@@ -124,7 +124,7 @@ class ToolManager:
             return f"Successfully edited {path}."
         except Exception as e: return f"Error editing file: {e}"
 
-    def delegate_to_coder(self, task_description: str) -> str:
+    async def delegate_to_coder(self, task_description: str) -> str:
         """Delegates a complex coding task to a specialized AI model."""
         try:
             from brain.llm import get_llm_client
