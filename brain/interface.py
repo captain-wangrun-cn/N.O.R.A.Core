@@ -15,7 +15,17 @@ class BaseLLM(ABC):
             history: A list of previous turns in the conversation.
                      Example: [{"role": "user", "content": "Hi"}, {"role": "assistant", "content": "Hello!"}]
 
-        Returns:
-            The generated text response from the LLM.
+    @abstractmethod
+    async def chat_stream(self, system_prompt: str, user_prompt: str, history: List[Dict[str, str]]):
+        """
+        Generates a chat response as an asynchronous stream.
+
+        Args:
+            system_prompt: The initial system instruction.
+            user_prompt: The latest user message.
+            history: A list of previous turns in the conversation.
+
+        Yields:
+            AsyncGenerator[str, None]: A stream of text chunks from the LLM.
         """
         pass

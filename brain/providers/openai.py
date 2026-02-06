@@ -33,3 +33,23 @@ class OpenAIProvider(BaseLLM):
             print(f"OpenAI API Error: {e}")
             return "Sorry, I encountered an issue processing your request with the OpenAI API."
 
+    async def chat_stream(self, system_prompt: str, user_prompt: str, history: List[Dict[str, str]]):
+        messages = [
+            {"role": "system", "content": system_prompt},
+            *history,
+            {"role": "user", "content": user_prompt}
+        ]
+        
+        try:
+            stream = await self.client.chat.completions.create(
+                model=self.model,
+                messages=messages,
+                stream=True
+            )
+            async for chunk in stream:
+                content = chunk.choices[0].delta.content
+                if content:
+                    yield content
+        except Exception as e:
+            print(f"OpenAI API Stream Error: {e}")
+            yield "Sorry, an error occurred during streaming."

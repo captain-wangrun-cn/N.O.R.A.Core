@@ -4,41 +4,34 @@ from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, fil
 
 import config
 from core.controller import NoraController
+from platforms.telegram import TelegramAdapter
 
 # Set up logging
 logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     level=logging.INFO
 )
-logging.getLogger("httpx").setLevel(logging.WARNING) # Reduce httpx noise
+logging.getLogger("httpx").setLevel(logging.WARNING)
 
 def main():
-    """Entry point for the N.O.R.A. Core application."""
+    """N.O.R.A. Core 应用入口。"""
     try:
-        # Load config first to catch errors early
-        cfg = config.get_config()
-        token = config.get_telegram_token()
-        if not token:
-            logging.error("FATAL: telegram.bot_token not found in config.yml.")
-            sys.exit(1)
+        config.load_config()
     except FileNotFoundError as e:
-        logging.error(f"FATAL: {e}")
+        logging.error(f"FATAL: {e}. Please run 'python configure.py' first.")
         sys.exit(1)
 
-    logging.info("Initializing N.O.R.A. Core...")
+    logging.info("正在初始化 N.O.R.A. Core...")
     
-    # Initialize the main controller
-    controller = NoraController()
+    # 1. 初始化平台适配器 (目前只有 Telegram)
+    adapter = TelegramAdapter()
     
-    # Build the Telegram application
-    application = ApplicationBuilder().token(token).build()
+    # 2. 初始化核心控制器，并把适配器注入进去
+    controller = NoraController(adapter)
     
-    # Register command and message handlers
-    application.add_handler(CommandHandler('start', controller.start))
-    application.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), controller.handle_message))
-    
-    logging.info("Application configured. Starting polling...")
-    application.run_polling()
+    # 3. 启动适配器，并将消息处理权交给控制器
+    # 这是一个阻塞操作，会一直运行直到程序退出
+    adapter.run(message_handler=controller.handle_new_message)
 
 if __name__ == '__main__':
     main()

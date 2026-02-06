@@ -40,3 +40,20 @@ class GeminiProvider(BaseLLM):
             # Handle potential content filtering and other API errors
             print(f"Gemini API Error: {e}")
             return "Sorry, I encountered an issue processing your request with the Gemini API."
+
+    async def chat_stream(self, system_prompt: str, user_prompt: str, history: List[Dict[str, str]]):
+        gemini_history = []
+        for item in history:
+            role = "user" if item["role"] == "user" else "model"
+            gemini_history.append({"role": role, "parts": [{"text": item["content"]}]})
+
+        full_prompt = f"{system_prompt}\n\n---\n\n{user_prompt}"
+        chat_session = self.model.start_chat(history=gemini_history)
+        
+        try:
+            response_stream = await chat_session.send_message_async(full_prompt, stream=True)
+            async for chunk in response_stream:
+                yield chunk.text
+        except Exception as e:
+            print(f"Gemini API Stream Error: {e}")
+            yield "Sorry, an error occurred during streaming."
