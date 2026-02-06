@@ -17,8 +17,8 @@ wizard:
   qdrant_host: "Qdrant 主机地址 (默认为 localhost):"
   qdrant_port: "Qdrant 端口 (默认为 6333):"
   mongo_uri: "MongoDB 连接串 (默认为 docker-compose 设置):"
-  embed_provider_prompt: "Embedding (向量化) 服务商 (推荐 siliconflow):"
-  embed_base_url_prompt: "Embedding API Base URL:"
+  embed_provider_prompt: "请选择 Embedding (向量化) 服务商:"
+  embed_base_url_prompt: "Embedding API Base URL (已自动预填):"
   embed_key_prompt: "Embedding API Key (若留空则复用 LLM Key):"
   embed_model_prompt: "Embedding 模型名称 (推荐 BAAI/bge-m3):"
   steps:

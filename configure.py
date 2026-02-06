@@ -124,13 +124,27 @@ class StepEmbedding(ConfigStep):
         mem_cfg = self.state.get('memory', {})
         embed_cfg = mem_cfg.get('embedding', {})
 
-        # Provider
+        # Provider Selection
         prov_def = embed_cfg.get('provider', 'siliconflow')
-        provider = questionary.text(t('wizard.embed_provider_prompt'), default=prov_def).ask()
+        choices = ["siliconflow", "openai", "openrouter", "custom"]
+        
+        # Ensure default is in choices
+        if prov_def not in choices: choices.append(prov_def)
+        
+        provider = questionary.select(
+            t('wizard.embed_provider_prompt'),
+            choices=choices,
+            default=prov_def
+        ).ask()
         if provider is None: return False
 
-        # Base URL
-        url_def = embed_cfg.get('base_url', 'https://api.siliconflow.cn/v1')
+        # Smart Base URL Defaults
+        url_def = embed_cfg.get('base_url', '')
+        if not url_def: # Only set default if not already configured
+            if provider == 'siliconflow': url_def = 'https://api.siliconflow.cn/v1'
+            elif provider == 'openai': url_def = 'https://api.openai.com/v1'
+            elif provider == 'openrouter': url_def = 'https://openrouter.ai/api/v1'
+        
         base_url = questionary.text(t('wizard.embed_base_url_prompt'), default=url_def).ask()
         if base_url is None: return False
 
@@ -141,6 +155,8 @@ class StepEmbedding(ConfigStep):
 
         # Model
         model_def = embed_cfg.get('model', 'BAAI/bge-m3')
+        if provider == 'openai' and model_def == 'BAAI/bge-m3': model_def = 'text-embedding-3-small' # Adjust default for OpenAI
+        
         model = questionary.text(t('wizard.embed_model_prompt'), default=model_def).ask()
         if model is None: return False
 
