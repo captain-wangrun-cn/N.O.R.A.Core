@@ -1,3 +1,7 @@
+import warnings
+# Suppress the FutureWarning from google-generativeai library at the source
+warnings.filterwarnings("ignore", category=FutureWarning, module="google.generativeai")
+
 import google.generativeai as genai
 from typing import List, Dict
 
