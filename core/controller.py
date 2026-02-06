@@ -145,7 +145,6 @@ class NoraController:
                                     if text_to_send:
                                         await self.adapter.send_message(chat_id, text_to_send)
                                         # Important: keep final buffer synchronized
-                                        final_response_buffer += text_to_send + " "
                                         temp_history.append({"role": "assistant", "content": text_to_send})
                                 # Keep the last incomplete part in buffer
                                 response_text_buffer = parts[-1]
