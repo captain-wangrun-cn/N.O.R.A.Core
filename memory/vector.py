@@ -88,6 +88,12 @@ class VectorStore:
         if not self.client: return []
 
         try:
+            # DEBUG: Check client attributes
+            if not hasattr(self.client, 'search'):
+                logger.error(f"Client 对象异常！Type: {type(self.client)}")
+                logger.error(f"Client 属性: {[d for d in dir(self.client) if not d.startswith('_')]}")
+                return []
+
             # 可以在这里添加 filter_criteria 的处理逻辑 (Qdrant Filter)
             # 目前暂时只做纯向量搜索
             search_result = self.client.search(
