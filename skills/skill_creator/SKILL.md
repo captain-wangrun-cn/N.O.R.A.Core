@@ -16,7 +16,7 @@ description: Create/Update agent skills. Use when user asks for new capabilities
 1.  **确认需求:** 与主人沟通，明确新技能的目标、输入参数和期望的输出格式。
 2.  **创建目录:** 使用 `mkdir -p skills/<skill_name>`。
 3.  **编写 SKILL.md:** 使用 `write_file` 创建 `skills/<skill_name>/SKILL.md`。**必须** 使用下面的 "SKILL.md 最佳实践模板"。
-4.  **请求审核:** 将 `SKILL.md` 的内容展示给主人，请求审核。**严禁** 在文档批准前编写任何代码。
+4.  <b>请求审核与自主推进:</b> 将 `SKILL.md` 的内容展示给主人。<b>如果主人的请求明确表示需要立即实现功能（例如：“帮我从Pixiv抓图”），则在展示后可直接进入代码实现阶段，无需等待明确的 “批准” 指令。否则，请等待批准后再进行代码实现。严禁</b> 在文档批准前编写任何代码。
 
 ### 阶段 2: 代码实现 (Code Implementation)
 1.  <b>编写可工作脚本:</b> 在主人批准 `SKILL.md` 后，开始编写实现核心功能的 Python 脚本 (e.g., `skills/<skill_name>/script.py`)。脚本必须具备实际作用，而非仅仅是一个框架或示例。
