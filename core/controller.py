@@ -190,8 +190,9 @@ class NoraController:
                     if current_turn == 1 and full_user_prompt not in [h['content'] for h in temp_history]:
                         temp_history.append({"role": "user", "content": full_user_prompt})
                     
-                    # Do not send raw debug info to user, just store it in history for LLM context
-                    assistant_msg = response_text_buffer or f"[Calling tool: {tool_name}]"
+                    # Store tool invocation in history, but do NOT leak placeholder text to the session history content
+                    # If there's real text in response_text_buffer, we keep it; otherwise, we use a internal label
+                    assistant_msg = response_text_buffer if response_text_buffer else f"（正在调用工具: {tool_name}）"
                     temp_history.append({"role": "assistant", "content": assistant_msg})
                     temp_history.append({"role": "user", "content": f"【Tool Output for {tool_name}】\n{truncated_result}"})
                     
