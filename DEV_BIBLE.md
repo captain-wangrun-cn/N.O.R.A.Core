@@ -1,7 +1,7 @@
 # N.O.R.A. Core - 技术设计文档 (TDD)
 
 > **项目名称:** N.O.R.A. Core (Project Echo)  
-> **版本:** 1.1.0-CN (Refactored)  
+> **版本:** 1.1.2-CN (Syntax Fix v2)  
 > **维护者:** CaptainCN (WR), Nora  
 > **仓库地址:** https://github.com/captain-wangrun-cn/N.O.R.A.Core  
 
@@ -20,28 +20,28 @@ N.O.R.A. Core 旨在构建一个模块化、高可扩展的 AI 代理系统。
 
 ```mermaid
 graph TD
-    User((用户 User)) -->|Telegram API| Entry["入口 (main.py)"]
-    Entry --> Controller["核心控制器 (core/controller.py)"]
+    User((用户)) -->|Telegram API| Entry["入口 main.py"]
+    Entry --> Controller["核心控制器"]
     
     subgraph "N.O.R.A. 运行时"
-        Controller -->|会话管理| SessionMgr["会话管理器 (core/session.py)"]
-        Controller -->|决策分发| Router{"模型路由 (Router)"}
+        Controller --> SessionMgr["会话管理器"]
+        Controller --> Router{"模型路由"}
         
-        subgraph "认知层 (Cognitive Layer)"
-            Router -->|日常交互| FastLLM[Fast Model (e.g. Flash/DeepSeek)]
-            Router -->|复杂推理| SmartLLM[Smart Model (e.g. Pro/GPT-4)]
-            Router -->|代码生成| CoderLLM[Coder Model (e.g. Codex)]
+        subgraph "认知层"
+            Router --> FastLLM["快速模型"]
+            Router --> SmartLLM["智能模型"]
+            Router --> CoderLLM["代码模型"]
         end
         
-        subgraph "记忆层 (Memory Layer)"
-            Controller <-->|RAG 检索| VectorDB[("向量数据库")]
-            VectorDB <-->|Embedding| EmbedService["嵌入服务"]
-            Controller -->|持久化| DocStore[("文档数据库")]
+        subgraph "记忆层"
+            Controller <--> VectorDB[("向量数据库")]
+            VectorDB <--> EmbedService["嵌入服务"]
+            Controller --> DocStore[("文档数据库")]
         end
         
-        subgraph "能力层 (Capability Layer)"
-            SmartLLM -->|Tool Call| ToolMgr["工具管理器"]
-            ToolMgr -->|Load| Scripts["本地脚本 (tools/)"]
+        subgraph "能力层"
+            SmartLLM --> ToolMgr["工具管理器"]
+            ToolMgr --> Scripts["本地脚本 (tools)"]
         end
     end
 ```
@@ -89,9 +89,9 @@ graph TD
 ```text
 nora-core/
 ├── main.py                 # 启动入口
-├── config.py               # 配置文件 (读取 .env)
+├── config.py               # 全局配置
 ├── docker-compose.yml      # 容器编排
-├── requirements.txt
+├── requirements.txt        # Python 依赖
 ├── .env                    # 密钥
 ├── core/                   # 核心业务
 │   ├── __init__.py
@@ -114,4 +114,4 @@ nora-core/
 
 ---
 
-*文档状态: 正式版 v1.1*
+*文档状态: 正式版 v1.1.2*
