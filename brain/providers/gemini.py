@@ -1,8 +1,11 @@
 import warnings
-# Suppress the FutureWarning from google-generativeai library at the source
-warnings.filterwarnings("ignore", category=FutureWarning, module="google.generativeai")
 
-import google.generativeai as genai
+# Suppress the FutureWarning during import using a context manager
+# This is the most aggressive way to silence warnings emitted at import time
+with warnings.catch_warnings():
+    warnings.simplefilter("ignore")
+    import google.generativeai as genai
+
 from typing import List, Dict
 
 from brain.interface import BaseLLM
