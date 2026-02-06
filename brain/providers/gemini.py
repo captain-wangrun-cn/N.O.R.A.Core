@@ -53,7 +53,13 @@ class GeminiProvider(BaseLLM):
         try:
             response_stream = await chat_session.send_message_async(full_prompt, stream=True)
             async for chunk in response_stream:
-                yield chunk.text
+                # Defensive check: Only yield text if the chunk actually has it.
+                try:
+                    if chunk.text:
+                        yield chunk.text
+                except ValueError:
+                    # This handles cases where a chunk is valid but has no text part (e.g., safety blocks).
+                    pass
         except Exception as e:
             print(f"Gemini API Stream Error: {e}")
             yield "Sorry, an error occurred during streaming."
