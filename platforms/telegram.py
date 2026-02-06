@@ -49,15 +49,15 @@ class TelegramAdapter(BaseAdapter):
 
     async def send_message(self, chat_id: str, text: str) -> str:
         try:
-            # Attempt to send with Markdown parsing (legacy mode is more forgiving than V2)
+            # Attempt to send with HTML parsing (more robust than Markdown)
             message = await self.application.bot.send_message(
                 chat_id=chat_id, 
                 text=text, 
-                parse_mode="Markdown"
+                parse_mode="HTML"
             )
         except Exception as e:
-            # If parsing fails (e.g. unclosed entities), fallback to plain text
-            print(f"[{chat_id}] Markdown parse failed, sending as plain text. Error: {e}")
+            # If parsing fails (e.g. unclosed tags), fallback to plain text
+            print(f"[{chat_id}] HTML parse failed, sending as plain text. Error: {e}")
             message = await self.application.bot.send_message(
                 chat_id=chat_id, 
                 text=text
