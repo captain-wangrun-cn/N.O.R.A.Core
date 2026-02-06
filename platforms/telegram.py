@@ -48,7 +48,21 @@ class TelegramAdapter(BaseAdapter):
             await self._aggregator.add_message(chat_id, text)
 
     async def send_message(self, chat_id: str, text: str) -> str:
-        message = await self.application.bot.send_message(chat_id=chat_id, text=text)
+        try:
+            # Attempt to send with Markdown parsing (legacy mode is more forgiving than V2)
+            message = await self.application.bot.send_message(
+                chat_id=chat_id, 
+                text=text, 
+                parse_mode="Markdown"
+            )
+        except Exception as e:
+            # If parsing fails (e.g. unclosed entities), fallback to plain text
+            print(f"[{chat_id}] Markdown parse failed, sending as plain text. Error: {e}")
+            message = await self.application.bot.send_message(
+                chat_id=chat_id, 
+                text=text
+            )
+            
         return str(message.message_id)
 
     async def start_typing(self, chat_id: str):
