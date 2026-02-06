@@ -1,5 +1,5 @@
 from abc import ABC, abstractmethod
-from typing import List, Dict
+from typing import List, Dict, AsyncGenerator
 
 class BaseLLM(ABC):
     """Abstract Base Class for all LLM providers."""
@@ -13,10 +13,14 @@ class BaseLLM(ABC):
             system_prompt: The initial system instruction.
             user_prompt: The latest user message.
             history: A list of previous turns in the conversation.
-                     Example: [{"role": "user", "content": "Hi"}, {"role": "assistant", "content": "Hello!"}]
+
+        Returns:
+            The generated text response from the LLM.
+        """
+        pass
 
     @abstractmethod
-    async def chat_stream(self, system_prompt: str, user_prompt: str, history: List[Dict[str, str]]):
+    async def chat_stream(self, system_prompt: str, user_prompt: str, history: List[Dict[str, str]]) -> AsyncGenerator[str, None]:
         """
         Generates a chat response as an asynchronous stream.
 
@@ -26,6 +30,8 @@ class BaseLLM(ABC):
             history: A list of previous turns in the conversation.
 
         Yields:
-            AsyncGenerator[str, None]: A stream of text chunks from the LLM.
+            A stream of text chunks from the LLM.
         """
-        pass
+        # This is an async generator, so it needs a yield statement.
+        # The implementation in the provider will handle the actual yielding.
+        yield
