@@ -133,11 +133,11 @@ class ToolManager:
             coder_prompt = "You are an expert Python programmer. Your task is to generate clean, readable, and correct Python code based on the user's request. Only return the raw code block, without any conversational fluff or explanations."
             
             import asyncio
-            return asyncio.run(coder_client.chat(
+            return await coder_client.chat(
                 system_prompt=coder_prompt,
                 user_prompt=task_description,
                 history=[]
-            ))
+            )
         except Exception as e:
             logger.error(f"Error delegating to coder: {e}", exc_info=True)
             return f"Error: Could not delegate to coder. Reason: {str(e)}"
