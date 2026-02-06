@@ -95,7 +95,7 @@ class ToolManager:
         except Exception as e: return f"Error writing file: {e}"
 
     def list_dir(self, path: str = ".") -> str:
-        """Lists files and directories in a path."""
+        """Lists files and directories in a path. 返回目录中的文件和子目录。如果需要了解技能的用法，请查找并 `read_file` `SKILL.md`。"""
         try:
             if not os.path.exists(path): return f"Error: Directory '{path}' not found."
             items = os.listdir(path)
