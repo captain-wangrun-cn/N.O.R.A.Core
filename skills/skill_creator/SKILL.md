@@ -19,7 +19,7 @@ description: Create/Update agent skills. Use when user asks for new capabilities
 4.  **请求审核:** 将 `SKILL.md` 的内容展示给主人，请求审核。**严禁** 在文档批准前编写任何代码。
 
 ### 阶段 2: 代码实现 (Code Implementation)
-1.  **编写脚本:** 在主人批准 `SKILL.md` 后，开始编写对应的 Python 脚本 (e.g., `skills/<skill_name>/script.py`)。
+1.  <b>编写可工作脚本:</b> 在主人批准 `SKILL.md` 后，开始编写实现核心功能的 Python 脚本 (e.g., `skills/<skill_name>/script.py`)。脚本必须具备实际作用，而非仅仅是一个框架或示例。
 2.  **遵循 I/O 契约:**
     *   **输入:** 使用 `argparse` 解析 `SKILL.md` 中 `parameters` 定义的参数。
     *   **输出:** 成功时，向 `stdout` 打印单行 JSON；失败时，向 `stderr` 打印错误信息。
