@@ -142,6 +142,9 @@ class NoraController:
             await self.adapter.send_message(chat_id, "抱歉，处理您的请求时出现内部错误。")
             
         finally:
+            self.generation_tasks.pop(chat_id, None)
+            logger.info(f"[{chat_id}] 本次生成任务结束。")
+
     async def _async_save_memory(self, text: str, metadata: Dict[str, Any]):
         """异步保存记忆，避免阻塞主线程。"""
         try:
