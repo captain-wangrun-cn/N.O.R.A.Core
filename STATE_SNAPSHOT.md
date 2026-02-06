@@ -1,8 +1,8 @@
 # N.O.R.A. Core - 项目执行计划书
 
-**文档版本:** 3.1 (Phase 3 Initialized)
+**文档版本:** 4.0 (Interactive Paradigm Shift)
 **更新日期:** 2026-02-06
-**当前状态:** Phase 3 (Skills) 进行中 - 基础工具与加载器已就绪，等待控制器接入。
+**当前状态:** Phase 3 (Skills) 核心功能完成，交互范式已升级。正在进行收尾工作。
 
 ---
 
@@ -14,46 +14,46 @@
 
 ## 2. 今日战果 (Achievements - 2026-02-06)
 
-**里程碑达成：记忆觉醒 & 技能萌芽。**
+**里程碑达成：交互范式革命 & 高级编程能力。**
 
-### A. 记忆与灵魂 (Phase 2 Completed)
-- **🧠 完整 RAG 闭环:** 实现了从 `Embedding` (感知) -> `Qdrant` (存储) -> `RAG Engine` (检索) -> `Controller` (注入) 的完整链路。Nora 现在能记住对话细节（如主人的幸运数字）。
-- **💾 基础设施:** 成功封装了 Qdrant 和 Embedding 客户端，并编写了集成测试。
+### A. 交互范式 (Phase 3.5 Completed)
+- **🧠 智能分段:** 实现了 `send_intermediate_message` 工具和相应的 Prompt 协议，使 Nora 能够像人类一样、有节奏地分段发送长消息。
+- **🛡️ 稳定性修复:**
+    - 解决了 Telegram HTML `<ul>` 标签不支持的崩溃问题。
+    - 解决了“消息过长”的崩溃问题，加入了工具输出截断器。
+- **🎯 认知矫正:**
+    - 通过重命名工具和强化 Prompt，解决了 `send_message` 导致的“工具 vs 技能”认知混淆。
+    - 注入了“用户指令至上”协议，解决了 Nora 因“过于主动”而忽略用户核心任务的问题。
 
-### B. 技能系统 (Phase 3 Started)
-- **🔌 插件架构:** 设计并实现了 Markdown 驱动的 `SkillLoader`，支持热插拔技能。
-- **🔨 原子工具:** 实现了 `brain/tools.py`，赋予 Nora 四大基础能力：`read_file`, `write_file`, `list_dir`, `exec_command`。
-- **📚 元技能:** 创建了 `skill_creator` 文档，教 Nora 如何自我编程。
+### B. 高级编程能力 (Phase 3.2 Completed)
+- **🔪 代码手术刀:** 实现了 `edit_file` 工具，赋予 Nora 精准修改代码的能力。
+- **📞 专家委托:** 实现了 `delegate_to_coder` 工具和动态模型路由，使 Nora 能将复杂代码任务外包给专门的 Code LLM。
+- **⚙️ 配置向导:** 将 `coder` 模型的配置加入 `configure.py`，完善了项目工程化。
 
-### C. 稳定性与体验
-- **🛡️ 记忆抢救:** 修复了抢占逻辑，实现了“未说完的话”自动合并。
-- **🎨 HTML 协议:** 彻底解决了 Telegram Markdown 解析报错问题。
-- **⚙️ 配置向导 v2.2:** 支持数据库、Embedding 服务商选择。
-
----
-
-## 3. 已完成任务清单 (Phase 2 & 3)
-
-- [x] **Task 3.1 - 3.5:** 记忆系统全线贯通 (RAG/Vector/Embed/Controller)。
-- [x] **Task 4.1: 技能加载器** (`skills/loader.py` - Markdown 扫描)
-- [x] **Task 4.2: 基础工具集** (`brain/tools.py` - Read/Write/Exec)
+### C. 技能系统 (Phase 3.1 Completed)
+- **🧩 拥抱标准:** 升级 `SkillLoader` 以全面支持 `Agent Skills` 开放标准的 YAML Frontmatter，并强化了技能模板 (`skill_creator`)。
+- **📖 先读后做:** 在 Prompt 中注入了“技能学习协议”，确保 Nora 在使用技能前会先阅读 `SKILL.md` 文档。
 
 ---
 
-## 4. 下一步行动纲领 (Phase 3: Skill System)
+## 3. 已完成任务清单 (Phase 3)
 
-现在的 Nora 有了记忆和双手（工具），只差大脑的指令。
+- [x] **Task 4.1 - 4.3:** 技能系统（加载、工具、执行循环）全线贯通。
+- [x] **Task 4.3.1 (衍生):** 实现 `edit_file` & `delegate_to_coder` 工具。
+- [x] **Task 4.3.2 (衍生):** 实现 `send_intermediate_message` 智能分段交互。
+- [x] **Task 4.3.3 (衍生):** 修复一系列由交互升级引发的认知和稳定性 Bug。
 
-#### **任务 4.3: 执行引擎 (`core/executor.py`)** (🚀 下一步)
-- **目标:** 在 Controller 中处理 Tool Calls。
+---
+
+## 4. 下一步行动纲领 (Next Actions)
+
+#### **任务 5.1: 修复 `/start` 命令** (🐞 **当前正在解决**)
+- **问题:** `/start` 命令不再清空对话历史。
+- **目标:** 审查 `Controller` 逻辑，确保 `/start` 能正确、安全地重置 `session["history"]`。
+
+#### **任务 4.4: 首批技能开发 - Web Search** (🚀 **即将开始**)
+- **目标:** 在全新的、稳固的架构上，创建第一个高级技能。
 - **步骤:**
-    1.  检测 LLM 返回的 Function Call 请求。
-    2.  调用 `ToolManager` 执行对应函数。
-    3.  将执行结果 (Observation) 反馈给 LLM 进行下一轮生成。
-
-#### **任务 4.4: 首批技能开发**
-- **Web Search:** 联网搜索能力。
-- **Painter:** 接入 Nano Banana Pro 或类似绘图 API。
-
----
-*文档状态: 更新至 v3.1*
+    1.  使用 `skill_creator` 创建 `skills/web_search/SKILL.md` (遵循新模板)。
+    2.  使用 `delegate_to_coder` 编写 `skills/web_search/search.py` 脚本。
+    3.  进行测试和验收。
