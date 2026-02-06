@@ -119,6 +119,42 @@ class StepDatabase(ConfigStep):
         self.state['memory']['mongo'] = {'uri': mongo_uri}
         return True
 
+class StepEmbedding(ConfigStep):
+    def run(self):
+        mem_cfg = self.state.get('memory', {})
+        embed_cfg = mem_cfg.get('embedding', {})
+
+        # Provider
+        prov_def = embed_cfg.get('provider', 'siliconflow')
+        provider = questionary.text(t('wizard.embed_provider_prompt'), default=prov_def).ask()
+        if provider is None: return False
+
+        # Base URL
+        url_def = embed_cfg.get('base_url', 'https://api.siliconflow.cn/v1')
+        base_url = questionary.text(t('wizard.embed_base_url_prompt'), default=url_def).ask()
+        if base_url is None: return False
+
+        # API Key
+        key_def = embed_cfg.get('api_key', '')
+        api_key = questionary.password(t('wizard.embed_key_prompt'), default=key_def).ask()
+        if api_key is None: return False
+
+        # Model
+        model_def = embed_cfg.get('model', 'BAAI/bge-m3')
+        model = questionary.text(t('wizard.embed_model_prompt'), default=model_def).ask()
+        if model is None: return False
+
+        # Save
+        if 'memory' not in self.state: self.state['memory'] = {}
+        self.state['memory']['embedding'] = {
+            'provider': provider,
+            'base_url': base_url,
+            'api_key': api_key,
+            'model': model,
+            'dimensions': 1024 # default BGE-M3
+        }
+        return True
+
 class StepModels(ConfigStep):
     def select_model(self, model_list, role_key):
         role_name = t(f'roles.{role_key}')
@@ -185,7 +221,7 @@ def run_wizard():
                 'memory': cfg.get("memory", {})
             }
 
-    steps = [StepTelegram, StepProvider, StepAPIKeys, StepDatabase, StepModels]
+    steps = [StepTelegram, StepProvider, StepAPIKeys, StepDatabase, StepEmbedding, StepModels]
     current_step = 0
     
     while current_step < len(steps):
