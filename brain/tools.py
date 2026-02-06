@@ -104,7 +104,7 @@ class ToolManager:
         except Exception as e: return f"Error listing directory: {e}"
 
     def exec_command(self, command: str) -> str:
-        """Executes a shell command."""
+        """Executes a shell command. 对于 `mkdir -p` 命令，如果返回 `(No output)` 则表示执行成功，无需再次尝试。"""
         try:
             result = subprocess.run(command, shell=True, capture_output=True, text=True, timeout=30)
             output = result.stdout
