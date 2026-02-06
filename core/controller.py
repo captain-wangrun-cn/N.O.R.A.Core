@@ -40,21 +40,38 @@ class NoraController:
 
     async def _generate_response(self, chat_id: str, text: str):
         """内部生成逻辑。"""
-        session = self.sessions.setdefault(chat_id, {"history": [], "interrupted_thought": ""})
+        # Ensure session keys exist
+        session = self.sessions.setdefault(chat_id, {"history": [], "interrupted_thought": "", "pending_text": ""})
         logger.info(f"[{chat_id}] 开始生成响应。History length: {len(session['history'])}")
         
         try:
             await self.adapter.start_typing(chat_id)
             
-            # --- 构建 Prompt ---
+            # --- 构建 Prompt (Context Reconstruction) ---
             instructions = []
             if "\n" in text.strip(): 
                 instructions.append("请仔细阅读并依次回答以下所有问题，不要遗漏。")
 
             full_user_prompt = text
-            if session["interrupted_thought"]:
-                full_user_prompt = f"（我之前的思路：{session['interrupted_thought']}）\n\n---\n\n{text}"
-                session["interrupted_thought"] = "" 
+            
+            # Check for salvaged context from previous interruption
+            pending_text = session.get("pending_text", "")
+            interrupted_thought = session.get("interrupted_thought", "")
+            
+            if pending_text or interrupted_thought:
+                logger.info(f"[{chat_id}] 检测到抢占遗留上下文，正在合并...")
+                # Construct a meta-prompt that includes the lost context
+                full_user_prompt = (
+                    f"（刚才您问了：'{pending_text}'，"
+                    f"我正想回答：'{interrupted_thought}'... "
+                    f"但还没说完就被新的消息打断了。）\n\n"
+                    f"--- 新的消息 ---\n"
+                    f"{text}\n\n"
+                    f"【指令】请将我刚才未说完的思路与现在的新问题结合，给出一个连贯、完整的最终回复。不要让我感觉对话断裂了。"
+                )
+                # Clear buffers after consumption
+                session["pending_text"] = ""
+                session["interrupted_thought"] = ""
             
             system_prompt = get_system_prompt(instructions)
 
@@ -72,6 +89,14 @@ class NoraController:
             logger.info(f"[{chat_id}] 流式生成完成。")
             # --- 正常完成 -> 发送 & 更新记忆 ---
             await self.adapter.send_message(chat_id, response_buffer)
+            
+            # Decide what to store in history:
+            # If we merged prompts, storing the HUGE meta-prompt might confuse future context window.
+            # But storing only 'text' might lose the 'pending_text' context again for long term memory.
+            # Strategy: Store the *User's Actual Intent* (Merged) or just sequence them?
+            # Simpler Strategy: Just store the 'text' (the latest trigger) and the 'response' (which now contains the answer to BOTH).
+            # This is acceptable because the response effectively "resolves" the previous pending text too.
+            
             session["history"].append({"role": "user", "content": text})
             session["history"].append({"role": "assistant", "content": response_buffer})
             
@@ -80,9 +105,17 @@ class NoraController:
             logger.info(f"[{chat_id}] History updated. New length: {len(session['history'])}")
 
         except asyncio.CancelledError:
+            # --- 抢占发生：抢救现场 ---
+            # 1. Save the User's input that triggered this specific task (it hasn't been added to history yet!)
+            session["pending_text"] = text
+            
+            # 2. Save the AI's partial thought
             if 'response_buffer' in locals() and response_buffer:
                 session["interrupted_thought"] = response_buffer
-                logger.info(f"[{chat_id}] 抢占成功：保存了部分思路: '{response_buffer[:50]}...'")
+                logger.info(f"[{chat_id}] 抢占成功：保存了部分思路 ('{response_buffer[:30]}...') 和用户输入。")
+            else:
+                session["interrupted_thought"] = "" # Nothing generated yet
+                logger.info(f"[{chat_id}] 抢占成功：尚未生成内容，仅保存了用户输入。")
         
         except Exception as e:
             logger.error(f"[{chat_id}] 生成响应时出现严重错误。", exc_info=True)
