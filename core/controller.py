@@ -36,12 +36,13 @@ class NoraController:
             await self.adapter.start_typing(chat_id)
             
             # --- 构建 Prompt ---
+            prompt_wrapper = "请仔细阅读并依次回答以下所有问题，不要遗漏：\n\n---\n\n"
             if session["interrupted_thought"]:
                 # 如果有被打断的思路，加入到上下文中
-                full_user_prompt = f"（我之前的思路：{session['interrupted_thought']}）\n\n---\n\n{text}"
+                full_user_prompt = f"（我之前的思路：{session['interrupted_thought']}）\n\n---\n\n{prompt_wrapper}{text}"
                 session["interrupted_thought"] = "" # 清空
             else:
-                full_user_prompt = text
+                full_user_prompt = f"{prompt_wrapper}{text}"
 
             # --- 流式生成 ---
             response_buffer = ""
