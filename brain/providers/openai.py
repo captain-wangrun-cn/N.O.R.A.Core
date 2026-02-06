@@ -7,12 +7,14 @@ import config
 class OpenAIProvider(BaseLLM):
     """LLM Provider for OpenAI models."""
 
-    def __init__(self, model_name: str = config.MODEL_SMART):
-        if not config.OPENAI_API_KEY:
-            raise ValueError("OPENAI_API_KEY is not set in the environment.")
+    def __init__(self, model_alias: str = "smart"):
+        if not config.get_api_key("openai"):
+            raise ValueError("OPENAI_API_KEY is not set in the config.")
         
-        self.client = openai.AsyncOpenAI(api_key=config.OPENAI_API_KEY)
-        self.model = model_name
+        self.client = openai.AsyncOpenAI(api_key=config.get_api_key("openai"))
+        self.model = config.get_model_name(model_alias)
+        if not self.model:
+            raise ValueError(f"Model for alias '{model_alias}' not found in config.")
 
     async def chat(self, system_prompt: str, user_prompt: str, history: List[Dict[str, str]]) -> str:
         messages = [

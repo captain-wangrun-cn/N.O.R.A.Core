@@ -7,11 +7,15 @@ import config
 class GeminiProvider(BaseLLM):
     """LLM Provider for Google Gemini models."""
 
-    def __init__(self, model_name: str = config.MODEL_SMART):
-        if not config.GEMINI_API_KEY:
-            raise ValueError("GEMINI_API_KEY is not set in the environment.")
+    def __init__(self, model_alias: str = "smart"):
+        if not config.get_api_key("gemini"):
+            raise ValueError("GEMINI_API_KEY is not set in the config.")
         
-        genai.configure(api_key=config.GEMINI_API_KEY)
+        model_name = config.get_model_name(model_alias)
+        if not model_name:
+            raise ValueError(f"Model for alias '{model_alias}' not found in config.")
+
+        genai.configure(api_key=config.get_api_key("gemini"))
         self.model = genai.GenerativeModel(
             model_name,
             system_instruction="You are Nora, a helpful assistant." # Base instruction
