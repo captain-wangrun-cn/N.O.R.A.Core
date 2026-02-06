@@ -90,14 +90,9 @@ class NoraController:
             # --- 正常完成 -> 发送 & 更新记忆 ---
             await self.adapter.send_message(chat_id, response_buffer)
             
-            # Decide what to store in history:
-            # If we merged prompts, storing the HUGE meta-prompt might confuse future context window.
-            # But storing only 'text' might lose the 'pending_text' context again for long term memory.
-            # Strategy: Store the *User's Actual Intent* (Merged) or just sequence them?
-            # Simpler Strategy: Just store the 'text' (the latest trigger) and the 'response' (which now contains the answer to BOTH).
-            # This is acceptable because the response effectively "resolves" the previous pending text too.
-            
-            session["history"].append({"role": "user", "content": text})
+            # Store the FULL context (including the merged pending text) so future memory retrieval works
+            # If we only store 'text', we lose the 'pending_text' from the history forever.
+            session["history"].append({"role": "user", "content": full_user_prompt})
             session["history"].append({"role": "assistant", "content": response_buffer})
             
             if len(session["history"]) > 20:
