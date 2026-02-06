@@ -88,19 +88,16 @@ class VectorStore:
         if not self.client: return []
 
         try:
-            # DEBUG: Check client attributes
-            if not hasattr(self.client, 'search'):
-                logger.error(f"Client 对象异常！Type: {type(self.client)}")
-                logger.error(f"Client 属性: {[d for d in dir(self.client) if not d.startswith('_')]}")
-                return []
-
-            # 可以在这里添加 filter_criteria 的处理逻辑 (Qdrant Filter)
-            # 目前暂时只做纯向量搜索
-            search_result = self.client.search(
+            # 适配 Qdrant Client v1.10+ (search 方法可能被 query_points 替代或环境差异)
+            # 使用 query_points 接口
+            response = self.client.query_points(
                 collection_name=self.collection_name,
-                query_vector=vector,
+                query=vector,
                 limit=top_k
             )
+            
+            # query_points 返回的是 QueryResponse 对象，包含 points 列表
+            search_result = response.points
 
             results = []
             for hit in search_result:
