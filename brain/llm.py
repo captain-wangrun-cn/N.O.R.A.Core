@@ -3,11 +3,14 @@ from brain.providers.gemini import GeminiProvider
 from brain.providers.openai import OpenAIProvider
 import config
 
-def get_llm_client(provider_name: str = config.LLM_PROVIDER) -> BaseLLM:
+def get_llm_client(provider_name: str = None) -> BaseLLM:
     """
     Factory function to get the configured LLM client.
     This allows for flexible switching between different LLM backends.
     """
+    if provider_name is None:
+        provider_name = config.get_llm_provider()
+        
     if provider_name == "gemini":
         return GeminiProvider()
     elif provider_name == "openai":

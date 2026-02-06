@@ -14,17 +14,24 @@ logging.getLogger("httpx").setLevel(logging.WARNING) # Reduce httpx noise
 
 def main():
     """Entry point for the N.O.R.A. Core application."""
-    if not config.TELEGRAM_BOT_TOKEN:
-        logging.error("FATAL: TELEGRAM_BOT_TOKEN not found. Please check your .env file.")
+    try:
+        # Load config first to catch errors early
+        cfg = config.get_config()
+        token = config.get_telegram_token()
+        if not token:
+            logging.error("FATAL: telegram.bot_token not found in config.yml.")
+            sys.exit(1)
+    except FileNotFoundError as e:
+        logging.error(f"FATAL: {e}")
         sys.exit(1)
-        
+
     logging.info("Initializing N.O.R.A. Core...")
     
     # Initialize the main controller
     controller = NoraController()
     
     # Build the Telegram application
-    application = ApplicationBuilder().token(config.TELEGRAM_BOT_TOKEN).build()
+    application = ApplicationBuilder().token(token).build()
     
     # Register command and message handlers
     application.add_handler(CommandHandler('start', controller.start))
