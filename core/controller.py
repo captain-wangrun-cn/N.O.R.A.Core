@@ -61,7 +61,7 @@ class NoraController:
             rag_context = ""
             if self.rag.enabled:
                 logger.debug(f"[{chat_id}] 正在从大脑检索相关记忆...")
-                rag_context = self.rag.get_context_string(text, top_k=3)
+                rag_context = self.rag.get_context_string(text, top_k=2)
                 if rag_context:
                     # 保留 INFO，但精简内容
                     logger.info(f"[{chat_id}] RAG 命中: {len(rag_context.splitlines())} lines.")
