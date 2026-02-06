@@ -167,17 +167,23 @@ class NoraController:
                     else:
                         truncated_result = tool_result
                     
-                    # If the tool was send_message, we don't need to append its output to history,
-                    # as it's just a confirmation. This reduces token usage.
-                    if tool_name == 'send_message':
-                        # We could even skip appending anything to history to let the AI continue
-                        # from its last thought, or just append a minimal confirmation.
-                        # Let's try skipping for now, to see if the AI can handle it.
-                        # It will just loop again with the same history, effectively continuing its thought.
-                        pass # Don't append tool output to history
+                    # Special handling for intermediate messages to ensure ordering and context
+                    if tool_name == 'send_intermediate_message':
+                        # 1. Flush the final_response_buffer first to maintain chronological order
+                        if final_response_buffer:
+                            await self.adapter.send_message(chat_id, final_response_buffer)
+                            temp_history.append({"role": "assistant", "content": final_response_buffer})
+                            final_response_buffer = ""
+
+                        # 2. Add the intermediate message content to history so LLM knows it's already sent
+                        # We treat the 'text' argument of the tool as the assistant's output
+                        msg_content = tool_args.get("text", "(Sent an empty intermediate message)")
+                        temp_history.append({"role": "assistant", "content": msg_content})
+                        # Also add the tool result to keep the turn-taking intact
+                        temp_history.append({"role": "user", "content": f"【Tool Output for {tool_name}】\n{truncated_result}"})
                     else:
                         # Append history for other tools
-                        if current_turn == 1:
+                        if current_turn == 1 and full_user_prompt not in [h['content'] for h in temp_history]:
                             temp_history.append({"role": "user", "content": full_user_prompt})
                         
                         assistant_msg = response_text_buffer or f"[Calling tool: {tool_name}]"
