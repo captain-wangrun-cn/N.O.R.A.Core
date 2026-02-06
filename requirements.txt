@@ -1,7 +1,8 @@
-python-telegram-bot==20.8
+python-telegram-bot==21.0.1
 pymongo
 requests
 python-dotenv
 qdrant-client
 openai
 aiohttp
+google-generativeai
