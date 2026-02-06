@@ -6,3 +6,4 @@ qdrant-client
 openai
 aiohttp
 google-generativeai
+questionary
