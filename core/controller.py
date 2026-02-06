@@ -5,6 +5,7 @@ from typing import Dict, Any
 from platforms.base import BaseAdapter
 from brain.llm import llm_client
 from brain.prompts import get_system_prompt
+from memory.rag import RAGEngine
 
 logger = logging.getLogger(__name__)
 
@@ -14,9 +15,10 @@ class NoraController:
     def __init__(self, adapter: BaseAdapter):
         self.adapter = adapter
         self.llm = llm_client
+        self.rag = RAGEngine() # Initialize RAG Engine
         self.sessions: Dict[str, Any] = {}
         self.generation_tasks: Dict[str, asyncio.Task] = {}
-        logger.info("NoraController 已初始化。")
+        logger.info(f"NoraController 已初始化。RAG 状态: {'Online' if self.rag.enabled else 'Offline'}")
 
     async def handle_new_message(self, chat_id: str, text: str):
         """处理来自聚合器的新消息/命令。"""
@@ -47,10 +49,25 @@ class NoraController:
         try:
             await self.adapter.start_typing(chat_id)
             
-            # --- 构建 Prompt (Context Reconstruction) ---
+            # --- 1. RAG 记忆检索 (Memory Retrieval) ---
+            # 只在没有被抢占的情况下检索，或者对最新的 text 进行检索
+            rag_context = ""
+            if self.rag.enabled:
+                logger.info(f"[{chat_id}] 正在从大脑检索相关记忆...")
+                rag_context = self.rag.get_context_string(text, top_k=3)
+                if rag_context:
+                    logger.info(f"[{chat_id}] RAG 命中！检索到 {len(rag_context.splitlines())} 条相关记忆。")
+                else:
+                    logger.info(f"[{chat_id}] RAG 未检索到强相关记忆。")
+
+            # --- 2. 构建 Prompt (Context Reconstruction) ---
             instructions = []
             if "\n" in text.strip(): 
                 instructions.append("请仔细阅读并依次回答以下所有问题，不要遗漏。")
+            
+            # Inject RAG context into instructions or system prompt
+            if rag_context:
+                instructions.append(f"【相关回忆/背景知识】(请参考以下历史记忆来回答):\n{rag_context}")
 
             full_user_prompt = text
             
@@ -75,7 +92,7 @@ class NoraController:
             
             system_prompt = get_system_prompt(instructions)
 
-            # --- 流式生成 ---
+            # --- 3. 流式生成 ---
             response_buffer = ""
             stream = self.llm.chat_stream(
                 system_prompt=system_prompt,
@@ -87,11 +104,19 @@ class NoraController:
                 response_buffer += chunk
             
             logger.info(f"[{chat_id}] 流式生成完成。")
-            # --- 正常完成 -> 发送 & 更新记忆 ---
+            
+            # --- 4. 发送响应 ---
             await self.adapter.send_message(chat_id, response_buffer)
             
+            # --- 5. RAG 记忆存储 (Memory Storage) ---
+            # 异步执行，不阻塞主流程
+            if self.rag.enabled:
+                # 存储用户的输入
+                asyncio.create_task(self._async_save_memory(text, {"role": "user", "chat_id": chat_id}))
+                # 存储 AI 的回复
+                asyncio.create_task(self._async_save_memory(response_buffer, {"role": "assistant", "chat_id": chat_id}))
+
             # Store the FULL context (including the merged pending text) so future memory retrieval works
-            # If we only store 'text', we lose the 'pending_text' from the history forever.
             session["history"].append({"role": "user", "content": full_user_prompt})
             session["history"].append({"role": "assistant", "content": response_buffer})
             
@@ -117,6 +142,13 @@ class NoraController:
             await self.adapter.send_message(chat_id, "抱歉，处理您的请求时出现内部错误。")
             
         finally:
-            self.generation_tasks.pop(chat_id, None)
-            logger.info(f"[{chat_id}] 本次生成任务结束。")
+    async def _async_save_memory(self, text: str, metadata: Dict[str, Any]):
+        """异步保存记忆，避免阻塞主线程。"""
+        try:
+            # 由于 RAG.add_memory 是同步的 (requests 是同步的)，我们需要在 executor 中运行它
+            # 或者如果 RAG 内部实现了异步更好。目前先简单用 to_thread
+            await asyncio.to_thread(self.rag.add_memory, text, metadata)
+            logger.info(f"[{metadata.get('chat_id')}] 记忆已异步保存 (Role: {metadata.get('role')})")
+        except Exception as e:
+            logger.error(f"保存记忆失败: {e}")
 
