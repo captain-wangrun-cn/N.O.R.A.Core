@@ -1,6 +1,6 @@
 <skill>
   <name>skill_creator</name>
-  <description>创建或更新新的 N.O.R.A. 技能。当你需要扩展自己的能力时使用此技能。</description>
+  <description>Create/Update agent skills. Use when user asks for new capabilities (e.g. 'learn to paint') or to modify existing ones.</description>
 </skill>
 
 # Skill Creator (技能创造者)
@@ -24,11 +24,11 @@ skills/
 
 ```markdown
 <skill>
-  <name>my_new_skill</name>
-  <description>一句话描述这个技能是做什么的。</description>
+  <name>weather</name>
+  <description>Get current weather forecast. Use when user asks about temperature or rain.</description>
 </skill>
 
-# My New Skill (技能名称)
+# Weather Skill
 
 ## 什么时候使用
 描述这个技能的适用场景。
