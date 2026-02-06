@@ -1,0 +1,20 @@
+# Example configuration for N.O.R.A. Core
+# Please fill in your details by running `python configure.py`
+
+telegram:
+  bot_token: "YOUR_TELEGRAM_BOT_TOKEN"
+
+llm:
+  # Supported providers: "gemini", "openai"
+  provider: "gemini"
+  
+  # API keys for the providers
+  api_keys:
+    gemini: "YOUR_GEMINI_API_KEY"
+    openai: "YOUR_OPENAI_API_KEY"
+  
+  # Model aliases used by the application
+  models:
+    smart: "gemini-1.5-pro-latest"
+    fast: "gemini-1.5-flash-latest"
+    coder: "gemini-1.5-pro-latest"
