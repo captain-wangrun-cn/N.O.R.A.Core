@@ -69,10 +69,13 @@ class StepTelegram(ConfigStep):
 class StepProvider(ConfigStep):
     def run(self):
         choices = ["gemini", "openai", t('wizard.back_option')]
+        default_val = self.state.get("provider", "gemini")
+        if default_val not in choices: default_val = "gemini"
+        
         self.state['provider'] = questionary.select(
             t('wizard.provider_prompt'),
             choices=choices,
-            default=self.state.get("provider", "gemini")
+            default=default_val
         ).ask()
         return self.state['provider'] is not None
 
@@ -93,20 +96,53 @@ class StepAPIKeys(ConfigStep):
             return self.state['openai_key'] is not None
         return False # Should not happen
 
+class StepDatabase(ConfigStep):
+    def run(self):
+        # Qdrant Config
+        qdrant_host_def = self.state.get('memory', {}).get('qdrant', {}).get('host', 'localhost')
+        qdrant_port_def = str(self.state.get('memory', {}).get('qdrant', {}).get('port', 6333))
+        
+        q_host = questionary.text(t('wizard.qdrant_host'), default=qdrant_host_def).ask()
+        if q_host is None: return False
+        
+        q_port = questionary.text(t('wizard.qdrant_port'), default=qdrant_port_def).ask()
+        if q_port is None: return False
+
+        # Mongo Config
+        mongo_uri_def = self.state.get('memory', {}).get('mongo', {}).get('uri', 'mongodb://nora:nora_password@localhost:27017/')
+        mongo_uri = questionary.text(t('wizard.mongo_uri'), default=mongo_uri_def).ask()
+        if mongo_uri is None: return False
+
+        # Save to state
+        if 'memory' not in self.state: self.state['memory'] = {}
+        self.state['memory']['qdrant'] = {'host': q_host, 'port': int(q_port)}
+        self.state['memory']['mongo'] = {'uri': mongo_uri}
+        return True
+
 class StepModels(ConfigStep):
     def select_model(self, model_list, role_key):
         role_name = t(f'roles.{role_key}')
+        current_models = self.state.get('models', {})
+        default_model = current_models.get(role_key) # Get existing value
+        
         if not model_list:
-            return questionary.text(t('wizard.manual_prompt', role=role_name)).ask()
+            return questionary.text(t('wizard.manual_prompt', role=role_name), default=default_model or "").ask()
         
         choices = model_list + [questionary.Separator(), t('wizard.manual_entry')]
+        
+        # Ensure default exists in choices for Questionary to select it
+        kwargs = {}
+        if default_model and default_model in model_list:
+            kwargs['default'] = default_model
+
         selection = questionary.select(
             t('wizard.model_select_prompt', role=role_name),
             choices=choices,
+            **kwargs
         ).ask()
         
         if selection == t('wizard.manual_entry'):
-            return questionary.text(t('wizard.manual_prompt', role=role_name)).ask()
+            return questionary.text(t('wizard.manual_prompt', role=role_name), default=default_model or "").ask()
         return selection
 
     def run(self):
@@ -145,10 +181,11 @@ def run_wizard():
                 'provider': cfg.get("llm", {}).get("provider"),
                 'gemini_key': cfg.get("llm", {}).get("api_keys", {}).get("gemini"),
                 'openai_key': cfg.get("llm", {}).get("api_keys", {}).get("openai"),
-                'models': cfg.get("llm", {}).get("models", {})
+                'models': cfg.get("llm", {}).get("models", {}),
+                'memory': cfg.get("memory", {})
             }
 
-    steps = [StepTelegram, StepProvider, StepAPIKeys, StepModels]
+    steps = [StepTelegram, StepProvider, StepAPIKeys, StepDatabase, StepModels]
     current_step = 0
     
     while current_step < len(steps):
@@ -176,7 +213,8 @@ def run_wizard():
                 'openai': state.get('openai_key', '')
             },
             'models': state.get('models', {})
-        }
+        },
+        'memory': state.get('memory', {})
     }
 
     print(t('wizard.summary_title'))
