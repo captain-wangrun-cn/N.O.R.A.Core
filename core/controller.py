@@ -158,31 +158,22 @@ class NoraController:
                     # Execute Tool
                     tool_result = self.tool_manager.execute(tool_name, tool_args)
                     logger.info(f"[{chat_id}] 🔧 Tool Result: {tool_result[:100]}...")
+
+                    # --- TRUNCATION SAFETY VALVE ---
+                    TRUNCATE_LIMIT = 2500 # Chars
+                    if len(tool_result) > TRUNCATE_LIMIT:
+                        truncated_result = tool_result[:TRUNCATE_LIMIT] + "\n\n... (Output truncated by system)"
+                        logger.warning(f"Tool output for {tool_name} was truncated from {len(tool_result)} chars.")
+                    else:
+                        truncated_result = tool_result
                     
                     # Update History for next turn
-                    # 1. User/System prompt from this turn is implicitly handled by history logic? 
-                    # Not exactly. We need to append what just happened to temp_history.
-                    
-                    # Logic:
-                    # Turn 1 Input: User Prompt
-                    # Turn 1 Output: Text + Tool Call
-                    # Turn 2 Input: Tool Result
-                    
                     if current_turn == 1:
-                        # Append the initial user prompt if it's not in history yet
-                        # (It's not, we passed it as user_prompt arg)
                         temp_history.append({"role": "user", "content": full_user_prompt})
                     
-                    # Append Assistant's reasoning + tool call
-                    # Since we don't have a structured "tool_calls" field in this simple history format,
-                    # We emulate it or append text representation.
-                    # Gemini is tricky with history. 
-                    # Best effort: Append text + pseudo tool use
-                    assistant_msg = response_text_buffer
-                    if not assistant_msg: assistant_msg = f"[Calling tool: {tool_name}]"
-                    
+                    assistant_msg = response_text_buffer or f"[Calling tool: {tool_name}]"
                     temp_history.append({"role": "assistant", "content": assistant_msg})
-                    temp_history.append({"role": "user", "content": f"【Tool Output for {tool_name}】\n{tool_result}"})
+                    temp_history.append({"role": "user", "content": f"【Tool Output for {tool_name}】\n{truncated_result}"})
                     
                     # Loop continues to let LLM process the result
                     continue
