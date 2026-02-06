@@ -1,0 +1,7 @@
+python-telegram-bot==20.8
+pymongo
+requests
+python-dotenv
+qdrant-client
+openai
+aiohttp
