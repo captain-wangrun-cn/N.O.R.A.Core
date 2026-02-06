@@ -1,16 +1,30 @@
 import sys
 import logging
-from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, filters
+from telegram.ext import ApplicationBuilder
 
 import config
 from core.controller import NoraController
 from platforms.telegram import TelegramAdapter
 
-# Set up logging
-logging.basicConfig(
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    level=logging.INFO
-)
+# Set up logging to both file and console
+log_formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+
+# File handler
+file_handler = logging.FileHandler("nora_core.log")
+file_handler.setFormatter(log_formatter)
+file_handler.setLevel(logging.INFO)
+
+# Console handler
+console_handler = logging.StreamHandler()
+console_handler.setFormatter(log_formatter)
+console_handler.setLevel(logging.INFO)
+
+# Get the root logger and add handlers
+root_logger = logging.getLogger()
+root_logger.setLevel(logging.INFO)
+root_logger.addHandler(file_handler)
+root_logger.addHandler(console_handler)
+
 logging.getLogger("httpx").setLevel(logging.WARNING)
 
 def main():
@@ -23,14 +37,9 @@ def main():
 
     logging.info("正在初始化 N.O.R.A. Core...")
     
-    # 1. 初始化平台适配器 (目前只有 Telegram)
     adapter = TelegramAdapter()
-    
-    # 2. 初始化核心控制器，并把适配器注入进去
     controller = NoraController(adapter)
     
-    # 3. 启动适配器，并将消息处理权交给控制器
-    # 这是一个阻塞操作，会一直运行直到程序退出
     adapter.run(message_handler=controller.handle_new_message)
 
 if __name__ == '__main__':
