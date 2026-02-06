@@ -1,5 +1,10 @@
 import sys
 import logging
+import warnings
+
+# Suppress the FutureWarnings from google-generativeai library
+warnings.filterwarnings("ignore", category=FutureWarning, module="google.generativeai")
+
 from telegram.ext import ApplicationBuilder
 
 import config

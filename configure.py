@@ -2,6 +2,11 @@
 import questionary
 import os
 import yaml
+import warnings
+
+# Suppress warnings from google-generativeai
+warnings.filterwarnings("ignore", category=FutureWarning, module="google.generativeai")
+
 import google.generativeai as genai
 import openai
 from typing import Dict, Any
