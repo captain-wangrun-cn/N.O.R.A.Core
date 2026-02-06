@@ -31,7 +31,7 @@ class NoraController:
         logger.debug(f"[{chat_id}] 收到新聚合消息: '{text[:50]}...'")
         
         # 特殊处理 /start 命令
-        if text.strip() == "/start":
+        if text.strip().startswith("/start"):
             self.sessions[chat_id] = {"history": [], "interrupted_thought": ""}
             await self.adapter.send_message(chat_id, "N.O.R.A. Core 已启动。")
             logger.info(f"[{chat_id}] Session已重置 by /start command.")
