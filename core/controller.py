@@ -6,6 +6,9 @@ from platforms.base import BaseAdapter
 from brain.llm import llm_client
 from brain.prompts import get_system_prompt
 from memory.rag import RAGEngine
+from brain.tools import ToolManager
+from skills.loader import SkillLoader
+import json
 
 logger = logging.getLogger(__name__)
 
@@ -16,9 +19,11 @@ class NoraController:
         self.adapter = adapter
         self.llm = llm_client
         self.rag = RAGEngine() # Initialize RAG Engine
+        self.tool_manager = ToolManager() # Initialize Tools
+        self.skill_loader = SkillLoader() # Initialize Skill Scanner
         self.sessions: Dict[str, Any] = {}
         self.generation_tasks: Dict[str, asyncio.Task] = {}
-        logger.info(f"NoraController 已初始化。RAG 状态: {'Online' if self.rag.enabled else 'Offline'}")
+        logger.info(f"NoraController 已初始化。RAG: {'Online' if self.rag.enabled else 'Offline'}")
 
     async def handle_new_message(self, chat_id: str, text: str):
         """处理来自聚合器的新消息/命令。"""
@@ -65,6 +70,13 @@ class NoraController:
 
             # --- 2. 构建 Prompt (Context Reconstruction) ---
             instructions = []
+            
+            # Inject Skills
+            skills = self.skill_loader.scan_skills()
+            if skills:
+                skill_desc = "\n".join([f"- {s['name']}: {s['description']} (Path: {s.get('path', 'N/A')})" for s in skills])
+                instructions.append(f"【可用技能 (Available Skills)】\n{skill_desc}\n\n你可以使用 `exec_command` 来运行这些技能脚本 (e.g., `python3 skills/xxx/skill.py`)。")
+
             if "\n" in text.strip(): 
                 instructions.append("请仔细阅读并依次回答以下所有问题，不要遗漏。")
             
@@ -95,21 +107,94 @@ class NoraController:
             
             system_prompt = get_system_prompt(instructions)
 
-            # --- 3. 流式生成 ---
-            response_buffer = ""
-            stream = self.llm.chat_stream(
-                system_prompt=system_prompt,
-                user_prompt=full_user_prompt,
-                history=session["history"]
-            )
+            # --- 3. 执行循环 (Tool Execution Loop) ---
+            MAX_TURNS = 5
+            current_turn = 0
+            final_response_buffer = ""
             
-            async for chunk in stream:
-                response_buffer += chunk
+            # 临时历史，用于多轮工具调用，最后合并入主历史
+            temp_history = list(session["history"]) 
+
+            while current_turn < MAX_TURNS:
+                current_turn += 1
+                logger.debug(f"[{chat_id}] Turn {current_turn}/{MAX_TURNS}")
+                
+                stream = self.llm.chat_stream(
+                    system_prompt=system_prompt,
+                    user_prompt=full_user_prompt if current_turn == 1 else " (Continue processing tool outputs...)", # Subsequent prompts handled via history
+                    history=temp_history,
+                    tools=self.tool_manager.get_tool_schemas()
+                )
+                
+                response_text_buffer = ""
+                tool_call = None
+                
+                async for chunk in stream:
+                    # Handle new dict-based chunks
+                    if isinstance(chunk, dict):
+                        if chunk["type"] == "text":
+                            response_text_buffer += chunk["content"]
+                        elif chunk["type"] == "tool_call":
+                            tool_call = chunk
+                            # Tool call usually ends the stream or comes alone
+                    elif isinstance(chunk, str):
+                        # Fallback for legacy providers
+                        response_text_buffer += chunk
+                
+                # Append text to final buffer (visible to user)
+                if response_text_buffer:
+                    final_response_buffer += response_text_buffer
+                    # In a real app, we might send this incrementally. 
+                    # For now, we wait for atomic send at the end (as per design), 
+                    # OR we could send partials if we supported it.
+                    # Current design: Atomic Output.
+                
+                # If tool call detected
+                if tool_call:
+                    tool_name = tool_call["name"]
+                    tool_args = tool_call["args"]
+                    logger.info(f"[{chat_id}] 🧠 AI Request Tool: {tool_name}({tool_args})")
+                    
+                    # Execute Tool
+                    tool_result = self.tool_manager.execute(tool_name, tool_args)
+                    logger.info(f"[{chat_id}] 🔧 Tool Result: {tool_result[:100]}...")
+                    
+                    # Update History for next turn
+                    # 1. User/System prompt from this turn is implicitly handled by history logic? 
+                    # Not exactly. We need to append what just happened to temp_history.
+                    
+                    # Logic:
+                    # Turn 1 Input: User Prompt
+                    # Turn 1 Output: Text + Tool Call
+                    # Turn 2 Input: Tool Result
+                    
+                    if current_turn == 1:
+                        # Append the initial user prompt if it's not in history yet
+                        # (It's not, we passed it as user_prompt arg)
+                        temp_history.append({"role": "user", "content": full_user_prompt})
+                    
+                    # Append Assistant's reasoning + tool call
+                    # Since we don't have a structured "tool_calls" field in this simple history format,
+                    # We emulate it or append text representation.
+                    # Gemini is tricky with history. 
+                    # Best effort: Append text + pseudo tool use
+                    assistant_msg = response_text_buffer
+                    if not assistant_msg: assistant_msg = f"[Calling tool: {tool_name}]"
+                    
+                    temp_history.append({"role": "assistant", "content": assistant_msg})
+                    temp_history.append({"role": "user", "content": f"【Tool Output for {tool_name}】\n{tool_result}"})
+                    
+                    # Loop continues to let LLM process the result
+                    continue
+                else:
+                    # No tool call -> Final response
+                    break
             
-            logger.debug(f"[{chat_id}] 流式生成完成。")
+            logger.debug(f"[{chat_id}] 生成完成。")
             
             # --- 4. 发送响应 ---
-            await self.adapter.send_message(chat_id, response_buffer)
+            # Send the accumulated text
+            await self.adapter.send_message(chat_id, final_response_buffer)
             
             # --- 5. RAG 记忆存储 (Memory Storage) ---
             # 异步执行，不阻塞主流程
@@ -117,11 +202,12 @@ class NoraController:
                 # 存储用户的输入
                 asyncio.create_task(self._async_save_memory(text, {"role": "user", "chat_id": chat_id}))
                 # 存储 AI 的回复
-                asyncio.create_task(self._async_save_memory(response_buffer, {"role": "assistant", "chat_id": chat_id}))
+                asyncio.create_task(self._async_save_memory(final_response_buffer, {"role": "assistant", "chat_id": chat_id}))
 
-            # Store the FULL context (including the merged pending text) so future memory retrieval works
+            # Store the FULL context
+            # We use the final state.
             session["history"].append({"role": "user", "content": full_user_prompt})
-            session["history"].append({"role": "assistant", "content": response_buffer})
+            session["history"].append({"role": "assistant", "content": final_response_buffer})
             
             if len(session["history"]) > 20:
                 session["history"] = session["history"][-20:]
@@ -133,9 +219,9 @@ class NoraController:
             session["pending_text"] = text
             
             # 2. Save the AI's partial thought
-            if 'response_buffer' in locals() and response_buffer:
-                session["interrupted_thought"] = response_buffer
-                logger.info(f"[{chat_id}] 抢占成功：保存了部分思路 ('{response_buffer[:30]}...') 和用户输入。")
+            if 'final_response_buffer' in locals() and final_response_buffer:
+                session["interrupted_thought"] = final_response_buffer
+                logger.info(f"[{chat_id}] 抢占成功：保存了部分思路 ('{final_response_buffer[:30]}...') 和用户输入。")
             else:
                 session["interrupted_thought"] = "" # Nothing generated yet
                 logger.info(f"[{chat_id}] 抢占成功：尚未生成内容，仅保存了用户输入。")

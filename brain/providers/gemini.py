@@ -103,25 +103,48 @@ class GeminiProvider(BaseLLM):
             print(f"Gemini API Error: {e}")
             return "Sorry, I encountered an issue processing your request with the Gemini API."
 
-    async def chat_stream(self, system_prompt: str, user_prompt: str, history: List[Dict[str, str]]):
+    async def chat_stream(self, system_prompt: str, user_prompt: str, history: List[Dict[str, str]], tools: List[Dict] = None):
         gemini_history = []
         for item in history:
             role = "user" if item["role"] == "user" else "model"
-            gemini_history.append({"role": role, "parts": [{"text": item["content"]}]})
+            # Gemini history must be text-only for now, or adapt tool_response
+            # For simplicity, we assume history is text. If we had tool outputs, we'd need more logic.
+            gemini_history.append({"role": role, "parts": [{"text": str(item["content"])}]})
 
-        full_prompt = f"{system_prompt}\n\n---\n\n{user_prompt}"
-        chat_session = self.model.start_chat(history=gemini_history)
+        # Configure model with tools if present
+        current_model = self.model
+        if tools:
+            # Pass tools to model. Newer SDKs support OpenAI-style schemas directly or we rely on auto-conversion.
+            # We assume tools is a list of schemas.
+            current_model = genai.GenerativeModel(
+                self.model.model_name,
+                tools=tools,
+                system_instruction=system_prompt
+            )
+            full_prompt = user_prompt # System prompt is in instruction
+        else:
+            full_prompt = f"{system_prompt}\n\n---\n\n{user_prompt}"
+
+        chat_session = current_model.start_chat(history=gemini_history)
         
         try:
             response_stream = await chat_session.send_message_async(full_prompt, stream=True)
             async for chunk in response_stream:
-                # Defensive check: Only yield text if the chunk actually has it.
-                try:
-                    if chunk.text:
-                        yield chunk.text
-                except ValueError:
-                    # This handles cases where a chunk is valid but has no text part (e.g., safety blocks).
-                    pass
+                # Check for function call
+                if chunk.parts and chunk.parts[0].function_call:
+                    fc = chunk.parts[0].function_call
+                    # Yield a structured object for the controller to handle
+                    yield {
+                        "type": "tool_call",
+                        "name": fc.name,
+                        "args": dict(fc.args)
+                    }
+                else:
+                    try:
+                        if chunk.text:
+                            yield {"type": "text", "content": chunk.text}
+                    except ValueError:
+                        pass
         except Exception as e:
             print(f"Gemini API Stream Error: {e}")
-            yield "Sorry, an error occurred during streaming."
+            yield {"type": "text", "content": f"[System Error: {str(e)}]"}
