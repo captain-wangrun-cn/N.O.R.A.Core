@@ -4,7 +4,7 @@ from typing import Callable, Any
 class BaseAdapter(ABC):
     """定义所有平台适配器必须实现的接口。"""
 
-    @abstractabstractmethod
+    @abstractmethod
     def run(self, message_handler: Callable[[str, str], Any]):
         """启动适配器并开始监听消息。"""
         pass
