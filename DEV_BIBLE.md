@@ -1,7 +1,7 @@
 # N.O.R.A. Core - 技术设计文档 (TDD)
 
 > **项目名称:** N.O.R.A. Core (Project Echo)  
-> **版本:** 1.0.1-CN  
+> **版本:** 1.1.0-CN (Refactored)  
 > **维护者:** CaptainCN (WR), Nora  
 > **仓库地址:** https://github.com/captain-wangrun-cn/N.O.R.A.Core  
 
@@ -9,146 +9,109 @@
 
 ## 1. 摘要 (Executive Summary)
 
-N.O.R.A. Core (Neural Optimized Responsive Assistant) 是一个定制化、轻量级的 AI 代理框架，旨在替代通用的 OpenClaw 系统。其核心设计目标是实现 **成本效益最大化**、**长期记忆留存 (RAG)** 以及 **自主能力扩展 (热重载技能)**。
-
-系统采用 **Python 优先** 的架构，利用 **Docker** 保证基础设施的一致性，并使用 **Git** 进行版本控制。
+N.O.R.A. Core 旨在构建一个模块化、高可扩展的 AI 代理系统。
+本项目强调 **配置驱动** 和 **接口抽象**，确保底层模型（LLM）和存储后端（Database）可以灵活替换，而不影响核心业务逻辑。
 
 ---
 
 ## 2. 系统架构 (System Architecture)
 
-### 2.1 高层组件图 (High-Level Component Diagram)
+### 2.1 抽象架构图
 
 ```mermaid
 graph TD
-    User((用户 User)) -->|Telegram API| Controller["控制器 (main.py)"]
+    User((用户 User)) -->|Telegram API| Entry["入口 (main.py)"]
+    Entry --> Controller["核心控制器 (core/controller.py)"]
     
-    subgraph "N.O.R.A. 运行时环境"
-        Controller -->|上下文 Context| Router{"LLM 路由 (Router)"}
+    subgraph "N.O.R.A. 运行时"
+        Controller -->|会话管理| SessionMgr["会话管理器 (core/session.py)"]
+        Controller -->|决策分发| Router{"模型路由 (Router)"}
         
         subgraph "认知层 (Cognitive Layer)"
-            Router -->|闲聊/扮演| FlashModel[Gemini 2.0 Flash]
-            Router -->|逻辑/代码| ProModel[Gemini 1.5 Pro]
+            Router -->|日常交互| FastLLM[Fast Model (e.g. Flash/DeepSeek)]
+            Router -->|复杂推理| SmartLLM[Smart Model (e.g. Pro/GPT-4)]
+            Router -->|代码生成| CoderLLM[Coder Model (e.g. Codex)]
         end
         
-        subgraph "记忆层 (Memory Layer - RAG)"
-            Controller <-->|查询/存储| VectorStore[("向量库 (Qdrant)")]
-            VectorStore <-->|向量化| EmbedAPI["SiliconFlow BGE-M3"]
-            Controller -->|归档| DocStore[("MongoDB")]
+        subgraph "记忆层 (Memory Layer)"
+            Controller <-->|RAG 检索| VectorDB[("向量数据库")]
+            VectorDB <-->|Embedding| EmbedService["嵌入服务"]
+            Controller -->|持久化| DocStore[("文档数据库")]
         end
         
         subgraph "能力层 (Capability Layer)"
-            ProModel -->|工具调用| SkillMgr["技能管理器 (Skill Manager)"]
-            SkillMgr -->|加载/执行| PyScripts["Python 脚本 (tools/*.py)"]
+            SmartLLM -->|Tool Call| ToolMgr["工具管理器"]
+            ToolMgr -->|Load| Scripts["本地脚本 (tools/)"]
         end
     end
 ```
 
 ### 2.2 核心组件规范
 
-#### 2.2.1 控制器 (Controller - `main.py`)
-- **职责:** 事件循环处理、消息路由、错误管理。
-- **库:** `python-telegram-bot` (异步模式)。
-- **逻辑流:**
-  1. 接收来自 Telegram 的 `Update`。
-  2. 从 `记忆层` 检索用户上下文 (L1 短期 + L2 长期)。
-  3. 构建 `System Prompt` (包含身份设定 + 技能描述)。
-  4. 调用 `认知层` (LLM)。
-  5. 执行 `能力层` (如果模型请求调用工具)。
-  6. 返回响应给用户。
+#### 2.2.1 核心层 (`core/`)
+- **`main.py`**: 仅作为程序入口。负责初始化配置、建立数据库连接、启动 Bot 轮询 (`Application.run_polling`)。
+- **`controller.py`**: 业务逻辑中枢。负责协调记忆检索、Prompt 构建、模型调用和工具执行的流水线。
+- **`session.py`**: 管理用户上下文。处理消息队列、滑动窗口截断、用户状态机。
 
-#### 2.2.2 认知层 (Cognitive Layer - `brain/`)
-- **LLM 客户端:** 统一封装兼容 OpenAI 格式的 API (Gemini/DeepSeek/SiliconFlow)。
-- **路由逻辑 (Router):**
-  - **启发式规则:** 如果消息包含代码块或关键词 (`写`, `脚本`, `分析`) -> **Pro 模型**。
-  - **默认:** -> **Flash 模型** (省钱/快速)。
-- **提示工程 (Prompt Engineering):**
-  - 上下文窗口管理 (滑动窗口: 最近 10 条)。
-  - RAG 上下文注入 (Top-k 相关记忆)。
+#### 2.2.2 认知层 (`brain/`)
+- **`llm_interface.py`**: 定义抽象基类 `BaseLLM`。
+- **`providers/`**: 具体实现 (如 `GeminiProvider`, `OpenAIProvider`)。
+- **`router.py`**: 根据意图（Intent）将请求分发给 `FastLLM` 或 `SmartLLM`。具体使用的是哪个模型，由 `config.py` 决定。
 
-#### 2.2.3 记忆层 (Memory Layer - `memory/`)
-- **向量数据库:** **Qdrant** (本地 Docker 实例)。
-- **Embedding 模型:** **BGE-M3** (通过 SiliconFlow API 调用，或本地 fallback)。
-- **数据结构 (Qdrant Point):**
-  ```json
-  {
-    "id": "uuid",
-    "vector": [0.12, ...],
-    "payload": {
-      "text": "用户喜欢体素游戏。",
-      "timestamp": "2026-02-06T06:00:00Z",
-      "tags": ["偏好", "游戏"],
-      "type": "chat_history"
-    }
-  }
-  ```
+#### 2.2.3 记忆层 (`memory/`)
+- **`vector_store.py`**: 向量数据库接口。支持 Qdrant/Chroma/Pinecone 等后端。
+- **`rag_engine.py`**: 封装“检索-生成”逻辑。负责将 Embedding 结果转化为 Prompt 上下文。
 
-#### 2.2.4 能力层 (Capability Layer - `tools/`)
-- **设计模式:** 动态模块加载 (`importlib`)。
-- **发现机制:** 监控进程监听 `tools/*.py` 变化。
-- **定义规范:** 每个工具模块必须导出一个 `TOOL_DEF` 字典和一个 `run(**kwargs)` 函数。
-- **安全性:** (V1版本可选) 代码执行的子进程隔离。
+#### 2.2.4 能力层 (`tools/`)
+- **`manager.py`**: 负责扫描 `tools/` 目录，动态加载 Python 模块，并将其注册为 LLM 可调用的工具。
 
 ---
 
 ## 3. 实施路线图 (Roadmap)
 
-### 第一阶段: 基础建设 (Phase 1: Foundation) - 进行中
-*目标: 建立连接并实现基本聊天功能。*
-- [x] **仓库初始化:** Git 结构和环境配置。
-- [ ] **LLM 集成:** 使用 `openai` SDK 实现 `brain/llm.py` (对接 Gemini 接口)。
-- [ ] **Telegram 挂钩:** 连接 `main.py` 实现基本回声逻辑。
-- [ ] **身份注入:** 实现 `SOUL` (人设) 的加载。
+### 第一阶段: 基础架构 (Phase 1: Foundation)
+- [x] **Git 初始化**。
+- [ ] **核心拆分:** 建立 `core/` 目录，将逻辑从 `main.py` 剥离。
+- [ ] **LLM 抽象:** 编写 `BaseLLM` 接口，并实现第一个 Provider (Gemini)。
+- [ ] **Ping 测试:** 实现最简单的 `/start` 响应。
 
-### 第二阶段: 记忆植入 (Phase 2: Memory Integration)
-*目标: 实现跨会话的持久化记忆。*
-- [ ] **基础设施:** 编写 `docker-compose.yml` (Qdrant & MongoDB)。
-- [ ] **RAG 管道:** 实现 `memory.add(text)` 和 `memory.query(text)`。
-- [ ] **上下文注入:** 修改控制器，在调用 LLM 前先拉取相关记忆。
+### 第二阶段: 记忆接入 (Phase 2: Memory)
+- [ ] **Docker 环境:** 编写 `docker-compose.yml` 启动数据库。
+- [ ] **RAG 流程:** 打通 Embedding -> VectorDB -> Prompt 的链路。
 
-### 第三阶段: 自主进化 (Phase 3: Autonomous Expansion)
-*目标: 启用自我编程能力。*
-- [ ] **工具管理器:** 在 `tools/manager.py` 中实现热重载逻辑。
-- [ ] **元工具 (Meta-Tools):** 创建 `write_tool.py`，允许 AI 在 `tools/` 中生成新 Python 脚本。
+### 第三阶段: 动态能力 (Phase 3: Evolution)
+- [ ] **工具热加载:** 实现不重启服务即可加载新 `.py` 工具的机制。
 
 ---
 
-## 4. 开发规范 (Development Standards)
+## 4. 目录结构规范
 
-### 4.1 代码风格
-- **语言:** Python 3.10+
-- **格式化:** PEP 8 (使用 `black` 格式化)。
-- **类型提示:** 所有函数签名必须包含严格的 Type Hints (`typing.List`, `typing.Optional`)。
-- **异步:** 所有 I/O 操作 (数据库, API, 网络) 必须使用 `asyncio`。
-
-### 4.2 配置管理
-- **密钥:** 所有 API Key 必须通过 `python-dotenv` 从 `.env` 加载。
-- **常量:** 非机密配置 (超时时间, 模型名称) 存放在 `config.py`。
-
-### 4.3 目录结构
 ```text
 nora-core/
-├── main.py                 # 应用入口
-├── config.py               # 全局配置
-├── docker-compose.yml      # 基础设施定义
-├── requirements.txt        # Python 依赖
-├── .env                    # 密钥 (严禁提交到 Git)
-├── brain/
+├── main.py                 # 启动入口
+├── config.py               # 配置文件 (读取 .env)
+├── docker-compose.yml      # 容器编排
+├── requirements.txt
+├── .env                    # 密钥
+├── core/                   # 核心业务
 │   ├── __init__.py
-│   ├── llm.py              # LLM 客户端适配器
-│   ├── prompts.py          # 系统提示词模板
-│   └── router.py           # 模型路由逻辑
-├── memory/
+│   ├── controller.py       # 流程控制
+│   └── session.py          # 会话状态
+├── brain/                  # 大脑 (LLM)
 │   ├── __init__.py
-│   ├── vector.py           # Qdrant 包装器
-│   └── mongo.py            # MongoDB 包装器
-└── tools/
+│   ├── interface.py        # 抽象接口
+│   ├── router.py           # 路由逻辑
+│   └── providers/          # 具体实现 (gemini.py, openai.py)
+├── memory/                 # 记忆
+│   ├── __init__.py
+│   ├── vector_store.py     # 向量库接口
+│   └── rag.py              # RAG 逻辑
+└── tools/                  # 工具箱
     ├── __init__.py
-    ├── manager.py          # 工具加载/执行器
-    └── base_tools.py       # 内置工具 (如: 搜索)
+    ├── manager.py          # 工具加载器
+    └── scripts/            # 具体的工具脚本
 ```
 
 ---
 
-*文档状态: 草稿 / 活跃*  
-*最后更新: 2026-02-06*
+*文档状态: 正式版 v1.1*
