@@ -1,7 +1,7 @@
 python-telegram-bot==21.0.1
 pymongo
 requests
-python-dotenv # Still useful for set_key
+python-dotenv 
 qdrant-client
 openai
 aiohttp

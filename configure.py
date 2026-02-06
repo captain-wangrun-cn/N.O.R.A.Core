@@ -1,118 +1,193 @@
-# N.O.R.A. Core - Interactive Configuration Wizard (YAML Edition)
+# N.O.R.A. Core - 交互式配置向导 (i18n YAML 版)
 import questionary
 import os
 import yaml
 import google.generativeai as genai
 import openai
+from typing import Dict, Any
 
-CONFIG_FILE = "config.yml"
+# --- i18n 配置 ---
+LOCALE_DIR = "locales"
+DEFAULT_LOCALE = "zh_CN"
+_strings = {}
 
-def get_gemini_models(api_key):
-    """Fetches available Gemini models."""
+def t(key: str, **kwargs) -> str:
+    """简单的 i18n 翻译函数"""
+    keys = key.split('.')
+    value = _strings
+    for k in keys:
+        value = value.get(k)
+        if value is None:
+            return key # fallback
+    return value.format(**kwargs)
+
+def load_locale():
+    """加载语言文件"""
+    global _strings
+    locale_file = os.path.join(LOCALE_DIR, f"{DEFAULT_LOCALE}.yml")
+    if not os.path.exists(locale_file):
+        print(f"警告: 语言文件 {locale_file} 未找到。")
+        return
+    with open(locale_file, 'r') as f:
+        _strings = yaml.safe_load(f)
+
+# --- 模型获取 ---
+def get_gemini_models(api_key: str):
     try:
         genai.configure(api_key=api_key)
-        models = [m.name for m in genai.list_models() if 'generateContent' in m.supported_generation_methods]
-        return [model.replace("models/", "") for model in models]
+        models = [m.name.replace("models/", "") for m in genai.list_models() if 'generateContent' in m.supported_generation_methods]
+        return sorted(models)
     except Exception as e:
-        questionary.print(f"Could not fetch Gemini models: {e}", style="bold red").ask()
-        return []
+        questionary.print(t('wizard.model_fetch_error', error=e), style="bold red").ask()
+        return None
 
-def get_openai_models(api_key):
-    """Fetches available OpenAI models."""
+def get_openai_models(api_key: str):
     try:
         client = openai.OpenAI(api_key=api_key)
-        models = [model.id for model in client.models.list()]
-        return sorted([m for m in models if "gpt" in m.lower()])
+        models = sorted([model.id for model in client.models.list() if "gpt" in model.id.lower()])
+        return models
     except Exception as e:
-        questionary.print(f"Could not fetch OpenAI models: {e}", style="bold red").ask()
-        return []
+        questionary.print(t('wizard.model_fetch_error', error=e), style="bold red").ask()
+        return None
 
-def select_model(model_list, role):
-    """Asks the user to select a model from a list or enter manually."""
-    if not model_list:
-        return questionary.text(f"Enter the model name for the '{role}' role:").ask()
+# --- 向导步骤 ---
+class ConfigStep:
+    def __init__(self, state: Dict[str, Any]):
+        self.state = state
+
+    def run(self):
+        raise NotImplementedError
+
+class StepTelegram(ConfigStep):
+    def run(self):
+        self.state['telegram_token'] = questionary.password(
+            t('wizard.token_prompt'),
+            default=self.state.get("telegram_token", "")
+        ).ask()
+        return self.state['telegram_token'] is not None
+
+class StepProvider(ConfigStep):
+    def run(self):
+        choices = ["gemini", "openai", t('wizard.back_option')]
+        self.state['provider'] = questionary.select(
+            t('wizard.provider_prompt'),
+            choices=choices,
+            default=self.state.get("provider", "gemini")
+        ).ask()
+        return self.state['provider'] is not None
+
+class StepAPIKeys(ConfigStep):
+    def run(self):
+        provider = self.state.get('provider')
+        if provider == 'gemini':
+            self.state['gemini_key'] = questionary.password(
+                t('wizard.gemini_key_prompt'),
+                default=self.state.get("gemini_key", "")
+            ).ask()
+            return self.state['gemini_key'] is not None
+        elif provider == 'openai':
+            self.state['openai_key'] = questionary.password(
+                t('wizard.openai_key_prompt'),
+                default=self.state.get("openai_key", "")
+            ).ask()
+            return self.state['openai_key'] is not None
+        return False # Should not happen
+
+class StepModels(ConfigStep):
+    def select_model(self, model_list, role_key):
+        role_name = t(f'roles.{role_key}')
+        if not model_list:
+            return questionary.text(t('wizard.manual_prompt', role=role_name)).ask()
         
-    choices = model_list + [questionary.Separator(), "--- Manually Enter ---"]
-    selection = questionary.select(
-        f"Select the model for the '{role}' role:",
-        choices=choices,
-    ).ask()
-    
-    if selection == "--- Manually Enter ---":
-        return questionary.text(f"Manually enter model name for '{role}':").ask()
-    return selection
+        choices = model_list + [questionary.Separator(), t('wizard.manual_entry')]
+        selection = questionary.select(
+            t('wizard.model_select_prompt', role=role_name),
+            choices=choices,
+        ).ask()
+        
+        if selection == t('wizard.manual_entry'):
+            return questionary.text(t('wizard.manual_prompt', role=role_name)).ask()
+        return selection
 
+    def run(self):
+        provider = self.state.get('provider')
+        api_key = self.state.get(f"{provider}_key")
+        model_list = []
+
+        if provider == 'gemini' and api_key:
+            model_list = get_gemini_models(api_key)
+        elif provider == 'openai' and api_key:
+            model_list = get_openai_models(api_key)
+
+        if model_list is None: # API call failed
+            return False 
+
+        models = self.state.get('models', {})
+        models['smart'] = self.select_model(model_list, 'smart')
+        models['fast'] = self.select_model(model_list, 'fast')
+        models['coder'] = self.select_model(model_list, 'coder')
+        self.state['models'] = models
+        return True
+
+# --- 主流程 ---
 def run_wizard():
-    print("Welcome to the N.O.R.A. Core YAML Configuration Wizard!")
-    
-    # Load existing config if it exists
-    existing_config = {}
-    if os.path.exists(CONFIG_FILE):
-        with open(CONFIG_FILE, 'r') as f:
-            existing_config = yaml.safe_load(f) or {}
+    load_locale()
+    print(t('wizard.welcome'))
 
-    # --- Start Questions ---
-    
-    telegram_token = questionary.password(
-        "Please enter your Telegram Bot Token:",
-        default=existing_config.get("telegram", {}).get("bot_token", "")
-    ).ask()
-    
-    provider = questionary.select(
-        "Which primary LLM provider will you use?",
-        choices=["gemini", "openai"],
-        default=existing_config.get("llm", {}).get("provider", "gemini")
-    ).ask()
-    
-    gemini_key = ""
-    openai_key = ""
-    
-    if provider == 'gemini':
-        gemini_key = questionary.password(
-            "Please enter your Google Gemini API Key:",
-            default=existing_config.get("llm", {}).get("api_keys", {}).get("gemini", "")
-        ).ask()
-    else:
-        openai_key = questionary.password(
-            "Please enter your OpenAI API Key:",
-            default=existing_config.get("llm", {}).get("api_keys", {}).get("openai", "")
-        ).ask()
+    # 加载现有配置
+    config_file = "config.yml"
+    state = {}
+    if os.path.exists(config_file):
+        with open(config_file, 'r') as f:
+            cfg = yaml.safe_load(f) or {}
+            state = {
+                'telegram_token': cfg.get("telegram", {}).get("bot_token"),
+                'provider': cfg.get("llm", {}).get("provider"),
+                'gemini_key': cfg.get("llm", {}).get("api_keys", {}).get("gemini"),
+                'openai_key': cfg.get("llm", {}).get("api_keys", {}).get("openai"),
+                'models': cfg.get("llm", {}).get("models", {})
+            }
 
-    # --- Model Selection ---
-    models = {}
-    model_list = []
-    if provider == 'gemini' and gemini_key:
-        model_list = get_gemini_models(gemini_key)
-    elif provider == 'openai' and openai_key:
-        model_list = get_openai_models(openai_key)
+    steps = [StepTelegram, StepProvider, StepAPIKeys, StepModels]
+    current_step = 0
+    
+    while current_step < len(steps):
+        step_instance = steps[current_step](state)
+        success = step_instance.run()
+
+        if not success: # User pressed Ctrl+C
+            print(t('wizard.aborted_message'))
+            return
         
-    models['smart'] = select_model(model_list, 'smart (for complex reasoning)')
-    models['fast'] = select_model(model_list, 'fast (for chat and simple tasks)')
-    models['coder'] = select_model(model_list, 'coder (for code generation)')
+        # 检查是否选择了 "返回"
+        if state.get('provider') == t('wizard.back_option'):
+            current_step = max(0, current_step - 1)
+            continue
+            
+        current_step += 1
 
-    # --- Build Final Config ---
+    # --- 确认保存 ---
     final_config = {
-        'telegram': {'bot_token': telegram_token},
+        'telegram': {'bot_token': state.get('telegram_token')},
         'llm': {
-            'provider': provider,
+            'provider': state.get('provider'),
             'api_keys': {
-                'gemini': gemini_key,
-                'openai': openai_key
+                'gemini': state.get('gemini_key', ''),
+                'openai': state.get('openai_key', '')
             },
-            'models': models
+            'models': state.get('models', {})
         }
     }
-    
-    # --- Confirmation ---
-    print("\n--- Configuration Summary ---")
-    print(yaml.dump(final_config, indent=2))
-    
-    if questionary.confirm("Save this configuration?").ask():
-        with open(CONFIG_FILE, 'w') as f:
-            yaml.dump(final_config, f, indent=2)
-        print(f"✅ Configuration saved to {CONFIG_FILE}")
+
+    print(t('wizard.summary_title'))
+    print(yaml.dump(final_config, indent=2, allow_unicode=True))
+
+    if questionary.confirm(t('wizard.save_confirm')).ask():
+        with open(config_file, 'w', encoding='utf-8') as f:
+            yaml.dump(final_config, f, indent=2, allow_unicode=True)
+        print(t('wizard.success_message', file=config_file))
     else:
-        print("Configuration aborted.")
+        print(t('wizard.aborted_message'))
 
 if __name__ == "__main__":
     run_wizard()
