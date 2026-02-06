@@ -123,26 +123,26 @@ class ToolManager:
 
     def _generate_schema(self, func: Callable) -> Dict[str, Any]:
         """
-        Helper: Generate OpenAI/Gemini compatible function schema from docstring and type hints.
-        Simplistic implementation.
+        Helper: Generate OpenAI/Gemini compatible function schema.
+        Note: Gemini SDK (Protobuf) prefers UPPERCASE types (STRING, OBJECT, etc.)
         """
         sig = inspect.signature(func)
         doc = inspect.getdoc(func) or "No description."
         
-        # Simple parsing of docstring for parameter descriptions (could be improved)
+        # Simple parsing of docstring
         desc = doc.split("\n")[0]
         
         parameters = {
-            "type": "object",
+            "type": "OBJECT", # Changed from "object"
             "properties": {},
             "required": []
         }
         
         for name, param in sig.parameters.items():
             if name == 'self': continue
-            param_type = "string" # Default
-            if param.annotation == int: param_type = "integer"
-            elif param.annotation == bool: param_type = "boolean"
+            param_type = "STRING" # Default, changed from "string"
+            if param.annotation == int: param_type = "INTEGER"
+            elif param.annotation == bool: param_type = "BOOLEAN"
             
             parameters["properties"][name] = {
                 "type": param_type,
