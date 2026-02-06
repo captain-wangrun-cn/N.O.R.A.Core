@@ -31,7 +31,8 @@ class ToolManager:
         self.register(self.delegate_to_coder)
     
     def _register_messaging_tools(self):
-        self.register(self.send_intermediate_message)
+        # self.register(self.send_intermediate_message)
+        pass
 
     def register(self, func: Callable):
         """Registers a function as a tool, automatically generating its schema."""

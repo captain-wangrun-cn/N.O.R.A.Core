@@ -133,15 +133,27 @@ class NoraController:
                     # Handle new dict-based chunks
                     if isinstance(chunk, dict):
                         if chunk["type"] == "text":
-                            response_text_buffer += chunk["content"]
+                            content = chunk["content"]
+                            response_text_buffer += content
+                            
+                            # Real-time splitting logic
+                            if "[SPLIT]" in response_text_buffer:
+                                parts = response_text_buffer.split("[SPLIT]")
+                                # Send all complete parts
+                                for part in parts[:-1]:
+                                    text_to_send = part.strip()
+                                    if text_to_send:
+                                        await self.adapter.send_message(chat_id, text_to_send)
+                                        temp_history.append({"role": "assistant", "content": text_to_send})
+                                # Keep the last incomplete part in buffer
+                                response_text_buffer = parts[-1]
+                                
                         elif chunk["type"] == "tool_call":
                             tool_call = chunk
                             # IMMEDIATELY sync text buffer to final buffer if tool call is detected
-                            # This ensures preceding text is captured before tool execution
                             if response_text_buffer:
                                 final_response_buffer += response_text_buffer
                                 response_text_buffer = ""
-                            # Tool call usually ends the stream or comes alone
                     elif isinstance(chunk, str):
                         # Fallback for legacy providers
                         response_text_buffer += chunk
@@ -172,28 +184,13 @@ class NoraController:
                     else:
                         truncated_result = tool_result
                     
-                    # Special handling for intermediate messages to ensure ordering and context
-                    if tool_name == 'send_intermediate_message':
-                        # 1. Flush the final_response_buffer first to maintain chronological order
-                        if final_response_buffer:
-                            await self.adapter.send_message(chat_id, final_response_buffer)
-                            temp_history.append({"role": "assistant", "content": final_response_buffer})
-                            final_response_buffer = ""
-
-                        # 2. Add the intermediate message content to history so LLM knows it's already sent
-                        # We treat the 'text' argument of the tool as the assistant's output
-                        msg_content = tool_args.get("text", "(Sent an empty intermediate message)")
-                        temp_history.append({"role": "assistant", "content": msg_content})
-                        # Also add the tool result to keep the turn-taking intact
-                        temp_history.append({"role": "user", "content": f"【Tool Output for {tool_name}】\n{truncated_result}"})
-                    else:
-                        # Append history for other tools
-                        if current_turn == 1 and full_user_prompt not in [h['content'] for h in temp_history]:
-                            temp_history.append({"role": "user", "content": full_user_prompt})
-                        
-                        assistant_msg = response_text_buffer or f"[Calling tool: {tool_name}]"
-                        temp_history.append({"role": "assistant", "content": assistant_msg})
-                        temp_history.append({"role": "user", "content": f"【Tool Output for {tool_name}】\n{truncated_result}"})
+                    # Append history for tools
+                    if current_turn == 1 and full_user_prompt not in [h['content'] for h in temp_history]:
+                        temp_history.append({"role": "user", "content": full_user_prompt})
+                    
+                    assistant_msg = response_text_buffer or f"[Calling tool: {tool_name}]"
+                    temp_history.append({"role": "assistant", "content": assistant_msg})
+                    temp_history.append({"role": "user", "content": f"【Tool Output for {tool_name}】\n{truncated_result}"})
                     
                     # Loop continues to let LLM process the result
                     continue
