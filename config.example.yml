@@ -20,8 +20,19 @@ llm:
     coder: "gemini-1.5-pro-latest"
 
 memory:
+  # Vector Database (Qdrant)
   qdrant:
     host: "localhost"
     port: 6333
+  
+  # Document Database (MongoDB)
   mongo:
     uri: "mongodb://nora:nora_password@localhost:27017/"
+
+  # Embedding Service (Text -> Vector)
+  embedding:
+    provider: "openai_compatible" # Generic OpenAI compatible client
+    base_url: "https://api.siliconflow.cn/v1" # SiliconFlow endpoint
+    api_key: "YOUR_SILICONFLOW_API_KEY"
+    model: "BAAI/bge-m3" # Recommended for RAG
+    dimensions: 1024 # BGE-M3 output dimensions
