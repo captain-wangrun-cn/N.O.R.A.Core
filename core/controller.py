@@ -22,7 +22,8 @@ class NoraController:
 
     async def handle_new_message(self, chat_id: str, text: str):
         """处理来自聚合器的新消息/命令。"""
-        logger.info(f"[{chat_id}] 收到新聚合消息: '{text[:100]}...'")
+        # 降级为 DEBUG，避免刷屏
+        logger.debug(f"[{chat_id}] 收到新聚合消息: '{text[:50]}...'")
         
         # 特殊处理 /start 命令
         if text.strip() == "/start":
@@ -33,7 +34,7 @@ class NoraController:
 
         # --- 抢占逻辑 ---
         if chat_id in self.generation_tasks:
-            logger.warning(f"[{chat_id}] 抢占：取消正在进行的生成任务。")
+            logger.info(f"[{chat_id}] 抢占：取消正在进行的生成任务。")
             self.generation_tasks[chat_id].cancel()
             await asyncio.sleep(0.1)
 
@@ -44,7 +45,8 @@ class NoraController:
         """内部生成逻辑。"""
         # Ensure session keys exist
         session = self.sessions.setdefault(chat_id, {"history": [], "interrupted_thought": "", "pending_text": ""})
-        logger.info(f"[{chat_id}] 开始生成响应。History length: {len(session['history'])}")
+        # 降级为 DEBUG
+        logger.debug(f"[{chat_id}] 开始生成响应。History length: {len(session['history'])}")
         
         try:
             await self.adapter.start_typing(chat_id)
@@ -53,12 +55,13 @@ class NoraController:
             # 只在没有被抢占的情况下检索，或者对最新的 text 进行检索
             rag_context = ""
             if self.rag.enabled:
-                logger.info(f"[{chat_id}] 正在从大脑检索相关记忆...")
+                logger.debug(f"[{chat_id}] 正在从大脑检索相关记忆...")
                 rag_context = self.rag.get_context_string(text, top_k=3)
                 if rag_context:
-                    logger.info(f"[{chat_id}] RAG 命中！检索到 {len(rag_context.splitlines())} 条相关记忆。")
+                    # 保留 INFO，但精简内容
+                    logger.info(f"[{chat_id}] RAG 命中: {len(rag_context.splitlines())} lines.")
                 else:
-                    logger.info(f"[{chat_id}] RAG 未检索到强相关记忆。")
+                    logger.debug(f"[{chat_id}] RAG 未检索到强相关记忆。")
 
             # --- 2. 构建 Prompt (Context Reconstruction) ---
             instructions = []
@@ -103,7 +106,7 @@ class NoraController:
             async for chunk in stream:
                 response_buffer += chunk
             
-            logger.info(f"[{chat_id}] 流式生成完成。")
+            logger.debug(f"[{chat_id}] 流式生成完成。")
             
             # --- 4. 发送响应 ---
             await self.adapter.send_message(chat_id, response_buffer)
@@ -122,7 +125,7 @@ class NoraController:
             
             if len(session["history"]) > 20:
                 session["history"] = session["history"][-20:]
-            logger.info(f"[{chat_id}] History updated. New length: {len(session['history'])}")
+            logger.debug(f"[{chat_id}] History updated. New length: {len(session['history'])}")
 
         except asyncio.CancelledError:
             # --- 抢占发生：抢救现场 ---
@@ -143,7 +146,7 @@ class NoraController:
             
         finally:
             self.generation_tasks.pop(chat_id, None)
-            logger.info(f"[{chat_id}] 本次生成任务结束。")
+            logger.debug(f"[{chat_id}] 本次生成任务结束。")
 
     async def _async_save_memory(self, text: str, metadata: Dict[str, Any]):
         """异步保存记忆，避免阻塞主线程。"""
@@ -151,7 +154,8 @@ class NoraController:
             # 由于 RAG.add_memory 是同步的 (requests 是同步的)，我们需要在 executor 中运行它
             # 或者如果 RAG 内部实现了异步更好。目前先简单用 to_thread
             await asyncio.to_thread(self.rag.add_memory, text, metadata)
-            logger.info(f"[{metadata.get('chat_id')}] 记忆已异步保存 (Role: {metadata.get('role')})")
+            # 降级为 DEBUG，因为每次对话都会触发两次，太吵了
+            logger.debug(f"[{metadata.get('chat_id')}] 记忆已异步保存 (Role: {metadata.get('role')})")
         except Exception as e:
             logger.error(f"保存记忆失败: {e}")
 
