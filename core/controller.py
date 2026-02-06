@@ -136,6 +136,11 @@ class NoraController:
                             response_text_buffer += chunk["content"]
                         elif chunk["type"] == "tool_call":
                             tool_call = chunk
+                            # IMMEDIATELY sync text buffer to final buffer if tool call is detected
+                            # This ensures preceding text is captured before tool execution
+                            if response_text_buffer:
+                                final_response_buffer += response_text_buffer
+                                response_text_buffer = ""
                             # Tool call usually ends the stream or comes alone
                     elif isinstance(chunk, str):
                         # Fallback for legacy providers
