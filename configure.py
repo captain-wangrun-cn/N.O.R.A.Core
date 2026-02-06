@@ -172,7 +172,7 @@ class StepEmbedding(ConfigStep):
             'base_url': base_url,
             'api_key': api_key,
             'model': model,
-            'dimensions': 1024 # default BGE-M3
+            'dimensions': 1536 # default for text-embedding-3-small
         }
         return True
 

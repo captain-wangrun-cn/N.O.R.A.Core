@@ -18,7 +18,7 @@ class EmbeddingClient:
         self.api_key = cfg.get("api_key")
         self.base_url = cfg.get("base_url", "https://api.openai.com/v1").rstrip("/")
         self.model = cfg.get("model", "text-embedding-3-small")
-        self.dimensions = cfg.get("dimensions", 1024)
+        self.dimensions = cfg.get("dimensions", 1536)
 
         if not self.api_key or "YOUR_" in self.api_key:
             logger.warning("Embedding API Key 未配置！记忆系统将无法工作。")
