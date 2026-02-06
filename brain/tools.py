@@ -19,6 +19,8 @@ class ToolManager:
         self.register(self.write_file)
         self.register(self.list_dir)
         self.register(self.exec_command)
+        self.register(self.edit_file)
+        self.register(self.delegate_to_coder)
 
     def register(self, func: Callable):
         """注册一个工具函数，并自动生成 Schema。"""
@@ -120,6 +122,78 @@ class ToolManager:
             return "Error: Command timed out after 30 seconds."
         except Exception as e:
             return f"Error executing command: {e}"
+
+    def edit_file(self, path: str, old_code: str, new_code: str) -> str:
+        """
+        对文件进行精准的查找和替换。
+        Performs a precise find-and-replace operation on a file.
+        :param path: The path to the file.
+        :param old_code: The exact block of code to be replaced.
+        :param new_code: The new block of code to insert.
+        """
+        try:
+            if not os.path.exists(path):
+                return f"Error: File '{path}' not found."
+            
+            with open(path, 'r', encoding='utf-8') as f:
+                content = f.read()
+            
+            if old_code not in content:
+                return f"Error: The specified `old_code` was not found in {path}."
+            
+            # Perform a single, precise replacement
+            new_content = content.replace(old_code, new_code, 1)
+            
+            with open(path, 'w', encoding='utf-8') as f:
+                f.write(new_content)
+                
+            return f"Successfully edited {path}."
+        except Exception as e:
+            return f"Error editing file: {e}"
+
+    def delegate_to_coder(self, task_description: str) -> str:
+        """
+        将一个复杂的代码生成任务委托给专门的 Coder AI 模型。
+        Delegates a complex code generation task to a specialized Coder AI model.
+        :param task_description: A detailed description of the coding task.
+        """
+        try:
+            from brain.llm import get_llm_client
+            
+            logger.info(f"Delegating task to Coder model: {task_description[:60]}...")
+            
+            # Get a client for the coder model
+            # This assumes a 'coder' model is defined in config.yml
+            coder_client = get_llm_client(model_alias="coder")
+            
+            # A specialized prompt for the coder model
+            coder_system_prompt = (
+                "You are an expert Python programmer. Your task is to generate clean, "
+                "efficient, and correct Python code based on the user's request. "
+                "Do not add any conversational fluff or explanations outside of the code. "
+                "Only return the raw code block."
+            )
+            
+            # We use asyncio.run() here because this tool method itself is not async,
+            # but the underlying chat call is. This is a simple way to bridge sync and async.
+            import asyncio
+            
+            # This is a blocking call within the tool's execution context
+            code_result = asyncio.run(coder_client.chat(
+                system_prompt=coder_system_prompt,
+                user_prompt=task_description,
+                history=[] # Coder works on isolated tasks
+            ))
+            
+            return code_result
+
+        except ValueError as ve:
+            # Handle case where 'coder' model is not configured
+            logger.warning(f"Could not delegate to coder: {ve}")
+            return "Error: The 'coder' model is not configured in config.yml. Please ask the user to set it up."
+        except Exception as e:
+            logger.error(f"Error delegating to coder model: {e}")
+            return f"An unexpected error occurred while delegating the task: {str(e)}"
 
     def _generate_schema(self, func: Callable) -> Dict[str, Any]:
         """
