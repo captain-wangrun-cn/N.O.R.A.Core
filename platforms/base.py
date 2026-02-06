@@ -3,6 +3,9 @@ from typing import Callable, Any
 
 class BaseAdapter(ABC):
     """定义所有平台适配器必须实现的接口。"""
+    
+    def __init__(self):
+        self.current_chat_id: str = None
 
     @abstractmethod
     def run(self, message_handler: Callable[[str, str], Any]):

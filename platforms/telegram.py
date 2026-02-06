@@ -11,6 +11,7 @@ class TelegramAdapter(BaseAdapter):
     """Telegram 平台适配器。"""
 
     def __init__(self):
+        super().__init__() # Call parent __init__
         token = config.get_telegram_token()
         if not token:
             raise ValueError("Telegram Bot Token not found in config.")
@@ -43,6 +44,7 @@ class TelegramAdapter(BaseAdapter):
 
     async def _handle_incoming_message(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         chat_id = str(update.effective_chat.id)
+        self.current_chat_id = chat_id # Set current chat_id
         text = update.message.text
         if self._aggregator:
             await self._aggregator.add_message(chat_id, text)

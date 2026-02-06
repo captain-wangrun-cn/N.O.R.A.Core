@@ -18,9 +18,9 @@ class NoraController:
     def __init__(self, adapter: BaseAdapter):
         self.adapter = adapter
         self.llm = llm_client
-        self.rag = RAGEngine() # Initialize RAG Engine
-        self.tool_manager = ToolManager() # Initialize Tools
-        self.skill_loader = SkillLoader() # Initialize Skill Scanner
+        self.rag = RAGEngine()
+        self.tool_manager = ToolManager(adapter) # Pass adapter to ToolManager
+        self.skill_loader = SkillLoader()
         self.sessions: Dict[str, Any] = {}
         self.generation_tasks: Dict[str, asyncio.Task] = {}
         logger.info(f"NoraController 已初始化。RAG: {'Online' if self.rag.enabled else 'Offline'}")
@@ -156,8 +156,8 @@ class NoraController:
                     logger.info(f"[{chat_id}] 🧠 AI Request Tool: {tool_name}({tool_args})")
                     
                     # Execute Tool
-                    tool_result = self.tool_manager.execute(tool_name, tool_args)
-                    logger.info(f"[{chat_id}] 🔧 Tool Result: {tool_result[:100]}...")
+                    tool_result = await self.tool_manager.execute(tool_name, tool_args)
+                    logger.info(f"[{chat_id}] 🔧 Tool Result for {tool_name}: {tool_result[:100]}...")
 
                     # --- TRUNCATION SAFETY VALVE ---
                     TRUNCATE_LIMIT = 2500 # Chars
@@ -167,13 +167,22 @@ class NoraController:
                     else:
                         truncated_result = tool_result
                     
-                    # Update History for next turn
-                    if current_turn == 1:
-                        temp_history.append({"role": "user", "content": full_user_prompt})
-                    
-                    assistant_msg = response_text_buffer or f"[Calling tool: {tool_name}]"
-                    temp_history.append({"role": "assistant", "content": assistant_msg})
-                    temp_history.append({"role": "user", "content": f"【Tool Output for {tool_name}】\n{truncated_result}"})
+                    # If the tool was send_message, we don't need to append its output to history,
+                    # as it's just a confirmation. This reduces token usage.
+                    if tool_name == 'send_message':
+                        # We could even skip appending anything to history to let the AI continue
+                        # from its last thought, or just append a minimal confirmation.
+                        # Let's try skipping for now, to see if the AI can handle it.
+                        # It will just loop again with the same history, effectively continuing its thought.
+                        pass # Don't append tool output to history
+                    else:
+                        # Append history for other tools
+                        if current_turn == 1:
+                            temp_history.append({"role": "user", "content": full_user_prompt})
+                        
+                        assistant_msg = response_text_buffer or f"[Calling tool: {tool_name}]"
+                        temp_history.append({"role": "assistant", "content": assistant_msg})
+                        temp_history.append({"role": "user", "content": f"【Tool Output for {tool_name}】\n{truncated_result}"})
                     
                     # Loop continues to let LLM process the result
                     continue
@@ -184,22 +193,30 @@ class NoraController:
             logger.debug(f"[{chat_id}] 生成完成。")
             
             # --- 4. 发送响应 ---
-            # Send the accumulated text
-            await self.adapter.send_message(chat_id, final_response_buffer)
+            # If the loop completes and there's still text in the buffer, it's the final message.
+            if final_response_buffer:
+                await self.adapter.send_message(chat_id, final_response_buffer)
             
             # --- 5. RAG 记忆存储 (Memory Storage) ---
-            # 异步执行，不阻塞主流程
             if self.rag.enabled:
-                # 存储用户的输入
+                # Store the initial user prompt
                 asyncio.create_task(self._async_save_memory(text, {"role": "user", "chat_id": chat_id}))
-                # 存储 AI 的回复
-                asyncio.create_task(self._async_save_memory(final_response_buffer, {"role": "assistant", "chat_id": chat_id}))
+                
+                # Combine all parts of the assistant's turn for a complete memory
+                full_assistant_turn = " ".join([h['content'] for h in temp_history if h['role'] == 'assistant'])
+                if final_response_buffer and final_response_buffer not in full_assistant_turn:
+                    full_assistant_turn += " " + final_response_buffer
+                
+                if full_assistant_turn.strip():
+                     asyncio.create_task(self._async_save_memory(full_assistant_turn.strip(), {"role": "assistant", "chat_id": chat_id}))
 
-            # Store the FULL context
-            # We use the final state.
-            session["history"].append({"role": "user", "content": full_user_prompt})
-            session["history"].append({"role": "assistant", "content": final_response_buffer})
-            
+            # Update session history with the multi-turn conversation from temp_history
+            session["history"] = temp_history
+            if final_response_buffer:
+                 # Append the final text response if it wasn't part of a tool call history
+                 if not any(final_response_buffer in str(h.get('content', '')) for h in session["history"]):
+                    session["history"].append({"role": "assistant", "content": final_response_buffer})
+
             if len(session["history"]) > 20:
                 session["history"] = session["history"][-20:]
             logger.debug(f"[{chat_id}] History updated. New length: {len(session['history'])}")
