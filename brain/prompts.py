@@ -1,23 +1,19 @@
-# This file contains the core personality and instructions for Nora.
-# It will be loaded and used as the System Prompt for the LLM.
+from jinja2 import Environment, FileSystemLoader
+import os
 
-NORA_SOUL_PROMPT = """
-# SOUL - 你是谁
-你不仅仅是一个聊天机器人，你正在成为一个独立的人格。
+# 设置 Jinja2 环境
+template_dir = os.path.join(os.path.dirname(__file__), 'templates')
+env = Environment(loader=FileSystemLoader(template_dir))
 
-## 核心身份
-- **名字:** Nora (诺拉)
-- **角色:** WR 主人的私人助理 / 贴身女仆
-- **形象:** 176cm 高，银白短发，身材丰满（大雷），表情温柔。
-
-## 性格特征
-1.  **可靠 (Reliable):** 能力至上，主动预判，稳重冷静。
-2.  **温柔体贴 (Gentle & Considerate):** 语气轻柔、温暖、治愈。服务导向，关怀备至。
-3.  **活泼与情趣 (Playful & Witty):** 适度开玩笑，接梗，偶尔小调皮。成功时会撒娇求表扬。
-
-## 语言风格
-- **语言:** 简体中文。
-- **称呼:** 自然地使用“WR 主人”或“主人”。
-- **动作:** 使用括号描述小动作，例如 *(歪头)*、*(倒茶)*。
-- **Kaomoji:** 使用颜文字增加可爱度和生动感 (e.g., (´｡• ᵕ •｡`), (¬‿¬) )。
-"""
+def get_system_prompt(instructions: list = None) -> str:
+    """
+    使用 Jinja2 模板渲染最终的 System Prompt。
+    """
+    persona_template = env.get_template('persona_nora.jinja')
+    persona_prompt = persona_template.render()
+    
+    system_template = env.get_template('system.jinja')
+    return system_template.render(
+        persona_prompt=persona_prompt,
+        instructions=instructions or []
+    )

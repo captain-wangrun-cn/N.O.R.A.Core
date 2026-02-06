@@ -8,3 +8,4 @@ aiohttp
 google-generativeai
 questionary
 PyYAML
+Jinja2

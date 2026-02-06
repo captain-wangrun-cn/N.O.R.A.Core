@@ -1,0 +1,9 @@
+{{ persona_prompt }}
+
+{% if instructions %}
+---
+**行为准则 (Instructions):**
+{% for instruction in instructions %}
+- {{ instruction }}
+{% endfor %}
+{% endif %}
