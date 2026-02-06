@@ -139,15 +139,17 @@ class NoraController:
                             # Real-time splitting logic
                             if "[SPLIT]" in response_text_buffer:
                                 parts = response_text_buffer.split("[SPLIT]")
-                                # Send all complete parts
+                                # Send and sync all complete parts
                                 for part in parts[:-1]:
                                     text_to_send = part.strip()
                                     if text_to_send:
                                         await self.adapter.send_message(chat_id, text_to_send)
+                                        # Important: keep final buffer synchronized
+                                        final_response_buffer += text_to_send + " "
                                         temp_history.append({"role": "assistant", "content": text_to_send})
                                 # Keep the last incomplete part in buffer
                                 response_text_buffer = parts[-1]
-                                
+                        
                         elif chunk["type"] == "tool_call":
                             tool_call = chunk
                             # IMMEDIATELY sync text buffer to final buffer if tool call is detected
@@ -188,9 +190,13 @@ class NoraController:
                     if current_turn == 1 and full_user_prompt not in [h['content'] for h in temp_history]:
                         temp_history.append({"role": "user", "content": full_user_prompt})
                     
+                    # Do not send raw debug info to user, just store it in history for LLM context
                     assistant_msg = response_text_buffer or f"[Calling tool: {tool_name}]"
                     temp_history.append({"role": "assistant", "content": assistant_msg})
                     temp_history.append({"role": "user", "content": f"【Tool Output for {tool_name}】\n{truncated_result}"})
+                    
+                    # CRITICAL: Sync current progress back to the main session immediately to prevent state loss on preemption
+                    session["history"] = list(temp_history)
                     
                     # Loop continues to let LLM process the result
                     continue
