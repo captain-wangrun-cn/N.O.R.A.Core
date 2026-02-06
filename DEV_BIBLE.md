@@ -1,154 +1,154 @@
-# N.O.R.A. Core - Technical Design Document (TDD)
+# N.O.R.A. Core - 技术设计文档 (TDD)
 
-> **Project Name:** N.O.R.A. Core  
-> **Version:** 1.0.0-draft  
-> **Maintainers:** CaptainCN (WR), Nora  
-> **Repository:** https://github.com/captain-wangrun-cn/N.O.R.A.Core  
-
----
-
-## 1. Executive Summary
-
-N.O.R.A. Core (Neural Optimized Responsive Assistant) is a bespoke, lightweight AI agent framework designed to replace the generic OpenClaw system. It prioritizes **cost-efficiency**, **long-term memory retention (RAG)**, and **autonomous capability expansion (Hot-Reloading Skills)**.
-
-The system is built on a **Python-first** architecture, leveraging **Docker** for infrastructure consistency and **Git** for version control.
+> **项目名称:** N.O.R.A. Core (Project Echo)  
+> **版本:** 1.0.1-CN  
+> **维护者:** CaptainCN (WR), Nora  
+> **仓库地址:** https://github.com/captain-wangrun-cn/N.O.R.A.Core  
 
 ---
 
-## 2. System Architecture
+## 1. 摘要 (Executive Summary)
 
-### 2.1 High-Level Component Diagram
+N.O.R.A. Core (Neural Optimized Responsive Assistant) 是一个定制化、轻量级的 AI 代理框架，旨在替代通用的 OpenClaw 系统。其核心设计目标是实现 **成本效益最大化**、**长期记忆留存 (RAG)** 以及 **自主能力扩展 (热重载技能)**。
+
+系统采用 **Python 优先** 的架构，利用 **Docker** 保证基础设施的一致性，并使用 **Git** 进行版本控制。
+
+---
+
+## 2. 系统架构 (System Architecture)
+
+### 2.1 高层组件图 (High-Level Component Diagram)
 
 ```mermaid
 graph TD
-    User((User)) -->|Telegram API| Controller[Controller (main.py)]
+    User((用户 User)) -->|Telegram API| Controller["控制器 (main.py)"]
     
-    subgraph "N.O.R.A. Runtime"
-        Controller -->|Context| Router{LLM Router}
+    subgraph "N.O.R.A. 运行时环境"
+        Controller -->|上下文 Context| Router{"LLM 路由 (Router)"}
         
-        subgraph "Cognitive Layer"
-            Router -->|Chat/Roleplay| FlashModel[Gemini 2.0 Flash]
-            Router -->|Logic/Code| ProModel[Gemini 1.5 Pro]
+        subgraph "认知层 (Cognitive Layer)"
+            Router -->|闲聊/扮演| FlashModel[Gemini 2.0 Flash]
+            Router -->|逻辑/代码| ProModel[Gemini 1.5 Pro]
         end
         
-        subgraph "Memory Layer (RAG)"
-            Controller <-->|Query/Upsert| VectorStore[(Qdrant)]
-            VectorStore <-->|Vectorize| EmbedAPI[SiliconFlow BGE-M3]
-            Controller -->|Archive| DocStore[(MongoDB)]
+        subgraph "记忆层 (Memory Layer - RAG)"
+            Controller <-->|查询/存储| VectorStore[("向量库 (Qdrant)")]
+            VectorStore <-->|向量化| EmbedAPI["SiliconFlow BGE-M3"]
+            Controller -->|归档| DocStore[("MongoDB")]
         end
         
-        subgraph "Capability Layer"
-            ProModel -->|Tool Calls| SkillMgr[Skill Manager]
-            SkillMgr -->|Load/Exec| PyScripts[Python Scripts (tools/*.py)]
+        subgraph "能力层 (Capability Layer)"
+            ProModel -->|工具调用| SkillMgr["技能管理器 (Skill Manager)"]
+            SkillMgr -->|加载/执行| PyScripts["Python 脚本 (tools/*.py)"]
         end
     end
 ```
 
-### 2.2 Core Components Specification
+### 2.2 核心组件规范
 
-#### 2.2.1 Controller (`main.py`)
-- **Responsibility:** Event loop handling, message routing, and error management.
-- **Library:** `python-telegram-bot` (Async Mode).
-- **Logic:**
-  1. Receive `Update` from Telegram.
-  2. Retrieve user context from `Memory Layer` (L1 + L2).
-  3. Construct `System Prompt` (Identity + Skills).
-  4. Invoke `Cognitive Layer`.
-  5. Execute `Capability Layer` (if Tool Calls present).
-  6. Return response to user.
+#### 2.2.1 控制器 (Controller - `main.py`)
+- **职责:** 事件循环处理、消息路由、错误管理。
+- **库:** `python-telegram-bot` (异步模式)。
+- **逻辑流:**
+  1. 接收来自 Telegram 的 `Update`。
+  2. 从 `记忆层` 检索用户上下文 (L1 短期 + L2 长期)。
+  3. 构建 `System Prompt` (包含身份设定 + 技能描述)。
+  4. 调用 `认知层` (LLM)。
+  5. 执行 `能力层` (如果模型请求调用工具)。
+  6. 返回响应给用户。
 
-#### 2.2.2 Cognitive Layer (`brain/`)
-- **LLM Client:** Unified wrapper for OpenAI-compatible APIs (Gemini/DeepSeek/SiliconFlow).
-- **Router Logic:**
-  - **Heuristic:** If message contains code blocks or keywords (`write`, `script`, `analyze`) -> **Pro Model**.
-  - **Default:** -> **Flash Model**.
-- **Prompt Engineering:**
-  - Context window management (Sliding Window: last 10 messages).
-  - RAG Context injection (Top-k relevant memories).
+#### 2.2.2 认知层 (Cognitive Layer - `brain/`)
+- **LLM 客户端:** 统一封装兼容 OpenAI 格式的 API (Gemini/DeepSeek/SiliconFlow)。
+- **路由逻辑 (Router):**
+  - **启发式规则:** 如果消息包含代码块或关键词 (`写`, `脚本`, `分析`) -> **Pro 模型**。
+  - **默认:** -> **Flash 模型** (省钱/快速)。
+- **提示工程 (Prompt Engineering):**
+  - 上下文窗口管理 (滑动窗口: 最近 10 条)。
+  - RAG 上下文注入 (Top-k 相关记忆)。
 
-#### 2.2.3 Memory Layer (`memory/`)
-- **Vector Database:** **Qdrant** (Local Docker instance).
-- **Embedding Model:** **BGE-M3** via SiliconFlow API (or local `sentence-transformers` fallback).
-- **Data Schema (Qdrant Point):**
+#### 2.2.3 记忆层 (Memory Layer - `memory/`)
+- **向量数据库:** **Qdrant** (本地 Docker 实例)。
+- **Embedding 模型:** **BGE-M3** (通过 SiliconFlow API 调用，或本地 fallback)。
+- **数据结构 (Qdrant Point):**
   ```json
   {
     "id": "uuid",
     "vector": [0.12, ...],
     "payload": {
-      "text": "User prefers Voxel games.",
+      "text": "用户喜欢体素游戏。",
       "timestamp": "2026-02-06T06:00:00Z",
-      "tags": ["preference", "gaming"],
+      "tags": ["偏好", "游戏"],
       "type": "chat_history"
     }
   }
   ```
 
-#### 2.2.4 Capability Layer (Skill System) (`tools/`)
-- **Design Pattern:** Dynamic Module Loading (`importlib`).
-- **Discovery:** Watchdog process monitors `tools/*.py`.
-- **Definition:** Each tool module must export a `TOOL_DEF` dict and a `run(**kwargs)` function.
-- **Security:** Subprocess isolation for code execution (optional in V1, trusted environment).
+#### 2.2.4 能力层 (Capability Layer - `tools/`)
+- **设计模式:** 动态模块加载 (`importlib`)。
+- **发现机制:** 监控进程监听 `tools/*.py` 变化。
+- **定义规范:** 每个工具模块必须导出一个 `TOOL_DEF` 字典和一个 `run(**kwargs)` 函数。
+- **安全性:** (V1版本可选) 代码执行的子进程隔离。
 
 ---
 
-## 3. Implementation Roadmap
+## 3. 实施路线图 (Roadmap)
 
-### Phase 1: Foundation (Current)
-*Objective: Establish connectivity and basic chat capability.*
-- [x] **Repo Init:** Git structure and environment config.
-- [ ] **LLM Integration:** Implement `brain/llm.py` using `openai` SDK (targeting Gemini endpoint).
-- [ ] **Telegram Hook:** Connect `main.py` to basic echo logic.
-- [ ] **Identity:** Implement `SOUL` injection.
+### 第一阶段: 基础建设 (Phase 1: Foundation) - 进行中
+*目标: 建立连接并实现基本聊天功能。*
+- [x] **仓库初始化:** Git 结构和环境配置。
+- [ ] **LLM 集成:** 使用 `openai` SDK 实现 `brain/llm.py` (对接 Gemini 接口)。
+- [ ] **Telegram 挂钩:** 连接 `main.py` 实现基本回声逻辑。
+- [ ] **身份注入:** 实现 `SOUL` (人设) 的加载。
 
-### Phase 2: Memory Integration
-*Objective: Enable persistence across sessions.*
-- [ ] **Infrastructure:** `docker-compose.yml` for Qdrant & MongoDB.
-- [ ] **RAG Pipeline:** Implement `memory.add(text)` and `memory.query(text)`.
-- [ ] **Context Injection:** Modify Controller to fetch memory before LLM call.
+### 第二阶段: 记忆植入 (Phase 2: Memory Integration)
+*目标: 实现跨会话的持久化记忆。*
+- [ ] **基础设施:** 编写 `docker-compose.yml` (Qdrant & MongoDB)。
+- [ ] **RAG 管道:** 实现 `memory.add(text)` 和 `memory.query(text)`。
+- [ ] **上下文注入:** 修改控制器，在调用 LLM 前先拉取相关记忆。
 
-### Phase 3: Autonomous Expansion
-*Objective: Enable self-coding capabilities.*
-- [ ] **Tool Manager:** Implement hot-reloading logic in `tools/manager.py`.
-- [ ] **Meta-Tools:** Create `write_tool.py` allowing the AI to generate new Python scripts in `tools/`.
+### 第三阶段: 自主进化 (Phase 3: Autonomous Expansion)
+*目标: 启用自我编程能力。*
+- [ ] **工具管理器:** 在 `tools/manager.py` 中实现热重载逻辑。
+- [ ] **元工具 (Meta-Tools):** 创建 `write_tool.py`，允许 AI 在 `tools/` 中生成新 Python 脚本。
 
 ---
 
-## 4. Development Standards
+## 4. 开发规范 (Development Standards)
 
-### 4.1 Code Style
-- **Language:** Python 3.10+
-- **Formatting:** PEP 8 (Use `black` formatter).
-- **Typing:** Strict Type Hints (`typing.List`, `typing.Optional`) required for all function signatures.
-- **Async:** Use `asyncio` for all I/O bound operations (DB, API, Network).
+### 4.1 代码风格
+- **语言:** Python 3.10+
+- **格式化:** PEP 8 (使用 `black` 格式化)。
+- **类型提示:** 所有函数签名必须包含严格的 Type Hints (`typing.List`, `typing.Optional`)。
+- **异步:** 所有 I/O 操作 (数据库, API, 网络) 必须使用 `asyncio`。
 
-### 4.2 Configuration Management
-- **Secrets:** All API keys must be loaded from `.env` via `python-dotenv`.
-- **Constants:** Non-secret config (timeouts, model names) in `config.py`.
+### 4.2 配置管理
+- **密钥:** 所有 API Key 必须通过 `python-dotenv` 从 `.env` 加载。
+- **常量:** 非机密配置 (超时时间, 模型名称) 存放在 `config.py`。
 
-### 4.3 Directory Structure
+### 4.3 目录结构
 ```text
 nora-core/
-├── main.py                 # Application Entry Point
-├── config.py               # Global Configuration
-├── docker-compose.yml      # Infrastructure Definitions
-├── requirements.txt        # Python Dependencies
-├── .env                    # Secrets (Not in Git)
+├── main.py                 # 应用入口
+├── config.py               # 全局配置
+├── docker-compose.yml      # 基础设施定义
+├── requirements.txt        # Python 依赖
+├── .env                    # 密钥 (严禁提交到 Git)
 ├── brain/
 │   ├── __init__.py
-│   ├── llm.py              # LLM Client Adapter
-│   ├── prompts.py          # System Prompt Templates
-│   └── router.py           # Model Routing Logic
+│   ├── llm.py              # LLM 客户端适配器
+│   ├── prompts.py          # 系统提示词模板
+│   └── router.py           # 模型路由逻辑
 ├── memory/
 │   ├── __init__.py
-│   ├── vector.py           # Qdrant Wrapper
-│   └── mongo.py            # MongoDB Wrapper
+│   ├── vector.py           # Qdrant 包装器
+│   └── mongo.py            # MongoDB 包装器
 └── tools/
     ├── __init__.py
-    ├── manager.py          # Tool Loader/Executor
-    └── base_tools.py       # Built-in Tools (e.g., Web Search)
+    ├── manager.py          # 工具加载/执行器
+    └── base_tools.py       # 内置工具 (如: 搜索)
 ```
 
 ---
 
-*Document Status: Draft / Active*
-*Last Updated: 2026-02-06*
+*文档状态: 草稿 / 活跃*  
+*最后更新: 2026-02-06*
