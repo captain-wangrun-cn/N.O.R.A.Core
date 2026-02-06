@@ -1,62 +1,64 @@
-<skill>
-  <name>skill_creator</name>
-  <description>Create/Update agent skills. Use when user asks for new capabilities (e.g. 'learn to paint') or to modify existing ones.</description>
-</skill>
+---
+name: skill_creator
+description: Create/Update agent skills. Use when user asks for new capabilities (e.g. 'learn to paint') or to modify existing ones.
+---
 
 # Skill Creator (技能创造者)
 
-这个技能指导你如何为 N.O.R.A. Core 添加新的能力。
-
-## 技能的结构
-
-一个标准的技能包含在 `skills/<skill_name>/` 目录中，核心文件是 `SKILL.md`。
-
-```text
-skills/
-  └── <skill_name>/
-      ├── SKILL.md        (必须: 技能定义和操作指南)
-      └── <script>.py     (可选: 如果技能需要执行复杂逻辑，可以使用 Python 脚本)
-```
-
-## SKILL.md 模板
-
-创建新技能时，请严格遵守以下 XML 头部格式，以便加载器能识别它：
-
-```markdown
-<skill>
-  <name>weather</name>
-  <description>Get current weather forecast. Use when user asks about temperature or rain.</description>
-</skill>
-
-# Weather Skill
+这个技能指导你如何为 N.O.R.A. Core 添加新的、符合 **Agent Skills 开放标准** 的能力。
 
 ## 什么时候使用
-描述这个技能的适用场景。
+当主人要求你学习新能力，或者修改现有技能时使用。
 
-## 如何使用
-详细的步骤说明。
-例如：
-1. 读取 `config.yml` 获取配置。
-2. 运行 `python skills/my_new_skill/script.py --arg value`。
-3. 读取输出结果并回答用户。
+## 标准操作流程 (SOP)
 
+### 阶段 1: 文档先行 (Documentation First)
+1.  **确认需求:** 与主人沟通，明确新技能的目标、输入参数和期望的输出格式。
+2.  **创建目录:** 使用 `mkdir -p skills/<skill_name>`。
+3.  **编写 SKILL.md:** 使用 `write_file` 创建 `skills/<skill_name>/SKILL.md`。**必须** 使用下面的 "SKILL.md 最佳实践模板"。
+4.  **请求审核:** 将 `SKILL.md` 的内容展示给主人，请求审核。**严禁** 在文档批准前编写任何代码。
+
+### 阶段 2: 代码实现 (Code Implementation)
+1.  **编写脚本:** 在主人批准 `SKILL.md` 后，开始编写对应的 Python 脚本 (e.g., `skills/<skill_name>/script.py`)。
+2.  **遵循 I/O 契约:**
+    *   **输入:** 使用 `argparse` 解析 `SKILL.md` 中 `parameters` 定义的参数。
+    *   **输出:** 成功时，向 `stdout` 打印单行 JSON；失败时，向 `stderr` 打印错误信息。
+3.  **安全审计:** 编写完成后，**必须** 先进行自我代码审查，然后向主人报告："脚本已完成，经AI初步审计无明显风险。是否批准运行？"
+4.  **测试:** 在获得批准后，才能执行脚本进行测试。
+
+---
+
+## SKILL.md 最佳实践模板
+
+```markdown
+---
+name: your-skill-name
+description: A clear, concise description of what this skill does and when to use it.
+# [可选] 定义脚本的输入参数，LLM 会优先参考这里
+parameters:
+  type: object
+  properties:
+    arg_name_1:
+      type: string
+      description: Description of the first argument.
+    arg_name_2:
+      type: boolean
+      description: Description of a boolean flag.
+  required: [arg_name_1]
+---
+
+# Your Skill Name
+
+## How to use
+[对如何运行脚本或执行此技能的自然语言描述]
+e.g., Run `script.py` with the arguments defined in `parameters`.
+
+## Examples
+- **Example 1:** `python3 skills/your-skill-name/script.py --arg_name_1 "value"`
+  - [描述这个例子的作用和预期输出]
+- **Example 2:** ...
+
+## Guidelines
+- [关于使用此技能的注意事项或最佳实践]
+- e.g., The API key for this skill is stored in `config.yml` under the `your_skill_api_key` key.
 ```
-
-## 操作步骤
-
-如果你被要求创建一个新技能（例如 "weather"）：
-
-1.  **创建目录:** 使用 `mkdir -p skills/weather`。
-2.  **编写文档:** 使用 `write` 工具创建 `skills/weather/SKILL.md`，填入 `<name>`, `<description>` 和详细指南。
-3.  **编写脚本 (如需):** 如果需要调用 API 或处理数据，编写 `skills/weather/weather.py`。
-4.  **安全审查 (Security Check):**
-    - 在运行新生成的脚本前，**必须**先进行自我代码审查，确保无危险操作（如 `rm -rf`, `subprocess` 滥用）。
-    - **询问用户:** "我已为您编写了脚本 `weather.py`。为了安全，您希望我先进行一次AI代码审计，还是直接运行？"
-    - 如果用户选择审计，请仔细分析代码潜在风险后再执行。
-5.  **注册:** 不需要手动注册。下次系统启动或重载时，Loader 会自动扫描到它。
-
-## 注意事项
-
-- **自包含:** 尽量让技能逻辑包含在自己的目录里，不要修改核心代码 (`core/`, `brain/`)。
-- **Python 脚本:** 如果编写脚本，请确保它能独立运行（使用 `if __name__ == "__main__":`），并打印清晰的输出供你读取。
-- **description:** 需要是明确的，清晰的，简短的功能介绍
