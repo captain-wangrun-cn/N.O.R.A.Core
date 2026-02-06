@@ -1,0 +1,21 @@
+services:
+  qdrant:
+    image: qdrant/qdrant:latest
+    container_name: nora_qdrant
+    restart: always
+    ports:
+      - "6333:6333"
+    volumes:
+      - ./data/qdrant_storage:/qdrant/storage
+
+  mongo:
+    image: mongo:latest
+    container_name: nora_mongo
+    restart: always
+    ports:
+      - "27017:27017"
+    volumes:
+      - ./data/mongo_data:/data/db
+    environment:
+      MONGO_INITDB_ROOT_USERNAME: nora
+      MONGO_INITDB_ROOT_PASSWORD: nora_password

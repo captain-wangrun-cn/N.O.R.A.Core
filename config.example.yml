@@ -18,3 +18,10 @@ llm:
     smart: "gemini-1.5-pro-latest"
     fast: "gemini-1.5-flash-latest"
     coder: "gemini-1.5-pro-latest"
+
+memory:
+  qdrant:
+    host: "localhost"
+    port: 6333
+  mongo:
+    uri: "mongodb://nora:nora_password@localhost:27017/"
