@@ -31,7 +31,7 @@ class ToolManager:
         self.register(self.delegate_to_coder)
     
     def _register_messaging_tools(self):
-        self.register(self.send_message)
+        self.register(self.send_intermediate_message)
 
     def register(self, func: Callable):
         """Registers a function as a tool, automatically generating its schema."""
@@ -62,19 +62,19 @@ class ToolManager:
             return f"Error executing {name}: {str(e)}"
 
     # --- Messaging Tools ---
-    async def send_message(self, text: str) -> str:
+    async def send_intermediate_message(self, text: str) -> str:
         """
-        Sends a message to the user in the current chat.
-        :param text: The content of the message to send.
+        Sends an intermediate part of a long response to the user.
+        :param text: The content of the message chunk to send.
         """
         chat_id = self.adapter.current_chat_id
         if not chat_id:
             return "Error: Could not determine current chat_id."
         try:
             await self.adapter.send_message(chat_id, text)
-            return "Message sent successfully."
+            return "Intermediate message sent successfully."
         except Exception as e:
-            logger.error(f"Error in send_message tool: {e}")
+            logger.error(f"Error in send_intermediate_message tool: {e}")
             return f"Error sending message: {e}"
 
     # --- Primitive Tools ---
