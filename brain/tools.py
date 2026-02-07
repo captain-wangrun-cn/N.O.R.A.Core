@@ -153,14 +153,52 @@ class ToolManager:
         except Exception as e: return f"Error writing file: {e}"
 
     def edit_file(self, path: str, old_code: str, new_code: str) -> str:
-        """Performs a precise find-and-replace on a file."""
+        """
+        Performs a find-and-replace on a file. Tries exact match first, then falls back to
+        whitespace-normalized matching. If editing is difficult, consider using 'write_file' to
+        overwrite the entire file content instead.
+        :param path: Path to the file to edit.
+        :param old_code: The code snippet to find (approximate whitespace is OK).
+        :param new_code: The replacement code snippet.
+        """
         try:
-            with open(path, 'r', encoding='utf-8') as f: content = f.read()
-            if old_code not in content: return f"Error: 'old_code' not found in {path}."
-            new_content = content.replace(old_code, new_code, 1)
-            with open(path, 'w', encoding='utf-8') as f: f.write(new_content)
-            return f"Successfully edited {path}."
-        except Exception as e: return f"Error editing file: {e}"
+            with open(path, 'r', encoding='utf-8') as f:
+                content = f.read()
+
+            # 1. Try exact match first
+            if old_code in content:
+                new_content = content.replace(old_code, new_code, 1)
+                with open(path, 'w', encoding='utf-8') as f:
+                    f.write(new_content)
+                return f"Successfully edited {path}."
+
+            # 2. Fallback: normalized whitespace matching
+            import re
+            def normalize(s):
+                return re.sub(r'\s+', ' ', s).strip()
+
+            norm_old = normalize(old_code)
+            lines = content.split('\n')
+
+            # Sliding window over lines to find the best match
+            old_line_count = max(1, old_code.count('\n') + 1)
+            for window_size in range(max(1, old_line_count - 2), old_line_count + 3):
+                for i in range(len(lines) - window_size + 1):
+                    window = '\n'.join(lines[i:i + window_size])
+                    if normalize(window) == norm_old:
+                        # Found a match with normalized whitespace
+                        new_lines = lines[:i] + new_code.split('\n') + lines[i + window_size:]
+                        new_content = '\n'.join(new_lines)
+                        with open(path, 'w', encoding='utf-8') as f:
+                            f.write(new_content)
+                        return f"Successfully edited {path} (matched with normalized whitespace)."
+
+            return (
+                f"Error: 'old_code' not found in {path} (even after whitespace normalization). "
+                f"Tip: Use 'write_file' to overwrite the entire file instead of edit_file."
+            )
+        except Exception as e:
+            return f"Error editing file: {e}"
 
     def exec_command(self, command: str) -> str:
         """

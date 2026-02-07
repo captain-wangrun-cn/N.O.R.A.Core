@@ -193,9 +193,21 @@ class NoraController:
 
                     if session["tool_call_loop_counter"] >= 2:
                         logger.warning(f"[{chat_id}] 检测到工具调用循环: {current_tool_call_str}。正在强制中断。")
-                        # Inject a guiding message into the history and break the loop
-                        temp_history.append({"role": "user", "content": "【系统提示】检测到重复的工具调用。请停止当前操作，并重新评估下一步。如果是在检查目录，请直接开始创建操作。"})
-                        break # Exit the while loop
+                        if tool_name == "read_file":
+                            # For read-only tools, inject guidance to use a different approach instead of breaking
+                            temp_history.append({
+                                "role": "user",
+                                "content": (
+                                    "【系统提示】你已经多次读取同一个文件了。如果你需要修改它，请直接使用 write_file 写入完整的新内容，"
+                                    "不要再尝试 read_file。如果你已经完成了所有修改，请直接给用户回复最终结果。"
+                                )
+                            })
+                            session["tool_call_loop_counter"] = 0  # Reset to allow continued operation
+                            continue  # Don't break, let LLM try a different approach
+                        else:
+                            # For other tools, break the loop
+                            temp_history.append({"role": "user", "content": "【系统提示】检测到重复的工具调用。请停止当前操作，并重新评估下一步。如果是在检查目录，请直接开始创建操作。"})
+                            break # Exit the while loop
                     
                     
                     # Execute Tool
@@ -203,9 +215,10 @@ class NoraController:
                     logger.info(f"[{chat_id}] 🔧 Tool Result for {tool_name}: {tool_result[:100]}...")
 
                     # --- TRUNCATION SAFETY VALVE ---
-                    TRUNCATE_LIMIT = 2500 # Chars
+                    # read_file needs higher limit to avoid LLM re-reading in loops
+                    TRUNCATE_LIMIT = 8000 if tool_name == "read_file" else 4000
                     if len(tool_result) > TRUNCATE_LIMIT:
-                        truncated_result = tool_result[:TRUNCATE_LIMIT] + "\n\n... (Output truncated by system)"
+                        truncated_result = tool_result[:TRUNCATE_LIMIT] + f"\n\n... (Output truncated from {len(tool_result)} chars. Use write_file to overwrite the full file if needed.)"
                         logger.warning(f"Tool output for {tool_name} was truncated from {len(tool_result)} chars.")
                     else:
                         truncated_result = tool_result
