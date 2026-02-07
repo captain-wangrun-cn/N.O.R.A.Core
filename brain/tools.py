@@ -2,6 +2,7 @@
 
 import os
 import json
+import re
 import subprocess
 import logging
 import inspect
@@ -263,6 +264,7 @@ class ToolManager:
         (DANGEROUS) Executes a general-purpose shell command.
         WARNING: Do NOT use this for tasks that a high-level tool can do.
         Use 'list_dir' to list directories instead of 'ls'. Use 'read_file' to read files instead of 'cat'.
+        NEVER use this to run skill scripts — use 'execute_skill' instead.
         """
         # Security: block dangerous commands
         cmd_lower = command.lower().strip()
@@ -273,10 +275,21 @@ class ToolManager:
         for sensitive in SENSITIVE_FILES:
             if sensitive in command and any(reader in cmd_lower for reader in ["cat ", "head ", "tail ", "less ", "more ", "grep "]):
                 return f"Error: Cannot read '{sensitive}' — it contains sensitive data."
+        # Redirect: intercept skill script execution and guide to execute_skill
+        if re.search(r'python[3]?\s+skills/', cmd_lower):
+            # Extract skill name from the command
+            skill_match = re.search(r'skills/([^/\s]+)/', command)
+            skill_name = skill_match.group(1) if skill_match else "unknown"
+            return (
+                f"Error: Do NOT use exec_command to run skill scripts. "
+                f"Use the 'execute_skill' tool instead.\n"
+                f"Example: execute_skill(\"{skill_name}\", '{{\"arg\": \"value\"}}')\n"
+                f"The execute_skill tool handles argument parsing, timeout, and error reporting automatically."
+            )
         try:
             result = subprocess.run(command, shell=True, capture_output=True, text=True, timeout=30)
             output = result.stdout.strip()
-            if result.stderr: output += f"\\n[STDERR]\\n{result.stderr.strip()}"
+            if result.stderr: output += f"\n[STDERR]\n{result.stderr.strip()}"
             if not output and result.returncode == 0:
                 return "Command executed successfully with no output."
             return output

@@ -91,7 +91,12 @@ class NoraController:
             skills = self.skill_loader.scan_skills()
             if skills:
                 skill_desc = "\n".join([f"- {s['name']}: {s['description']} (Path: {s.get('path', 'N/A')})" for s in skills])
-                instructions.append(f"【可用技能 (Available Skills)】\n{skill_desc}\n\n你可以使用 `exec_command` 来运行这些技能脚本 (e.g., `python3 skills/xxx/skill.py`)。")
+                instructions.append(
+                    f"【可用技能 (Available Skills)】\n{skill_desc}\n\n"
+                    f"⚠️ 执行技能时，**必须**使用 `execute_skill(skill_name, args_json)` 工具。\n"
+                    f"**严禁**使用 `exec_command` 运行技能脚本（如 `python3 skills/xxx/main.py`）。\n"
+                    f"示例: execute_skill(\"pixiv_manager\", '{{\"keyword\": \"碧蓝航线\", \"limit\": \"5\"}}')"
+                )
 
             if "\n" in text.strip(): 
                 instructions.append("请仔细阅读并依次回答以下所有问题，不要遗漏。")
