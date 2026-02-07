@@ -48,13 +48,13 @@ def setup_logging(tui_app):
 def run_bot_logic(tui_app):
     """This function contains the core bot logic and runs in a separate thread."""
     
-    # We need a new event loop for this thread
-    loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
-
-    logging.info("Initializing N.O.R.A. Core in background thread...")
-    
     try:
+        # We need a new event loop for this thread
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+
+        logging.info("Initializing N.O.R.A. Core in background thread...")
+    
         adapter = TelegramAdapter()
         # Pass the TUI's update_status method as a callback to the controller
         controller = NoraController(adapter, tui_callback=lambda text: tui_app.call_from_thread(tui_app.update_status, text))
@@ -62,7 +62,9 @@ def run_bot_logic(tui_app):
         # The adapter's run method will now use the new event loop
         adapter.run(message_handler=controller.handle_new_message)
     except Exception as e:
-        logging.error(f"FATAL ERROR in bot thread: {e}", exc_info=True)
+        logging.critical(f"FATAL ERROR in bot thread: {e}", exc_info=True)
+        # Also try to update TUI to show the crash
+        tui_app.call_from_thread(tui_app.update_status, f"FATAL ERROR in bot thread. Check nora_core.log.")
     
 def main():
     """N.O.R.A. Core application entry point with TUI."""
