@@ -111,7 +111,7 @@ class NoraController:
             system_prompt = get_system_prompt(instructions)
 
             # --- 3. 执行循环 (Tool Execution Loop) ---
-            MAX_TURNS = 5
+            MAX_TURNS = 15
             current_turn = 0
             final_response_buffer = ""
             latest_tool_output = ""  # Safeguard: fallback to show tool output if LLM stays silent
@@ -223,18 +223,32 @@ class NoraController:
                     
                     # CRITICAL: Sync current progress back to the main session immediately to prevent state loss on preemption
                     session["history"] = list(temp_history)
-
-                    # Inject a minimal follow-up user turn to steer LLM to summarize tool output
-                    temp_history.append({
-                        "role": "user",
-                        "content": "请基于上面的工具结果给出最终回答，简洁说明已完成的操作或下一步。"
-                    })
                     
                     # Loop continues to let LLM process the result
                     continue
                 else:
                     # No tool call -> Final response
                     break
+            
+            # If loop exhausted MAX_TURNS with pending tool work, inject a wrap-up prompt and do one final LLM call
+            if current_turn >= MAX_TURNS and not final_response_buffer:
+                logger.warning(f"[{chat_id}] Tool loop exhausted {MAX_TURNS} turns. Requesting LLM summary.")
+                temp_history.append({
+                    "role": "user",
+                    "content": "【系统提示】工具调用轮次已达上限，请立即基于已有的工具结果，给用户一个简洁的最终回复。"
+                })
+                stream = self.llm.chat_stream(
+                    system_prompt=system_prompt,
+                    user_prompt="请总结以上工具操作的结果，给出最终回答。",
+                    history=temp_history,
+                    tools=[]  # No tools for final summary
+                )
+                async for raw_chunk in stream:
+                    chunk = cast(Dict[str, Any], raw_chunk) if isinstance(raw_chunk, dict) else raw_chunk
+                    if isinstance(chunk, dict) and chunk.get("type") == "text":
+                        final_response_buffer += chunk["content"]
+                    elif isinstance(chunk, str):
+                        final_response_buffer += chunk
             
             logger.debug(f"[{chat_id}] 生成完成。")
             

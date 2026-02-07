@@ -94,16 +94,16 @@ class ToolManager:
         try:
             os.makedirs(skill_dir)
             with open(os.path.join(skill_dir, "SKILL.md"), 'w', encoding='utf-8') as f:
-                f.write(f"# {skill_name}\\n\\n{description}\\n")
+                f.write(f"# {skill_name}\n\n{description}\n")
             with open(os.path.join(skill_dir, "__init__.py"), 'w', encoding='utf-8') as f: pass
             with open(os.path.join(skill_dir, "main.py"), 'w', encoding='utf-8') as f:
                 # Use a simple placeholder replacement to avoid str.format interpreting template braces
                 rendered_template = SKILL_MAIN_PY_TEMPLATE.replace("{description}", description)
                 f.write(rendered_template)
             feedback = (
-                f"Successfully created new skill '{skill_name}'.\\n"
-                f"Step 1/3 Complete: Skill boilerplate generated at '{skill_dir}'.\\n"
-                f"Next step is to use 'edit_file' to add logic to '{os.path.join(skill_dir, 'main.py')}'."
+                f"Successfully created new skill '{skill_name}'.\n"
+                f"Step 1/3 Complete: Skill boilerplate generated at '{skill_dir}'.\n"
+                f"Next step is to use 'write_file' to replace the content of '{os.path.join(skill_dir, 'main.py')}' with real implementation code."
             )
             return feedback
         except Exception as e: return f"An unexpected error occurred: {e}"
