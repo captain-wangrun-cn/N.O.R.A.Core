@@ -1,5 +1,6 @@
 import asyncio
 import logging
+import os
 from typing import Dict, Any, Callable, Optional, cast
 
 from platforms.base import BaseAdapter
@@ -73,6 +74,18 @@ class NoraController:
 
             # --- 2. 构建 Prompt (Context Reconstruction) ---
             instructions = []
+            
+            # Inject Workspace Context
+            from brain.tools import WORKSPACE_ROOT, SKILLS_DIR
+            workspace_info = (
+                f"【工作区信息 (Workspace Context)】\n"
+                f"当前工作目录 (CWD): {WORKSPACE_ROOT}\n"
+                f"技能目录: {SKILLS_DIR}\n"
+                f"下载目录: {os.path.join(WORKSPACE_ROOT, 'downloads')}/\n"
+                f"⚠️ 禁止读取: config.yml, .env (含 API 密钥)\n"
+                f"💡 使用 list_dir 查看目录内容，不要用 exec_command ls"
+            )
+            instructions.append(workspace_info)
             
             # Inject Skills
             skills = self.skill_loader.scan_skills()
@@ -183,7 +196,7 @@ class NoraController:
                     # --- Loop Detection and Intervention ---
                     # Build a loop key from tool name + target (path/command) for file ops.
                     # This avoids false positives when LLM writes to different files sequentially.
-                    _file_tools = {"write_file", "edit_file", "read_file", "create_new_skill"}
+                    _file_tools = {"write_file", "edit_file", "read_file", "create_new_skill", "list_dir"}
                     if tool_name in _file_tools and isinstance(tool_args, dict):
                         _target = tool_args.get("path", tool_args.get("skill_name", ""))
                         loop_key = f"{tool_name}:{_target}"

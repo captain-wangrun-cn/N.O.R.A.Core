@@ -10,6 +10,16 @@ from platforms.base import BaseAdapter
 
 logger = logging.getLogger(__name__)
 
+# --- Workspace & Security Constants ---
+WORKSPACE_ROOT = os.path.abspath(os.getcwd())  # Project root (where main.py runs)
+SKILLS_DIR = os.path.join(WORKSPACE_ROOT, "skills")
+DOWNLOADS_DIR = os.path.join(WORKSPACE_ROOT, "downloads")
+
+# Files that LLM should NEVER read (contain secrets)
+SENSITIVE_FILES = {"config.yml", "config.yaml", ".env", ".env.local"}
+# Dangerous command patterns
+BLOCKED_COMMANDS = ["rm -rf /", "mkfs", "dd if=", "> /dev/", "shutdown", "reboot", "passwd"]
+
 SKILL_MAIN_PY_TEMPLATE = """\"\"\"
 {description}
 \"\"\"
@@ -58,6 +68,7 @@ class ToolManager:
         self.register(self.read_file)
         self.register(self.write_file)
         self.register(self.edit_file)
+        self.register(self.list_dir)
         self.register(self.get_available_skills)
         self.register(self.exec_command)
 
@@ -146,8 +157,47 @@ class ToolManager:
             return "Available skills:\\n" + "\\n".join([f"- {s}" for s in skill_folders])
         except Exception as e: return f"Error listing skills: {e}"
 
+    def _is_path_safe(self, path: str) -> tuple:
+        """Check if a path is safe to access. Returns (is_safe, reason)."""
+        abs_path = os.path.abspath(path)
+        basename = os.path.basename(abs_path)
+        if basename in SENSITIVE_FILES:
+            return False, f"Access denied: '{basename}' contains sensitive data (API keys, tokens). You should not read this file."
+        return True, ""
+
+    def list_dir(self, path: str = ".") -> str:
+        """
+        Lists the contents of a directory. Use this instead of 'exec_command ls'.
+        Returns files and subdirectories with type indicators (📁 for dirs, 📄 for files).
+        :param path: The directory path to list. Defaults to workspace root '.'.
+        """
+        try:
+            target = os.path.abspath(path)
+            if not os.path.isdir(target):
+                return f"Error: '{path}' is not a directory."
+            entries = sorted(os.listdir(target))
+            if not entries:
+                return f"Directory '{path}' is empty."
+            result_lines = [f"📂 Contents of '{path}':"]
+            for entry in entries:
+                full = os.path.join(target, entry)
+                if entry.startswith('.') or entry.startswith('__'):
+                    continue  # Skip hidden and __pycache__ dirs
+                if os.path.isdir(full):
+                    result_lines.append(f"  📁 {entry}/")
+                else:
+                    size = os.path.getsize(full)
+                    size_str = f"{size}" if size < 1024 else f"{size/1024:.1f}KB" if size < 1048576 else f"{size/1048576:.1f}MB"
+                    result_lines.append(f"  📄 {entry} ({size_str})")
+            return "\n".join(result_lines)
+        except Exception as e:
+            return f"Error listing directory: {e}"
+
     def read_file(self, path: str) -> str:
-        """Reads the contents of a file."""
+        """Reads the contents of a file. Cannot read sensitive config files (config.yml, .env)."""
+        safe, reason = self._is_path_safe(path)
+        if not safe:
+            return reason
         try:
             with open(path, 'r', encoding='utf-8') as f: return f.read()
         except Exception as e: return f"Error reading file: {e}"
@@ -211,8 +261,18 @@ class ToolManager:
     def exec_command(self, command: str) -> str:
         """
         (DANGEROUS) Executes a general-purpose shell command.
-        WARNING: Do NOT use this for tasks that a high-level tool can do. For simple, one-off tasks ONLY.
+        WARNING: Do NOT use this for tasks that a high-level tool can do.
+        Use 'list_dir' to list directories instead of 'ls'. Use 'read_file' to read files instead of 'cat'.
         """
+        # Security: block dangerous commands
+        cmd_lower = command.lower().strip()
+        for blocked in BLOCKED_COMMANDS:
+            if blocked in cmd_lower:
+                return f"Error: Command blocked for safety reasons."
+        # Security: block reading sensitive files via cat/grep/head/tail
+        for sensitive in SENSITIVE_FILES:
+            if sensitive in command and any(reader in cmd_lower for reader in ["cat ", "head ", "tail ", "less ", "more ", "grep "]):
+                return f"Error: Cannot read '{sensitive}' — it contains sensitive data."
         try:
             result = subprocess.run(command, shell=True, capture_output=True, text=True, timeout=30)
             output = result.stdout.strip()
