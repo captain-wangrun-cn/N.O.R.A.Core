@@ -80,6 +80,28 @@ class SkillLoader:
                     "description": desc_match.group(1).strip()
                 }
             
+            # 3. 最后回退：从 Markdown 标题和首段文字推断 name/description
+            # 支持 "# skill_name\n\ndescription text" 这种 LLM 自动生成的格式
+            heading_match = re.match(r'^#\s+(.+)', content.strip())
+            if heading_match:
+                name = heading_match.group(1).strip()
+                # 取标题后的第一段非空文字作为 description
+                remaining = content.strip()[heading_match.end():].strip()
+                # 跳过空行，取第一段
+                desc_lines = []
+                for line in remaining.split('\n'):
+                    stripped = line.strip()
+                    if stripped.startswith('#') or stripped.startswith('##'):
+                        break  # 遇到下一个标题就停
+                    if stripped:
+                        desc_lines.append(stripped)
+                    elif desc_lines:
+                        break  # 遇到空行且已有内容就停
+                if desc_lines:
+                    description = ' '.join(desc_lines)
+                    logger.debug(f"从 {os.path.basename(file_path)} 的 Markdown 标题推断出 name='{name}', description='{description[:50]}...'")
+                    return {"name": name, "description": description}
+
             logger.warning(f"文件 {file_path} 既无有效 YAML Frontmatter 也无 XML 标签。")
             return None
             
