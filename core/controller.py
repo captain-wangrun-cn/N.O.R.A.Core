@@ -191,8 +191,8 @@ class NoraController:
                     
                     # Store tool invocation in history, but do NOT leak placeholder text to the session history content
                     # If there's real text in response_text_buffer, we keep it; otherwise, we use a internal label
-                    assistant_msg = response_text_buffer if response_text_buffer else f"（正在调用工具: {tool_name}）"
-                    temp_history.append({"role": "assistant", "content": assistant_msg})
+                    # assistant_msg = response_text_buffer if response_text_buffer else f"（正在调用工具: {tool_name}）"
+                    # temp_history.append({"role": "assistant", "content": assistant_msg})
                     temp_history.append({"role": "user", "content": f"【Tool Output for {tool_name}】\n{truncated_result}"})
                     
                     # CRITICAL: Sync current progress back to the main session immediately to prevent state loss on preemption
