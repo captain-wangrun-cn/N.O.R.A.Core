@@ -172,6 +172,24 @@ class NoraController:
                     tool_name = tool_call["name"]
                     tool_args = tool_call["args"]
                     logger.info(f"[{chat_id}] 🧠 AI Request Tool: {tool_name}({tool_args})")
+
+                    # --- Loop Detection and Intervention ---
+                    last_tool_call = session.get("last_tool_call")
+                    current_tool_call_str = f"{tool_name}({json.dumps(tool_args)})"
+                    
+                    if last_tool_call and last_tool_call == current_tool_call_str:
+                        session["tool_call_loop_counter"] = session.get("tool_call_loop_counter", 0) + 1
+                    else:
+                        session["tool_call_loop_counter"] = 0
+                    
+                    session["last_tool_call"] = current_tool_call_str
+
+                    if session["tool_call_loop_counter"] >= 2:
+                        logger.warning(f"[{chat_id}] 检测到工具调用循环: {current_tool_call_str}。正在强制中断。")
+                        # Inject a guiding message into the history and break the loop
+                        temp_history.append({"role": "user", "content": "【系统提示】检测到重复的工具调用。请停止当前操作，并重新评估下一步。如果是在检查目录，请直接开始创建操作。"})
+                        break # Exit the while loop
+                    
                     
                     # Execute Tool
                     tool_result = await self.tool_manager.execute(tool_name, tool_args)

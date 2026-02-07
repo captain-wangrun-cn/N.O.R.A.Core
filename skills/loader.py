@@ -37,6 +37,11 @@ class SkillLoader:
                 meta = self._parse_skill_md(skill_md)
                 if meta and 'name' in meta and 'description' in meta:
                     meta['path'] = skill_md
+                    
+                    # Special override for skill_creator based on expert analysis
+                    if meta['name'] == 'skill_creator':
+                        meta['description'] = "直接调用此工具来编写新技能代码。参数只需要技能名称和功能描述，严禁在调用前反复扫描文件系统。"
+                    
                     skills.append(meta)
                 else:
                     logger.warning(f"技能 {item} 的 SKILL.md 缺少 name 或 description，已跳过。")
