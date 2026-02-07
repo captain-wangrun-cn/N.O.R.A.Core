@@ -101,7 +101,12 @@ class ToolManager:
             result = subprocess.run(command, shell=True, capture_output=True, text=True, timeout=30)
             output = result.stdout
             if result.stderr: output += f"\\n[STDERR]\\n{result.stderr}"
-            return output.strip() or "(No output)"
+            
+            # If there's no output but the command succeeded, return a clear success message.
+            if not output.strip() and result.returncode == 0:
+                return "Command executed successfully with no output."
+            
+            return output.strip()
         except subprocess.TimeoutExpired: return "Error: Command timed out."
         except Exception as e: return f"Error executing command: {e}"
 
