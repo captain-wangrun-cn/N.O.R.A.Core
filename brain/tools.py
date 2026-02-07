@@ -72,8 +72,10 @@ class ToolManager:
         if name not in self._tools: return f"Error: Tool '{name}' not found."
         try:
             logger.info(f"Executing tool: {name} with args: {args}")
+            # Filter out 'kwargs' if it exists in args to prevent common LLM mapping errors
+            filtered_args = {k: v for k, v in args.items() if k != 'kwargs'}
             func = self._tools[name]
-            result = await func(**args) if inspect.iscoroutinefunction(func) else func(**args)
+            result = await func(**filtered_args) if inspect.iscoroutinefunction(func) else func(**filtered_args)
             return str(result)
         except Exception as e:
             logger.error(f"Tool execution error for {name}: {e}", exc_info=True)
