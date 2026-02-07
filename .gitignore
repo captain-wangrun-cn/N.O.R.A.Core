@@ -7,4 +7,5 @@ config.yml
 .idea/
 venv/
 *.log
+logs/
 nora_state.json

@@ -7,11 +7,13 @@ import asyncio
 warnings.filterwarnings("ignore", category=FutureWarning, module="google.generativeai")
 
 import config
+from brain.logging_config import setup_logging as setup_unified_logging, get_chat_logger
 from core.controller import NoraController
 from platforms.telegram import TelegramAdapter
 from tui import TUI
 
 class TuiLogHandler(logging.Handler):
+    """Custom handler to forward logs to TUI display."""
     def __init__(self, tui_app):
         super().__init__()
         self.tui_app = tui_app
@@ -21,21 +23,22 @@ class TuiLogHandler(logging.Handler):
         if self.tui_app._is_running:
             self.tui_app.call_from_thread(self.tui_app.write_log, log_entry)
 
-def setup_logging(tui_app):
-    log_formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
-    file_handler = logging.FileHandler("nora_core.log")
-    file_handler.setFormatter(log_formatter)
-    file_handler.setLevel(logging.INFO)
+def setup_logging_with_tui(tui_app):
+    """Initialize unified logging + TUI handler."""
+    # Setup base logging (console + file)
+    setup_unified_logging(console_level=logging.WARNING, file_level=logging.DEBUG)
+    
+    # Add TUI handler to root logger
     tui_handler = TuiLogHandler(tui_app)
-    tui_handler.setFormatter(log_formatter)
-    tui_handler.setLevel(logging.INFO)
+    tui_formatter = logging.Formatter(
+        '%(asctime)s - %(name)s - %(levelname)s - [%(chat_id)s] %(message)s',
+        datefmt='%H:%M:%S'
+    )
+    tui_handler.setFormatter(tui_formatter)
+    tui_handler.setLevel(logging.INFO)  # TUI shows INFO and above
+    
     root_logger = logging.getLogger()
-    root_logger.setLevel(logging.INFO)
-    root_logger.handlers.clear()
-    root_logger.addHandler(file_handler)
     root_logger.addHandler(tui_handler)
-    logging.getLogger("httpx").setLevel(logging.WARNING)
-    logging.getLogger("httpcore").setLevel(logging.WARNING)
 
 def run_bot_logic(tui_app, tui_ready_event):
     """Contains the core bot logic, runs in a separate thread."""
@@ -75,7 +78,7 @@ def main():
 
     tui_ready_event = threading.Event()
     app = NoraTUI(tui_ready_event)
-    setup_logging(app)
+    setup_logging_with_tui(app)
     
     bot_thread = threading.Thread(target=run_bot_logic, args=(app, tui_ready_event), daemon=True)
     bot_thread.start()
