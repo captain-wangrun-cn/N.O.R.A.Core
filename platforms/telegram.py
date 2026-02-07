@@ -34,7 +34,7 @@ class TelegramAdapter(BaseAdapter):
         self.application.add_handler(msg_handler)
         
         print("Telegram Adapter is running...")
-        self.application.run_polling()
+        self.application.run_polling(stop_signals=None)
 
     async def _start_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         chat_id = str(update.effective_chat.id)

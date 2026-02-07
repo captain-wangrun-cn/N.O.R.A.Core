@@ -48,6 +48,9 @@ def run_bot_logic(tui_app, tui_ready_event):
     try:
         adapter = TelegramAdapter()
         controller = NoraController(adapter, tui_callback=lambda text: tui_app.call_from_thread(tui_app.update_status, text))
+        
+        # Start the bot logic within the existing event loop if necessary, 
+        # but run_polling is blocking, so we run it directly here.
         adapter.run(message_handler=controller.handle_new_message)
     except Exception as e:
         logging.critical(f"FATAL ERROR in bot thread: {e}", exc_info=True)

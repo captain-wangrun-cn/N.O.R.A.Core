@@ -25,6 +25,8 @@ class TUI(App):
         """Called when app starts."""
         self.title = "N.O.R.A. Core Dashboard"
         self._is_running = True
+        self.query_one("#log_panel", RichLog).write("TUI Mounted and Ready.")
+        self.query_one("#status_panel", Static).update("System Active")
 
     def on_unmount(self) -> None:
         """Called when app stops."""
