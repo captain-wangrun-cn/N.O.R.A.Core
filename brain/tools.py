@@ -94,7 +94,7 @@ class ToolManager:
         try:
             os.makedirs(skill_dir)
             with open(os.path.join(skill_dir, "SKILL.md"), 'w', encoding='utf-8') as f:
-                f.write(f"# {skill_name}\n\n{description}\n")
+                f.write(f"---\nname: {skill_name}\ndescription: {description}\n---\n\n# {skill_name}\n\n{description}\n")
             with open(os.path.join(skill_dir, "__init__.py"), 'w', encoding='utf-8') as f: pass
             with open(os.path.join(skill_dir, "main.py"), 'w', encoding='utf-8') as f:
                 # Use a simple placeholder replacement to avoid str.format interpreting template braces
