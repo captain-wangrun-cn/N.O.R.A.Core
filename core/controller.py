@@ -252,9 +252,11 @@ class NoraController:
                     else:
                         truncated_result = tool_result
                     latest_tool_output = truncated_result  # remember latest tool output for fallback delivery
-                    # Only track meaningful outputs for user-facing fallback (skip internal exploration)
+                    # Only track successful, meaningful outputs for user-facing fallback
+                    # Skip errors/refusals/internal diagnostics — those are for LLM, not the user
                     _user_facing_tools = {"execute_skill", "create_new_skill"}
-                    if tool_name in _user_facing_tools:
+                    _is_error = any(kw in truncated_result[:100] for kw in ["Error:", "REFUSED:", "failed", "not found"])
+                    if tool_name in _user_facing_tools and not _is_error:
                         latest_meaningful_output = truncated_result
                     
                     # Append history for tools

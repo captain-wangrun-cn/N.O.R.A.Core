@@ -128,7 +128,21 @@ class ToolManager:
         """
         skill_script_path = os.path.join("skills", skill_name, "main.py")
         if not os.path.exists(skill_script_path):
-            return f"Error: Skill '{skill_name}' not found at '{skill_script_path}'. Available skills can be listed with get_available_skills."
+            return f"Error: Skill '{skill_name}' not found. Use get_available_skills to see what's available."
+        
+        # Pre-flight: refuse to execute template/placeholder code
+        try:
+            with open(skill_script_path, 'r', encoding='utf-8') as f:
+                code_content = f.read()
+            _template_markers = ["TODO: Replace this placeholder", "has not been implemented yet", "Skill executed successfully"]
+            if any(marker in code_content for marker in _template_markers):
+                return (
+                    f"REFUSED: '{skill_name}' still contains template code and cannot be executed.\n"
+                    f"Action required: use write_file('{skill_script_path}', '<real code>') to write the implementation first."
+                )
+        except Exception:
+            pass
+        
         try:
             args_dict = json.loads(args_json)
             command = ["python3", skill_script_path]
@@ -139,48 +153,19 @@ class ToolManager:
             output = result.stdout.strip()
             stderr = result.stderr.strip()
             
-            # Always include stderr if present
             if stderr:
                 output += f"\n[STDERR]\n{stderr}"
             
             if result.returncode != 0:
-                error_msg = f"Skill '{skill_name}' failed (exit code {result.returncode})."
-                if output:
-                    error_msg += f"\n{output}"
-                if "not been implemented" in (output + stderr):
-                    error_msg += (
-                        f"\n\n⚠️ This skill is still using TEMPLATE CODE — it has no real implementation. "
-                        f"You need to use write_file to replace '{skill_script_path}' with actual working code first, "
-                        f"then try execute_skill again. Do NOT retry without fixing the code."
-                    )
-                return error_msg
+                return f"Skill '{skill_name}' failed (exit code {result.returncode}).\n{output}" if output else f"Skill '{skill_name}' failed with no output."
             
-            if not output:
-                # Check if the script is still template code
-                try:
-                    with open(skill_script_path, 'r') as f:
-                        code = f.read()
-                    if "TODO: Replace this placeholder" in code or "Skill executed successfully" in code:
-                        return (
-                            f"⚠️ Skill '{skill_name}' produced no output because it still contains TEMPLATE CODE.\n"
-                            f"You MUST use write_file to replace '{skill_script_path}' with a real implementation first.\n"
-                            f"Do NOT call execute_skill again until you have written the actual code."
-                        )
-                except Exception:
-                    pass
-                return (
-                    f"Skill '{skill_name}' executed successfully (exit code 0) but produced no stdout output.\n"
-                    f"This usually means the script does not print() its results. "
-                    f"Consider reading the script with read_file('{skill_script_path}') to check if it needs fixing."
-                )
-            
-            return output
+            return output if output else f"Skill '{skill_name}' ran OK but produced no output. Check if it prints results."
         except subprocess.TimeoutExpired:
             return f"Error: Skill '{skill_name}' timed out after 120 seconds."
         except json.JSONDecodeError as e:
-            return f"Error: Invalid args_json format: {e}. Must be valid JSON string like '{{\"key\": \"value\"}}'."
+            return f"Error: Invalid args_json: {e}. Format: '{{\"key\": \"value\"}}'."
         except Exception as e:
-            return f"Error executing skill '{skill_name}': {e}"
+            return f"Error executing '{skill_name}': {e}"
 
     def get_available_skills(self) -> str:
         """Lists all available skills that N.O.R.A. Core can use."""
