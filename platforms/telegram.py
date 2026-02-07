@@ -5,12 +5,18 @@ from typing import Callable, Any
 import os
 import re
 import logging
+import io
 
 from platforms.base import BaseAdapter
 from platforms.aggregator import MessageAggregator
 import config
 
 logger = logging.getLogger(__name__)
+
+# Telegram limits
+TG_PHOTO_MAX_SIZE = 10 * 1024 * 1024       # 10MB for photos
+TG_DOCUMENT_MAX_SIZE = 50 * 1024 * 1024     # 50MB for documents
+COMPRESS_TARGET_SIZE = 9 * 1024 * 1024       # Compress target: 9MB (safety margin)
 
 class TelegramAdapter(BaseAdapter):
     """Telegram 平台适配器。"""
@@ -93,6 +99,115 @@ class TelegramAdapter(BaseAdapter):
                 return media_type
         return 'document'  # 未知扩展名默认作为文档发送
 
+    def _compress_image(self, file_path: str, target_size: int = COMPRESS_TARGET_SIZE) -> io.BytesIO:
+        """
+        压缩图片到目标大小以内，返回 BytesIO。
+        优先用 Pillow，没装就返回 None。
+        """
+        try:
+            from PIL import Image
+        except ImportError:
+            logger.warning("Pillow 未安装，无法压缩图片。可以运行 pip install Pillow 来启用压缩。")
+            return None
+
+        try:
+            img = Image.open(file_path)
+            # 如果有 RGBA/P 模式，转为 RGB（JPEG 不支持透明）
+            if img.mode in ('RGBA', 'P', 'LA'):
+                img = img.convert('RGB')
+
+            # 先尝试缩小分辨率（Telegram 照片最大边 4096px 就够了）
+            max_dimension = 4096
+            if max(img.size) > max_dimension:
+                img.thumbnail((max_dimension, max_dimension), Image.LANCZOS)
+
+            # 二分法找到合适的质量
+            quality_low, quality_high = 10, 95
+            best_buf = None
+
+            while quality_low <= quality_high:
+                quality_mid = (quality_low + quality_high) // 2
+                buf = io.BytesIO()
+                img.save(buf, format='JPEG', quality=quality_mid, optimize=True)
+                size = buf.tell()
+
+                if size <= target_size:
+                    best_buf = buf
+                    quality_low = quality_mid + 1  # 尝试更高质量
+                else:
+                    quality_high = quality_mid - 1  # 需要更低质量
+
+            if best_buf:
+                best_buf.seek(0)
+                logger.info(f"图片压缩成功: {file_path} -> {best_buf.getbuffer().nbytes / 1024 / 1024:.1f}MB (quality={quality_low-1})")
+                return best_buf
+
+            # 如果即使最低质量还是太大，进一步缩小分辨率
+            for scale in [0.75, 0.5, 0.25]:
+                new_size = (int(img.size[0] * scale), int(img.size[1] * scale))
+                resized = img.resize(new_size, Image.LANCZOS)
+                buf = io.BytesIO()
+                resized.save(buf, format='JPEG', quality=60, optimize=True)
+                if buf.tell() <= target_size:
+                    buf.seek(0)
+                    logger.info(f"图片压缩成功(缩小): {file_path} -> {buf.getbuffer().nbytes / 1024 / 1024:.1f}MB (scale={scale})")
+                    return buf
+
+            logger.warning(f"图片压缩失败，即使最小分辨率仍然超过限制: {file_path}")
+            return None
+
+        except Exception as e:
+            logger.error(f"压缩图片时出错 {file_path}: {e}")
+            return None
+
+    async def _send_photo_smart(self, chat_id: str, file_path: str, caption: str):
+        """
+        智能发送图片：
+        1. 小于 10MB → 直接 send_photo
+        2. 大于 10MB → 尝试压缩后 send_photo
+        3. 压缩失败或仍然太大 → 降级为 send_document
+        """
+        file_size = os.path.getsize(file_path)
+        await self.application.bot.send_chat_action(chat_id=chat_id, action=ChatAction.UPLOAD_PHOTO)
+
+        # Case 1: 小图直接发
+        if file_size <= TG_PHOTO_MAX_SIZE:
+            with open(file_path, 'rb') as f:
+                return await self.application.bot.send_photo(
+                    chat_id=chat_id, photo=f, caption=caption
+                )
+
+        # Case 2: 大图尝试压缩
+        logger.info(f"[{chat_id}] 图片过大 ({file_size/1024/1024:.1f}MB)，尝试压缩: {file_path}")
+        compressed = self._compress_image(file_path)
+        if compressed:
+            try:
+                return await self.application.bot.send_photo(
+                    chat_id=chat_id, photo=compressed, caption=f"{caption} (已压缩)"
+                )
+            except Exception as e:
+                logger.warning(f"[{chat_id}] 压缩后发送图片仍失败: {e}")
+
+        # Case 3: 降级为文档发送
+        logger.info(f"[{chat_id}] 图片无法作为照片发送，降级为文档: {file_path}")
+        if file_size <= TG_DOCUMENT_MAX_SIZE:
+            await self.application.bot.send_chat_action(chat_id=chat_id, action=ChatAction.UPLOAD_DOCUMENT)
+            with open(file_path, 'rb') as f:
+                return await self.application.bot.send_document(
+                    chat_id=chat_id, document=f, caption=f"{caption} (原图)"
+                )
+        else:
+            # 超过 50MB 文档限制，发压缩版文档
+            if compressed:
+                compressed.seek(0)
+                await self.application.bot.send_chat_action(chat_id=chat_id, action=ChatAction.UPLOAD_DOCUMENT)
+                return await self.application.bot.send_document(
+                    chat_id=chat_id, document=compressed,
+                    filename=os.path.splitext(caption)[0] + '_compressed.jpg',
+                    caption=f"{caption} (压缩后文档)"
+                )
+            raise Exception(f"文件过大 ({file_size/1024/1024:.1f}MB) 且无法压缩")
+
     async def send_message(self, chat_id: str, text: str) -> str:
         """
         发送消息，自动检测并发送嵌入的富媒体文件。
@@ -146,34 +261,35 @@ class TelegramAdapter(BaseAdapter):
         for file_path, media_type in file_entries:
             caption = os.path.basename(file_path)
             try:
-                with open(file_path, 'rb') as f:
-                    if media_type == 'photo':
-                        await self.application.bot.send_chat_action(chat_id=chat_id, action=ChatAction.UPLOAD_PHOTO)
-                        message = await self.application.bot.send_photo(
-                            chat_id=chat_id, photo=f, caption=caption
-                        )
-                    elif media_type == 'gif':
-                        await self.application.bot.send_chat_action(chat_id=chat_id, action=ChatAction.UPLOAD_PHOTO)
+                if media_type == 'photo':
+                    message = await self._send_photo_smart(chat_id, file_path, caption)
+                elif media_type == 'gif':
+                    await self.application.bot.send_chat_action(chat_id=chat_id, action=ChatAction.UPLOAD_PHOTO)
+                    with open(file_path, 'rb') as f:
                         message = await self.application.bot.send_animation(
                             chat_id=chat_id, animation=f, caption=caption
                         )
-                    elif media_type == 'video':
-                        await self.application.bot.send_chat_action(chat_id=chat_id, action=ChatAction.UPLOAD_VIDEO)
+                elif media_type == 'video':
+                    await self.application.bot.send_chat_action(chat_id=chat_id, action=ChatAction.UPLOAD_VIDEO)
+                    with open(file_path, 'rb') as f:
                         message = await self.application.bot.send_video(
                             chat_id=chat_id, video=f, caption=caption
                         )
-                    elif media_type == 'audio':
-                        await self.application.bot.send_chat_action(chat_id=chat_id, action=ChatAction.UPLOAD_VOICE)
+                elif media_type == 'audio':
+                    await self.application.bot.send_chat_action(chat_id=chat_id, action=ChatAction.UPLOAD_VOICE)
+                    with open(file_path, 'rb') as f:
                         message = await self.application.bot.send_audio(
                             chat_id=chat_id, audio=f, caption=caption
                         )
-                    elif media_type == 'voice':
-                        await self.application.bot.send_chat_action(chat_id=chat_id, action=ChatAction.UPLOAD_VOICE)
+                elif media_type == 'voice':
+                    await self.application.bot.send_chat_action(chat_id=chat_id, action=ChatAction.UPLOAD_VOICE)
+                    with open(file_path, 'rb') as f:
                         message = await self.application.bot.send_voice(
                             chat_id=chat_id, voice=f, caption=caption
                         )
-                    else:  # document (including code files)
-                        await self.application.bot.send_chat_action(chat_id=chat_id, action=ChatAction.UPLOAD_DOCUMENT)
+                else:  # document (including code files)
+                    await self.application.bot.send_chat_action(chat_id=chat_id, action=ChatAction.UPLOAD_DOCUMENT)
+                    with open(file_path, 'rb') as f:
                         message = await self.application.bot.send_document(
                             chat_id=chat_id, document=f, caption=caption
                         )
