@@ -223,6 +223,12 @@ class NoraController:
                     
                     # CRITICAL: Sync current progress back to the main session immediately to prevent state loss on preemption
                     session["history"] = list(temp_history)
+
+                    # Inject a minimal follow-up user turn to steer LLM to summarize tool output
+                    temp_history.append({
+                        "role": "user",
+                        "content": "请基于上面的工具结果给出最终回答，简洁说明已完成的操作或下一步。"
+                    })
                     
                     # Loop continues to let LLM process the result
                     continue
