@@ -1,6 +1,6 @@
 import asyncio
 import logging
-from typing import Dict, Any
+from typing import Dict, Any, Callable
 
 from platforms.base import BaseAdapter
 from brain.llm import llm_client
