@@ -151,9 +151,9 @@ class NoraController:
                         
                         elif chunk["type"] == "tool_call":
                             tool_call = chunk
-                            # IMMEDIATELY sync text buffer to final buffer if tool call is detected
+                            # IMMEDIATELY clear text buffer if tool call is detected, to prevent leaking thoughts.
                             if response_text_buffer:
-                                final_response_buffer += response_text_buffer
+                                # final_response_buffer += response_text_buffer # This was the source of the leak
                                 response_text_buffer = ""
                     elif isinstance(chunk, str):
                         # Fallback for legacy providers
