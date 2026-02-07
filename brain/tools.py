@@ -119,14 +119,22 @@ class ToolManager:
             return f"Error: Skill '{skill_name}' not found."
         try:
             args_dict = json.loads(args_json)
-            command = [f"python3", skill_script_path]
+            command = ["python3", skill_script_path]
             for key, value in args_dict.items():
                 command.extend([f"--{key}", str(value)])
-            result = subprocess.run(command, capture_output=True, text=True, timeout=60, check=True)
+            result = subprocess.run(command, capture_output=True, text=True, timeout=120)
             output = result.stdout.strip()
-            if result.stderr: output += f"\\n[STDERR]\\n{result.stderr.strip()}"
-            return output or "Skill executed successfully with no output."
-        except Exception as e: return f"Error executing skill '{skill_name}': {e}"
+            stderr = result.stderr.strip()
+            # Always include stderr if present (may contain useful info even on success)
+            if stderr:
+                output += f"\n[STDERR]\n{stderr}"
+            if result.returncode != 0:
+                return f"Skill '{skill_name}' exited with code {result.returncode}.\n{output}" if output else f"Skill '{skill_name}' exited with code {result.returncode} and no output."
+            return output or f"Skill '{skill_name}' executed successfully (exit code 0, no stdout output). The script may need to print results to stdout."
+        except subprocess.TimeoutExpired:
+            return f"Error: Skill '{skill_name}' timed out after 120 seconds."
+        except Exception as e:
+            return f"Error executing skill '{skill_name}': {e}"
 
     def get_available_skills(self) -> str:
         """Lists all available skills that N.O.R.A. Core can use."""

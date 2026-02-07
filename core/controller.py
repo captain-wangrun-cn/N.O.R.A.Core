@@ -181,18 +181,19 @@ class NoraController:
                     logger.info(f"[{chat_id}] 🧠 AI Request Tool: {tool_name}({tool_args})")
 
                     # --- Loop Detection and Intervention ---
-                    last_tool_call = session.get("last_tool_call")
-                    current_tool_call_str = f"{tool_name}({json.dumps(tool_args)})"
+                    # Track by tool NAME (not exact args) to catch semantically repeated calls
+                    # e.g. execute_skill with different keyword variants
+                    last_tool_name = session.get("last_tool_name")
                     
-                    if last_tool_call and last_tool_call == current_tool_call_str:
+                    if last_tool_name and last_tool_name == tool_name:
                         session["tool_call_loop_counter"] = session.get("tool_call_loop_counter", 0) + 1
                     else:
                         session["tool_call_loop_counter"] = 0
                     
-                    session["last_tool_call"] = current_tool_call_str
+                    session["last_tool_name"] = tool_name
 
-                    if session["tool_call_loop_counter"] >= 2:
-                        logger.warning(f"[{chat_id}] 检测到工具调用循环: {current_tool_call_str}。正在强制中断。")
+                    if session["tool_call_loop_counter"] >= 3:
+                        logger.warning(f"[{chat_id}] 检测到工具调用循环: {tool_name} 已连续调用 {session['tool_call_loop_counter']+1} 次。正在强制中断。")
                         if tool_name == "read_file":
                             # For read-only tools, inject guidance to use a different approach instead of breaking
                             temp_history.append({
