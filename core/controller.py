@@ -181,19 +181,28 @@ class NoraController:
                     logger.info(f"[{chat_id}] 🧠 AI Request Tool: {tool_name}({tool_args})")
 
                     # --- Loop Detection and Intervention ---
-                    # Track by tool NAME (not exact args) to catch semantically repeated calls
-                    # e.g. execute_skill with different keyword variants
-                    last_tool_name = session.get("last_tool_name")
+                    # Build a loop key from tool name + target (path/command) for file ops.
+                    # This avoids false positives when LLM writes to different files sequentially.
+                    _file_tools = {"write_file", "edit_file", "read_file", "create_new_skill"}
+                    if tool_name in _file_tools and isinstance(tool_args, dict):
+                        _target = tool_args.get("path", tool_args.get("skill_name", ""))
+                        loop_key = f"{tool_name}:{_target}"
+                    elif tool_name == "execute_skill" and isinstance(tool_args, dict):
+                        loop_key = f"execute_skill:{tool_args.get('skill_name', '')}"
+                    else:
+                        loop_key = tool_name
                     
-                    if last_tool_name and last_tool_name == tool_name:
+                    last_loop_key = session.get("last_loop_key")
+                    
+                    if last_loop_key and last_loop_key == loop_key:
                         session["tool_call_loop_counter"] = session.get("tool_call_loop_counter", 0) + 1
                     else:
                         session["tool_call_loop_counter"] = 0
                     
-                    session["last_tool_name"] = tool_name
+                    session["last_loop_key"] = loop_key
 
-                    if session["tool_call_loop_counter"] >= 3:
-                        logger.warning(f"[{chat_id}] 检测到工具调用循环: {tool_name} 已连续调用 {session['tool_call_loop_counter']+1} 次。正在强制中断。")
+                    if session["tool_call_loop_counter"] >= 4:
+                        logger.warning(f"[{chat_id}] 检测到工具调用循环: {loop_key} 已连续调用 {session['tool_call_loop_counter']+1} 次。正在强制中断。")
                         if tool_name == "read_file":
                             # For read-only tools, inject guidance to use a different approach instead of breaking
                             temp_history.append({
@@ -207,7 +216,7 @@ class NoraController:
                             continue  # Don't break, let LLM try a different approach
                         else:
                             # For other tools, break the loop
-                            temp_history.append({"role": "user", "content": "【系统提示】检测到重复的工具调用。请停止当前操作，并重新评估下一步。如果是在检查目录，请直接开始创建操作。"})
+                            temp_history.append({"role": "user", "content": "【系统提示】检测到重复的工具调用。请停止当前操作，并直接给用户回复当前进展和结果。"})
                             break # Exit the while loop
                     
                     
