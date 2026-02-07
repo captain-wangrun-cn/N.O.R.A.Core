@@ -97,7 +97,9 @@ class ToolManager:
                 f.write(f"# {skill_name}\\n\\n{description}\\n")
             with open(os.path.join(skill_dir, "__init__.py"), 'w', encoding='utf-8') as f: pass
             with open(os.path.join(skill_dir, "main.py"), 'w', encoding='utf-8') as f:
-                f.write(SKILL_MAIN_PY_TEMPLATE.format(description=description))
+                # Use a simple placeholder replacement to avoid str.format interpreting template braces
+                rendered_template = SKILL_MAIN_PY_TEMPLATE.replace("{description}", description)
+                f.write(rendered_template)
             feedback = (
                 f"Successfully created new skill '{skill_name}'.\\n"
                 f"Step 1/3 Complete: Skill boilerplate generated at '{skill_dir}'.\\n"
