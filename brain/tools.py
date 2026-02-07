@@ -24,33 +24,27 @@ BLOCKED_COMMANDS = ["rm -rf /", "mkfs", "dd if=", "> /dev/", "shutdown", "reboot
 SKILL_MAIN_PY_TEMPLATE = """\"\"\"
 {description}
 \"\"\"
+import argparse
+import json
+import sys
 
 def run(**kwargs):
-    # Main logic for the skill goes here
-    # You can access arguments passed from the controller via kwargs
-    print(f"Executing {{__name__}} with arguments: {kwargs}")
-    return "Skill executed successfully."
+    \"\"\"Main logic for the skill. Implement your code here.\"\"\"
+    # TODO: Replace this placeholder with real implementation!
+    # kwargs contains the arguments passed from the command line.
+    # Example: kwargs = {"keyword": "blue archive", "limit": "5"}
+    print(json.dumps({"status": "error", "message": "This skill has not been implemented yet. Please write the real code."}))
+    return 1
 
-\"\"\"
-This dictionary is used to define the tool's schema for the LLM.
-'name' should be the function name to be called.
-'description' should be a brief explanation of what the tool does.
-'parameters' should be a dictionary defining the arguments the tool accepts.
-\"\"\"
-SCHEMA = {
-    "name": "run",
-    "description": "{description}",
-    "parameters": {
-        "type": "OBJECT",
-        "properties": {
-            "example_arg": {
-                "type": "STRING",
-                "description": "An example argument."
-            }
-        },
-        "required": ["example_arg"]
-    }
-}
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description="{description}")
+    # TODO: Define your arguments here. Example:
+    # parser.add_argument("--keyword", required=True, help="Search keyword")
+    # parser.add_argument("--limit", type=int, default=3, help="Max results")
+    
+    args, unknown = parser.parse_known_args()
+    result = run(**vars(args))
+    sys.exit(result if isinstance(result, int) else 0)
 """
 
 class ToolManager:
@@ -113,9 +107,15 @@ class ToolManager:
                 rendered_template = SKILL_MAIN_PY_TEMPLATE.replace("{description}", description)
                 f.write(rendered_template)
             feedback = (
-                f"Successfully created new skill '{skill_name}'.\n"
-                f"Step 1/3 Complete: Skill boilerplate generated at '{skill_dir}'.\n"
-                f"Next step is to use 'write_file' to replace the content of '{os.path.join(skill_dir, 'main.py')}' with real implementation code."
+                f"Successfully created skill boilerplate for '{skill_name}' at '{skill_dir}'.\n\n"
+                f"⚠️ IMPORTANT: The skill is NOT functional yet! The main.py contains only TEMPLATE code.\n"
+                f"You MUST now use write_file('{os.path.join(skill_dir, 'main.py')}', '<real code>') to write the actual implementation.\n"
+                f"The script must:\n"
+                f"  1. Use argparse to parse command-line arguments (--key value format)\n"
+                f"  2. Print results to stdout (so execute_skill can capture them)\n"
+                f"  3. Have an 'if __name__ == \"__main__\":' entry point\n\n"
+                f"After writing the code, also update '{os.path.join(skill_dir, 'SKILL.md')}' with the correct usage docs.\n"
+                f"Do NOT call execute_skill until the real code is written."
             )
             return feedback
         except Exception as e: return f"An unexpected error occurred: {e}"
@@ -128,23 +128,57 @@ class ToolManager:
         """
         skill_script_path = os.path.join("skills", skill_name, "main.py")
         if not os.path.exists(skill_script_path):
-            return f"Error: Skill '{skill_name}' not found."
+            return f"Error: Skill '{skill_name}' not found at '{skill_script_path}'. Available skills can be listed with get_available_skills."
         try:
             args_dict = json.loads(args_json)
             command = ["python3", skill_script_path]
             for key, value in args_dict.items():
                 command.extend([f"--{key}", str(value)])
+            
             result = subprocess.run(command, capture_output=True, text=True, timeout=120)
             output = result.stdout.strip()
             stderr = result.stderr.strip()
-            # Always include stderr if present (may contain useful info even on success)
+            
+            # Always include stderr if present
             if stderr:
                 output += f"\n[STDERR]\n{stderr}"
+            
             if result.returncode != 0:
-                return f"Skill '{skill_name}' exited with code {result.returncode}.\n{output}" if output else f"Skill '{skill_name}' exited with code {result.returncode} and no output."
-            return output or f"Skill '{skill_name}' executed successfully (exit code 0, no stdout output). The script may need to print results to stdout."
+                error_msg = f"Skill '{skill_name}' failed (exit code {result.returncode})."
+                if output:
+                    error_msg += f"\n{output}"
+                if "not been implemented" in (output + stderr):
+                    error_msg += (
+                        f"\n\n⚠️ This skill is still using TEMPLATE CODE — it has no real implementation. "
+                        f"You need to use write_file to replace '{skill_script_path}' with actual working code first, "
+                        f"then try execute_skill again. Do NOT retry without fixing the code."
+                    )
+                return error_msg
+            
+            if not output:
+                # Check if the script is still template code
+                try:
+                    with open(skill_script_path, 'r') as f:
+                        code = f.read()
+                    if "TODO: Replace this placeholder" in code or "Skill executed successfully" in code:
+                        return (
+                            f"⚠️ Skill '{skill_name}' produced no output because it still contains TEMPLATE CODE.\n"
+                            f"You MUST use write_file to replace '{skill_script_path}' with a real implementation first.\n"
+                            f"Do NOT call execute_skill again until you have written the actual code."
+                        )
+                except Exception:
+                    pass
+                return (
+                    f"Skill '{skill_name}' executed successfully (exit code 0) but produced no stdout output.\n"
+                    f"This usually means the script does not print() its results. "
+                    f"Consider reading the script with read_file('{skill_script_path}') to check if it needs fixing."
+                )
+            
+            return output
         except subprocess.TimeoutExpired:
             return f"Error: Skill '{skill_name}' timed out after 120 seconds."
+        except json.JSONDecodeError as e:
+            return f"Error: Invalid args_json format: {e}. Must be valid JSON string like '{{\"key\": \"value\"}}'."
         except Exception as e:
             return f"Error executing skill '{skill_name}': {e}"
 
