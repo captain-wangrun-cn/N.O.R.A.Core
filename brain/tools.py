@@ -17,7 +17,7 @@ SKILL_MAIN_PY_TEMPLATE = """\"\"\"
 def run(**kwargs):
     # Main logic for the skill goes here
     # You can access arguments passed from the controller via kwargs
-    print(f"Executing {__name__} with arguments: {kwargs}")
+    print(f"Executing {{__name__}} with arguments: {kwargs}")
     return "Skill executed successfully."
 
 \"\"\"
