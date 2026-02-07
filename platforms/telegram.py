@@ -227,6 +227,7 @@ class TelegramAdapter(BaseAdapter):
         """
         # 1. 提取所有文件路径
         file_entries = []  # [(path, media_type)]
+        missing_files = []
         for match in self.FILE_PATTERN.finditer(text):
             path = match.group(1) or match.group(2) or match.group(3) or match.group(4)
             if path:
@@ -234,12 +235,19 @@ class TelegramAdapter(BaseAdapter):
                 if os.path.isfile(path):
                     media_type = self._classify_file(path)
                     file_entries.append((path, media_type))
+                    logger.info(f"[{chat_id}] 检测到媒体文件: {path} ({media_type})")
+                else:
+                    missing_files.append(path)
+                    logger.warning(f"[{chat_id}] 文件路径不存在，跳过: {path}")
 
-        # 2. 清理文本中的文件引用
-        clean_text = text
-        if file_entries:
-            clean_text = self.FILE_PATTERN.sub('', text).strip()
-            clean_text = re.sub(r'\n{3,}', '\n\n', clean_text).strip()
+        # 2. 清理文本中的文件引用（无论文件是否存在都清理，不要把 [image:...] 原样显示）
+        clean_text = self.FILE_PATTERN.sub('', text).strip()
+        clean_text = re.sub(r'\n{3,}', '\n\n', clean_text).strip()
+        
+        # 如果有文件不存在，在文末追加提示
+        if missing_files:
+            not_found_hint = "\n\n⚠️ 以下文件未找到:\n" + "\n".join(f"  • {p}" for p in missing_files)
+            clean_text += not_found_hint
 
         # 3. 发送文本部分
         last_message_id = None

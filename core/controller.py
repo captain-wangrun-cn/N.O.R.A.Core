@@ -128,6 +128,7 @@ class NoraController:
             current_turn = 0
             final_response_buffer = ""
             latest_tool_output = ""  # Safeguard: fallback to show tool output if LLM stays silent
+            latest_meaningful_output = ""  # Only meaningful outputs (execute_skill, etc.)
             
             # 临时历史，用于多轮工具调用，最后合并入主历史
             temp_history = list(session["history"]) 
@@ -246,6 +247,10 @@ class NoraController:
                     else:
                         truncated_result = tool_result
                     latest_tool_output = truncated_result  # remember latest tool output for fallback delivery
+                    # Only track meaningful outputs for user-facing fallback (skip internal exploration)
+                    _user_facing_tools = {"execute_skill", "create_new_skill"}
+                    if tool_name in _user_facing_tools:
+                        latest_meaningful_output = truncated_result
                     
                     # Append history for tools
                     if current_turn == 1 and full_user_prompt not in [h['content'] for h in temp_history]:
@@ -292,9 +297,13 @@ class NoraController:
             # If the loop completes and there's still text in the buffer, it's the final message.
             if final_response_buffer:
                 await self.adapter.send_message(chat_id, final_response_buffer)
+            elif latest_meaningful_output:
+                # Fallback: LLM stayed silent; surface the latest meaningful tool output (e.g. skill result)
+                await self.adapter.send_message(chat_id, f"【执行结果】\n{latest_meaningful_output}")
             elif latest_tool_output:
-                # Fallback: LLM stayed silent after tool calls; at least surface the latest tool output
-                await self.adapter.send_message(chat_id, f"【工具结果】\n{latest_tool_output}")
+                # Last resort: show generic tool output but truncate to be less scary
+                brief = latest_tool_output[:500] + "..." if len(latest_tool_output) > 500 else latest_tool_output
+                await self.adapter.send_message(chat_id, f"任务已完成，但我没能生成摘要。\n<pre>{brief}</pre>")
             
             # --- 5. RAG 记忆存储 (Memory Storage) ---
             if self.rag.enabled:
@@ -315,8 +324,8 @@ class NoraController:
                  # Append the final text response if it wasn't part of a tool call history
                  if not any(final_response_buffer in str(h.get('content', '')) for h in session["history"]):
                     session["history"].append({"role": "assistant", "content": final_response_buffer})
-            elif latest_tool_output:
-                session["history"].append({"role": "assistant", "content": f"【工具结果】\n{latest_tool_output}"})
+            elif latest_meaningful_output:
+                session["history"].append({"role": "assistant", "content": f"【执行结果】\n{latest_meaningful_output}"})
 
             if len(session["history"]) > 20:
                 session["history"] = session["history"][-20:]
