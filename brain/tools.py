@@ -1,6 +1,7 @@
 # brain/tools.py
 
 import os
+import json
 import subprocess
 import logging
 import inspect
@@ -43,23 +44,22 @@ SCHEMA = {
 
 class ToolManager:
     """
-    Manages and executes all available tools.
+    Manages and executes all available tools using a dual-layer system.
     """
     def __init__(self, adapter: BaseAdapter):
         self._tools: Dict[str, Callable] = {}
         self._schemas: List[Dict[str, Any]] = []
         self.adapter = adapter
-        self._register_primitive_tools()
+        self._register_tools()
 
-    def _register_primitive_tools(self):
+    def _register_tools(self):
+        self.register(self.create_new_skill)
+        self.register(self.execute_skill)
         self.register(self.read_file)
         self.register(self.write_file)
         self.register(self.edit_file)
         self.register(self.get_available_skills)
-        self.register(self.create_new_skill) # Register the new macro tool
-        # self.register(self.list_dir) # Deprecated
-        # self.register(self.exec_command) # Deprecated for safety
-        # self.register(self.delegate_to_coder) # Temporarily disable
+        self.register(self.exec_command)
 
     def register(self, func: Callable):
         self._tools[func.__name__] = func
@@ -69,101 +69,74 @@ class ToolManager:
         return self._schemas
 
     async def execute(self, name: str, args: Dict[str, Any]) -> str:
-        if name not in self._tools:
-            return f"Error: Tool '{name}' not found."
-        
+        if name not in self._tools: return f"Error: Tool '{name}' not found."
         try:
             logger.info(f"Executing tool: {name} with args: {args}")
             func = self._tools[name]
-            
-            if inspect.iscoroutinefunction(func):
-                result = await func(**args)
-            else:
-                result = func(**args)
-            
+            result = await func(**args) if inspect.iscoroutinefunction(func) else func(**args)
             return str(result)
         except Exception as e:
             logger.error(f"Tool execution error for {name}: {e}", exc_info=True)
             return f"Error executing {name}: {str(e)}"
 
-    # --- Macro & Primitive Tools ---
-
     def create_new_skill(self, skill_name: str, description: str) -> str:
         """
-        Creates a complete boilerplate for a new skill. Use this to initialize a new capability.
-        This single action will create the directory, SKILL.md, __init__.py, and a main.py template.
+        Creates a complete boilerplate for a new skill. This is the preferred way to create skills.
         :param skill_name: The name of the new skill (e.g., 'web_search').
         :param description: A one-sentence description of what the new skill does.
         """
         logger.info(f"Request to create new skill: {skill_name}")
-        skills_base_dir = "skills"
-        skill_dir = os.path.join(skills_base_dir, skill_name)
-
-        # 1. Check-then-Act: Verify if skill already exists
+        skill_dir = os.path.join("skills", skill_name)
         if os.path.exists(skill_dir):
-            return f"Error: Skill '{skill_name}' already exists at '{skill_dir}'. Please choose a different name."
-
+            return f"Error: Skill '{skill_name}' already exists. Please choose a different name."
         try:
-            # 2. Create the directory structure
             os.makedirs(skill_dir)
-
-            # 3. Create SKILL.md
             with open(os.path.join(skill_dir, "SKILL.md"), 'w', encoding='utf-8') as f:
-                f.write(f"# {skill_name}\n\n{description}\n")
-
-            # 4. Create __init__.py
-            with open(os.path.join(skill_dir, "__init__.py"), 'w', encoding='utf-8') as f:
-                pass # Empty file
-
-            # 5. Create main.py with a template
-            main_py_content = SKILL_MAIN_PY_TEMPLATE.format(description=description)
+                f.write(f"# {skill_name}\\n\\n{description}\\n")
+            with open(os.path.join(skill_dir, "__init__.py"), 'w', encoding='utf-8') as f: pass
             with open(os.path.join(skill_dir, "main.py"), 'w', encoding='utf-8') as f:
-                f.write(main_py_content)
-            
-            # 6. Return a clear success message with progress
+                f.write(SKILL_MAIN_PY_TEMPLATE.format(description=description))
             feedback = (
-                f"Successfully created new skill '{skill_name}'.\n"
-                f"Step 1/3 Complete: Skill boilerplate generated at '{skill_dir}'.\n"
-                f"Directory structure:\n"
-                f"- {skill_dir}/\n"
-                f"  - SKILL.md (Description written)\n"
-                f"  - __init__.py (Created)\n"
-                f"  - main.py (Template created)\n\n"
-                f"Next step for you is to use the 'write_file' or 'edit_file' tool to add the core logic to '{os.path.join(skill_dir, 'main.py')}'."
+                f"Successfully created new skill '{skill_name}'.\\n"
+                f"Step 1/3 Complete: Skill boilerplate generated at '{skill_dir}'.\\n"
+                f"Next step is to use 'edit_file' to add logic to '{os.path.join(skill_dir, 'main.py')}'."
             )
             return feedback
+        except Exception as e: return f"An unexpected error occurred: {e}"
 
-        except Exception as e:
-            logger.error(f"Error creating new skill '{skill_name}': {e}", exc_info=True)
-            return f"An unexpected error occurred while creating the skill: {e}"
+    def execute_skill(self, skill_name: str, args_json: str = "{}") -> str:
+        """
+        Executes a specific, pre-existing skill. This is the ONLY safe way to run skill scripts.
+        :param skill_name: The name of the skill directory (e.g., 'pixiv_manager').
+        :param args_json: A JSON string of arguments for the skill (e.g., '{"keyword": "blue archive"}').
+        """
+        skill_script_path = os.path.join("skills", skill_name, "main.py")
+        if not os.path.exists(skill_script_path):
+            return f"Error: Skill '{skill_name}' not found."
+        try:
+            args_dict = json.loads(args_json)
+            command = [f"python3", skill_script_path]
+            for key, value in args_dict.items():
+                command.extend([f"--{key}", str(value)])
+            result = subprocess.run(command, capture_output=True, text=True, timeout=60, check=True)
+            output = result.stdout.strip()
+            if result.stderr: output += f"\\n[STDERR]\\n{result.stderr.strip()}"
+            return output or "Skill executed successfully with no output."
+        except Exception as e: return f"Error executing skill '{skill_name}': {e}"
 
     def get_available_skills(self) -> str:
-        """
-        Lists all available skills that N.O.R.A. Core can use.
-        Use this tool to discover what capabilities are available.
-        """
-        skills_dir = "skills/" 
+        """Lists all available skills that N.O.R.A. Core can use."""
+        skills_dir = "skills/"
+        if not os.path.exists(skills_dir): return "Error: Skills directory not found."
         try:
-            if not os.path.exists(skills_dir) or not os.path.isdir(skills_dir):
-                return f"Error: Skills directory '{os.path.abspath(skills_dir)}' not found."
-            
             skill_folders = [d for d in os.listdir(skills_dir) if os.path.isdir(os.path.join(skills_dir, d)) and not d.startswith('__')]
-            
-            if not skill_folders:
-                return "No skills are currently available."
-
-            available_skills = []
-            for skill in skill_folders:
-                available_skills.append(f"- {skill}")
-
-            return "Here are the available skills:\n" + "\n".join(available_skills)
-        except Exception as e:
-            return f"Error while trying to list skills: {e}"
+            if not skill_folders: return "No skills are currently available."
+            return "Available skills:\\n" + "\\n".join([f"- {s}" for s in skill_folders])
+        except Exception as e: return f"Error listing skills: {e}"
 
     def read_file(self, path: str) -> str:
         """Reads the contents of a file."""
         try:
-            if not os.path.exists(path): return f"Error: File '{path}' not found."
             with open(path, 'r', encoding='utf-8') as f: return f.read()
         except Exception as e: return f"Error reading file: {e}"
 
@@ -178,7 +151,6 @@ class ToolManager:
     def edit_file(self, path: str, old_code: str, new_code: str) -> str:
         """Performs a precise find-and-replace on a file."""
         try:
-            if not os.path.exists(path): return f"Error: File '{path}' not found."
             with open(path, 'r', encoding='utf-8') as f: content = f.read()
             if old_code not in content: return f"Error: 'old_code' not found in {path}."
             new_content = content.replace(old_code, new_code, 1)
@@ -186,18 +158,33 @@ class ToolManager:
             return f"Successfully edited {path}."
         except Exception as e: return f"Error editing file: {e}"
 
+    def exec_command(self, command: str) -> str:
+        """
+        (DANGEROUS) Executes a general-purpose shell command.
+        WARNING: Do NOT use this for tasks that a high-level tool can do. For simple, one-off tasks ONLY.
+        """
+        try:
+            result = subprocess.run(command, shell=True, capture_output=True, text=True, timeout=30)
+            output = result.stdout.strip()
+            if result.stderr: output += f"\\n[STDERR]\\n{result.stderr.strip()}"
+            if not output and result.returncode == 0:
+                return "Command executed successfully with no output."
+            return output
+        except Exception as e: return f"Error executing command: {e}"
+
     def _generate_schema(self, func: Callable) -> Dict[str, Any]:
         """Generates a JSON schema for a function."""
         sig = inspect.signature(func)
-        doc = inspect.getdoc(func) or "No description."
-        desc = doc.strip().split("\n")[0]
+        doc = inspect.getdoc(func) or ""
+        desc = doc.strip().split("\\n")[0]
         parameters = {"type": "OBJECT", "properties": {}, "required": []}
         for name, param in sig.parameters.items():
-            if name in ('self', 'args', 'kwargs'): continue
+            if name == 'self': continue
             param_type = "STRING"
             if param.annotation == int: param_type = "INTEGER"
             elif param.annotation == bool: param_type = "BOOLEAN"
-            parameters["properties"][name] = {"type": param_type, "description": "Parameter for " + name}
+            parameters["properties"][name] = {"type": param_type}
             if param.default == inspect.Parameter.empty:
                 parameters["required"].append(name)
         return {"name": func.__name__, "description": desc, "parameters": parameters}
+
