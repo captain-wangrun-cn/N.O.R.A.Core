@@ -1,0 +1,23 @@
+/* nora-core/tui.css */
+Screen {
+    layout: vertical;
+}
+
+Container {
+    height: 1fr;
+    layout: vertical;
+}
+
+#log_panel {
+    height: 80%;
+    border: heavy white;
+    margin: 1;
+}
+
+#status_panel {
+    height: 20%;
+    border: heavy white;
+    margin: 1;
+    padding: 1;
+    content-align: center middle;
+}

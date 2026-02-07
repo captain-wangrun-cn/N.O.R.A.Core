@@ -15,8 +15,9 @@ logger = logging.getLogger(__name__)
 class NoraController:
     """处理机器人的核心业务逻辑。"""
 
-    def __init__(self, adapter: BaseAdapter):
+    def __init__(self, adapter: BaseAdapter, tui_callback: Callable[[str], None] = None):
         self.adapter = adapter
+        self.tui_callback = tui_callback
         self.llm = llm_client
         self.rag = RAGEngine()
         self.tool_manager = ToolManager(adapter) # Pass adapter to ToolManager
@@ -54,12 +55,14 @@ class NoraController:
         logger.debug(f"[{chat_id}] 开始生成响应。History length: {len(session['history'])}")
         
         try:
+            if self.tui_callback: self.tui_callback(f"🏃 Handling new message...")
             await self.adapter.start_typing(chat_id)
             
             # --- 1. RAG 记忆检索 (Memory Retrieval) ---
             # 只在没有被抢占的情况下检索，或者对最新的 text 进行检索
             rag_context = ""
             if self.rag.enabled:
+                if self.tui_callback: self.tui_callback("🧠 Retrieving memories (RAG)...")
                 logger.debug(f"[{chat_id}] 正在从大脑检索相关记忆...")
                 rag_context = self.rag.get_context_string(text, top_k=2)
                 if rag_context:
@@ -117,6 +120,7 @@ class NoraController:
 
             while current_turn < MAX_TURNS:
                 current_turn += 1
+                if self.tui_callback: self.tui_callback(f"🤔 Thinking... (Turn {current_turn}/{MAX_TURNS})")
                 logger.debug(f"[{chat_id}] Turn {current_turn}/{MAX_TURNS}")
                 
                 stream = self.llm.chat_stream(
@@ -171,6 +175,7 @@ class NoraController:
                 if tool_call:
                     tool_name = tool_call["name"]
                     tool_args = tool_call["args"]
+                    if self.tui_callback: self.tui_callback(f"🔧 Executing Tool: {tool_name}")
                     logger.info(f"[{chat_id}] 🧠 AI Request Tool: {tool_name}({tool_args})")
 
                     # --- Loop Detection and Intervention ---
@@ -267,10 +272,12 @@ class NoraController:
                 logger.info(f"[{chat_id}] 抢占成功：尚未生成内容，仅保存了用户输入。")
         
         except Exception as e:
+            if self.tui_callback: self.tui_callback(f"❌ Error: {e.__class__.__name__}")
             logger.error(f"[{chat_id}] 生成响应时出现严重错误。", exc_info=True)
             await self.adapter.send_message(chat_id, "抱歉，处理您的请求时出现内部错误。")
             
         finally:
+            if self.tui_callback: self.tui_callback("✅ Idle")
             self.generation_tasks.pop(chat_id, None)
             logger.debug(f"[{chat_id}] 本次生成任务结束。")
 

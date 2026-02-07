@@ -9,3 +9,4 @@ google-generativeai
 questionary
 PyYAML
 Jinja2
+textual
