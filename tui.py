@@ -9,21 +9,18 @@ class TUI(App):
     CSS_PATH = "tui.css"
     BINDINGS = [("d", "toggle_dark", "Toggle dark mode")]
 
-    def compose(self) -> ComposeResult:
-        """Create child widgets for the app."""
-        yield Header()
-        with Container():
-            yield RichLog(id="log_panel", wrap=True, highlight=True)
-            yield Static("Initializing...", id="status_panel")
-        yield Footer()
-
-    def action_toggle_dark(self) -> None:
-        """An action to toggle dark mode."""
-        self.dark = not self.dark
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self._is_running = False
 
     def on_mount(self) -> None:
         """Called when app starts."""
         self.title = "N.O.R.A. Core Dashboard"
+        self._is_running = True
+
+    def on_unmount(self) -> None:
+        """Called when app stops."""
+        self._is_running = False
 
     def update_status(self, text: str):
         """Method to update the status panel from an external thread."""
