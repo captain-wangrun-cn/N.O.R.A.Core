@@ -1,6 +1,6 @@
 import asyncio
 import logging
-from typing import Dict, Any, Callable
+from typing import Dict, Any, Callable, Optional, cast
 
 from platforms.base import BaseAdapter
 from brain.llm import llm_client
@@ -15,7 +15,7 @@ logger = logging.getLogger(__name__)
 class NoraController:
     """处理机器人的核心业务逻辑。"""
 
-    def __init__(self, adapter: BaseAdapter, tui_callback: Callable[[str], None] = None):
+    def __init__(self, adapter: BaseAdapter, tui_callback: Optional[Callable[[str], None]] = None):
         self.adapter = adapter
         self.tui_callback = tui_callback
         self.llm = llm_client
@@ -114,6 +114,7 @@ class NoraController:
             MAX_TURNS = 5
             current_turn = 0
             final_response_buffer = ""
+            latest_tool_output = ""  # Safeguard: fallback to show tool output if LLM stays silent
             
             # 临时历史，用于多轮工具调用，最后合并入主历史
             temp_history = list(session["history"]) 
@@ -133,7 +134,8 @@ class NoraController:
                 response_text_buffer = ""
                 tool_call = None
                 
-                async for chunk in stream:
+                async for raw_chunk in stream:
+                    chunk = cast(Dict[str, Any], raw_chunk) if isinstance(raw_chunk, dict) else raw_chunk
                     # Handle new dict-based chunks
                     if isinstance(chunk, dict):
                         if chunk["type"] == "text":
@@ -173,8 +175,8 @@ class NoraController:
                 
                 # If tool call detected
                 if tool_call:
-                    tool_name = tool_call["name"]
-                    tool_args = tool_call["args"]
+                    tool_name = cast(Dict[str, Any], tool_call)["name"]
+                    tool_args = cast(Dict[str, Any], tool_call)["args"]
                     if self.tui_callback: self.tui_callback(f"🔧 Executing Tool: {tool_name}")
                     logger.info(f"[{chat_id}] 🧠 AI Request Tool: {tool_name}({tool_args})")
 
@@ -197,7 +199,7 @@ class NoraController:
                     
                     
                     # Execute Tool
-                    tool_result = await self.tool_manager.execute(tool_name, tool_args)
+                    tool_result = await self.tool_manager.execute(tool_name, cast(Dict[str, Any], tool_args))
                     logger.info(f"[{chat_id}] 🔧 Tool Result for {tool_name}: {tool_result[:100]}...")
 
                     # --- TRUNCATION SAFETY VALVE ---
@@ -207,6 +209,7 @@ class NoraController:
                         logger.warning(f"Tool output for {tool_name} was truncated from {len(tool_result)} chars.")
                     else:
                         truncated_result = tool_result
+                    latest_tool_output = truncated_result  # remember latest tool output for fallback delivery
                     
                     # Append history for tools
                     if current_turn == 1 and full_user_prompt not in [h['content'] for h in temp_history]:
@@ -233,6 +236,9 @@ class NoraController:
             # If the loop completes and there's still text in the buffer, it's the final message.
             if final_response_buffer:
                 await self.adapter.send_message(chat_id, final_response_buffer)
+            elif latest_tool_output:
+                # Fallback: LLM stayed silent after tool calls; at least surface the latest tool output
+                await self.adapter.send_message(chat_id, f"【工具结果】\n{latest_tool_output}")
             
             # --- 5. RAG 记忆存储 (Memory Storage) ---
             if self.rag.enabled:
@@ -253,6 +259,8 @@ class NoraController:
                  # Append the final text response if it wasn't part of a tool call history
                  if not any(final_response_buffer in str(h.get('content', '')) for h in session["history"]):
                     session["history"].append({"role": "assistant", "content": final_response_buffer})
+            elif latest_tool_output:
+                session["history"].append({"role": "assistant", "content": f"【工具结果】\n{latest_tool_output}"})
 
             if len(session["history"]) > 20:
                 session["history"] = session["history"][-20:]
