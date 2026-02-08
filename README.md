@@ -12,23 +12,51 @@
 ## 🚀 Setup
 
 1. Clone the repo:
+
    ```bash
    git clone https://github.com/captain-wangrun-cn/N.O.R.A.Core.git
    cd N.O.R.A.Core
    ```
 
 2. Install dependencies:
+
    ```bash
    pip install -r requirements.txt
    ```
 
-3. Configure environment:
-   Copy `.env.example` to `.env` and fill in your keys.
+3. Configure using the CLI wizard:
+
+   ```bash
+   python cli.py --configure
+   ```
+
+   Or use the interactive menu:
+
+   ```bash
+   python cli.py
+   ```
 
 4. Run:
    ```bash
    python main.py
    ```
+
+## 🛠 Management CLI
+
+N.O.R.A. Core includes a powerful CLI tool (`cli.py`) for configuration and maintenance:
+
+```bash
+# Interactive menu
+python cli.py
+
+# Direct commands
+python cli.py --configure      # Run configuration wizard
+python cli.py --test-qdrant    # Test Qdrant connection
+python cli.py --test-rag       # Test RAG system
+python cli.py --clean-rag      # Clean RAG data
+```
+
+See [CLI Usage Guide](docs/CLI_USAGE.md) for detailed documentation.
 
 ## 📂 Structure
 
