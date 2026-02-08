@@ -31,7 +31,7 @@ def setup_logging_with_tui(tui_app):
     # Add TUI handler to root logger
     tui_handler = TuiLogHandler(tui_app)
     tui_formatter = logging.Formatter(
-        '%(asctime)s - %(name)s - %(levelname)s - [%(chat_id)s] %(message)s',
+        '%(asctime)s - %(name)s - %(levelname)s - %(message)s',
         datefmt='%H:%M:%S'
     )
     tui_handler.setFormatter(tui_formatter)
