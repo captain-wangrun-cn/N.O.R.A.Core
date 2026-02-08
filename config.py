@@ -37,3 +37,7 @@ def get_model_name(model_alias="smart"):
     """Gets the model name for a given alias (e.g., 'smart', 'fast')."""
     return get_config().get("llm", {}).get("models", {}).get(model_alias)
 
+def get_message_history_config():
+    """Gets the message history configuration."""
+    return get_config().get("memory", {}).get("message_history", {})
+

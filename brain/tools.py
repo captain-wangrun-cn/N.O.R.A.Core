@@ -278,13 +278,19 @@ class ToolManager:
         except Exception as e:
             return f"Error editing file: {e}"
 
-    def exec_command(self, command: str) -> str:
+    def exec_command(self, command: str, timeout: int = 60) -> str:
         """
         (DANGEROUS) Executes a general-purpose shell command.
         WARNING: Do NOT use this for tasks that a high-level tool can do.
         Use 'list_dir' to list directories instead of 'ls'. Use 'read_file' to read files instead of 'cat'.
         NEVER use this to run skill scripts — use 'execute_skill' instead.
+        For long-running commands (e.g., apt install, pip install), set timeout to a higher value (e.g., 300).
+        :param command: The shell command to execute.
+        :param timeout: Maximum execution time in seconds (default: 60, max: 600). Use higher values for package installs.
         """
+        # Clamp timeout
+        timeout = max(10, min(int(timeout), 600))
+        
         # Security: block dangerous commands
         cmd_lower = command.lower().strip()
         for blocked in BLOCKED_COMMANDS:
@@ -306,12 +312,22 @@ class ToolManager:
                 f"The execute_skill tool handles argument parsing, timeout, and error reporting automatically."
             )
         try:
-            result = subprocess.run(command, shell=True, capture_output=True, text=True, timeout=30)
-            output = result.stdout.strip()
-            if result.stderr: output += f"\n[STDERR]\n{result.stderr.strip()}"
-            if not output and result.returncode == 0:
-                return "Command executed successfully with no output."
-            return output
+            result = subprocess.run(command, shell=True, capture_output=True, text=True, timeout=timeout)
+            
+            # Build structured output with exit code
+            parts = []
+            if result.stdout.strip():
+                parts.append(result.stdout.strip())
+            if result.stderr.strip():
+                parts.append(f"[STDERR]\n{result.stderr.strip()}")
+            
+            output = "\n".join(parts) if parts else "(no output)"
+            
+            # Always include exit code for LLM decision-making
+            status = "✅ SUCCESS" if result.returncode == 0 else f"❌ FAILED"
+            return f"[Exit Code: {result.returncode}] {status}\n{output}"
+        except subprocess.TimeoutExpired:
+            return f"Error: Command timed out after {timeout} seconds. For long-running commands (apt install, pip install, etc.), use a higher timeout value, e.g. exec_command(command, timeout=300)."
         except Exception as e: return f"Error executing command: {e}"
 
     def _generate_schema(self, func: Callable) -> Dict[str, Any]:

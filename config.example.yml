@@ -7,24 +7,32 @@ telegram:
 llm:
   # Supported providers: "gemini", "openai"
   provider: "gemini"
-  
+
   # API keys for the providers
   api_keys:
     gemini: "YOUR_GEMINI_API_KEY"
     openai: "YOUR_OPENAI_API_KEY"
-  
+
   # Model aliases used by the application
   models:
     smart: "gemini-1.5-pro-latest"
     fast: "gemini-1.5-flash-latest"
     coder: "gemini-1.5-pro-latest"
+    summary: "gemini-1.5-flash-latest" # 用于消息历史总结的模型
 
 memory:
+  # 消息历史管理
+  message_history:
+    raw_window: 50 # 原始消息窗口大小（完整保留）
+    compress_window: 200 # 超过此数量开始压缩
+    compress_ratio: 10 # 压缩比例（10条压缩为1条总结）
+    archive_threshold: 500 # 超过此数量创建归档总结
+
   # Vector Database (Qdrant)
   qdrant:
     host: "localhost"
     port: 6333
-  
+
   # Document Database (MongoDB)
   mongo:
     uri: "mongodb://nora:nora_password@localhost:27017/"

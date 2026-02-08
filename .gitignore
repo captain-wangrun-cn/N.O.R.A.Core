@@ -5,7 +5,7 @@ config.yml
 .DS_Store
 .vscode/
 .idea/
-venv/
+.venv/
 *.log
 logs/
 nora_state.json

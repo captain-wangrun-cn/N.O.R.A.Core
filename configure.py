@@ -219,6 +219,7 @@ class StepModels(ConfigStep):
         models['smart'] = self.select_model(model_list, 'smart')
         models['fast'] = self.select_model(model_list, 'fast')
         models['coder'] = self.select_model(model_list, 'coder')
+        models['summary'] = self.select_model(model_list, 'summary')  # 添加总结模型
         self.state['models'] = models
         return True
 

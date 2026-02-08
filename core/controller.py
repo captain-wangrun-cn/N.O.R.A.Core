@@ -7,8 +7,10 @@ from platforms.base import BaseAdapter
 from brain.llm import llm_client
 from brain.prompts import get_system_prompt
 from memory.rag import RAGEngine
+from memory.message_history import MessageHistory
 from brain.tools import ToolManager
 from skills.loader import SkillLoader
+import config
 import json
 
 logger = logging.getLogger(__name__)
@@ -25,7 +27,18 @@ class NoraController:
         self.skill_loader = SkillLoader()
         self.sessions: Dict[str, Any] = {}
         self.generation_tasks: Dict[str, asyncio.Task] = {}
-        logger.info(f"NoraController 已初始化。RAG: {'Online' if self.rag.enabled else 'Offline'}")
+        
+        # 消息历史管理
+        history_cfg = config.get_message_history_config()
+        self.message_history = MessageHistory(
+            db_path=history_cfg.get("db_path", "memory/message_history.db"),
+            raw_window=history_cfg.get("raw_window", 50),
+            compress_window=history_cfg.get("compress_window", 200),
+            compress_ratio=history_cfg.get("compress_ratio", 10),
+            archive_threshold=history_cfg.get("archive_threshold", 500),
+        )
+        
+        logger.info(f"NoraController 已初始化。RAG: {'Online' if self.rag.enabled else 'Offline'}, MessageHistory: Online")
 
     async def handle_new_message(self, chat_id: str, text: str):
         """处理来自聚合器的新消息/命令。"""
@@ -35,6 +48,7 @@ class NoraController:
         # 特殊处理 /start 命令
         if text.strip().startswith("/start"):
             self.sessions[chat_id] = {"history": [], "interrupted_thought": ""}
+            self.message_history.clear_chat_history("telegram", chat_id, keep_pinned=True)
             await self.adapter.send_message(chat_id, "N.O.R.A. Core 已启动。")
             logger.info(f"[{chat_id}] Session已重置 by /start command.")
             return
@@ -58,6 +72,14 @@ class NoraController:
         try:
             if self.tui_callback: self.tui_callback(f"🏃 Handling new message...")
             await self.adapter.start_typing(chat_id)
+            
+            # --- 0. 保存用户消息到数据库 ---
+            self.message_history.add_message(
+                platform="telegram",
+                chat_id=chat_id,
+                role="user",
+                content=text
+            )
             
             # --- 1. RAG 记忆检索 (Memory Retrieval) ---
             # 只在没有被抢占的情况下检索，或者对最新的 text 进行检索
@@ -129,14 +151,19 @@ class NoraController:
             system_prompt = get_system_prompt(instructions)
 
             # --- 3. 执行循环 (Tool Execution Loop) ---
-            MAX_TURNS = 15
+            MAX_TURNS = 30
             current_turn = 0
             final_response_buffer = ""
             latest_tool_output = ""  # Safeguard: fallback to show tool output if LLM stays silent
             latest_meaningful_output = ""  # Only meaningful outputs (execute_skill, etc.)
             
-            # 临时历史，用于多轮工具调用，最后合并入主历史
-            temp_history = list(session["history"]) 
+            # 临时历史，从数据库加载持久化上下文
+            db_context = self.message_history.get_context_messages("telegram", chat_id)
+            temp_history = [
+                {"role": msg["role"], "content": msg["content"]}
+                for msg in db_context
+                if msg["role"] in ("user", "assistant", "system")
+            ]
 
             while current_turn < MAX_TURNS:
                 current_turn += 1
@@ -305,12 +332,63 @@ class NoraController:
             if final_response_buffer:
                 await self.adapter.send_message(chat_id, final_response_buffer)
             elif latest_meaningful_output:
-                # Fallback: LLM stayed silent; surface the latest meaningful tool output (e.g. skill result)
-                await self.adapter.send_message(chat_id, f"【执行结果】\n{latest_meaningful_output}")
+                # Fallback: LLM stayed silent; do one final LLM call to summarize the tool output
+                temp_history.append({
+                    "role": "user",
+                    "content": "【系统提示】工具已执行完毕，请根据以上工具输出，用自然语言向用户总结执行结果。不要直接输出原始命令行内容。"
+                })
+                stream = self.llm.chat_stream(
+                    system_prompt=system_prompt,
+                    user_prompt="请总结以上操作的执行结果。",
+                    history=temp_history,
+                    tools=[]
+                )
+                async for raw_chunk in stream:
+                    chunk = cast(Dict[str, Any], raw_chunk) if isinstance(raw_chunk, dict) else raw_chunk
+                    if isinstance(chunk, dict) and chunk.get("type") == "text":
+                        final_response_buffer += chunk["content"]
+                    elif isinstance(chunk, str):
+                        final_response_buffer += chunk
+                
+                if final_response_buffer:
+                    await self.adapter.send_message(chat_id, final_response_buffer)
+                else:
+                    # 真的没生成内容，发简短提示
+                    final_response_buffer = "任务已完成。"
+                    await self.adapter.send_message(chat_id, final_response_buffer)
             elif latest_tool_output:
-                # Last resort: show generic tool output but truncate to be less scary
-                brief = latest_tool_output[:500] + "..." if len(latest_tool_output) > 500 else latest_tool_output
-                await self.adapter.send_message(chat_id, f"任务已完成，但我没能生成摘要。\n<pre>{brief}</pre>")
+                # Last resort: LLM truly silent, summarize via one more call
+                temp_history.append({
+                    "role": "user",
+                    "content": f"【系统提示】工具输出如下，请用自然语言简要告诉用户结果：\n{latest_tool_output[:1000]}"
+                })
+                stream = self.llm.chat_stream(
+                    system_prompt=system_prompt,
+                    user_prompt="请简要总结操作结果。",
+                    history=temp_history,
+                    tools=[]
+                )
+                async for raw_chunk in stream:
+                    chunk = cast(Dict[str, Any], raw_chunk) if isinstance(raw_chunk, dict) else raw_chunk
+                    if isinstance(chunk, dict) and chunk.get("type") == "text":
+                        final_response_buffer += chunk["content"]
+                    elif isinstance(chunk, str):
+                        final_response_buffer += chunk
+                
+                if final_response_buffer:
+                    await self.adapter.send_message(chat_id, final_response_buffer)
+                else:
+                    final_response_buffer = "任务已完成。"
+                    await self.adapter.send_message(chat_id, final_response_buffer)
+            
+            # --- 4.5 保存助手回复到数据库 ---
+            if final_response_buffer:
+                self.message_history.add_message(
+                    platform="telegram",
+                    chat_id=chat_id,
+                    role="assistant",
+                    content=final_response_buffer
+                )
             
             # --- 5. RAG 记忆存储 (Memory Storage) ---
             if self.rag.enabled:
@@ -325,14 +403,11 @@ class NoraController:
                 if full_assistant_turn.strip():
                      asyncio.create_task(self._async_save_memory(full_assistant_turn.strip(), {"role": "assistant", "chat_id": chat_id}))
 
-            # Update session history with the multi-turn conversation from temp_history
+            # Update session history (in-memory cache, DB is source of truth)
             session["history"] = temp_history
             if final_response_buffer:
-                 # Append the final text response if it wasn't part of a tool call history
                  if not any(final_response_buffer in str(h.get('content', '')) for h in session["history"]):
                     session["history"].append({"role": "assistant", "content": final_response_buffer})
-            elif latest_meaningful_output:
-                session["history"].append({"role": "assistant", "content": f"【执行结果】\n{latest_meaningful_output}"})
 
             if len(session["history"]) > 20:
                 session["history"] = session["history"][-20:]

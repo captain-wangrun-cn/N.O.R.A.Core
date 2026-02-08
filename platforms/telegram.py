@@ -1,11 +1,12 @@
-from telegram import Update
-from telegram.ext import ApplicationBuilder, ContextTypes, CommandHandler, MessageHandler, filters
-from telegram.constants import ChatAction
-from typing import Callable, Any
+from telegram import Update, Message, InlineKeyboardMarkup, InlineKeyboardButton
+from telegram.ext import ApplicationBuilder, ContextTypes, CommandHandler, MessageHandler, filters, CallbackQueryHandler
+from telegram.constants import ChatAction, ParseMode
+from typing import Callable, Any, Optional, List, Dict
 import os
 import re
 import logging
 import io
+import asyncio
 
 from platforms.base import BaseAdapter
 from platforms.aggregator import MessageAggregator
@@ -30,6 +31,7 @@ class TelegramAdapter(BaseAdapter):
         self.application = ApplicationBuilder().token(token).build()
         self._message_handler: Callable[[str, str], Any] | None = None
         self._aggregator: MessageAggregator | None = None
+        self._reply_contexts: Dict[str, Dict] = {}  # 存储回复上下文 {chat_id: {msg_id: context}}
 
     def run(self, message_handler: Callable[[str, str], Any]):
         self._message_handler = message_handler
@@ -40,9 +42,17 @@ class TelegramAdapter(BaseAdapter):
 
         start_handler = CommandHandler('start', self._start_command)
         msg_handler = MessageHandler(filters.TEXT & (~filters.COMMAND), self._handle_incoming_message)
+        photo_handler = MessageHandler(filters.PHOTO, self._handle_photo)
+        document_handler = MessageHandler(filters.Document.ALL, self._handle_document)
+        sticker_handler = MessageHandler(filters.Sticker.ALL, self._handle_sticker)
+        callback_handler = CallbackQueryHandler(self._handle_callback)
         
         self.application.add_handler(start_handler)
         self.application.add_handler(msg_handler)
+        self.application.add_handler(photo_handler)
+        self.application.add_handler(document_handler)
+        self.application.add_handler(sticker_handler)
+        self.application.add_handler(callback_handler)
         
         print("Telegram Adapter is running...")
         self.application.run_polling(stop_signals=None)
@@ -57,8 +67,143 @@ class TelegramAdapter(BaseAdapter):
         chat_id = str(update.effective_chat.id)
         self.current_chat_id = chat_id # Set current chat_id
         text = update.message.text
+        
+        # 处理回复消息
+        reply_info = await self._extract_reply_info(update.message)
+        if reply_info:
+            text = f"[回复: {reply_info}]\n{text}"
+        
         if self._aggregator:
             await self._aggregator.add_message(chat_id, text)
+
+    async def _handle_photo(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """处理图片消息"""
+        chat_id = str(update.effective_chat.id)
+        self.current_chat_id = chat_id
+        
+        photo = update.message.photo[-1]  # 获取最高质量版本
+        caption = update.message.caption or ""
+        
+        # 下载图片
+        file = await photo.get_file()
+        file_path = f"downloads/telegram/photo_{photo.file_id}.jpg"
+        os.makedirs(os.path.dirname(file_path), exist_ok=True)
+        await file.download_to_drive(file_path)
+        
+        # 构造消息
+        reply_info = await self._extract_reply_info(update.message)
+        text = f"[图片: {file_path}]"
+        if caption:
+            text += f"\n{caption}"
+        if reply_info:
+            text = f"[回复: {reply_info}]\n{text}"
+        
+        if self._aggregator:
+            await self._aggregator.add_message(chat_id, text)
+        
+        logger.info(f"[{chat_id}] 收到图片: {file_path}")
+
+    async def _handle_document(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """处理文档消息"""
+        chat_id = str(update.effective_chat.id)
+        self.current_chat_id = chat_id
+        
+        document = update.message.document
+        caption = update.message.caption or ""
+        
+        # 下载文档
+        file = await document.get_file()
+        file_name = document.file_name or f"document_{document.file_id}"
+        file_path = f"downloads/telegram/{file_name}"
+        os.makedirs(os.path.dirname(file_path), exist_ok=True)
+        await file.download_to_drive(file_path)
+        
+        # 构造消息
+        reply_info = await self._extract_reply_info(update.message)
+        text = f"[文件: {file_path}]"
+        if caption:
+            text += f"\n{caption}"
+        if reply_info:
+            text = f"[回复: {reply_info}]\n{text}"
+        
+        if self._aggregator:
+            await self._aggregator.add_message(chat_id, text)
+        
+        logger.info(f"[{chat_id}] 收到文档: {file_path}")
+
+    async def _handle_sticker(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """处理贴纸消息"""
+        chat_id = str(update.effective_chat.id)
+        self.current_chat_id = chat_id
+        
+        sticker = update.message.sticker
+        emoji = sticker.emoji or "🎨"
+        set_name = sticker.set_name or "未知贴纸包"
+        
+        # 下载贴纸
+        file = await sticker.get_file()
+        ext = "webm" if sticker.is_video else "webp"
+        file_path = f"downloads/telegram/sticker_{sticker.file_id}.{ext}"
+        os.makedirs(os.path.dirname(file_path), exist_ok=True)
+        await file.download_to_drive(file_path)
+        
+        # 构造消息
+        reply_info = await self._extract_reply_info(update.message)
+        text = f"[贴纸: {emoji} 来自 {set_name}]\n[文件: {file_path}]"
+        if reply_info:
+            text = f"[回复: {reply_info}]\n{text}"
+        
+        if self._aggregator:
+            await self._aggregator.add_message(chat_id, text)
+        
+        logger.info(f"[{chat_id}] 收到贴纸: {emoji} from {set_name}")
+
+    async def _handle_callback(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """处理 inline keyboard 回调"""
+        query = update.callback_query
+        chat_id = str(query.message.chat_id)
+        callback_data = query.data
+        
+        # 确认回调
+        await query.answer()
+        
+        # 构造消息
+        text = f"[按钮点击: {callback_data}]"
+        
+        if self._aggregator:
+            await self._aggregator.add_message(chat_id, text)
+        
+        logger.info(f"[{chat_id}] 收到回调: {callback_data}")
+
+    async def _extract_reply_info(self, message: Message) -> Optional[str]:
+        """提取回复消息的信息"""
+        if not message.reply_to_message:
+            return None
+        
+        replied = message.reply_to_message
+        sender = replied.from_user.first_name if replied.from_user else "未知"
+        
+        # 提取原消息内容摘要
+        if replied.text:
+            content = replied.text[:100] + "..." if len(replied.text) > 100 else replied.text
+        elif replied.caption:
+            content = replied.caption[:100] + "..." if len(replied.caption) > 100 else replied.caption
+        elif replied.photo:
+            content = "[图片]"
+        elif replied.document:
+            content = f"[文档: {replied.document.file_name}]"
+        elif replied.sticker:
+            content = f"[贴纸: {replied.sticker.emoji}]"
+        elif replied.voice:
+            content = "[语音]"
+        elif replied.video:
+            content = "[视频]"
+        elif replied.audio:
+            content = "[音频]"
+        else:
+            content = "[消息]"
+        
+        return f"{sender}: {content}"
 
     # --- 富媒体自动检测 ---
     # 文件扩展名 → 媒体类型映射
@@ -327,3 +472,242 @@ class TelegramAdapter(BaseAdapter):
     async def stop_typing(self, chat_id: str):
         # Telegram doesn't have a "stop typing" action, it's implicit.
         pass
+
+    async def send_sticker(self, chat_id: str, sticker: str) -> str:
+        """
+        发送贴纸
+        :param sticker: 贴纸文件ID 或 本地文件路径
+        """
+        try:
+            if os.path.isfile(sticker):
+                with open(sticker, 'rb') as f:
+                    message = await self.application.bot.send_sticker(chat_id=chat_id, sticker=f)
+            else:
+                message = await self.application.bot.send_sticker(chat_id=chat_id, sticker=sticker)
+            
+            logger.info(f"[{chat_id}] 已发送贴纸")
+            return str(message.message_id)
+        except Exception as e:
+            logger.error(f"[{chat_id}] 发送贴纸失败: {e}")
+            raise
+
+    async def send_with_buttons(self, chat_id: str, text: str, buttons: List[List[Dict[str, str]]]) -> str:
+        """
+        发送带按钮的消息
+        :param buttons: 按钮布局 [[{"text": "按钮1", "callback_data": "btn1"}]]
+        """
+        try:
+            keyboard = []
+            for row in buttons:
+                keyboard_row = []
+                for btn in row:
+                    keyboard_row.append(
+                        InlineKeyboardButton(text=btn.get("text", ""), callback_data=btn.get("callback_data", ""))
+                    )
+                keyboard.append(keyboard_row)
+            
+            reply_markup = InlineKeyboardMarkup(keyboard)
+            message = await self.application.bot.send_message(
+                chat_id=chat_id,
+                text=text,
+                reply_markup=reply_markup
+            )
+            
+            logger.info(f"[{chat_id}] 已发送带按钮的消息")
+            return str(message.message_id)
+        except Exception as e:
+            logger.error(f"[{chat_id}] 发送按钮消息失败: {e}")
+            raise
+
+    async def edit_message(self, chat_id: str, message_id: str, new_text: str) -> bool:
+        """编辑已发送的消息"""
+        try:
+            await self.application.bot.edit_message_text(
+                chat_id=chat_id,
+                message_id=int(message_id),
+                text=new_text
+            )
+            logger.info(f"[{chat_id}] 已编辑消息 {message_id}")
+            return True
+        except Exception as e:
+            logger.error(f"[{chat_id}] 编辑消息失败: {e}")
+            return False
+
+    async def delete_message(self, chat_id: str, message_id: str) -> bool:
+        """删除消息"""
+        try:
+            await self.application.bot.delete_message(
+                chat_id=chat_id,
+                message_id=int(message_id)
+            )
+            logger.info(f"[{chat_id}] 已删除消息 {message_id}")
+            return True
+        except Exception as e:
+            logger.error(f"[{chat_id}] 删除消息失败: {e}")
+            return False
+
+    async def get_chat_info(self, chat_id: str) -> Optional[Dict]:
+        """获取聊天信息"""
+        try:
+            chat = await self.application.bot.get_chat(chat_id=chat_id)
+            info = {
+                "id": chat.id,
+                "type": chat.type,
+                "title": chat.title,
+                "username": chat.username,
+                "first_name": chat.first_name,
+                "last_name": chat.last_name,
+                "description": chat.description,
+                "member_count": None
+            }
+            
+            # 尝试获取成员数（仅群组）
+            if chat.type in ["group", "supergroup"]:
+                try:
+                    count = await self.application.bot.get_chat_member_count(chat_id=chat_id)
+                    info["member_count"] = count
+                except:
+                    pass
+            
+            logger.info(f"[{chat_id}] 获取聊天信息成功")
+            return info
+        except Exception as e:
+            logger.error(f"[{chat_id}] 获取聊天信息失败: {e}")
+            return None
+
+    async def get_user_profile_photos(self, user_id: str, limit: int = 1) -> List[str]:
+        """获取用户头像照片"""
+        try:
+            photos = await self.application.bot.get_user_profile_photos(user_id=int(user_id), limit=limit)
+            photo_paths = []
+            
+            for i, photo_list in enumerate(photos.photos):
+                if photo_list:
+                    photo = photo_list[-1]  # 最高质量
+                    file = await photo.get_file()
+                    file_path = f"downloads/telegram/profile_{user_id}_{i}.jpg"
+                    os.makedirs(os.path.dirname(file_path), exist_ok=True)
+                    await file.download_to_drive(file_path)
+                    photo_paths.append(file_path)
+            
+            logger.info(f"获取用户 {user_id} 的头像: {len(photo_paths)} 张")
+            return photo_paths
+        except Exception as e:
+            logger.error(f"获取用户头像失败: {e}")
+            return []
+
+    async def pin_message(self, chat_id: str, message_id: str, disable_notification: bool = False) -> bool:
+        """置顶消息"""
+        try:
+            await self.application.bot.pin_chat_message(
+                chat_id=chat_id,
+                message_id=int(message_id),
+                disable_notification=disable_notification
+            )
+            logger.info(f"[{chat_id}] 已置顶消息 {message_id}")
+            return True
+        except Exception as e:
+            logger.error(f"[{chat_id}] 置顶消息失败: {e}")
+            return False
+
+    async def unpin_message(self, chat_id: str, message_id: Optional[str] = None) -> bool:
+        """取消置顶消息"""
+        try:
+            if message_id:
+                await self.application.bot.unpin_chat_message(
+                    chat_id=chat_id,
+                    message_id=int(message_id)
+                )
+            else:
+                await self.application.bot.unpin_all_chat_messages(chat_id=chat_id)
+            logger.info(f"[{chat_id}] 已取消置顶")
+            return True
+        except Exception as e:
+            logger.error(f"[{chat_id}] 取消置顶失败: {e}")
+            return False
+
+    async def send_poll(self, chat_id: str, question: str, options: List[str], 
+                       is_anonymous: bool = True, allows_multiple_answers: bool = False) -> str:
+        """发送投票"""
+        try:
+            message = await self.application.bot.send_poll(
+                chat_id=chat_id,
+                question=question,
+                options=options,
+                is_anonymous=is_anonymous,
+                allows_multiple_answers=allows_multiple_answers
+            )
+            logger.info(f"[{chat_id}] 已发送投票: {question}")
+            return str(message.message_id)
+        except Exception as e:
+            logger.error(f"[{chat_id}] 发送投票失败: {e}")
+            raise
+
+    async def send_contact(self, chat_id: str, phone_number: str, first_name: str, 
+                          last_name: Optional[str] = None) -> str:
+        """发送联系人"""
+        try:
+            message = await self.application.bot.send_contact(
+                chat_id=chat_id,
+                phone_number=phone_number,
+                first_name=first_name,
+                last_name=last_name
+            )
+            logger.info(f"[{chat_id}] 已发送联系人: {first_name}")
+            return str(message.message_id)
+        except Exception as e:
+            logger.error(f"[{chat_id}] 发送联系人失败: {e}")
+            raise
+
+    async def send_location(self, chat_id: str, latitude: float, longitude: float) -> str:
+        """发送位置"""
+        try:
+            message = await self.application.bot.send_location(
+                chat_id=chat_id,
+                latitude=latitude,
+                longitude=longitude
+            )
+            logger.info(f"[{chat_id}] 已发送位置: ({latitude}, {longitude})")
+            return str(message.message_id)
+        except Exception as e:
+            logger.error(f"[{chat_id}] 发送位置失败: {e}")
+            raise
+
+    async def forward_message(self, from_chat_id: str, to_chat_id: str, message_id: str) -> str:
+        """转发消息"""
+        try:
+            message = await self.application.bot.forward_message(
+                chat_id=to_chat_id,
+                from_chat_id=from_chat_id,
+                message_id=int(message_id)
+            )
+            logger.info(f"转发消息 {message_id} 从 {from_chat_id} 到 {to_chat_id}")
+            return str(message.message_id)
+        except Exception as e:
+            logger.error(f"转发消息失败: {e}")
+            raise
+
+    async def get_sticker_set(self, name: str) -> Optional[Dict]:
+        """获取贴纸包信息"""
+        try:
+            sticker_set = await self.application.bot.get_sticker_set(name=name)
+            info = {
+                "name": sticker_set.name,
+                "title": sticker_set.title,
+                "sticker_type": sticker_set.sticker_type,
+                "sticker_count": len(sticker_set.stickers),
+                "stickers": [
+                    {
+                        "file_id": s.file_id,
+                        "emoji": s.emoji,
+                        "is_animated": s.is_animated,
+                        "is_video": s.is_video
+                    }
+                    for s in sticker_set.stickers
+                ]
+            }
+            logger.info(f"获取贴纸包信息: {name} ({len(sticker_set.stickers)} 个贴纸)")
+            return info
+        except Exception as e:
+            logger.error(f"获取贴纸包失败: {e}")
+            return None

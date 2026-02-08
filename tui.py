@@ -8,6 +8,9 @@ class TUI(App):
 
     CSS_PATH = "tui.css"
     BINDINGS = [("d", "toggle_dark", "Toggle dark mode")]
+    
+    # Textual dark mode support
+    dark: bool = True  # Default to dark mode
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)

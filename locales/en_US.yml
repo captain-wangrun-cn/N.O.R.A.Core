@@ -24,3 +24,4 @@ roles:
   smart: "smart (for complex reasoning)"
   fast: "fast (for chat and simple tasks)"
   coder: "coder (for code generation)"
+  summary: "summary (for message history compression)"
