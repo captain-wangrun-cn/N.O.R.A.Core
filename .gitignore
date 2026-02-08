@@ -9,3 +9,5 @@ config.yml
 *.log
 logs/
 nora_state.json
+memory/message_history.py
+memory/test_timestamp.db

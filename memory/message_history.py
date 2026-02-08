@@ -110,12 +110,53 @@ class MessageHistory:
         """
         添加一条消息
         
+        自动在适当时机插入时间戳:
+        - 当距离上一条带时间戳的消息超过15分钟时
+        - 时间戳格式: [YYYY-MM-DD HH:MM]
+        
         :return: 消息ID
         """
         conn = sqlite3.connect(str(self.db_path))
         cursor = conn.cursor()
         
         timestamp = datetime.now().timestamp()
+        
+        # 检查是否需要插入时间戳
+        should_add_timestamp = False
+        if role == "user":  # 仅在用户消息中插入时间
+            # 首先查找最后一条有时间戳标记的消息
+            cursor.execute("""
+                SELECT timestamp FROM messages
+                WHERE platform = ? AND chat_id = ? 
+                AND json_extract(metadata, '$.has_timestamp') = 1
+                ORDER BY timestamp DESC
+                LIMIT 1
+            """, (platform, chat_id))
+            
+            last_timestamped_msg = cursor.fetchone()
+            
+            TIME_THRESHOLD = 15 * 60  # 15分钟
+            
+            if last_timestamped_msg:
+                # 有带时间戳的消息，检查距离现在是否超过15分钟
+                time_since_last_timestamp = timestamp - last_timestamped_msg[0]
+                if time_since_last_timestamp >= TIME_THRESHOLD:
+                    should_add_timestamp = True
+            else:
+                # 没有任何带时间戳的消息，这是第一条或清空后的第一条
+                should_add_timestamp = True
+        
+        # 如果需要，在内容前添加时间戳
+        original_content = content
+        if should_add_timestamp:
+            time_str = datetime.fromtimestamp(timestamp).strftime("%Y-%m-%d %H:%M")
+            content = f"[{time_str}] {content}"
+            # 在元数据中标记此消息包含时间戳
+            if metadata is None:
+                metadata = {}
+            metadata["has_timestamp"] = True
+            logger.debug(f"[{platform}/{chat_id}] 插入时间戳: {time_str}")
+        
         metadata_json = json.dumps(metadata) if metadata else None
         
         cursor.execute("""
@@ -130,7 +171,13 @@ class MessageHistory:
         logger.debug(f"[{platform}/{chat_id}] 添加消息 #{message_id}: {role}")
         
         # 异步触发压缩检查（不阻塞）
-        asyncio.create_task(self._check_and_compress(platform, chat_id))
+        # 只在有运行中的事件循环时才创建任务
+        try:
+            asyncio.create_task(self._check_and_compress(platform, chat_id))
+        except RuntimeError:
+            # 没有运行中的事件循环，跳过压缩检查
+            # 这在测试或同步环境中是正常的
+            pass
         
         return message_id
     
