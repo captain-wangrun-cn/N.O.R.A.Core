@@ -37,6 +37,16 @@ class ColoredFormatter(logging.Formatter):
         return super().format(record)
 
 
+class SafeFormatter(logging.Formatter):
+    """Formatter that safely handles missing chat_id attribute."""
+    
+    def format(self, record):
+        # Ensure chat_id exists (fallback to 'SYSTEM')
+        if not hasattr(record, 'chat_id'):
+            record.chat_id = 'SYSTEM'
+        return super().format(record)
+
+
 def setup_logging(console_level=logging.WARNING, file_level=logging.DEBUG):
     """
     Setup centralized logging with console and file handlers.
@@ -71,7 +81,7 @@ def setup_logging(console_level=logging.WARNING, file_level=logging.DEBUG):
         encoding='utf-8'
     )
     main_file_handler.setLevel(file_level)
-    file_formatter = logging.Formatter(
+    file_formatter = SafeFormatter(
         fmt='%(asctime)s - %(name)s - %(levelname)s - [%(chat_id)s] %(funcName)s:%(lineno)d - %(message)s',
         datefmt='%Y-%m-%d %H:%M:%S'
     )
