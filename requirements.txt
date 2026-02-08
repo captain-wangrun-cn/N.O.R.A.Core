@@ -10,3 +10,4 @@ questionary
 PyYAML
 Jinja2
 textual
+tavily-python  # Web search API (optional: will fallback to HTTP if not installed)

@@ -199,6 +199,48 @@ class StepEmbedding(ConfigStep):
         }
         return True
 
+class StepTavily(ConfigStep):
+    """Tavily 网络搜索 API 配置"""
+    def run(self):
+        tavily_cfg = self.state.get('tavily', {})
+        
+        # 询问是否配置 Tavily
+        configure = questionary.confirm(
+            "是否配置 Tavily 网络搜索 API？(可选，用于 web_search 技能)",
+            default=bool(tavily_cfg.get('api_key'))
+        ).ask()
+        
+        if not configure:
+            # 如果用户选择不配置，保持现有配置或设置为空
+            return True
+        
+        # API Key
+        key_def = tavily_cfg.get('api_key', '')
+        api_key = questionary.password(
+            "请输入 Tavily API Key (从 https://tavily.com/ 获取):",
+            default=key_def
+        ).ask()
+        
+        if api_key is None:
+            return False
+        
+        # Timeout
+        timeout_def = str(tavily_cfg.get('timeout', 10))
+        timeout = questionary.text(
+            "API 请求超时时间（秒）:",
+            default=timeout_def
+        ).ask()
+        
+        if timeout is None:
+            return False
+        
+        # Save
+        self.state['tavily'] = {
+            'api_key': api_key,
+            'timeout': int(timeout)
+        }
+        return True
+
 class StepModels(ConfigStep):
     def select_model(self, model_list, role_key):
         role_name = t(f'roles.{role_key}')
@@ -265,10 +307,11 @@ def run_wizard():
                 'gemini_key': cfg.get("llm", {}).get("api_keys", {}).get("gemini"),
                 'openai_key': cfg.get("llm", {}).get("api_keys", {}).get("openai"),
                 'models': cfg.get("llm", {}).get("models", {}),
-                'memory': cfg.get("memory", {})
+                'memory': cfg.get("memory", {}),
+                'tavily': cfg.get("tavily", {})
             }
 
-    steps = [StepTelegram, StepWorkspace, StepProvider, StepAPIKeys, StepDatabase, StepEmbedding, StepModels]
+    steps = [StepTelegram, StepWorkspace, StepProvider, StepAPIKeys, StepDatabase, StepEmbedding, StepTavily, StepModels]
     current_step = 0
     
     while current_step < len(steps):
@@ -300,6 +343,10 @@ def run_wizard():
         },
         'memory': state.get('memory', {})
     }
+    
+    # 添加 Tavily 配置（如果存在）
+    if state.get('tavily'):
+        final_config['tavily'] = state['tavily']
 
     print(t('wizard.summary_title'))
     print(yaml.dump(final_config, indent=2, allow_unicode=True))

@@ -54,3 +54,8 @@ memory:
     api_key: "YOUR_SILICONFLOW_API_KEY"
     model: "BAAI/bge-m3" # Recommended for RAG
     dimensions: 1024 # BGE-M3 output dimensions
+
+# Tavily 网络搜索 API (可选)
+tavily:
+  api_key: "YOUR_TAVILY_API_KEY" # 从 https://tavily.com/ 获取
+  timeout: 10 # API 请求超时时间（秒）
