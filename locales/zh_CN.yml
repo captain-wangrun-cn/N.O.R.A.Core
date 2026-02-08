@@ -2,6 +2,7 @@
 wizard:
   welcome: "欢迎使用 N.O.R.A. Core YAML 配置向导！"
   token_prompt: "请输入您的 Telegram Bot Token:"
+  workspace_prompt: "工作区路径 (存储技能、下载等，默认 ~/.nora/workspace):"
   provider_prompt: "您将主要使用哪个 LLM 服务商？"
   gemini_key_prompt: "请输入您的 Google Gemini API Key:"
   openai_key_prompt: "请输入您的 OpenAI API Key:"

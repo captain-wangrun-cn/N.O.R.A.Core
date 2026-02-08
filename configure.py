@@ -71,6 +71,21 @@ class StepTelegram(ConfigStep):
         ).ask()
         return self.state['telegram_token'] is not None
 
+class StepWorkspace(ConfigStep):
+    def run(self):
+        workspace_def = self.state.get('workspace', {}).get('root_path', '~/.nora/workspace')
+        
+        workspace_path = questionary.text(
+            t('wizard.workspace_prompt'),
+            default=workspace_def
+        ).ask()
+        
+        if workspace_path is None:
+            return False
+        
+        self.state['workspace'] = {'root_path': workspace_path}
+        return True
+
 class StepProvider(ConfigStep):
     def run(self):
         choices = ["gemini", "openai", t('wizard.back_option')]
@@ -236,6 +251,7 @@ def run_wizard():
             cfg = yaml.safe_load(f) or {}
             state = {
                 'telegram_token': cfg.get("telegram", {}).get("bot_token"),
+                'workspace': cfg.get("workspace", {}),
                 'provider': cfg.get("llm", {}).get("provider"),
                 'gemini_key': cfg.get("llm", {}).get("api_keys", {}).get("gemini"),
                 'openai_key': cfg.get("llm", {}).get("api_keys", {}).get("openai"),
@@ -243,7 +259,7 @@ def run_wizard():
                 'memory': cfg.get("memory", {})
             }
 
-    steps = [StepTelegram, StepProvider, StepAPIKeys, StepDatabase, StepEmbedding, StepModels]
+    steps = [StepTelegram, StepWorkspace, StepProvider, StepAPIKeys, StepDatabase, StepEmbedding, StepModels]
     current_step = 0
     
     while current_step < len(steps):
@@ -263,6 +279,7 @@ def run_wizard():
 
     # --- 确认保存 ---
     final_config = {
+        'workspace': state.get('workspace', {'root_path': '~/.nora/workspace'}),
         'telegram': {'bot_token': state.get('telegram_token')},
         'llm': {
             'provider': state.get('provider'),

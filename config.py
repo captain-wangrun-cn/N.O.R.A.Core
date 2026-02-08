@@ -41,3 +41,7 @@ def get_message_history_config():
     """Gets the message history configuration."""
     return get_config().get("memory", {}).get("message_history", {})
 
+def get_workspace_config():
+    """Gets the workspace configuration."""
+    return get_config().get("workspace", {})
+

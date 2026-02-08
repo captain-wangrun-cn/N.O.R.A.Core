@@ -8,13 +8,16 @@ import logging
 import inspect
 from typing import List, Dict, Callable, Any
 from platforms.base import BaseAdapter
+from workspace_config import get_workspace_manager
 
 logger = logging.getLogger(__name__)
 
 # --- Workspace & Security Constants ---
-WORKSPACE_ROOT = os.path.abspath(os.getcwd())  # Project root (where main.py runs)
-SKILLS_DIR = os.path.join(WORKSPACE_ROOT, "skills")
-DOWNLOADS_DIR = os.path.join(WORKSPACE_ROOT, "downloads")
+# 获取工作区管理器，会自动初始化工作区
+workspace_manager = get_workspace_manager()
+WORKSPACE_ROOT = workspace_manager.root
+SKILLS_DIR = workspace_manager.skills_dir
+DOWNLOADS_DIR = workspace_manager.downloads_dir
 
 # Files that LLM should NEVER read (contain secrets)
 SENSITIVE_FILES = {"config.yml", "config.yaml", ".env", ".env.local"}

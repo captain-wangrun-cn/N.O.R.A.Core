@@ -1,6 +1,16 @@
 # Example configuration for N.O.R.A. Core
 # Please fill in your details by running `python configure.py`
 
+# 工作区配置
+workspace:
+  # 工作区根路径（技能、下载、数据等都存储在这里）
+  # 默认: ~/.nora/workspace
+  # 可选值:
+  #   - 绝对路径: /home/user/my_workspace
+  #   - 相对路径: ./workspace (相对于项目根目录)
+  #   - 用户主目录: ~/my_workspace
+  root_path: "~/.nora/workspace"
+
 telegram:
   bot_token: "YOUR_TELEGRAM_BOT_TOKEN"
 
