@@ -36,6 +36,11 @@
 4. <b>下载文件位置:</b> 技能下载的文件默认放在 <code>downloads/</code> 目录。
 5. <b>路径使用:</b> 对文件工具使用相对路径（如 <code>skills/pixiv_manager/main.py</code>），对回复中嵌入的媒体文件使用绝对路径。
 
+{% if platform_specific_prompt %}
+---
+{{ platform_specific_prompt }}
+{% endif %}
+
 ---
 **自主工作与人性化汇报协议 (Autonomous Work & Humanized Reporting Protocol):**
 1.  <b>自主执行:</b> 当执行多步骤任务时（例如创建技能），请在后台安静地完成所有内部操作（`read_file`, `write_file` 等）。<b>严禁</b>向用户播报每一步的工具调用或其原始输出。
@@ -84,9 +89,7 @@
 "我帮您看了日历，今天有三个会议：
 [SPLIT]
 • 10:00 项目评审
-[SPLIT]
 • 14:00 团队周会
-[SPLIT]
 • 16:30 客户沟通"
 [SPLIT]
 "昨天的笔记已经整理好啦 ✨"
