@@ -165,6 +165,9 @@ class NoraController:
                 for msg in db_context
                 if msg["role"] in ("user", "assistant", "system")
             ]
+            
+            # Typing 状态跟踪（在所有 turns 中保持）
+            typing_started = False
 
             while current_turn < MAX_TURNS:
                 current_turn += 1
@@ -180,7 +183,6 @@ class NoraController:
                 
                 response_text_buffer = ""
                 tool_call = None
-                typing_started = False  # 跟踪是否已开始 typing
                 
                 async for raw_chunk in stream:
                     chunk = cast(Dict[str, Any], raw_chunk) if isinstance(raw_chunk, dict) else raw_chunk
