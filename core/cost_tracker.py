@@ -23,13 +23,76 @@ class CostTracker:
     
     # Gemini 官方定价 (2026-02, USD per million tokens)
     # https://ai.google.dev/pricing
+    # 上下文长度: <=200k (-short), >200k (-long)
     GEMINI_PRICES = {
+        # === Gemini 3 模型 (预览版) ===
+        # Pro 预览版 - 提示 <=200k
+        "gemini-3-pro-preview": {"input": 2.00, "output": 12.00},
+        "gemini-3-pro-preview-short": {"input": 2.00, "output": 12.00},
+        # Pro 预览版 - 提示 >200k
+        "gemini-3-pro-preview-long": {"input": 4.00, "output": 18.00},
+        
+        # Flash 预览版 - 文字/图片/视频
+        "gemini-3-flash-preview": {"input": 0.50, "output": 3.00},
+        "gemini-3-flash-preview-short": {"input": 0.50, "output": 3.00},
+        # Flash 预览版 - 音频
+        "gemini-3-flash-preview-audio": {"input": 1.00, "output": 3.00},
+        
+        # === Gemini 2.5 稳定版 ===
+        # Pro - 提示 <=200k
+        "gemini-2.5-pro": {"input": 1.25, "output": 10.00},
+        "gemini-2.5-pro-short": {"input": 1.25, "output": 10.00},
+        # Pro - 提示 >200k
+        "gemini-2.5-pro-long": {"input": 2.50, "output": 15.00},
+        
+        # Flash - 文字/图片/视频
+        "gemini-2.5-flash": {"input": 0.30, "output": 2.50},
+        "gemini-2.5-flash-short": {"input": 0.30, "output": 2.50},
+        # Flash - 音频
+        "gemini-2.5-flash-audio": {"input": 1.00, "output": 2.50},
+        
+        # Flash-Lite - 文字/图片/视频
+        "gemini-2.5-flash-lite": {"input": 0.10, "output": 0.40},
+        "gemini-2.5-flash-lite-short": {"input": 0.10, "output": 0.40},
+        # Flash-Lite - 音频
+        "gemini-2.5-flash-lite-audio": {"input": 0.30, "output": 0.40},
+        
+        # === Gemini 2.5 预览版 ===
+        "gemini-2.5-flash-preview-09-2025": {"input": 0.30, "output": 2.50},
+        "gemini-2.5-flash-lite-preview-09-2025": {"input": 0.10, "output": 0.40},
+        
+        # === Gemini 2.0 稳定版 ===
+        # Flash - 文字/图片/视频
+        "gemini-2.0-flash": {"input": 0.10, "output": 0.40},
+        "gemini-2.0-flash-short": {"input": 0.10, "output": 0.40},
+        # Flash - 音频
+        "gemini-2.0-flash-audio": {"input": 0.70, "output": 0.40},
+        
+        # Flash-Lite - 最经济的模型
+        "gemini-2.0-flash-lite": {"input": 0.075, "output": 0.30},
+        
+        # === Gemini 1.5 模型 (旧版本，仍保留向后兼容) ===
+        # Pro - 短上下文 (128k context)
         "gemini-1.5-pro-latest": {"input": 1.25, "output": 5.00},
         "gemini-1.5-pro": {"input": 1.25, "output": 5.00},
+        "gemini-1.5-pro-short": {"input": 1.25, "output": 5.00},
+        "gemini-1.5-pro-latest-short": {"input": 1.25, "output": 5.00},
+        # Pro - 长上下文 (>200k, 最高2M)
+        "gemini-1.5-pro-long": {"input": 2.50, "output": 10.00},
+        "gemini-1.5-pro-latest-long": {"input": 2.50, "output": 10.00},
+        
+        # Flash - 短上下文 (128k context)
         "gemini-1.5-flash-latest": {"input": 0.075, "output": 0.30},
         "gemini-1.5-flash": {"input": 0.075, "output": 0.30},
-        "gemini-2.0-flash-exp": {"input": 0.00, "output": 0.00},  # 免费实验版
-        "gemini-exp-1206": {"input": 0.00, "output": 0.00},  # 免费实验版
+        "gemini-1.5-flash-short": {"input": 0.075, "output": 0.30},
+        "gemini-1.5-flash-latest-short": {"input": 0.075, "output": 0.30},
+        # Flash - 长上下文 (>200k, 最高1M)
+        "gemini-1.5-flash-long": {"input": 0.15, "output": 0.60},
+        "gemini-1.5-flash-latest-long": {"input": 0.15, "output": 0.60},
+        
+        # === 免费实验版 ===
+        "gemini-2.0-flash-exp": {"input": 0.00, "output": 0.00},
+        "gemini-exp-1206": {"input": 0.00, "output": 0.00},
     }
     
     # OpenAI 官方定价 (2026-02, USD per million tokens)
@@ -60,7 +123,23 @@ class CostTracker:
         
         self.db_path = db_path
         self.custom_prices = custom_prices or {}
+        
+        # 对于 :memory: 数据库，需要保持持久连接
+        self._persistent_conn = None
+        if self.db_path == ":memory:":
+            self._persistent_conn = sqlite3.connect(self.db_path)
+        
         self._init_db()
+    
+    def _get_connection(self):
+        """获取数据库连接"""
+        if self._persistent_conn:
+            return self._persistent_conn
+        return sqlite3.connect(self.db_path)
+    
+    def _should_close_connection(self):
+        """是否应该关闭连接（文件数据库需要，内存数据库不需要）"""
+        return self._persistent_conn is None
         
     def _init_db(self):
         """初始化数据库表"""
@@ -95,6 +174,32 @@ class CostTracker:
                 CREATE INDEX IF NOT EXISTS idx_model ON usage_log(model)
             """)
     
+    def _normalize_model_name(self, provider: str, model: str, input_tokens: int) -> str:
+        """
+        根据上下文长度规范化模型名称
+        
+        Args:
+            provider: 提供商 (gemini/openai)
+            model: 原始模型名称
+            input_tokens: 输入 token 数
+            
+        Returns:
+            规范化的模型名称 (可能添加 -short 或 -long 后缀)
+        """
+        # 只有 Gemini 1.5 Pro/Flash 需要区分上下文长度
+        if provider == "gemini" and ("1.5-pro" in model or "1.5-flash" in model):
+            # 如果已经有后缀了,直接返回
+            if model.endswith("-short") or model.endswith("-long"):
+                return model
+            
+            # 根据输入 token 数判断
+            if input_tokens > 200_000:
+                return f"{model}-long"
+            else:
+                return f"{model}-short"
+        
+        return model
+    
     def get_model_price(self, provider: str, model: str) -> Optional[Dict[str, float]]:
         """
         获取模型价格（优先自定义配置，其次内置价格）
@@ -106,15 +211,25 @@ class CostTracker:
         if model in self.custom_prices:
             return self.custom_prices[model]
         
-        # 内置价格
+        # 内置价格 - 精确匹配优先，然后模糊匹配
         if provider == "gemini":
-            for model_pattern, price in self.GEMINI_PRICES.items():
+            # 先尝试精确匹配
+            if model in self.GEMINI_PRICES:
+                return self.GEMINI_PRICES[model]
+            # 再尝试模糊匹配（从最长的开始，避免短模式误匹配）
+            sorted_patterns = sorted(self.GEMINI_PRICES.keys(), key=len, reverse=True)
+            for model_pattern in sorted_patterns:
                 if model_pattern in model:
-                    return price
+                    return self.GEMINI_PRICES[model_pattern]
         elif provider == "openai":
-            for model_pattern, price in self.OPENAI_PRICES.items():
+            # 先尝试精确匹配
+            if model in self.OPENAI_PRICES:
+                return self.OPENAI_PRICES[model]
+            # 再尝试模糊匹配
+            sorted_patterns = sorted(self.OPENAI_PRICES.keys(), key=len, reverse=True)
+            for model_pattern in sorted_patterns:
                 if model_pattern in model:
-                    return price
+                    return self.OPENAI_PRICES[model_pattern]
         
         logger.warning(f"No price data for {provider}/{model}. Cost will be 0.")
         return None
@@ -132,7 +247,9 @@ class CostTracker:
         Returns:
             (input_cost, output_cost, total_cost) in USD
         """
-        prices = self.get_model_price(provider, model)
+        # 根据上下文长度规范化模型名称
+        normalized_model = self._normalize_model_name(provider, model, input_tokens)
+        prices = self.get_model_price(provider, normalized_model)
         
         if not prices:
             return 0.0, 0.0, 0.0
@@ -157,33 +274,41 @@ class CostTracker:
         
         Args:
             provider: 提供商 (gemini/openai)
-            model: 模型名称
+            model: 模型名称 (会自动根据上下文长度规范化)
             input_tokens: 输入 token 数
             output_tokens: 输出 token 数
             model_alias: 模型别名 (smart/fast/coder/summary)
             context: 上下文说明 (如 "chat", "tool_call", "summary")
         """
+        # 根据上下文长度规范化模型名称
+        normalized_model = self._normalize_model_name(provider, model, input_tokens)
+        
         input_cost, output_cost, total_cost = self.calculate_cost(
             provider, model, input_tokens, output_tokens
         )
         
         timestamp = datetime.now().isoformat()
         
-        with sqlite3.connect(self.db_path) as conn:
+        conn = self._get_connection()
+        try:
             conn.execute("""
                 INSERT INTO usage_log 
                 (timestamp, provider, model, model_alias, input_tokens, output_tokens,
                  input_cost, output_cost, total_cost, context)
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """, (
-                timestamp, provider, model, model_alias,
+                timestamp, provider, normalized_model, model_alias,
                 input_tokens, output_tokens,
                 input_cost, output_cost, total_cost,
                 context
             ))
+            conn.commit()
+        finally:
+            if self._should_close_connection():
+                conn.close()
         
         logger.info(
-            f"[Cost] {provider}/{model_alias or model}: "
+            f"[Cost] {provider}/{model_alias or normalized_model}: "
             f"{input_tokens} in + {output_tokens} out = ${total_cost:.6f}"
         )
     
