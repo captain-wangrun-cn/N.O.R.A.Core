@@ -72,7 +72,7 @@ class NoraController:
         
         try:
             if self.tui_callback: self.tui_callback(f"🏃 Handling new message...")
-            await self.adapter.start_typing(chat_id)
+            # 初始不显示 typing，等待判断是否需要工具调用
             
             # --- 0. 保存用户消息到数据库 ---
             self.message_history.add_message(
@@ -180,6 +180,7 @@ class NoraController:
                 
                 response_text_buffer = ""
                 tool_call = None
+                typing_started = False  # 跟踪是否已开始 typing
                 
                 async for raw_chunk in stream:
                     chunk = cast(Dict[str, Any], raw_chunk) if isinstance(raw_chunk, dict) else raw_chunk
@@ -187,6 +188,12 @@ class NoraController:
                     if isinstance(chunk, dict):
                         if chunk["type"] == "text":
                             content = chunk["content"]
+                            
+                            # 开始接收文本内容时，显示 typing 状态（表示在聊天）
+                            if not typing_started:
+                                await self.adapter.start_typing(chat_id)
+                                typing_started = True
+                            
                             response_text_buffer += content
                             
                             # Real-time splitting logic
@@ -204,6 +211,8 @@ class NoraController:
                         
                         elif chunk["type"] == "tool_call":
                             tool_call = chunk
+                            # 检测到工具调用，停止 typing（不再是聊天状态）
+                            # Telegram 的 typing 状态会自动过期，无需显式停止
                             # IMMEDIATELY clear text buffer if tool call is detected, to prevent leaking thoughts.
                             if response_text_buffer:
                                 # final_response_buffer += response_text_buffer # This was the source of the leak
