@@ -58,12 +58,37 @@ python cli.py --clean-rag      # Clean RAG data
 
 See [CLI Usage Guide](docs/CLI_USAGE.md) for detailed documentation.
 
-## 📂 Structure
+## � Cost Tracking
+
+N.O.R.A. Core automatically tracks LLM API usage and costs:
+
+- **Auto-pricing**: Built-in pricing for Gemini and OpenAI models
+- **Custom pricing**: Support for custom model prices
+- **Detailed stats**: View costs by time period, model, or alias
+
+```bash
+# View total costs
+python view_costs.py
+
+# View today's costs
+python view_costs.py --today
+
+# View costs for specific provider
+python view_costs.py --provider gemini
+
+# View costs for specific model alias
+python view_costs.py --alias smart
+```
+
+Cost data is stored in `<workspace>/cost_tracker.db` and can be configured via the CLI wizard.
+
+## �📂 Structure
 
 - `main.py`: Entry point and Bot Controller.
 - `brain/`: LLM routing and logic.
+- `core/`: Core components (Controller, Cost Tracker).
 - `memory/`: RAG and MongoDB connectors.
-- `tools/`: Dynamic skill scripts.
+- `skills/`: Dynamic skill scripts.
 - `utils/`: Helpers.
 
 ## 📝 License

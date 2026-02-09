@@ -63,6 +63,29 @@ def get_openai_models(api_key: str):
         questionary.print(t('wizard.model_fetch_error', error=e), style="bold red").ask()
         return None
 
+
+def get_model_price_info(provider: str, model_name: str) -> str:
+    """获取模型的价格信息（用于显示）"""
+    from core.cost_tracker import CostTracker
+    
+    tracker = CostTracker(db_path=":memory:")  # 仅用于查询价格
+    prices = tracker.get_model_price(provider, model_name)
+    
+    if not prices:
+        return ""
+    
+    input_price = prices["input"]
+    output_price = prices["output"]
+    
+    if input_price == 0 and output_price == 0:
+        return " 💚 FREE"
+    
+    # 格式化价格显示
+    if input_price < 1 and output_price < 1:
+        return f" 💰 ${input_price:.3f}/${output_price:.2f} per M"
+    else:
+        return f" 💰 ${input_price:.2f}/${output_price:.2f} per M"
+
 # --- 向导步骤 ---
 class ConfigStep:
     def __init__(self, state: Dict[str, Any]):
@@ -303,7 +326,7 @@ class StepTimezone(ConfigStep):
         return True
 
 class StepModels(ConfigStep):
-    def select_model(self, model_list, role_key):
+    def select_model(self, model_list, role_key, provider):
         role_name = t(f'roles.{role_key}')
         current_models = self.state.get('models', {})
         default_model = current_models.get(role_key) # Get existing value
@@ -311,7 +334,14 @@ class StepModels(ConfigStep):
         if not model_list:
             return questionary.text(t('wizard.manual_prompt', role=role_name), default=default_model or "").ask()
         
-        choices = model_list + [questionary.Separator(), t('wizard.manual_entry')]
+        # 为每个模型添加价格信息
+        choices_with_prices = []
+        for model in model_list:
+            price_info = get_model_price_info(provider, model)
+            display_name = f"{model}{price_info}" if price_info else model
+            choices_with_prices.append(questionary.Choice(title=display_name, value=model))
+        
+        choices_with_prices.extend([questionary.Separator(), questionary.Choice(title=t('wizard.manual_entry'), value='__manual__')])
         
         # Ensure default exists in choices for Questionary to select it
         kwargs = {}
@@ -320,11 +350,11 @@ class StepModels(ConfigStep):
 
         selection = questionary.select(
             t('wizard.model_select_prompt', role=role_name),
-            choices=choices,
+            choices=choices_with_prices,
             **kwargs
         ).ask()
         
-        if selection == t('wizard.manual_entry'):
+        if selection == '__manual__':
             return questionary.text(t('wizard.manual_prompt', role=role_name), default=default_model or "").ask()
         return selection
 
@@ -342,12 +372,82 @@ class StepModels(ConfigStep):
             return False 
 
         models = self.state.get('models', {})
-        models['smart'] = self.select_model(model_list, 'smart')
-        models['fast'] = self.select_model(model_list, 'fast')
-        models['coder'] = self.select_model(model_list, 'coder')
-        models['summary'] = self.select_model(model_list, 'summary')  # 添加总结模型
+        models['smart'] = self.select_model(model_list, 'smart', provider)
+        models['fast'] = self.select_model(model_list, 'fast', provider)
+        models['coder'] = self.select_model(model_list, 'coder', provider)
+        models['summary'] = self.select_model(model_list, 'summary', provider)  # 添加总结模型
         self.state['models'] = models
         return True
+
+
+class StepCostTracking(ConfigStep):
+    """成本跟踪配置步骤"""
+    
+    def run(self):
+        print("\n📊 成本跟踪配置")
+        print("-" * 50)
+        print("N.O.R.A. 可以自动跟踪 LLM 调用的 token 使用量和成本。")
+        print("内置了 Gemini 和 OpenAI 的官方定价，也支持自定义价格。")
+        
+        # 是否启用成本跟踪
+        cost_config = self.state.get('cost_tracking', {})
+        current_enabled = cost_config.get('enabled', True)
+        
+        enabled = questionary.confirm(
+            "是否启用成本跟踪？",
+            default=current_enabled
+        ).ask()
+        
+        if not enabled:
+            self.state['cost_tracking'] = {'enabled': False}
+            return True
+        
+        # 询问是否需要自定义价格
+        has_custom = questionary.confirm(
+            "是否需要配置自定义模型价格？\n（如果使用官方 Gemini/OpenAI 模型，通常不需要）",
+            default=False
+        ).ask()
+        
+        custom_prices = {}
+        
+        if has_custom:
+            print("\n💰 自定义模型价格（USD per million tokens）")
+            print("提示: 输入空白跳过，完成后输入 'done'")
+            
+            while True:
+                model_name = questionary.text(
+                    "模型名称（或输入 'done' 完成）:"
+                ).ask()
+                
+                if not model_name or model_name.lower() == 'done':
+                    break
+                
+                try:
+                    input_price = float(questionary.text(
+                        f"  输入 token 价格（每百万）:"
+                    ).ask() or 0)
+                    
+                    output_price = float(questionary.text(
+                        f"  输出 token 价格（每百万）:"
+                    ).ask() or 0)
+                    
+                    custom_prices[model_name] = {
+                        "input": input_price,
+                        "output": output_price
+                    }
+                    
+                    print(f"  ✅ 已添加 {model_name}: ${input_price:.4f} / ${output_price:.4f}")
+                except ValueError:
+                    print("  ⚠️  价格格式错误，已跳过")
+        
+        self.state['cost_tracking'] = {
+            'enabled': True,
+            'custom_prices': custom_prices if custom_prices else {}
+        }
+        
+        print("\n✅ 成本跟踪配置完成")
+        return True
+
 
 # --- 配置向导主流程 ---
 def run_wizard():
@@ -369,10 +469,11 @@ def run_wizard():
                 'openai_key': cfg.get("llm", {}).get("api_keys", {}).get("openai"),
                 'models': cfg.get("llm", {}).get("models", {}),
                 'memory': cfg.get("memory", {}),
-                'tavily': cfg.get("tavily", {})
+                'tavily': cfg.get("tavily", {}),
+                'cost_tracking': cfg.get("cost_tracking", {'enabled': True})
             }
 
-    steps = [StepTelegram, StepWorkspace, StepProvider, StepAPIKeys, StepDatabase, StepEmbedding, StepTavily, StepTimezone, StepModels]
+    steps = [StepTelegram, StepWorkspace, StepProvider, StepAPIKeys, StepDatabase, StepEmbedding, StepTavily, StepTimezone, StepModels, StepCostTracking]
     current_step = 0
     
     while current_step < len(steps):
@@ -402,7 +503,8 @@ def run_wizard():
             },
             'models': state.get('models', {})
         },
-        'memory': state.get('memory', {})
+        'memory': state.get('memory', {}),
+        'cost_tracking': state.get('cost_tracking', {'enabled': True})
     }
     
     # 添加 Tavily 配置（如果存在）

@@ -6,7 +6,7 @@ with warnings.catch_warnings():
     warnings.simplefilter("ignore")
     import google.generativeai as genai
 
-from typing import List, Dict
+from typing import List, Dict, Optional
 
 from brain.interface import BaseLLM
 import config
@@ -15,9 +15,11 @@ class GeminiProvider(BaseLLM):
     """LLM Provider for Google Gemini models."""
 
     def __init__(self, model_alias: str = "smart"):
+        super().__init__()  # 初始化 BaseLLM
         if not config.get_api_key("gemini"):
             raise ValueError("GEMINI_API_KEY is not set in the config.")
         
+        self.model_alias = model_alias
         model_name = config.get_model_name(model_alias)
         if not model_name:
             raise ValueError(f"Model for alias '{model_alias}' not found in config.")
@@ -28,7 +30,7 @@ class GeminiProvider(BaseLLM):
             system_instruction="You are Nora, a helpful assistant." # Base instruction
         )
 
-    async def chat(self, system_prompt: str, user_prompt: str, history: List[Dict[str, str]], tools: List[Dict] = None) -> str:
+    async def chat(self, system_prompt: str, user_prompt: str, history: List[Dict[str, str]], tools: Optional[List[Dict]] = None) -> str:
         # Convert OpenAI-style history to Gemini's format
         gemini_history = []
         for item in history:
@@ -103,7 +105,7 @@ class GeminiProvider(BaseLLM):
             print(f"Gemini API Error: {e}")
             return "Sorry, I encountered an issue processing your request with the Gemini API."
 
-    async def chat_stream(self, system_prompt: str, user_prompt: str, history: List[Dict[str, str]], tools: List[Dict] = None):
+    async def chat_stream(self, system_prompt: str, user_prompt: str, history: List[Dict[str, str]], tools: Optional[List[Dict]] = None):
         gemini_history = []
         for item in history:
             role = "user" if item["role"] == "user" else "model"
@@ -129,7 +131,20 @@ class GeminiProvider(BaseLLM):
         
         try:
             response_stream = await chat_session.send_message_async(full_prompt, stream=True)
+            
+            # 收集 usage 数据
+            input_tokens = 0
+            output_tokens = 0
+            
             async for chunk in response_stream:
+                # 尝试从 chunk 中获取 usage 信息（如果可用）
+                if hasattr(chunk, 'usage_metadata'):
+                    usage = chunk.usage_metadata
+                    if hasattr(usage, 'prompt_token_count'):
+                        input_tokens = usage.prompt_token_count
+                    if hasattr(usage, 'candidates_token_count'):
+                        output_tokens = usage.candidates_token_count
+                
                 # Check for function call
                 if chunk.parts and chunk.parts[0].function_call:
                     fc = chunk.parts[0].function_call
@@ -145,6 +160,19 @@ class GeminiProvider(BaseLLM):
                             yield {"type": "text", "content": chunk.text}
                     except ValueError:
                         pass
+            
+            # 保存并返回 usage 信息
+            if input_tokens or output_tokens:
+                self.last_usage = {
+                    "input_tokens": input_tokens,
+                    "output_tokens": output_tokens
+                }
+                yield {
+                    "type": "usage",
+                    "input_tokens": input_tokens,
+                    "output_tokens": output_tokens
+                }
+                
         except Exception as e:
             print(f"Gemini API Stream Error: {e}")
             yield {"type": "text", "content": f"[System Error: {str(e)}]"}

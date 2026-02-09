@@ -60,3 +60,14 @@ memory:
 tavily:
   api_key: "YOUR_TAVILY_API_KEY" # 从 https://tavily.com/ 获取
   timeout: 10 # API 请求超时时间（秒）
+
+# 成本跟踪配置
+cost_tracking:
+  enabled: true # 是否启用成本跟踪
+
+  # 自定义模型价格（USD per million tokens）
+  # 如果不配置，将使用内置价格数据（Gemini, OpenAI 官方价格）
+  # 格式: model_name: {input: price, output: price}
+  custom_prices:
+    # 示例: 自定义模型价格
+    # "my-custom-model": {"input": 0.5, "output": 2.0}

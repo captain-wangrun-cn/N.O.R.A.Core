@@ -10,6 +10,7 @@ from memory.rag import RAGEngine
 from memory.message_history import MessageHistory
 from brain.tools import ToolManager
 from skills.loader import SkillLoader
+from core.cost_tracker import get_cost_tracker
 import config
 import json
 
@@ -38,6 +39,17 @@ class NoraController:
             archive_threshold=history_cfg.get("archive_threshold", 500),
             timezone=history_cfg.get("timezone", "Asia/Shanghai"),
         )
+        
+        # 成本跟踪
+        cost_cfg = config.get_config().get("cost_tracking", {})
+        self.cost_tracking_enabled = cost_cfg.get("enabled", True)
+        if self.cost_tracking_enabled:
+            custom_prices = cost_cfg.get("custom_prices", {})
+            self.cost_tracker = get_cost_tracker(custom_prices=custom_prices)
+            logger.info("成本跟踪已启用")
+        else:
+            self.cost_tracker = None
+            logger.info("成本跟踪已禁用")
         
         logger.info(f"NoraController 已初始化。RAG: {'Online' if self.rag.enabled else 'Offline'}, MessageHistory: Online")
 
@@ -183,6 +195,7 @@ class NoraController:
                 
                 response_text_buffer = ""
                 tool_call = None
+                usage_data = None  # 用于收集 token 使用数据
                 
                 async for raw_chunk in stream:
                     chunk = cast(Dict[str, Any], raw_chunk) if isinstance(raw_chunk, dict) else raw_chunk
@@ -219,9 +232,30 @@ class NoraController:
                             if response_text_buffer:
                                 # final_response_buffer += response_text_buffer # This was the source of the leak
                                 response_text_buffer = ""
+                        
+                        elif chunk["type"] == "usage":
+                            # 收集 usage 信息
+                            usage_data = {
+                                "input_tokens": chunk.get("input_tokens", 0),
+                                "output_tokens": chunk.get("output_tokens", 0)
+                            }
+                            
                     elif isinstance(chunk, str):
                         # Fallback for legacy providers
                         response_text_buffer += chunk
+                
+                # 记录成本（如果启用）
+                if self.cost_tracking_enabled and self.cost_tracker and usage_data:
+                    provider = config.get_llm_provider()
+                    model = config.get_model_name("smart")  # 默认使用 smart 模型
+                    self.cost_tracker.log_usage(
+                        provider=provider,
+                        model=model,
+                        input_tokens=usage_data["input_tokens"],
+                        output_tokens=usage_data["output_tokens"],
+                        model_alias="smart",
+                        context="chat"
+                    )
                 
                 # Append text to final buffer (visible to user)
                 if response_text_buffer:
