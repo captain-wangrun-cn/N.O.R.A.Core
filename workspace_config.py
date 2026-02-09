@@ -33,16 +33,15 @@ class WorkspaceManager:
             workspace_path: 工作区路径。如果为 None，使用 config.yml 中的设置或默认路径。
         """
         if workspace_path:
-            self.workspace_root = os.path.abspath(workspace_path)
+            self.workspace_root = os.path.abspath(os.path.expanduser(workspace_path))
         else:
             # 尝试从 config 读取
             try:
                 import config
                 config.load_config()
                 workspace_cfg = config.get_config().get("workspace", {})
-                self.workspace_root = os.path.abspath(
-                    workspace_cfg.get("root_path", DEFAULT_WORKSPACE_PATH)
-                )
+                raw_path = workspace_cfg.get("root_path", DEFAULT_WORKSPACE_PATH)
+                self.workspace_root = os.path.abspath(os.path.expanduser(raw_path))
             except:
                 self.workspace_root = os.path.abspath(DEFAULT_WORKSPACE_PATH)
         

@@ -242,6 +242,9 @@ class ToolManager:
         :param old_code: The code snippet to find (approximate whitespace is OK).
         :param new_code: The replacement code snippet.
         """
+        safe, reason = self._is_path_safe(path)
+        if not safe:
+            return reason
         try:
             with open(path, 'r', encoding='utf-8') as f:
                 content = f.read()
@@ -263,7 +266,8 @@ class ToolManager:
 
             # Sliding window over lines to find the best match
             old_line_count = max(1, old_code.count('\n') + 1)
-            for window_size in range(max(1, old_line_count - 2), old_line_count + 3):
+            # Widen the window search range to handle more varying empty lines/formatting
+            for window_size in range(max(1, old_line_count - 5), old_line_count + 6):
                 for i in range(len(lines) - window_size + 1):
                     window = '\n'.join(lines[i:i + window_size])
                     if normalize(window) == norm_old:
