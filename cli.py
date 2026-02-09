@@ -241,6 +241,67 @@ class StepTavily(ConfigStep):
         }
         return True
 
+class StepTimezone(ConfigStep):
+    """时区配置"""
+    def run(self):
+        memory_cfg = self.state.get('memory', {})
+        msg_history_cfg = memory_cfg.get('message_history', {})
+        
+        # 常用时区选项
+        common_timezones = [
+            "Asia/Shanghai",
+            "UTC",
+            "Asia/Tokyo",
+            "Europe/London",
+            "America/New_York",
+            "America/Los_Angeles",
+            questionary.Separator(),
+            "手动输入其他时区"
+        ]
+        
+        current_tz = msg_history_cfg.get('timezone', 'Asia/Shanghai')
+        
+        # 如果当前时区在常用列表中，设为默认
+        kwargs = {}
+        if current_tz in common_timezones:
+            kwargs['default'] = current_tz
+        
+        timezone = questionary.select(
+            "选择消息时间戳显示的时区:",
+            choices=common_timezones,
+            **kwargs
+        ).ask()
+        
+        if timezone is None:
+            return False
+        
+        if timezone == "手动输入其他时区":
+            timezone = questionary.text(
+                "请输入时区名称 (如 Asia/Hong_Kong):",
+                default=current_tz
+            ).ask()
+            
+            if timezone is None:
+                return False
+        
+        # 验证时区
+        try:
+            from zoneinfo import ZoneInfo
+            ZoneInfo(timezone)
+        except Exception as e:
+            questionary.print(f"⚠️  无效的时区: {e}", style="bold red")
+            return False
+        
+        # 保存配置
+        if 'memory' not in self.state:
+            self.state['memory'] = {}
+        if 'message_history' not in self.state['memory']:
+            self.state['memory']['message_history'] = {}
+        
+        self.state['memory']['message_history']['timezone'] = timezone
+        questionary.print(f"✓ 时区已设置为: {timezone}", style="bold green")
+        return True
+
 class StepModels(ConfigStep):
     def select_model(self, model_list, role_key):
         role_name = t(f'roles.{role_key}')
@@ -311,7 +372,7 @@ def run_wizard():
                 'tavily': cfg.get("tavily", {})
             }
 
-    steps = [StepTelegram, StepWorkspace, StepProvider, StepAPIKeys, StepDatabase, StepEmbedding, StepTavily, StepModels]
+    steps = [StepTelegram, StepWorkspace, StepProvider, StepAPIKeys, StepDatabase, StepEmbedding, StepTavily, StepTimezone, StepModels]
     current_step = 0
     
     while current_step < len(steps):

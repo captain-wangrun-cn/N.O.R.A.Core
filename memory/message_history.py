@@ -2,6 +2,7 @@ import sqlite3
 import json
 import asyncio
 from datetime import datetime
+from zoneinfo import ZoneInfo
 from typing import List, Dict, Optional, Tuple
 from pathlib import Path
 import logging
@@ -26,7 +27,8 @@ class MessageHistory:
         raw_window: int = 50,      # 原始消息窗口大小
         compress_window: int = 200, # 开始压缩的阈值
         compress_ratio: int = 10,   # 压缩比例 (10:1)
-        archive_threshold: int = 500 # 归档阈值
+        archive_threshold: int = 500, # 归档阈值
+        timezone: str = "Asia/Shanghai"  # 时间戳显示时区
     ):
         self.db_path = Path(db_path)
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
@@ -35,6 +37,13 @@ class MessageHistory:
         self.compress_window = compress_window
         self.compress_ratio = compress_ratio
         self.archive_threshold = archive_threshold
+        
+        # 设置时区
+        try:
+            self.timezone = ZoneInfo(timezone)
+        except Exception as e:
+            logger.warning(f"无效的时区 '{timezone}'，回退到 UTC: {e}")
+            self.timezone = ZoneInfo("UTC")
         
         self._init_db()
         self._summarizer = None  # 延迟加载
@@ -149,13 +158,15 @@ class MessageHistory:
         # 如果需要，在内容前添加时间戳
         original_content = content
         if should_add_timestamp:
-            time_str = datetime.fromtimestamp(timestamp).strftime("%Y-%m-%d %H:%M")
+            # 使用配置的时区格式化时间
+            dt = datetime.fromtimestamp(timestamp, tz=self.timezone)
+            time_str = dt.strftime("%Y-%m-%d %H:%M")
             content = f"[{time_str}] {content}"
             # 在元数据中标记此消息包含时间戳
             if metadata is None:
                 metadata = {}
             metadata["has_timestamp"] = True
-            logger.debug(f"[{platform}/{chat_id}] 插入时间戳: {time_str}")
+            logger.debug(f"[{platform}/{chat_id}] 插入时间戳: {time_str} ({self.timezone})")
         
         metadata_json = json.dumps(metadata) if metadata else None
         

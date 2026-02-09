@@ -36,6 +36,7 @@ class NoraController:
             compress_window=history_cfg.get("compress_window", 200),
             compress_ratio=history_cfg.get("compress_ratio", 10),
             archive_threshold=history_cfg.get("archive_threshold", 500),
+            timezone=history_cfg.get("timezone", "Asia/Shanghai"),
         )
         
         logger.info(f"NoraController 已初始化。RAG: {'Online' if self.rag.enabled else 'Offline'}, MessageHistory: Online")

@@ -37,6 +37,7 @@ memory:
     compress_window: 200 # 超过此数量开始压缩
     compress_ratio: 10 # 压缩比例（10条压缩为1条总结）
     archive_threshold: 500 # 超过此数量创建归档总结
+    timezone: "Asia/Shanghai" # 时间戳显示时区（如 "Asia/Shanghai", "UTC", "America/New_York"）
 
   # Vector Database (Qdrant)
   qdrant:
