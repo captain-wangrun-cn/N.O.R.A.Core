@@ -7,13 +7,17 @@ import yaml
 import warnings
 import logging
 import sys
+import sqlite3
+from pathlib import Path
 
 # Suppress warnings
 warnings.filterwarnings("ignore", category=FutureWarning, module="google.generativeai")
 
 import google.generativeai as genai
 import openai
-from typing import Dict, Any
+from typing import Dict, Any, List, Tuple, Optional
+
+from memory.message_history import MessageHistory
 
 # Configure logger for CLI operations
 logging.basicConfig(level=logging.INFO, format='%(levelname)s: %(message)s')
@@ -85,6 +89,166 @@ def get_model_price_info(provider: str, model_name: str) -> str:
         return f" 💰 ${input_price:.3f}/${output_price:.2f} per M"
     else:
         return f" 💰 ${input_price:.2f}/${output_price:.2f} per M"
+
+
+# --- 聊天记录管理 ---
+
+def _load_message_history() -> Tuple[MessageHistory, Path]:
+    import config
+    history_cfg = config.get_message_history_config()
+    db_path = Path(history_cfg.get("db_path", "memory/message_history.db"))
+    mh = MessageHistory(
+        db_path=str(db_path),
+        raw_window=history_cfg.get("raw_window", 50),
+        compress_window=history_cfg.get("compress_window", 200),
+        compress_ratio=history_cfg.get("compress_ratio", 10),
+        archive_threshold=history_cfg.get("archive_threshold", 500),
+        timezone=history_cfg.get("timezone", "Asia/Shanghai"),
+    )
+    return mh, db_path
+
+
+def _list_chats(db_path: Path) -> List[sqlite3.Row]:
+    if not db_path.exists():
+        return []
+    conn = sqlite3.connect(str(db_path))
+    conn.row_factory = sqlite3.Row
+    cursor = conn.cursor()
+    cursor.execute(
+        """
+        SELECT platform, chat_id, COUNT(*) as count,
+               SUM(is_pinned) as pinned,
+               SUM(is_archived) as archived
+        FROM messages
+        GROUP BY platform, chat_id
+        ORDER BY count DESC
+        """
+    )
+    rows = cursor.fetchall()
+    conn.close()
+    return rows
+
+
+def _summaries_count(db_path: Path) -> int:
+    if not db_path.exists():
+        return 0
+    conn = sqlite3.connect(str(db_path))
+    cursor = conn.cursor()
+    cursor.execute("SELECT COUNT(*) FROM summaries")
+    count = cursor.fetchone()[0]
+    conn.close()
+    return count
+
+
+def show_history_stats():
+    mh, db_path = _load_message_history()
+    if not db_path.exists():
+        logger.info("ℹ️  未找到聊天记录数据库，路径: %s", db_path)
+        return
+
+    chats = _list_chats(db_path)
+    summaries_count = _summaries_count(db_path)
+
+    total_messages = sum(row["count"] for row in chats)
+    pinned_messages = sum(row["pinned"] or 0 for row in chats)
+    archived_messages = sum(row["archived"] or 0 for row in chats)
+
+    logger.info("💾 聊天记录文件: %s", db_path)
+    logger.info(
+        "📊 总消息: %d | 已归档: %d | 已标记: %d | 总结: %d",
+        total_messages,
+        archived_messages,
+        pinned_messages,
+        summaries_count,
+    )
+
+    if not chats:
+        logger.info("ℹ️  没有可展示的聊天记录。")
+        return
+
+    logger.info("📚 按聊天统计:")
+    for row in chats:
+        logger.info(
+            "- %s/%s -> %d 条 (标记 %d, 归档 %d)",
+            row["platform"],
+            row["chat_id"],
+            row["count"],
+            row["pinned"] or 0,
+            row["archived"] or 0,
+        )
+
+
+def clear_history_all(include_pinned: bool = False):
+    mh, db_path = _load_message_history()
+    chats = _list_chats(db_path)
+
+    if not chats:
+        logger.info("ℹ️  没有可清理的聊天记录。")
+        return
+
+    for row in chats:
+        mh.clear_chat_history(
+            platform=row["platform"],
+            chat_id=row["chat_id"],
+            keep_pinned=not include_pinned,
+        )
+    logger.info("✅ 已清理全部聊天记录 (包含标记: %s)", include_pinned)
+
+
+def clear_history_chat(chat_id: str, platform: str = "telegram", include_pinned: bool = False):
+    mh, db_path = _load_message_history()
+    chats = _list_chats(db_path)
+    exists = any(row["platform"] == platform and row["chat_id"] == chat_id for row in chats)
+    if not exists:
+        logger.warning("⚠️  未找到聊天 %s/%s，无法清理。", platform, chat_id)
+        return
+    mh.clear_chat_history(platform=platform, chat_id=chat_id, keep_pinned=not include_pinned)
+    logger.info("✅ 已清理聊天 %s/%s (包含标记: %s)", platform, chat_id, include_pinned)
+
+
+def history_menu():
+    """交互式聊天记录管理"""
+    mh, db_path = _load_message_history()
+    while True:
+        choices = [
+            "📊 查看聊天记录统计",
+            "🧹 清空全部 (保留标记)",
+            "🧹 清空全部 (包含标记)",
+            "🧹 按聊天清理 (保留标记)",
+            "🧹 按聊天清理 (包含标记)",
+            "⬅️ 返回主菜单",
+        ]
+
+        choice = questionary.select("选择操作:", choices=choices).ask()
+        if choice is None or choice == "⬅️ 返回主菜单":
+            break
+
+        if choice == "📊 查看聊天记录统计":
+            show_history_stats()
+        elif choice == "🧹 清空全部 (保留标记)":
+            if questionary.confirm("确定清空全部非标记聊天记录？").ask():
+                clear_history_all(include_pinned=False)
+        elif choice == "🧹 清空全部 (包含标记)":
+            if questionary.confirm("确定清空全部聊天记录（包含已标记）？").ask():
+                clear_history_all(include_pinned=True)
+        elif choice in ["🧹 按聊天清理 (保留标记)", "🧹 按聊天清理 (包含标记)"]:
+            chats = _list_chats(db_path)
+            if not chats:
+                logger.info("ℹ️  没有可清理的聊天记录。")
+                continue
+            options = [
+                questionary.Choice(
+                    title=f"{row['platform']}/{row['chat_id']} ({row['count']} 条, 标记 {row['pinned'] or 0})",
+                    value=(row['platform'], row['chat_id'])
+                )
+                for row in chats
+            ]
+            selected = questionary.select("选择要清理的聊天:", choices=options).ask()
+            if selected is None:
+                continue
+            include_pinned = choice.endswith("包含标记)")
+            clear_history_chat(chat_id=selected[1], platform=selected[0], include_pinned=include_pinned)
+
 
 # --- 向导步骤 ---
 class ConfigStep:
@@ -799,6 +963,7 @@ def main_menu():
         "🔧 运行配置向导",
         "🧪 测试 Qdrant 连接",
         "🧪 测试 RAG 系统",
+        "💬 聊天记录管理",
         "🧹 清理 RAG 数据",
         "❌ 退出"
     ]
@@ -823,6 +988,8 @@ def main_menu():
             test_qdrant()
         elif choice == "🧪 测试 RAG 系统":
             test_rag()
+        elif choice == "💬 聊天记录管理":
+            history_menu()
         elif choice == "🧹 清理 RAG 数据":
             clean_rag()
 
@@ -848,6 +1015,11 @@ def main():
     parser.add_argument('--test-qdrant', action='store_true', help='测试 Qdrant 连接')
     parser.add_argument('--test-rag', action='store_true', help='测试 RAG 系统')
     parser.add_argument('--clean-rag', action='store_true', help='清理 RAG 数据')
+    parser.add_argument('--history-stats', action='store_true', help='查看聊天记录统计')
+    parser.add_argument('--clear-history', action='store_true', help='清空全部聊天记录（保留标记，除非指定 --include-pinned）')
+    parser.add_argument('--clear-history-chat', type=str, help='按 chat_id 清空聊天记录（默认保留标记）')
+    parser.add_argument('--platform', type=str, default='telegram', help='结合 --clear-history-chat 指定平台，默认 telegram')
+    parser.add_argument('--include-pinned', action='store_true', help='与清理选项一起使用，包含已标记消息')
     
     args = parser.parse_args()
     
@@ -865,6 +1037,12 @@ def main():
         test_rag()
     elif args.clean_rag:
         clean_rag()
+    elif args.history_stats:
+        show_history_stats()
+    elif args.clear_history:
+        clear_history_all(include_pinned=args.include_pinned)
+    elif args.clear_history_chat:
+        clear_history_chat(chat_id=args.clear_history_chat, platform=args.platform, include_pinned=args.include_pinned)
 
 
 if __name__ == "__main__":
