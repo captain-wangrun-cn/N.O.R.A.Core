@@ -317,9 +317,14 @@ class NoraController:
                     session["last_loop_key"] = loop_key
 
                     if session["tool_call_loop_counter"] >= 2:
-                        logger.warning(f"[{chat_id}] 检测到工具调用循环: {loop_key} 已连续调用 {session['tool_call_loop_counter']+1} 次。正在强制中断。")
-                        if tool_name == "read_file":
-                            # For read-only tools, inject guidance to use a different approach instead of breaking
+                        # execute_skill 允许更高阈值（翻页、重试是合理操作）
+                        _high_tolerance_tools = {"execute_skill"}
+                        _threshold = 5 if tool_name in _high_tolerance_tools else 2
+
+                        if session["tool_call_loop_counter"] < _threshold:
+                            pass  # 未达到该工具的实际阈值，放行
+                        elif tool_name == "read_file":
+                            logger.warning(f"[{chat_id}] 检测到工具调用循环: {loop_key} 已连续调用 {session['tool_call_loop_counter']+1} 次。")
                             temp_history.append({
                                 "role": "user",
                                 "content": (
@@ -327,10 +332,10 @@ class NoraController:
                                     "不要再尝试 read_file。如果你已经完成了所有修改，请直接给用户回复最终结果。"
                                 )
                             })
-                            session["tool_call_loop_counter"] = 0  # Reset to allow continued operation
-                            continue  # Don't break, let LLM try a different approach
+                            session["tool_call_loop_counter"] = 0
+                            continue
                         elif tool_name == "edit_file":
-                            # edit_file 反复操作同一文件，引导使用 write_file 覆盖
+                            logger.warning(f"[{chat_id}] 检测到工具调用循环: {loop_key} 已连续调用 {session['tool_call_loop_counter']+1} 次。")
                             temp_history.append({
                                 "role": "user",
                                 "content": (
@@ -342,9 +347,14 @@ class NoraController:
                             session["tool_call_loop_counter"] = 0
                             continue
                         else:
-                            # For other tools, break the loop
-                            temp_history.append({"role": "user", "content": "【系统提示】检测到重复的工具调用。请停止当前操作，并直接给用户回复当前进展和结果。"})
-                            break # Exit the while loop
+                            # 其他工具（含 execute_skill 达到高阈值后）
+                            logger.warning(f"[{chat_id}] 检测到工具调用循环: {loop_key} 已连续调用 {session['tool_call_loop_counter']+1} 次。正在引导总结。")
+                            temp_history.append({
+                                "role": "user",
+                                "content": "【系统提示】你已经多次重复调用同一个工具。请停止重复调用，基于已有的结果直接给用户回复。"
+                            })
+                            session["tool_call_loop_counter"] = 0
+                            continue  # 不 break，让 LLM 生成总结
                     
                     
                     # Execute Tool
