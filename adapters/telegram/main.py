@@ -764,4 +764,61 @@ class TelegramAdapter(BaseAdapter):
                 logger.info(f"[{chat_id}] 已发送URL媒体 {media_type}: {file_path}")
                 return last_message_id
 
-            # ...existing code...
+            # 本地文件处理
+            if not os.path.exists(file_path):
+                logger.warning(f"[{chat_id}] 文件不存在: {file_path}")
+                await self.application.bot.send_message(
+                    chat_id=chat_id,
+                    text=f"⚠️ 文件未找到: {file_path}"
+                )
+                return None
+
+            if media_type == 'photo':
+                # 尝试压缩
+                image_data = self._compress_image(file_path)
+                if image_data:
+                    message = await self.application.bot.send_photo(
+                        chat_id=chat_id, photo=image_data, caption=caption
+                    )
+                else:
+                    # 压缩失败或 pillow 不可用，直接发送原图
+                    with open(file_path, 'rb') as f:
+                        message = await self.application.bot.send_photo(
+                            chat_id=chat_id, photo=f, caption=caption
+                        )
+            elif media_type == 'video':
+                with open(file_path, 'rb') as f:
+                    message = await self.application.bot.send_video(
+                        chat_id=chat_id, video=f, caption=caption
+                    )
+            elif media_type == 'audio':
+                with open(file_path, 'rb') as f:
+                    message = await self.application.bot.send_audio(
+                        chat_id=chat_id, audio=f, caption=caption
+                    )
+            elif media_type == 'voice':
+                with open(file_path, 'rb') as f:
+                    message = await self.application.bot.send_voice(
+                        chat_id=chat_id, voice=f, caption=caption
+                    )
+            else:  # document or unknown
+                await self.application.bot.send_chat_action(chat_id=chat_id, action=ChatAction.UPLOAD_DOCUMENT)
+                with open(file_path, 'rb') as f:
+                    message = await self.application.bot.send_document(
+                        chat_id=chat_id, document=f, caption=caption
+                    )
+            
+            last_message_id = str(message.message_id)
+            logger.info(f"[{chat_id}] 已发送本地媒体 {media_type}: {file_path}")
+            return last_message_id
+
+        except Exception as e:
+            logger.error(f"[{chat_id}] 发送媒体失败 {file_path}: {e}")
+            try:
+                await self.application.bot.send_message(
+                    chat_id=chat_id,
+                    text=f"⚠️ 发送失败: {file_path}\n错误: {e}"
+                )
+            except:
+                pass
+            return None
