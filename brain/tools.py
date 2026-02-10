@@ -269,6 +269,12 @@ class ToolManager:
         if not safe:
             return reason
         try:
+            # LLM 可能传入字符串类型的行号，需要强制转换
+            if start_line is not None:
+                start_line = int(start_line)
+            if end_line is not None:
+                end_line = int(end_line)
+            
             with open(path, 'r', encoding='utf-8') as f:
                 if start_line is None and end_line is None:
                     # 读取全文
@@ -414,15 +420,33 @@ class ToolManager:
 
     def _generate_schema(self, func: Callable) -> Dict[str, Any]:
         """Generates a JSON schema for a function."""
+        import typing
         sig = inspect.signature(func)
         doc = inspect.getdoc(func) or ""
         desc = doc.strip().split("\\n")[0]
         parameters = {"type": "OBJECT", "properties": {}, "required": []}
         for name, param in sig.parameters.items():
             if name == 'self': continue
-            param_type = "STRING"
-            if param.annotation == int: param_type = "INTEGER"
-            elif param.annotation == bool: param_type = "BOOLEAN"
+            
+            # 解析类型注解，支持 Optional[X] (即 Union[X, None])
+            annotation = param.annotation
+            param_type = "STRING"  # 默认
+            
+            # 处理 Optional[X] → 提取 X
+            origin = getattr(annotation, '__origin__', None)
+            if origin is typing.Union:
+                # Optional[int] == Union[int, None]
+                args = [a for a in annotation.__args__ if a is not type(None)]
+                if args:
+                    annotation = args[0]
+            
+            if annotation == int:
+                param_type = "INTEGER"
+            elif annotation == bool:
+                param_type = "BOOLEAN"
+            elif annotation == float:
+                param_type = "NUMBER"
+            
             parameters["properties"][name] = {"type": param_type}
             if param.default == inspect.Parameter.empty:
                 parameters["required"].append(name)
