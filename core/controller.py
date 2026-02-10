@@ -357,8 +357,22 @@ class NoraController:
                             session["tool_call_loop_counter"] = 0
                             force_no_tools = True
                             continue
+                        elif tool_name == "execute_skill":
+                            logger.warning(f"[{chat_id}] 检测到 execute_skill 工具调用循环: {loop_key} 已连续调用 {session['tool_call_loop_counter']+1} 次。正在引导自查。")
+                            temp_history.append({
+                                "role": "user",
+                                "content": (
+                                    "【系统提示】你已经多次调用同一个 skill 但均未成功。请停止重复调用，"
+                                    "现在请你自己检查 skill 的代码实现，分析失败原因，尝试修复 bug 或给出诊断建议。"
+                                    "可以结合工具输出、报错信息和 skill 代码内容进行自查。"
+                                    "最后用简短自然语言总结你的分析和建议，不要复述原始输出。"
+                                )
+                            })
+                            session["tool_call_loop_counter"] = 0
+                            force_no_tools = True
+                            continue
                         else:
-                            # 其他工具（含 execute_skill 达到高阈值后）
+                            # 其他工具
                             logger.warning(f"[{chat_id}] 检测到工具调用循环: {loop_key} 已连续调用 {session['tool_call_loop_counter']+1} 次。正在引导总结。")
                             temp_history.append({
                                 "role": "user",
