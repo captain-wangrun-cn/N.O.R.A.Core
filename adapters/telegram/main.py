@@ -19,6 +19,47 @@ TG_PHOTO_MAX_SIZE = 10 * 1024 * 1024       # 10MB for photos
 TG_DOCUMENT_MAX_SIZE = 50 * 1024 * 1024     # 50MB for documents
 COMPRESS_TARGET_SIZE = 9 * 1024 * 1024       # Compress target: 9MB (safety margin)
 
+
+def _markdown_to_html(text: str) -> str:
+    """
+    将 LLM 常见的 Markdown 格式转为 Telegram 兼容的 HTML。
+    只处理最常见的格式，避免破坏已有 HTML 标签。
+    """
+    # 跳过已经包含大量 HTML 标签的文本（已经是 HTML 格式）
+    if text.count('<') > 5 and text.count('>') > 5:
+        return text
+    
+    # 代码块: ```lang\ncode\n``` → <pre><code>code</code></pre>
+    text = re.sub(
+        r'```(\w*)\n(.*?)```',
+        lambda m: f'<pre><code class="language-{m.group(1)}">{m.group(2).rstrip()}</code></pre>' if m.group(1) else f'<pre><code>{m.group(2).rstrip()}</code></pre>',
+        text, flags=re.DOTALL
+    )
+    
+    # 行内代码: `code` → <code>code</code> (但不匹配已在 <pre> 内的)
+    text = re.sub(r'(?<!<code>)`([^`\n]+?)`', r'<code>\1</code>', text)
+    
+    # 粗体+斜体: ***text*** or ___text___
+    text = re.sub(r'\*\*\*(.+?)\*\*\*', r'<b><i>\1</i></b>', text)
+    
+    # 粗体: **text** or __text__
+    text = re.sub(r'\*\*(.+?)\*\*', r'<b>\1</b>', text)
+    text = re.sub(r'__(.+?)__', r'<b>\1</b>', text)
+    
+    # 斜体: *text* or _text_ (小心不要匹配文件路径中的下划线)
+    text = re.sub(r'(?<!\w)\*([^*\n]+?)\*(?!\w)', r'<i>\1</i>', text)
+    
+    # 删除线: ~~text~~
+    text = re.sub(r'~~(.+?)~~', r'<s>\1</s>', text)
+    
+    # Markdown 链接: [text](url) → <a href="url">text</a>
+    text = re.sub(r'\[([^\]]+?)\]\((https?://[^\)]+?)\)', r'<a href="\2">\1</a>', text)
+    
+    # Markdown 标题: # Title → <b>TITLE</b> (Telegram 不支持 h1-h6)
+    text = re.sub(r'^#{1,6}\s+(.+)$', r'<b>\1</b>', text, flags=re.MULTILINE)
+    
+    return text
+
 class TelegramAdapter(BaseAdapter):
     """Telegram 平台适配器。"""
 
@@ -380,13 +421,15 @@ class TelegramAdapter(BaseAdapter):
         file_entries = []  # [(path, media_type)]
         missing_files = []
         for match in self.FILE_PATTERN.finditer(text):
-            path = match.group(1) or match.group(2) or match.group(3) or match.group(4)
+            # FILE_PATTERN 有5个捕获组: (1)Markdown, (2)HTML img, (3)自定义标记, (4)URL, (5)本地路径
+            path = next((g for g in match.groups() if g), None)
             if path:
                 path = path.strip()
-                if os.path.isfile(path):
+                is_url = path.startswith(('http://', 'https://'))
+                if is_url or os.path.isfile(path):
                     media_type = self._classify_file(path)
                     file_entries.append((path, media_type))
-                    logger.info(f"[{chat_id}] 检测到媒体文件: {path} ({media_type})")
+                    logger.info(f"[{chat_id}] 检测到媒体{'URL' if is_url else '文件'}: {path} ({media_type})")
                 else:
                     missing_files.append(path)
                     logger.warning(f"[{chat_id}] 文件路径不存在，跳过: {path}")
@@ -403,16 +446,21 @@ class TelegramAdapter(BaseAdapter):
         # 3. 发送文本部分
         last_message_id = None
         if clean_text:
+            # Markdown → HTML 转换（LLM 有时会输出 Markdown 格式）
+            html_text = _markdown_to_html(clean_text)
             try:
                 message = await self.application.bot.send_message(
                     chat_id=chat_id,
-                    text=clean_text,
+                    text=html_text,
                     parse_mode="HTML"
                 )
-            except Exception:
+            except Exception as html_err:
+                logger.warning(f"[{chat_id}] HTML 发送失败 ({html_err})，降级为纯文本。")
+                # HTML 解析失败，降级发送纯文本（去除所有标签）
+                plain_text = re.sub(r'<[^>]+>', '', clean_text)
                 message = await self.application.bot.send_message(
                     chat_id=chat_id,
-                    text=clean_text
+                    text=plain_text or clean_text
                 )
             last_message_id = str(message.message_id)
 

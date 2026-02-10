@@ -29,13 +29,23 @@ SKILL_MAIN_PY_TEMPLATE = """\"\"\"
 \"\"\"
 import argparse
 import json
+import os
 import sys
+
+# 工作区路径（由 execute_skill 自动注入，无需手动设置）
+WORKSPACE_ROOT = os.getenv("WORKSPACE_ROOT", ".")
+DOWNLOADS_DIR = os.getenv("DOWNLOADS_DIR", os.path.join(WORKSPACE_ROOT, "downloads"))
 
 def run(**kwargs):
     \"\"\"Main logic for the skill. Implement your code here.\"\"\"
     # TODO: Replace this placeholder with real implementation!
     # kwargs contains the arguments passed from the command line.
     # Example: kwargs = {"keyword": "blue archive", "limit": "5"}
+    #
+    # 文件下载示例:
+    #   save_path = os.path.join(DOWNLOADS_DIR, "my_file.jpg")
+    #   os.makedirs(DOWNLOADS_DIR, exist_ok=True)
+    #
     print(json.dumps({"status": "error", "message": "This skill has not been implemented yet. Please write the real code."}))
     return 1
 
@@ -116,7 +126,10 @@ class ToolManager:
                 f"The script must:\n"
                 f"  1. Use argparse to parse command-line arguments (--key value format)\n"
                 f"  2. Print results to stdout (so execute_skill can capture them)\n"
-                f"  3. Have an 'if __name__ == \"__main__\":' entry point\n\n"
+                f"  3. Have an 'if __name__ == \"__main__\":' entry point\n"
+                f"  4. Use os.getenv('WORKSPACE_ROOT') for workspace root path (currently: {WORKSPACE_ROOT})\n"
+                f"  5. Use os.getenv('DOWNLOADS_DIR') for download directory (currently: {DOWNLOADS_DIR})\n"
+                f"  6. NEVER hardcode paths like '/root/xxx' — always use the environment variables above!\n\n"
                 f"After writing the code, also update '{os.path.join(skill_dir, 'SKILL.md')}' with the correct usage docs.\n"
                 f"Do NOT call execute_skill until the real code is written."
             )
@@ -148,6 +161,10 @@ class ToolManager:
         
         # Load skill-specific config if it exists
         env = os.environ.copy()
+        # 始终注入工作区路径，让技能代码可以正确定位文件
+        env["WORKSPACE_ROOT"] = str(WORKSPACE_ROOT)
+        env["DOWNLOADS_DIR"] = str(DOWNLOADS_DIR)
+        env["SKILLS_DIR"] = str(SKILLS_DIR)
         config_path = os.path.join("skills", skill_name, "config.json")
         if os.path.exists(config_path):
             try:

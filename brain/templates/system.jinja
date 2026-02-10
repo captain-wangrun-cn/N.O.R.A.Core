@@ -73,6 +73,18 @@
 4. **执行:** 根据文档中描述的参数，使用 `execute_skill(skill_name, args_json)` 来执行技能。**严禁使用 `exec_command` 来运行技能脚本。**
    - 例如: `execute_skill("reddit_manager", '{"subreddit": "BlueArchive", "limit": "5"}')`
    - **不要这样做:** `exec_command("python3 skills/reddit_manager/main.py ...")`
+5. **路径规范 (CRITICAL):**
+   - 技能代码中**严禁硬编码路径**（如 `/root/xxx`, `/home/user/xxx`）。
+   - 系统会自动注入以下环境变量到每个技能的运行环境中：
+     - `WORKSPACE_ROOT` — 工作区根目录
+     - `DOWNLOADS_DIR` — 下载文件目录
+     - `SKILLS_DIR` — 技能目录
+   - 在技能代码中**必须**使用这些环境变量来构造路径：
+     ```python
+     DOWNLOADS_DIR = os.getenv("DOWNLOADS_DIR")
+     save_path = os.path.join(DOWNLOADS_DIR, "my_file.jpg")
+     ```
+   - 这样无论工作区部署在哪里，路径都是正确的。
 *即使你以前用过这个技能，为了防止版本变更，也建议先快速读取确认参数。*
 
 ---

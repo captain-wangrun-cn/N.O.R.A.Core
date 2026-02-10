@@ -169,6 +169,7 @@ class NoraController:
             final_response_buffer = ""
             latest_tool_output = ""  # Safeguard: fallback to show tool output if LLM stays silent
             latest_meaningful_output = ""  # Only meaningful outputs (execute_skill, etc.)
+            force_no_tools = False  # 循环检测触发后，下一轮禁用工具
             
             # 临时历史，从数据库加载持久化上下文
             db_context = self.message_history.get_context_messages("telegram", chat_id)
@@ -188,10 +189,11 @@ class NoraController:
                 
                 stream = self.llm.chat_stream(
                     system_prompt=system_prompt,
-                    user_prompt=full_user_prompt if current_turn == 1 else " (Continue processing tool outputs...)", # Subsequent prompts handled via history
+                    user_prompt=full_user_prompt if current_turn == 1 else " (Continue processing tool outputs...)",
                     history=temp_history,
-                    tools=self.tool_manager.get_tool_schemas()
+                    tools=[] if force_no_tools else self.tool_manager.get_tool_schemas()
                 )
+                force_no_tools = False  # 重置，仅影响紧跟的一轮
                 
                 response_text_buffer = ""
                 tool_call = None
@@ -305,6 +307,7 @@ class NoraController:
                                 )
                             })
                             file_edit_counts[edit_target] = 0  # Reset for potential future edits
+                            force_no_tools = True
                             continue
                     
                     last_loop_key = session.get("last_loop_key")
@@ -333,6 +336,7 @@ class NoraController:
                                 )
                             })
                             session["tool_call_loop_counter"] = 0
+                            force_no_tools = True
                             continue
                         elif tool_name == "edit_file":
                             logger.warning(f"[{chat_id}] 检测到工具调用循环: {loop_key} 已连续调用 {session['tool_call_loop_counter']+1} 次。")
@@ -345,6 +349,7 @@ class NoraController:
                                 )
                             })
                             session["tool_call_loop_counter"] = 0
+                            force_no_tools = True
                             continue
                         else:
                             # 其他工具（含 execute_skill 达到高阈值后）
@@ -354,6 +359,7 @@ class NoraController:
                                 "content": "【系统提示】你已经多次重复调用同一个工具。请停止重复调用，基于已有的结果直接给用户回复。"
                             })
                             session["tool_call_loop_counter"] = 0
+                            force_no_tools = True
                             continue  # 不 break，让 LLM 生成总结
                     
                     
