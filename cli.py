@@ -958,11 +958,6 @@ def test_rag():
 def main_menu():
     """显示主菜单并处理用户选择"""
     load_locale()
-
-    # 若当前环境不是交互式终端，直接提示并退出
-    if not (sys.stdin.isatty() and sys.stdout.isatty()):
-        logger.error("当前环境不支持交互式菜单。请使用命令行参数，例如 --configure / --test-qdrant / --history-stats 等。")
-        return
     
     choices = [
         "🔧 运行配置向导",
@@ -983,10 +978,7 @@ def main_menu():
             choices=choices
         ).ask()
         
-        if choice is None:
-            logger.error("交互输入失败（可能是非 TTY 或被中断）。请重试或改用命令行参数 --help 查看用法。")
-            break
-        if choice == "❌ 退出":
+        if choice is None or choice == "❌ 退出":
             print("👋 再见！")
             break
         
@@ -1031,11 +1023,12 @@ def main():
     
     args = parser.parse_args()
     
-    # 如果没有指定任何参数，尝试显示主菜单；在非交互环境下给出指引
-    if not any(vars(args).values()):
-        if not (sys.stdin.isatty() and sys.stdout.isatty()):
-            logger.error("检测到非交互环境，无法显示菜单。请使用命令行参数运行，示例见 --help。")
-            return
+    # 如果没有指定任何参数，显示主菜单
+    # 注意：--platform 和 --include-pinned 有默认值，需要单独检查操作性参数
+    has_action = (args.configure or args.test_qdrant or args.test_rag or args.clean_rag or
+                  args.history_stats or args.clear_history or args.clear_history_chat)
+    
+    if not has_action:
         main_menu()
         return
     
