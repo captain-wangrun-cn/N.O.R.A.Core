@@ -1,6 +1,7 @@
 from telegram import Update, Message, InlineKeyboardMarkup, InlineKeyboardButton
 from telegram.ext import ApplicationBuilder, ContextTypes, CommandHandler, MessageHandler, filters, CallbackQueryHandler
 from telegram.constants import ChatAction, ParseMode
+from telegram.error import TimedOut, RetryAfter
 from typing import Callable, Any, Optional, List, Dict
 import os
 import re
@@ -141,6 +142,31 @@ class TelegramAdapter(BaseAdapter):
         self.application = ApplicationBuilder().token(token).build()
         self._message_handler: Callable[[str, str], Any] | None = None
         self._aggregator: MessageAggregator | None = None
+
+    async def _send_with_retry(self, send_coro_factory, retries: int = 2, base_delay: float = 1.0):
+        """
+        对 Telegram 发送操作做超时重试。
+        - 仅对 TimedOut / RetryAfter 重试；其他异常直接抛出。
+        - 重试次数含首次尝试，默认最多 3 次（0 + 2 次重试）。
+        """
+        attempt = 0
+        while True:
+            try:
+                return await send_coro_factory()
+            except RetryAfter as e:
+                attempt += 1
+                if attempt > retries:
+                    raise
+                wait = getattr(e, "retry_after", base_delay * attempt)
+                logger.warning(f"发送被限流，{wait}s 后重试 (attempt {attempt}/{retries})")
+                await asyncio.sleep(wait)
+            except TimedOut:
+                attempt += 1
+                if attempt > retries:
+                    raise
+                wait = base_delay * attempt
+                logger.warning(f"发送超时，{wait}s 后重试 (attempt {attempt}/{retries})")
+                await asyncio.sleep(wait)
         self._reply_contexts: Dict[str, Dict] = {}  # 存储回复上下文 {chat_id: {msg_id: context}}
 
     def run(self, message_handler: Callable[[str, str], Any]):
@@ -527,10 +553,12 @@ class TelegramAdapter(BaseAdapter):
             
             for chunk_html in html_chunks:
                 try:
-                    message = await self.application.bot.send_message(
-                        chat_id=chat_id,
-                        text=chunk_html,
-                        parse_mode="HTML"
+                    message = await self._send_with_retry(
+                        lambda: self.application.bot.send_message(
+                            chat_id=chat_id,
+                            text=chunk_html,
+                            parse_mode="HTML"
+                        )
                     )
                 except Exception as html_err:
                     logger.warning(f"[{chat_id}] HTML 发送失败 ({html_err})，降级为纯文本。")
@@ -539,9 +567,11 @@ class TelegramAdapter(BaseAdapter):
                     # 纯文本也可能过长（标签去掉后不一定短多少），再次分割
                     plain_parts = _split_long_text(plain_chunk or chunk_html, TG_MSG_MAX_LENGTH)
                     for part in plain_parts:
-                        message = await self.application.bot.send_message(
-                            chat_id=chat_id,
-                            text=part
+                        message = await self._send_with_retry(
+                            lambda: self.application.bot.send_message(
+                                chat_id=chat_id,
+                                text=part
+                            )
                         )
                 last_message_id = str(message.message_id)
 
@@ -553,59 +583,63 @@ class TelegramAdapter(BaseAdapter):
                     # URL 直接通过 Telegram 发送，不走本地文件读取
                     if media_type == 'photo':
                         await self.application.bot.send_chat_action(chat_id=chat_id, action=ChatAction.UPLOAD_PHOTO)
-                        message = await self.application.bot.send_photo(chat_id=chat_id, photo=file_path, caption=caption)
+                        message = await self._send_with_retry(lambda: self.application.bot.send_photo(chat_id=chat_id, photo=file_path, caption=caption))
                     elif media_type == 'gif':
                         await self.application.bot.send_chat_action(chat_id=chat_id, action=ChatAction.UPLOAD_PHOTO)
-                        message = await self.application.bot.send_animation(chat_id=chat_id, animation=file_path, caption=caption)
+                        message = await self._send_with_retry(lambda: self.application.bot.send_animation(chat_id=chat_id, animation=file_path, caption=caption))
                     elif media_type == 'video':
                         await self.application.bot.send_chat_action(chat_id=chat_id, action=ChatAction.UPLOAD_VIDEO)
-                        message = await self.application.bot.send_video(chat_id=chat_id, video=file_path, caption=caption)
+                        message = await self._send_with_retry(lambda: self.application.bot.send_video(chat_id=chat_id, video=file_path, caption=caption))
                     elif media_type in ('audio', 'voice'):
                         await self.application.bot.send_chat_action(chat_id=chat_id, action=ChatAction.UPLOAD_VOICE)
-                        message = await self.application.bot.send_audio(chat_id=chat_id, audio=file_path, caption=caption)
+                        message = await self._send_with_retry(lambda: self.application.bot.send_audio(chat_id=chat_id, audio=file_path, caption=caption))
                     else:
                         await self.application.bot.send_chat_action(chat_id=chat_id, action=ChatAction.UPLOAD_DOCUMENT)
-                        message = await self.application.bot.send_document(chat_id=chat_id, document=file_path, caption=caption)
+                        message = await self._send_with_retry(lambda: self.application.bot.send_document(chat_id=chat_id, document=file_path, caption=caption))
                 else:
                     if media_type == 'photo':
                         message = await self._send_photo_smart(chat_id, file_path, caption)
                     elif media_type == 'gif':
                         await self.application.bot.send_chat_action(chat_id=chat_id, action=ChatAction.UPLOAD_PHOTO)
                         with open(file_path, 'rb') as f:
-                            message = await self.application.bot.send_animation(
+                            message = await self._send_with_retry(lambda: self.application.bot.send_animation(
                                 chat_id=chat_id, animation=f, caption=caption
-                            )
+                            ))
                     elif media_type == 'video':
                         await self.application.bot.send_chat_action(chat_id=chat_id, action=ChatAction.UPLOAD_VIDEO)
                         with open(file_path, 'rb') as f:
-                            message = await self.application.bot.send_video(
+                            message = await self._send_with_retry(lambda: self.application.bot.send_video(
                                 chat_id=chat_id, video=f, caption=caption
-                            )
+                            ))
                     elif media_type == 'audio':
                         await self.application.bot.send_chat_action(chat_id=chat_id, action=ChatAction.UPLOAD_VOICE)
                         with open(file_path, 'rb') as f:
-                            message = await self.application.bot.send_audio(
+                            message = await self._send_with_retry(lambda: self.application.bot.send_audio(
                                 chat_id=chat_id, audio=f, caption=caption
-                            )
+                            ))
                     elif media_type == 'voice':
                         await self.application.bot.send_chat_action(chat_id=chat_id, action=ChatAction.UPLOAD_VOICE)
                         with open(file_path, 'rb') as f:
-                            message = await self.application.bot.send_voice(
+                            message = await self._send_with_retry(lambda: self.application.bot.send_voice(
                                 chat_id=chat_id, voice=f, caption=caption
-                            )
+                            ))
                     else:  # document (including code files)
                         await self.application.bot.send_chat_action(chat_id=chat_id, action=ChatAction.UPLOAD_DOCUMENT)
                         with open(file_path, 'rb') as f:
-                            message = await self.application.bot.send_document(
+                            message = await self._send_with_retry(lambda: self.application.bot.send_document(
                                 chat_id=chat_id, document=f, caption=caption
-                            )
+                            ))
                 last_message_id = str(message.message_id)
                 logger.info(f"[{chat_id}] 已发送{media_type}: {file_path}")
             except Exception as e:
                 logger.error(f"[{chat_id}] 发送{media_type}失败 {file_path}: {e}")
-                message = await self.application.bot.send_message(
-                    chat_id=chat_id,
-                    text=f"⚠️ 无法发送文件: {file_path}\n类型: {media_type}\n错误: {e}"
+                message = await self._send_with_retry(
+                    lambda: self.application.bot.send_message(
+                        chat_id=chat_id,
+                        text=("⚠️ 无法发送文件: {file_path}\n类型: {media_type}\n错误: {err}\n"
+                             "已达到重试上限，建议检查网络或稍后再试。"
+                        ).format(file_path=file_path, media_type=media_type, err=e)
+                    )
                 )
                 last_message_id = str(message.message_id)
 
