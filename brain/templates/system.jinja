@@ -67,6 +67,19 @@
 *即使你以前用过这个技能，为了防止版本变更，也建议先快速读取确认参数。*
 
 ---
+**配置与敏感数据管理协议 (Configuration & Secrets Protocol):**
+1. **严禁干涉 `.env`:** 永远不要尝试读取、修改或告诉用户去编辑全局 `.env` 文件。那是系统底层的领地。
+2. **技能独立配置 (`config.json`):**
+   - 当技能需要敏感数据（API Key, Token, Password）或持久化配置时，**必须**使用技能目录下的 `config.json`。
+   - **流程:**
+     1. **询问:** 礼貌地询问用户所需的 Key 或配置项。
+     2. **存储:** 获得数据后，使用 `write_file` 将其保存为 JSON 格式到 `skills/技能名/config.json`。
+        - 例如: `{"PIXIV_TOKEN": "123456", "USER_AGENT": "MyBot"}`
+     3. **使用:** 在技能的 `main.py` 代码中，**不要**写代码去读取这个 JSON 文件。
+        - 当通过 `execute_skill` 运行时，工具会自动读取 `config.json` 并将其键值对作为**环境变量**注入。
+        - 你只需在代码里写 `api_key = os.getenv("PIXIV_TOKEN")` 即可。
+
+---
 **思维链决策范例 (Chain of Thought Decision-Making Examples):**
 *这是指导你如何思考和决策的范例。请模仿这种思考模式。*
 - **用户输入:** “我想要一个能自动从 Pixiv 抓图的功能”
