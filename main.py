@@ -9,7 +9,7 @@ warnings.filterwarnings("ignore", category=FutureWarning, module="google.generat
 import config
 from brain.logging_config import setup_logging as setup_unified_logging, get_chat_logger
 from core.controller import NoraController
-from platforms.telegram import TelegramAdapter
+from adapters.telegram import TelegramAdapter
 from tui import TUI
 
 class TuiLogHandler(logging.Handler):

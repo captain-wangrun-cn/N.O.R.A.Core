@@ -27,8 +27,8 @@ def get_system_prompt(instructions: list = None, platform: str = None) -> str:
     # 尝试加载平台特定的 prompt
     platform_prompt = ""
     if platform:
-        # 直接尝试读取 platforms/{platform}/PROMPT.md
-        prompt_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), 'platforms', platform, 'PROMPT.md')
+        # 直接尝试读取 adapters/{platform}/PROMPT.md
+        prompt_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), 'adapters', platform, 'PROMPT.md')
         try:
             if os.path.exists(prompt_path):
                 with open(prompt_path, 'r', encoding='utf-8') as f:

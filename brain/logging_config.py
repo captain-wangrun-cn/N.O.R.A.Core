@@ -114,7 +114,7 @@ def setup_logging(console_level=logging.WARNING, file_level=logging.DEBUG):
     logging.getLogger('memory').setLevel(logging.INFO)
     
     # Platforms: INFO (message flow)
-    logging.getLogger('platforms').setLevel(logging.INFO)
+    logging.getLogger('adapters').setLevel(logging.INFO)
     
     # Suppress noisy third-party libraries
     logging.getLogger('httpx').setLevel(logging.WARNING)

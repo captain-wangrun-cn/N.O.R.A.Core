@@ -7,7 +7,7 @@ import subprocess
 import logging
 import inspect
 from typing import List, Dict, Callable, Any
-from platforms.base import BaseAdapter
+from adapters.base import BaseAdapter
 from workspace_config import get_workspace_manager
 
 logger = logging.getLogger(__name__)

@@ -8,8 +8,8 @@ import logging
 import io
 import asyncio
 
-from platforms.base import BaseAdapter
-from platforms.aggregator import MessageAggregator
+from adapters.base import BaseAdapter
+from adapters.aggregator import MessageAggregator
 import config
 
 logger = logging.getLogger(__name__)

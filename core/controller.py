@@ -3,7 +3,7 @@ import logging
 import os
 from typing import Dict, Any, Callable, Optional, cast
 
-from platforms.base import BaseAdapter
+from adapters.base import BaseAdapter
 from brain.llm import llm_client
 from brain.prompts import get_system_prompt
 from memory.rag import RAGEngine
