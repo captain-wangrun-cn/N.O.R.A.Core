@@ -17,6 +17,9 @@ Telegram 仅支持有限的 HTML 标签。为了确保消息能被正确渲染�
   `<pre><code class="language-python">code block</code></pre>`
 - > 引用 (Blockquote): `<blockquote>text</blockquote>`
 
+- **动作描写:** 使用 `<i>(动作)</i>` 包裹，例如 `<i>(歪头)</i>`。
+- **特殊字符转义:** 文本中的 `<` `>` `&` 如果不是用于标签，**必须**转义为 `&lt;` `&gt;` `&amp;`。
+
 **禁止使用的格式:**
 
 - **严禁使用 Markdown!** (如 `**bold**`, `[link](url)`, `` `code` ``)。Telegram 的解析器已被配置为 HTML 模式，Markdown 语法会作为普通文本显示，非常丑陋。
