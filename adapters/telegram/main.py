@@ -487,7 +487,7 @@ class TelegramAdapter(BaseAdapter):
           - 文档/代码: pdf, py, js, json, zip, 等等
         """
         # 1. 提取所有文件路径
-        file_entries = []  # [(path, media_type)]
+        file_entries = []  # [(path, media_type, is_url)]
         missing_files = []
         for match in self.FILE_PATTERN.finditer(text):
             # FILE_PATTERN 有5个捕获组: (1)Markdown, (2)HTML img, (3)自定义标记, (4)URL, (5)本地路径
@@ -495,10 +495,14 @@ class TelegramAdapter(BaseAdapter):
             if path:
                 path = path.strip()
                 is_url = path.startswith(('http://', 'https://'))
-                if is_url or os.path.isfile(path):
+                if is_url:
                     media_type = self._classify_file(path)
-                    file_entries.append((path, media_type))
-                    logger.info(f"[{chat_id}] 检测到媒体{'URL' if is_url else '文件'}: {path} ({media_type})")
+                    file_entries.append((path, media_type, True))
+                    logger.info(f"[{chat_id}] 检测到媒体URL: {path} ({media_type})")
+                elif os.path.isfile(path):
+                    media_type = self._classify_file(path)
+                    file_entries.append((path, media_type, False))
+                    logger.info(f"[{chat_id}] 检测到媒体文件: {path} ({media_type})")
                 else:
                     missing_files.append(path)
                     logger.warning(f"[{chat_id}] 文件路径不存在，跳过: {path}")
@@ -542,41 +546,59 @@ class TelegramAdapter(BaseAdapter):
                 last_message_id = str(message.message_id)
 
         # 4. 逐个发送媒体文件
-        for file_path, media_type in file_entries:
+        for file_path, media_type, is_url in file_entries:
             caption = os.path.basename(file_path)
             try:
-                if media_type == 'photo':
-                    message = await self._send_photo_smart(chat_id, file_path, caption)
-                elif media_type == 'gif':
-                    await self.application.bot.send_chat_action(chat_id=chat_id, action=ChatAction.UPLOAD_PHOTO)
-                    with open(file_path, 'rb') as f:
-                        message = await self.application.bot.send_animation(
-                            chat_id=chat_id, animation=f, caption=caption
-                        )
-                elif media_type == 'video':
-                    await self.application.bot.send_chat_action(chat_id=chat_id, action=ChatAction.UPLOAD_VIDEO)
-                    with open(file_path, 'rb') as f:
-                        message = await self.application.bot.send_video(
-                            chat_id=chat_id, video=f, caption=caption
-                        )
-                elif media_type == 'audio':
-                    await self.application.bot.send_chat_action(chat_id=chat_id, action=ChatAction.UPLOAD_VOICE)
-                    with open(file_path, 'rb') as f:
-                        message = await self.application.bot.send_audio(
-                            chat_id=chat_id, audio=f, caption=caption
-                        )
-                elif media_type == 'voice':
-                    await self.application.bot.send_chat_action(chat_id=chat_id, action=ChatAction.UPLOAD_VOICE)
-                    with open(file_path, 'rb') as f:
-                        message = await self.application.bot.send_voice(
-                            chat_id=chat_id, voice=f, caption=caption
-                        )
-                else:  # document (including code files)
-                    await self.application.bot.send_chat_action(chat_id=chat_id, action=ChatAction.UPLOAD_DOCUMENT)
-                    with open(file_path, 'rb') as f:
-                        message = await self.application.bot.send_document(
-                            chat_id=chat_id, document=f, caption=caption
-                        )
+                if is_url:
+                    # URL 直接通过 Telegram 发送，不走本地文件读取
+                    if media_type == 'photo':
+                        await self.application.bot.send_chat_action(chat_id=chat_id, action=ChatAction.UPLOAD_PHOTO)
+                        message = await self.application.bot.send_photo(chat_id=chat_id, photo=file_path, caption=caption)
+                    elif media_type == 'gif':
+                        await self.application.bot.send_chat_action(chat_id=chat_id, action=ChatAction.UPLOAD_PHOTO)
+                        message = await self.application.bot.send_animation(chat_id=chat_id, animation=file_path, caption=caption)
+                    elif media_type == 'video':
+                        await self.application.bot.send_chat_action(chat_id=chat_id, action=ChatAction.UPLOAD_VIDEO)
+                        message = await self.application.bot.send_video(chat_id=chat_id, video=file_path, caption=caption)
+                    elif media_type in ('audio', 'voice'):
+                        await self.application.bot.send_chat_action(chat_id=chat_id, action=ChatAction.UPLOAD_VOICE)
+                        message = await self.application.bot.send_audio(chat_id=chat_id, audio=file_path, caption=caption)
+                    else:
+                        await self.application.bot.send_chat_action(chat_id=chat_id, action=ChatAction.UPLOAD_DOCUMENT)
+                        message = await self.application.bot.send_document(chat_id=chat_id, document=file_path, caption=caption)
+                else:
+                    if media_type == 'photo':
+                        message = await self._send_photo_smart(chat_id, file_path, caption)
+                    elif media_type == 'gif':
+                        await self.application.bot.send_chat_action(chat_id=chat_id, action=ChatAction.UPLOAD_PHOTO)
+                        with open(file_path, 'rb') as f:
+                            message = await self.application.bot.send_animation(
+                                chat_id=chat_id, animation=f, caption=caption
+                            )
+                    elif media_type == 'video':
+                        await self.application.bot.send_chat_action(chat_id=chat_id, action=ChatAction.UPLOAD_VIDEO)
+                        with open(file_path, 'rb') as f:
+                            message = await self.application.bot.send_video(
+                                chat_id=chat_id, video=f, caption=caption
+                            )
+                    elif media_type == 'audio':
+                        await self.application.bot.send_chat_action(chat_id=chat_id, action=ChatAction.UPLOAD_VOICE)
+                        with open(file_path, 'rb') as f:
+                            message = await self.application.bot.send_audio(
+                                chat_id=chat_id, audio=f, caption=caption
+                            )
+                    elif media_type == 'voice':
+                        await self.application.bot.send_chat_action(chat_id=chat_id, action=ChatAction.UPLOAD_VOICE)
+                        with open(file_path, 'rb') as f:
+                            message = await self.application.bot.send_voice(
+                                chat_id=chat_id, voice=f, caption=caption
+                            )
+                    else:  # document (including code files)
+                        await self.application.bot.send_chat_action(chat_id=chat_id, action=ChatAction.UPLOAD_DOCUMENT)
+                        with open(file_path, 'rb') as f:
+                            message = await self.application.bot.send_document(
+                                chat_id=chat_id, document=f, caption=caption
+                            )
                 last_message_id = str(message.message_id)
                 logger.info(f"[{chat_id}] 已发送{media_type}: {file_path}")
             except Exception as e:
