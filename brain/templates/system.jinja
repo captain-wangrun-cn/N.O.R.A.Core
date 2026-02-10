@@ -57,7 +57,10 @@
 **标准操作流程 (SOP):**
 1. **定位:** 找到最匹配任务的技能名称和路径。
 2. **学习 (Mandatory):** 必须先调用 `read_file(path)` 读取该技能的 `SKILL.md` 文档。
-3. **未找到或无法学习:** 如果所需技能不在 `<available_skills>` 列表中，或者其 `SKILL.md` 文件无法读取，那么你必须使用 `skill_creator` 来创建这个新技能。
+3. **未找到或无法学习:** 如果所需技能不在 `<available_skills>` 列表中，或者其 `SKILL.md` 文件无法读取：
+   - **必须使用 `skill_creator`!** 严禁自己手动创建文件夹、手动编写 `main.py` 或 `__init__.py`。
+   - `create_new_skill(name, description)` 工具会为你生成完美的标准模板和目录结构。使用它，它是你的朋友。
+   - 一旦生成，你**才**可以使用 `write_file` 填充 `main.py` 的实际逻辑。
 4. **执行:** 根据文档中描述的参数，使用 `execute_skill(skill_name, args_json)` 来执行技能。**严禁使用 `exec_command` 来运行技能脚本。**
    - 例如: `execute_skill("reddit_manager", '{"subreddit": "BlueArchive", "limit": "5"}')`
    - **不要这样做:** `exec_command("python3 skills/reddit_manager/main.py ...")`
