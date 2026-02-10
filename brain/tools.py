@@ -146,13 +146,31 @@ class ToolManager:
         except Exception:
             pass
         
+        # Load skill-specific config if it exists
+        env = os.environ.copy()
+        config_path = os.path.join("skills", skill_name, "config.json")
+        if os.path.exists(config_path):
+            try:
+                with open(config_path, 'r', encoding='utf-8') as f:
+                    skill_config = json.load(f)
+                    if isinstance(skill_config, dict):
+                        # Inject config values as environment variables
+                        for k, v in skill_config.items():
+                            env[str(k)] = str(v)
+                    else:
+                        return f"Error: {config_path} must be a valid JSON object."
+            except json.JSONDecodeError as e:
+                return f"Error: Invalid JSON in {config_path}: {e}"
+            except Exception as e:
+                return f"Error reading config for '{skill_name}': {e}"
+
         try:
             args_dict = json.loads(args_json)
             command = ["python3", skill_script_path]
             for key, value in args_dict.items():
                 command.extend([f"--{key}", str(value)])
             
-            result = subprocess.run(command, capture_output=True, text=True, timeout=120)
+            result = subprocess.run(command, capture_output=True, text=True, timeout=120, env=env)
             output = result.stdout.strip()
             stderr = result.stderr.strip()
             
