@@ -151,8 +151,8 @@ class NoraController:
         # --- 前后端分离逻辑 ---
         status = self.worker_status.get(chat_id)
         if status and status.busy:
-            # 后端忙碌：走前端快速回复路径
-            logger.info(f"[{chat_id}] 后端忙碌，走前端快速回复路径。")
+            # 后端忙碌：用 fast 模型判断用户意图并生成回复
+            logger.info(f"[{chat_id}] 后端忙碌，分析用户意图...")
             
             # 保存用户消息到数据库（不丢消息）
             self.message_history.add_message(
@@ -162,12 +162,31 @@ class NoraController:
                 content=text
             )
             
-            # 将新消息加入待处理队列
-            self.pending_messages.setdefault(chat_id, []).append(text)
+            # LLM 判断意图并生成回复
+            decision = await self._detect_interrupt_intent_and_reply(chat_id, text, status)
+            action = decision["action"]
+            reply = decision["reply"]
             
-            # 生成前端快速回复
-            await self._frontend_reply(chat_id, text, status)
-            return
+            # 发送回复
+            await self.adapter.send_message(chat_id, reply)
+            self.message_history.add_message(
+                platform="telegram",
+                chat_id=chat_id,
+                role="assistant",
+                content=reply
+            )
+            
+            # 根据 action 执行操作
+            if action == "stop":
+                await self._interrupt_backend(chat_id, reason="stop", user_text=text, skip_reply=True)
+                return
+            elif action == "change":
+                await self._interrupt_backend(chat_id, reason="change", user_text=text, skip_reply=True)
+                return
+            else:  # action == "queue"
+                # 入队列，等后端完成后处理
+                self.pending_messages.setdefault(chat_id, []).append(text)
+                return
 
         # --- 正常流程：后端空闲，启动新任务 ---
         # 旧的抢占逻辑保留，以防万一有残留任务
@@ -179,25 +198,37 @@ class NoraController:
         task = asyncio.create_task(self._generate_response(chat_id, text))
         self.generation_tasks[chat_id] = task
 
-    async def _frontend_reply(self, chat_id: str, user_text: str, status: WorkerStatus):
-        """前端快速回复：告诉用户后端正在忙，并提供进度概括。"""
+    async def _detect_interrupt_intent_and_reply(self, chat_id: str, text: str, status: WorkerStatus) -> Dict[str, str]:
+        """
+        用 fast 模型智能判断用户意图并生成回复。
+        
+        Returns:
+            {
+                "action": "stop" | "change" | "queue",  # 要执行的操作
+                "reply": "...",                          # 给用户的回复文案
+            }
+        """
         progress = status.get_summary()
         
-        # 用快速模型生成自然语言回复
         prompt = (
-            f"你是 Nora，用户刚发了新消息，但你正在忙着处理之前的请求。\n"
-            f"用户新消息: \"{user_text}\"\n\n"
-            f"你当前的工作状态:\n{progress}\n\n"
-            f"请用简短友好的语气（1-3句话）告诉用户：\n"
-            f"1. 你正在忙着处理之前的事情（简要说明在做什么）\n"
-            f"2. 已经收到了他们的新消息，会在忙完后处理\n"
-            f"不要用 Markdown 格式，不要列清单，像聊天一样说话。"
+            f"你是 Nora，用户发来新消息，但你正忙着处理之前的请求。分析用户意图并给出回复。\n\n"
+            f"【你当前的工作状态】\n{progress}\n\n"
+            f"【用户新消息】\"{text}\"\n\n"
+            f"请判断用户意图并回复：\n"
+            f"1. 如果用户要求**停止**当前工作（如'停'、'取消'、'不用了'、'算了'、'stop'等），\n"
+            f"   输出: ACTION:stop | REPLY:（确认已停止的友好回复，1-2句话）\n\n"
+            f"2. 如果用户要求**切换**到新任务（如'先别...了，帮我...'、'换一个'、'改成'等），\n"
+            f"   输出: ACTION:change | REPLY:（确认切换的回复，如'好，马上切换～'）\n\n"
+            f"3. 如果是**普通追加消息**（如询问进度、补充信息、闲聊等），\n"
+            f"   输出: ACTION:queue | REPLY:（告知正在忙+会稍后处理的友好回复，1-3句话）\n\n"
+            f"格式: ACTION:xxx | REPLY:yyy\n"
+            f"用简短自然的口语回复，不要用 Markdown 格式。"
         )
         
         try:
             response = ""
             stream = self.fast_llm.chat_stream(
-                system_prompt="你是 Nora，一个友好的 AI 助手。用简短自然的口语风格回复。",
+                system_prompt="你是 Nora，友好的 AI 助手。简短自然地回复。",
                 user_prompt=prompt,
                 history=[],
                 tools=[]
@@ -208,23 +239,113 @@ class NoraController:
                 elif isinstance(chunk, str):
                     response += chunk
             
-            if response.strip():
-                await self.adapter.send_message(chat_id, response.strip())
-                # 保存前端回复到数据库
-                self.message_history.add_message(
-                    platform="telegram",
-                    chat_id=chat_id,
-                    role="assistant",
-                    content=response.strip()
-                )
+            # 解析 LLM 输出
+            response = response.strip()
+            if "|" in response and "ACTION:" in response.upper():
+                parts = response.split("|", 1)
+                action_part = parts[0].strip()
+                reply_part = parts[1].strip() if len(parts) > 1 else ""
+                
+                # 提取 ACTION
+                action = "queue"  # 默认
+                if "ACTION:" in action_part.upper():
+                    action_text = action_part.split(":", 1)[1].strip().lower()
+                    if "stop" in action_text:
+                        action = "stop"
+                    elif "change" in action_text:
+                        action = "change"
+                
+                # 提取 REPLY
+                reply = reply_part
+                if "REPLY:" in reply.upper():
+                    reply = reply.split(":", 1)[1].strip()
+                
+                if not reply:
+                    # fallback 回复
+                    if action == "stop":
+                        reply = "好的，已经停下来了～"
+                    elif action == "change":
+                        reply = "好，马上切换～"
+                    else:
+                        reply = f"收到～ 我正在处理之前的请求（{status.phase}），完成后马上看你的新消息！"
+                
+                logger.info(f"[{chat_id}] LLM判断意图: action={action}, reply='{reply[:50]}'")
+                return {"action": action, "reply": reply}
+            
             else:
-                # fallback: 快速模型无输出，用固定文案
-                fallback = f"收到～ 我正在处理之前的请求（{status.phase}），完成后马上看你的新消息！"
-                await self.adapter.send_message(chat_id, fallback)
+                # 解析失败，fallback 到 queue
+                logger.warning(f"[{chat_id}] 意图解析失败，fallback 到 queue。LLM输出: {response[:100]}")
+                return {
+                    "action": "queue",
+                    "reply": f"收到～ 我正在处理之前的请求（{status.phase}），完成后马上看你的新消息！"
+                }
+        
         except Exception as e:
-            logger.warning(f"[{chat_id}] 前端快速回复失败: {e}")
-            fallback = f"收到～ 我正在忙着处理之前的请求，完成后会看你的新消息！"
-            await self.adapter.send_message(chat_id, fallback)
+            logger.warning(f"[{chat_id}] 意图检测失败: {e}，fallback 到 queue")
+            return {
+                "action": "queue",
+                "reply": f"收到～ 我正在忙着处理之前的请求，完成后会看你的新消息！"
+            }
+
+    async def _interrupt_backend(self, chat_id: str, reason: str, user_text: str, skip_reply: bool = False):
+        """
+        前端打断后端：取消当前任务，清理状态，根据 reason 决定下一步。
+        
+        reason:
+            "stop"   - 停止并告知用户已停止
+            "change" - 停止后立即处理新消息
+        skip_reply: 是否跳过回复（调用方已经发过回复）
+        """
+        logger.info(f"[{chat_id}] 前端打断后端: reason={reason}, text='{user_text[:50]}'")
+        
+        # 设置打断标记，防止 finally 块自动处理排队消息
+        session = self.sessions.setdefault(chat_id, {"history": [], "interrupted_thought": "", "pending_text": ""})
+        session["_interrupted_by_frontend"] = True
+        
+        # 1. 取消后端任务
+        task = self.generation_tasks.get(chat_id)
+        if task and not task.done():
+            task.cancel()
+            # 等待任务真正结束
+            try:
+                await asyncio.wait_for(asyncio.shield(task), timeout=2.0)
+            except (asyncio.CancelledError, asyncio.TimeoutError, Exception):
+                pass
+        
+        # 2. 清理状态
+        status = self.worker_status.get(chat_id)
+        if status:
+            status.finish()
+        
+        # 3. 清空排队消息（用户已改变意图，旧队列失效）
+        self.pending_messages.pop(chat_id, None)
+        
+        # 4. 根据 reason 决定下一步（如果调用方已回复，则跳过）
+        if skip_reply:
+            # 调用方已发送回复，直接执行后续操作
+            if reason == "change":
+                # 启动新任务处理 user_text
+                task = asyncio.create_task(self._generate_response(chat_id, user_text))
+                self.generation_tasks[chat_id] = task
+        else:
+            # 需要生成并发送回复（兼容旧调用方式）
+            if reason == "stop":
+                reply = "好的，已经停下来了～"
+                await self.adapter.send_message(chat_id, reply)
+                self.message_history.add_message(
+                    platform="telegram", chat_id=chat_id,
+                    role="assistant", content=reply
+                )
+            elif reason == "change":
+                reply = "好，马上切换～"
+                await self.adapter.send_message(chat_id, reply)
+                self.message_history.add_message(
+                    platform="telegram", chat_id=chat_id,
+                    role="assistant", content=reply
+                )
+                # 启动新任务
+                task = asyncio.create_task(self._generate_response(chat_id, user_text))
+                self.generation_tasks[chat_id] = task
 
     async def _generate_response(self, chat_id: str, text: str):
         """内部生成逻辑。"""
@@ -722,30 +843,45 @@ class NoraController:
             logger.debug(f"[{chat_id}] History updated. New length: {len(session['history'])}")
 
         except asyncio.CancelledError:
-            # --- 抢占发生：抢救现场 ---
+            # --- 抢占/打断发生：抢救现场 ---
+            # 标记后端完成（打断方也会调 finish，但这里确保一定执行）
+            status.finish()
+            
             session["pending_text"] = text
             
             if 'final_response_buffer' in locals() and final_response_buffer:
                 session["interrupted_thought"] = final_response_buffer
-                logger.info(f"[{chat_id}] 抢占成功：保存了部分思路 ('{final_response_buffer[:30]}...') 和用户输入。")
+                logger.info(f"[{chat_id}] 任务被打断：保存了部分思路 ('{final_response_buffer[:30]}...') 和用户输入。")
             else:
                 session["interrupted_thought"] = ""
-                logger.info(f"[{chat_id}] 抢占成功：尚未生成内容，仅保存了用户输入。")
+                logger.info(f"[{chat_id}] 任务被打断：尚未生成内容，仅保存了用户输入。")
         
         except Exception as e:
             if self.tui_callback: self.tui_callback(f"❌ Error: {e.__class__.__name__}")
             logger.error(f"[{chat_id}] 生成响应时出现严重错误。", exc_info=True)
-            await self.adapter.send_message(chat_id, "抱歉，处理您的请求时出现内部错误。")
+            try:
+                await self.adapter.send_message(chat_id, "抱歉，处理您的请求时出现内部错误。")
+            except Exception:
+                pass  # 发送失败也不能再抛
             
         finally:
-            # 标记后端完成
+            # 确保后端状态被清理（CancelledError 块可能已经 finish 了，重复调用无害）
             status.finish()
             if self.tui_callback: self.tui_callback("✅ Idle")
             self.generation_tasks.pop(chat_id, None)
             logger.debug(f"[{chat_id}] 本次生成任务结束。")
             
-            # --- 处理排队消息 ---
-            await self._process_pending_messages(chat_id)
+            # --- 处理排队消息（仅在非取消情况下） ---
+            # 如果任务是被打断的（CancelledError），排队消息由 _interrupt_backend 负责处理
+            # 只在正常完成或异常完成时处理队列
+            if not self._was_interrupted(chat_id):
+                await self._process_pending_messages(chat_id)
+
+    def _was_interrupted(self, chat_id: str) -> bool:
+        """检查本次任务是否是被前端打断的（通过检查 session 标记）。"""
+        session = self.sessions.get(chat_id, {})
+        was = session.pop("_interrupted_by_frontend", False)
+        return was
 
     async def _process_pending_messages(self, chat_id: str):
         """后端完成后，处理队列中积攒的用户消息。"""
