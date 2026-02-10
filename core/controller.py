@@ -1,6 +1,7 @@
 import asyncio
 import logging
 import os
+import re
 from typing import Dict, Any, Callable, Optional, cast
 
 from adapters.base import BaseAdapter
@@ -219,7 +220,11 @@ class NoraController:
                                 # Send and sync all complete parts
                                 for part in parts[:-1]:
                                     text_to_send = part.strip()
-                                    if text_to_send:
+                                    # 过滤掉包含工具调用语法的泄漏内容
+                                    if text_to_send and not re.search(
+                                        r'(?:execute_skill|write_file|read_file|edit_file|exec_command|list_dir|create_new_skill)\s*\(',
+                                        text_to_send
+                                    ):
                                         await self.adapter.send_message(chat_id, text_to_send)
                                         # Important: keep final buffer synchronized
                                         temp_history.append({"role": "assistant", "content": text_to_send})
@@ -427,7 +432,20 @@ class NoraController:
             # --- 4. 发送响应 ---
             # If the loop completes and there's still text in the buffer, it's the final message.
             if final_response_buffer:
-                await self.adapter.send_message(chat_id, final_response_buffer)
+                # 过滤掉可能泄漏的工具调用语法
+                clean_response = re.sub(
+                    r'(?:execute_skill|write_file|read_file|edit_file|exec_command|list_dir|create_new_skill)\s*\([^)]*\)',
+                    '', final_response_buffer
+                ).strip()
+                # 过滤掉 "返回结果:" + 原始 JSON/代码块
+                clean_response = re.sub(
+                    r'返回结果[：:]\s*```[\s\S]*?```', '', clean_response
+                ).strip()
+                if clean_response:
+                    await self.adapter.send_message(chat_id, clean_response)
+                elif latest_meaningful_output:
+                    # 整条消息都是工具语法泄漏，用工具结果做 fallback
+                    pass  # 由下面的 elif 分支处理
             elif latest_meaningful_output:
                 # Fallback: LLM stayed silent; do one final LLM call to summarize the tool output
                 temp_history.append({

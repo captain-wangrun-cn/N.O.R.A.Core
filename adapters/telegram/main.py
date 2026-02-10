@@ -22,41 +22,71 @@ COMPRESS_TARGET_SIZE = 9 * 1024 * 1024       # Compress target: 9MB (safety marg
 
 def _markdown_to_html(text: str) -> str:
     """
-    将 LLM 常见的 Markdown 格式转为 Telegram 兼容的 HTML。
-    只处理最常见的格式，避免破坏已有 HTML 标签。
+    将 Markdown 格式转为 Telegram 兼容的 HTML。
+    
+    处理策略：先保护代码块和行内代码，转义特殊字符，再做格式转换，最后还原代码。
     """
-    # 跳过已经包含大量 HTML 标签的文本（已经是 HTML 格式）
-    if text.count('<') > 5 and text.count('>') > 5:
-        return text
+    # === Phase 0: 提取并保护代码块和行内代码（避免内部内容被错误转换） ===
+    code_blocks = []
+    inline_codes = []
     
-    # 代码块: ```lang\ncode\n``` → <pre><code>code</code></pre>
-    text = re.sub(
-        r'```(\w*)\n(.*?)```',
-        lambda m: f'<pre><code class="language-{m.group(1)}">{m.group(2).rstrip()}</code></pre>' if m.group(1) else f'<pre><code>{m.group(2).rstrip()}</code></pre>',
-        text, flags=re.DOTALL
-    )
+    def _save_code_block(m):
+        idx = len(code_blocks)
+        lang = m.group(1) or ""
+        code = m.group(2)
+        # 代码块内部需要转义 HTML 特殊字符
+        escaped_code = code.replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;')
+        if lang:
+            code_blocks.append(f'<pre><code class="language-{lang}">{escaped_code}</code></pre>')
+        else:
+            code_blocks.append(f'<pre><code>{escaped_code}</code></pre>')
+        return f'\x00CODEBLOCK{idx}\x00'
     
-    # 行内代码: `code` → <code>code</code> (但不匹配已在 <pre> 内的)
-    text = re.sub(r'(?<!<code>)`([^`\n]+?)`', r'<code>\1</code>', text)
+    def _save_inline_code(m):
+        idx = len(inline_codes)
+        code = m.group(1)
+        escaped_code = code.replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;')
+        inline_codes.append(f'<code>{escaped_code}</code>')
+        return f'\x00INLINECODE{idx}\x00'
     
-    # 粗体+斜体: ***text*** or ___text___
+    # 先保护代码块 (```...```)
+    text = re.sub(r'```(\w*)\n(.*?)```', _save_code_block, text, flags=re.DOTALL)
+    # 再保护行内代码 (`...`)
+    text = re.sub(r'`([^`\n]+?)`', _save_inline_code, text)
+    
+    # === Phase 1: 转义 HTML 特殊字符（在非代码区域） ===
+    text = text.replace('&', '&amp;')
+    text = text.replace('<', '&lt;')
+    text = text.replace('>', '&gt;')
+    
+    # === Phase 2: Markdown → HTML 格式转换 ===
+    # 粗体+斜体: ***text***
     text = re.sub(r'\*\*\*(.+?)\*\*\*', r'<b><i>\1</i></b>', text)
-    
-    # 粗体: **text** or __text__
+    # 粗体: **text**
     text = re.sub(r'\*\*(.+?)\*\*', r'<b>\1</b>', text)
+    # 粗体: __text__
     text = re.sub(r'__(.+?)__', r'<b>\1</b>', text)
-    
-    # 斜体: *text* or _text_ (小心不要匹配文件路径中的下划线)
+    # 斜体: *text* (不匹配乘号或路径中的星号)
     text = re.sub(r'(?<!\w)\*([^*\n]+?)\*(?!\w)', r'<i>\1</i>', text)
-    
     # 删除线: ~~text~~
     text = re.sub(r'~~(.+?)~~', r'<s>\1</s>', text)
-    
-    # Markdown 链接: [text](url) → <a href="url">text</a>
+    # 链接: [text](url)
     text = re.sub(r'\[([^\]]+?)\]\((https?://[^\)]+?)\)', r'<a href="\2">\1</a>', text)
-    
-    # Markdown 标题: # Title → <b>TITLE</b> (Telegram 不支持 h1-h6)
+    # 标题: # Title → 加粗（Telegram 不支持 h1-h6）
     text = re.sub(r'^#{1,6}\s+(.+)$', r'<b>\1</b>', text, flags=re.MULTILINE)
+    # 引用: > text → blockquote
+    # 匹配连续的 > 行，合并为一个 blockquote
+    text = re.sub(
+        r'(^&gt;\s?.+(?:\n^&gt;\s?.+)*)',
+        lambda m: '<blockquote>' + re.sub(r'^&gt;\s?', '', m.group(0), flags=re.MULTILINE) + '</blockquote>',
+        text, flags=re.MULTILINE
+    )
+    
+    # === Phase 3: 还原代码块和行内代码 ===
+    for idx, block in enumerate(code_blocks):
+        text = text.replace(f'\x00CODEBLOCK{idx}\x00', block)
+    for idx, code in enumerate(inline_codes):
+        text = text.replace(f'\x00INLINECODE{idx}\x00', code)
     
     return text
 
