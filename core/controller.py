@@ -278,11 +278,34 @@ class NoraController:
                     _file_tools = {"write_file", "edit_file", "read_file", "create_new_skill", "list_dir"}
                     if tool_name in _file_tools and isinstance(tool_args, dict):
                         _target = tool_args.get("path", tool_args.get("skill_name", ""))
-                        loop_key = f"{tool_name}:{_target}"
+                        # For edit_file, use a broader key: any edit on the same file counts together
+                        if tool_name == "edit_file":
+                            loop_key = f"edit_file:{_target}"
+                        else:
+                            loop_key = f"{tool_name}:{_target}"
                     elif tool_name == "execute_skill" and isinstance(tool_args, dict):
                         loop_key = f"execute_skill:{tool_args.get('skill_name', '')}"
                     else:
                         loop_key = tool_name
+                    
+                    # Also track cumulative edits to the same file (regardless of consecutive or not)
+                    file_edit_counts = session.setdefault("file_edit_counts", {})
+                    if tool_name == "edit_file" and isinstance(tool_args, dict):
+                        edit_target = tool_args.get("path", "")
+                        file_edit_counts[edit_target] = file_edit_counts.get(edit_target, 0) + 1
+                        if file_edit_counts[edit_target] >= 3:
+                            logger.warning(f"[{chat_id}] 对文件 {edit_target} 的 edit_file 调用已达 {file_edit_counts[edit_target]} 次，强制引导使用 write_file。")
+                            temp_history.append({
+                                "role": "user",
+                                "content": (
+                                    f"【系统提示】你已经对 {edit_target} 进行了 {file_edit_counts[edit_target]} 次 edit_file 操作。"
+                                    f"这太多了！请停止使用 edit_file。如果还需要修改这个文件，请先用 read_file 读取完整内容，"
+                                    f"然后用 write_file 一次性写入所有修改后的完整内容。"
+                                    f"如果修改已经完成，请直接给用户回复结果。"
+                                )
+                            })
+                            file_edit_counts[edit_target] = 0  # Reset for potential future edits
+                            continue
                     
                     last_loop_key = session.get("last_loop_key")
                     
@@ -293,7 +316,7 @@ class NoraController:
                     
                     session["last_loop_key"] = loop_key
 
-                    if session["tool_call_loop_counter"] >= 4:
+                    if session["tool_call_loop_counter"] >= 2:
                         logger.warning(f"[{chat_id}] 检测到工具调用循环: {loop_key} 已连续调用 {session['tool_call_loop_counter']+1} 次。正在强制中断。")
                         if tool_name == "read_file":
                             # For read-only tools, inject guidance to use a different approach instead of breaking
@@ -306,6 +329,18 @@ class NoraController:
                             })
                             session["tool_call_loop_counter"] = 0  # Reset to allow continued operation
                             continue  # Don't break, let LLM try a different approach
+                        elif tool_name == "edit_file":
+                            # edit_file 反复操作同一文件，引导使用 write_file 覆盖
+                            temp_history.append({
+                                "role": "user",
+                                "content": (
+                                    "【系统提示】你已经连续多次对同一个文件使用 edit_file。这是低效的做法。"
+                                    "请停止 edit_file，改用 read_file 读取完整内容后，用 write_file 一次性写入所有修改。"
+                                    "如果不需要继续修改，请直接给用户回复结果。"
+                                )
+                            })
+                            session["tool_call_loop_counter"] = 0
+                            continue
                         else:
                             # For other tools, break the loop
                             temp_history.append({"role": "user", "content": "【系统提示】检测到重复的工具调用。请停止当前操作，并直接给用户回复当前进展和结果。"})
