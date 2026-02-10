@@ -224,11 +224,15 @@ class TelegramAdapter(BaseAdapter):
         },
     }
 
-    # 统一匹配：支持多种嵌入语法 + 原始文件路径
+    # 统一匹配：支持多种嵌入语法 + 原始文件路径 + HTTP URLs
     FILE_PATTERN = re.compile(
         r'(?:!\[.*?\]\((.*?)\))|'                  # Markdown: ![alt](path)
         r'(?:<img\s+src="(.*?)"[^>]*>)|'            # HTML: <img src="path">
-        r'(?:\[(?:image|file|audio|video|doc):\s*(.*?)\])|'  # 自定义: [image: path] / [file: path] / [audio: path] 等
+        r'(?:\[(?:image|file|audio|video|doc):\s*(.*?)\])|'  # 自定义: [image: path]...
+        r'(?:^|\s)((?:https?://[^\s]+\.(?:' +
+        '|'.join(
+            ext.lstrip('.') for exts in MEDIA_TYPES.values() for ext in exts
+        ) + r'))\b)|'                               # URL匹配: http://example.com/image.png
         r'(?:^|\s)((?:/|\.{0,2}/|[a-zA-Z]:\\)[^\s<>"\']+\.(?:' +
         '|'.join(
             ext.lstrip('.') for exts in MEDIA_TYPES.values() for ext in exts
@@ -238,7 +242,9 @@ class TelegramAdapter(BaseAdapter):
 
     def _classify_file(self, path: str) -> str:
         """根据扩展名判断文件类型"""
-        ext = os.path.splitext(path)[1].lower()
+        # 移除 URL 参数以便正确判断扩展名 (如 image.jpg?v=1)
+        clean_path = path.split('?')[0].split('#')[0]
+        ext = os.path.splitext(clean_path)[1].lower()
         for media_type, extensions in self.MEDIA_TYPES.items():
             if ext in extensions:
                 return media_type
@@ -370,6 +376,27 @@ class TelegramAdapter(BaseAdapter):
           - 音频: mp3, ogg, wav, flac, m4a, opus
           - 文档/代码: pdf, py, js, json, zip, 等等
         """
+        # Telegram Photo/File Handling
+        if message.photo:
+            # Get the largest photo (last one in the array)
+            file_id = message.photo[-1].file_id
+            try:
+                # 获取文件 URL (这需要再次调用 getFile)
+                # 由于 python-telegram-bot 的 handle_update 并不直接提供 URL，
+                # 这里如果需要处理图片内容，通常需要下载。
+                # 暂时先标记收到了图片。
+                text = f"[Telegram Photo: {file_id}] {message.caption or ''}"
+            except Exception as e:
+                logger.error(f"Error handling photo: {e}")
+                text = "[Telegram Photo Error]"
+        elif message.document:
+            text = f"[Telegram Document: {message.document.file_name}] {message.caption or ''}"
+        elif message.text:
+            text = message.text
+        else:
+             # Fallback for voice, video, stickers etc if needed in future
+            text = "[Non-text message received]"
+
         # 1. 提取所有文件路径
         file_entries = []  # [(path, media_type)]
         missing_files = []
@@ -711,3 +738,30 @@ class TelegramAdapter(BaseAdapter):
         except Exception as e:
             logger.error(f"获取贴纸包失败: {e}")
             return None
+
+    async def _send_single_file(self, chat_id: str, file_path: str, caption: str = "") -> Optional[str]:
+        """发送单个文件，自动判断类型"""
+        media_type = self._classify_file(file_path)
+        last_message_id = None
+        
+        try:
+            is_url = file_path.startswith(('http://', 'https://'))
+            
+            if is_url:
+                # 直接发送 URL，Telegram 会尝试下载并预览
+                if media_type == 'photo':
+                     message = await self.application.bot.send_photo(chat_id=chat_id, photo=file_path, caption=caption)
+                elif media_type == 'video':
+                     message = await self.application.bot.send_video(chat_id=chat_id, video=file_path, caption=caption)
+                elif media_type == 'audio':
+                     message = await self.application.bot.send_audio(chat_id=chat_id, audio=file_path, caption=caption)
+                elif media_type == 'voice':
+                     message = await self.application.bot.send_voice(chat_id=chat_id, voice=file_path, caption=caption)
+                else:
+                     message = await self.application.bot.send_document(chat_id=chat_id, document=file_path, caption=caption)
+                
+                last_message_id = str(message.message_id)
+                logger.info(f"[{chat_id}] 已发送URL媒体 {media_type}: {file_path}")
+                return last_message_id
+
+            # ...existing code...
