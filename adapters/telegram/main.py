@@ -376,27 +376,6 @@ class TelegramAdapter(BaseAdapter):
           - 音频: mp3, ogg, wav, flac, m4a, opus
           - 文档/代码: pdf, py, js, json, zip, 等等
         """
-        # Telegram Photo/File Handling
-        if message.photo:
-            # Get the largest photo (last one in the array)
-            file_id = message.photo[-1].file_id
-            try:
-                # 获取文件 URL (这需要再次调用 getFile)
-                # 由于 python-telegram-bot 的 handle_update 并不直接提供 URL，
-                # 这里如果需要处理图片内容，通常需要下载。
-                # 暂时先标记收到了图片。
-                text = f"[Telegram Photo: {file_id}] {message.caption or ''}"
-            except Exception as e:
-                logger.error(f"Error handling photo: {e}")
-                text = "[Telegram Photo Error]"
-        elif message.document:
-            text = f"[Telegram Document: {message.document.file_name}] {message.caption or ''}"
-        elif message.text:
-            text = message.text
-        else:
-             # Fallback for voice, video, stickers etc if needed in future
-            text = "[Non-text message received]"
-
         # 1. 提取所有文件路径
         file_entries = []  # [(path, media_type)]
         missing_files = []
