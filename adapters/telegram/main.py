@@ -18,6 +18,7 @@ logger = logging.getLogger(__name__)
 TG_PHOTO_MAX_SIZE = 10 * 1024 * 1024       # 10MB for photos
 TG_DOCUMENT_MAX_SIZE = 50 * 1024 * 1024     # 50MB for documents
 COMPRESS_TARGET_SIZE = 9 * 1024 * 1024       # Compress target: 9MB (safety margin)
+TG_MSG_MAX_LENGTH = 4096                     # Telegram message text limit
 
 
 def _markdown_to_html(text: str) -> str:
@@ -89,6 +90,44 @@ def _markdown_to_html(text: str) -> str:
         text = text.replace(f'\x00INLINECODE{idx}\x00', code)
     
     return text
+
+
+def _split_long_text(text: str, max_length: int = TG_MSG_MAX_LENGTH) -> List[str]:
+    """
+    将超长文本按 Telegram 限制分割成多条消息。
+    优先在段落边界分割，其次在行边界，最后在字符边界。
+    """
+    if len(text) <= max_length:
+        return [text]
+    
+    chunks = []
+    remaining = text
+    
+    while len(remaining) > max_length:
+        # 在 max_length 范围内找最佳分割点
+        split_at = max_length
+        
+        # 优先：在段落边界 (\n\n) 分割
+        para_break = remaining.rfind('\n\n', 0, max_length)
+        if para_break > max_length // 4:  # 至少用到 1/4 的空间
+            split_at = para_break + 2  # 包含 \n\n
+        else:
+            # 其次：在行边界 (\n) 分割
+            line_break = remaining.rfind('\n', 0, max_length)
+            if line_break > max_length // 4:
+                split_at = line_break + 1
+            # 最后：硬切
+        
+        chunk = remaining[:split_at].rstrip()
+        if chunk:
+            chunks.append(chunk)
+        remaining = remaining[split_at:].lstrip('\n')
+    
+    if remaining.strip():
+        chunks.append(remaining.strip())
+    
+    return chunks if chunks else [text]
+
 
 class TelegramAdapter(BaseAdapter):
     """Telegram 平台适配器。"""
@@ -478,21 +517,29 @@ class TelegramAdapter(BaseAdapter):
         if clean_text:
             # Markdown → HTML 转换（LLM 有时会输出 Markdown 格式）
             html_text = _markdown_to_html(clean_text)
-            try:
-                message = await self.application.bot.send_message(
-                    chat_id=chat_id,
-                    text=html_text,
-                    parse_mode="HTML"
-                )
-            except Exception as html_err:
-                logger.warning(f"[{chat_id}] HTML 发送失败 ({html_err})，降级为纯文本。")
-                # HTML 解析失败，降级发送纯文本（去除所有标签）
-                plain_text = re.sub(r'<[^>]+>', '', clean_text)
-                message = await self.application.bot.send_message(
-                    chat_id=chat_id,
-                    text=plain_text or clean_text
-                )
-            last_message_id = str(message.message_id)
+            
+            # 分割超长消息（Telegram 限制 4096 字符）
+            html_chunks = _split_long_text(html_text, TG_MSG_MAX_LENGTH)
+            
+            for chunk_html in html_chunks:
+                try:
+                    message = await self.application.bot.send_message(
+                        chat_id=chat_id,
+                        text=chunk_html,
+                        parse_mode="HTML"
+                    )
+                except Exception as html_err:
+                    logger.warning(f"[{chat_id}] HTML 发送失败 ({html_err})，降级为纯文本。")
+                    # HTML 解析失败，降级发送纯文本（去除所有标签）
+                    plain_chunk = re.sub(r'<[^>]+>', '', chunk_html)
+                    # 纯文本也可能过长（标签去掉后不一定短多少），再次分割
+                    plain_parts = _split_long_text(plain_chunk or chunk_html, TG_MSG_MAX_LENGTH)
+                    for part in plain_parts:
+                        message = await self.application.bot.send_message(
+                            chat_id=chat_id,
+                            text=part
+                        )
+                last_message_id = str(message.message_id)
 
         # 4. 逐个发送媒体文件
         for file_path, media_type in file_entries:

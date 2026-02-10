@@ -6,7 +6,7 @@ import re
 import subprocess
 import logging
 import inspect
-from typing import List, Dict, Callable, Any
+from typing import List, Dict, Callable, Any, Optional
 from adapters.base import BaseAdapter
 from workspace_config import get_workspace_manager
 
@@ -251,14 +251,54 @@ class ToolManager:
         except Exception as e:
             return f"Error listing directory: {e}"
 
-    def read_file(self, path: str) -> str:
-        """Reads the contents of a file. Cannot read sensitive config files (config.yml, .env)."""
+    def read_file(self, path: str, start_line: Optional[int] = None, end_line: Optional[int] = None) -> str:
+        """
+        Reads the contents of a file. Cannot read sensitive config files (config.yml, .env).
+        
+        :param path: Path to the file to read.
+        :param start_line: Optional. Starting line number (1-indexed, inclusive). If not provided, starts from beginning.
+        :param end_line: Optional. Ending line number (1-indexed, inclusive). If not provided, reads to end.
+        :return: File contents or specific line range.
+        
+        Examples:
+          read_file("app.py")              → Read entire file
+          read_file("app.py", 10, 20)      → Read lines 10-20 (inclusive)
+          read_file("app.py", 50)          → Read from line 50 to end
+        """
         safe, reason = self._is_path_safe(path)
         if not safe:
             return reason
         try:
-            with open(path, 'r', encoding='utf-8') as f: return f.read()
-        except Exception as e: return f"Error reading file: {e}"
+            with open(path, 'r', encoding='utf-8') as f:
+                if start_line is None and end_line is None:
+                    # 读取全文
+                    return f.read()
+                else:
+                    # 按行读取
+                    lines = f.readlines()
+                    total_lines = len(lines)
+                    
+                    # 处理行号（1-indexed → 0-indexed）
+                    start_idx = (start_line - 1) if start_line else 0
+                    end_idx = end_line if end_line else total_lines
+                    
+                    # 边界检查
+                    if start_idx < 0:
+                        start_idx = 0
+                    if end_idx > total_lines:
+                        end_idx = total_lines
+                    if start_idx >= total_lines:
+                        return f"Error: start_line {start_line} exceeds file length ({total_lines} lines)"
+                    
+                    # 提取指定行范围
+                    selected_lines = lines[start_idx:end_idx]
+                    result = ''.join(selected_lines)
+                    
+                    # 添加行号信息帮助 LLM 理解上下文
+                    header = f"# Lines {start_idx + 1}-{end_idx} of {total_lines} (File: {path})\n"
+                    return header + result
+        except Exception as e:
+            return f"Error reading file: {e}"
 
     def write_file(self, path: str, content: str) -> str:
         """Writes content to a file, overwriting it."""

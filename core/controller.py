@@ -336,8 +336,9 @@ class NoraController:
                             temp_history.append({
                                 "role": "user",
                                 "content": (
-                                    "【系统提示】你已经多次读取同一个文件了。如果你需要修改它，请直接使用 write_file 写入完整的新内容，"
-                                    "不要再尝试 read_file。如果你已经完成了所有修改，请直接给用户回复最终结果。"
+                                    "【系统提示】你已经多次读取同一个文件了。文件内容已截断是系统限制，无法通过重复调用获取更多内容。"
+                                    "请基于已读取到的部分来工作。"
+                                    "回复用户时，不要复述文件的代码内容，只需用简短的自然语言总结你的发现或下一步操作。"
                                 )
                             })
                             session["tool_call_loop_counter"] = 0
@@ -361,7 +362,7 @@ class NoraController:
                             logger.warning(f"[{chat_id}] 检测到工具调用循环: {loop_key} 已连续调用 {session['tool_call_loop_counter']+1} 次。正在引导总结。")
                             temp_history.append({
                                 "role": "user",
-                                "content": "【系统提示】你已经多次重复调用同一个工具。请停止重复调用，基于已有的结果直接给用户回复。"
+                                "content": "【系统提示】你已经多次重复调用同一个工具。请停止重复调用，基于已有的结果用简短的自然语言直接给用户回复。不要复述原始输出内容。"
                             })
                             session["tool_call_loop_counter"] = 0
                             force_no_tools = True
@@ -376,8 +377,27 @@ class NoraController:
                     # read_file needs higher limit to avoid LLM re-reading in loops
                     TRUNCATE_LIMIT = 8000 if tool_name == "read_file" else 4000
                     if len(tool_result) > TRUNCATE_LIMIT:
-                        truncated_result = tool_result[:TRUNCATE_LIMIT] + f"\n\n... (Output truncated from {len(tool_result)} chars. Use write_file to overwrite the full file if needed.)"
-                        logger.warning(f"Tool output for {tool_name} was truncated from {len(tool_result)} chars.")
+                        total_len = len(tool_result)
+                        truncated_result = tool_result[:TRUNCATE_LIMIT]
+                        if tool_name == "read_file":
+                            # 计算行数信息帮助 LLM 理解截断范围
+                            shown_lines = truncated_result.count('\n') + 1
+                            total_lines = tool_result.count('\n') + 1
+                            # 提取文件路径（如果有的话）
+                            file_path_match = re.search(r'read_file.*?["\']([^"\']+)["\']', str(tool_args))
+                            file_path = file_path_match.group(1) if file_path_match else tool_args.get("path", "该文件")
+                            truncated_result += (
+                                f"\n\n... 【文件已截断】显示了前 {shown_lines}/{total_lines} 行 "
+                                f"({TRUNCATE_LIMIT}/{total_len} 字符)。"
+                                f"\n\n💡 提示：如需查看后续内容，请使用行范围参数："
+                                f"\n   read_file(path=\"{file_path}\", start_line={shown_lines + 1}, end_line={total_lines})"
+                                f"\n或分段读取："
+                                f"\n   read_file(path=\"{file_path}\", start_line={shown_lines + 1}, end_line={shown_lines + 100})"
+                                f"\n\n请不要重复调用 read_file(\"{file_path}\") 而不带行号参数，那只会返回同样的截断内容。"
+                            )
+                        else:
+                            truncated_result += f"\n\n... (Output truncated from {total_len} chars. Use write_file to overwrite the full file if needed.)"
+                        logger.warning(f"Tool output for {tool_name} was truncated from {total_len} chars.")
                     else:
                         truncated_result = tool_result
                     latest_tool_output = truncated_result  # remember latest tool output for fallback delivery
