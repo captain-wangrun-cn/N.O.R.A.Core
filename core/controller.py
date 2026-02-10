@@ -2,10 +2,11 @@ import asyncio
 import logging
 import os
 import re
-from typing import Dict, Any, Callable, Optional, cast
+import time
+from typing import Dict, Any, Callable, Optional, List, cast
 
 from adapters.base import BaseAdapter
-from brain.llm import llm_client
+from brain.llm import llm_client, get_llm_client
 from brain.prompts import get_system_prompt
 from memory.rag import RAGEngine
 from memory.message_history import MessageHistory
@@ -16,6 +17,68 @@ import config
 import json
 
 logger = logging.getLogger(__name__)
+
+
+class WorkerStatus:
+    """后端工作状态追踪器 —— 记录当前正在做什么，供前端查询。"""
+
+    def __init__(self):
+        self.busy: bool = False
+        self.phase: str = ""          # 当前阶段名 (e.g. "RAG检索", "工具调用")
+        self.detail: str = ""         # 更详细描述 (e.g. "正在执行 execute_skill(web_search)")
+        self.tool_history: List[str] = []  # 本次任务执行过的工具步骤摘要
+        self.current_turn: int = 0
+        self.max_turns: int = 0
+        self.started_at: float = 0.0
+        self.original_query: str = ""  # 用户最初问的问题
+
+    def start(self, query: str, max_turns: int = 30):
+        self.busy = True
+        self.phase = "初始化"
+        self.detail = "正在准备处理请求..."
+        self.tool_history = []
+        self.current_turn = 0
+        self.max_turns = max_turns
+        self.started_at = time.time()
+        self.original_query = query
+
+    def update(self, phase: str, detail: str = ""):
+        self.phase = phase
+        self.detail = detail
+
+    def log_tool(self, tool_name: str, tool_args: Any):
+        """记录一次工具调用的简略描述。"""
+        if isinstance(tool_args, dict):
+            # 只取关键参数做摘要
+            short_args = {k: (str(v)[:60] + "..." if len(str(v)) > 60 else str(v))
+                          for k, v in list(tool_args.items())[:3]}
+            self.tool_history.append(f"{tool_name}({short_args})")
+        else:
+            self.tool_history.append(f"{tool_name}(...)")
+
+    def finish(self):
+        self.busy = False
+        self.phase = "完成"
+        self.detail = ""
+
+    def get_summary(self) -> str:
+        """生成一段给用户看的进度概括。"""
+        if not self.busy:
+            return ""
+        elapsed = int(time.time() - self.started_at)
+        lines = [
+            f"📌 正在处理: \"{self.original_query[:80]}\"",
+            f"⏱ 已用时 {elapsed} 秒 | 阶段: {self.phase}",
+        ]
+        if self.detail:
+            lines.append(f"🔧 {self.detail}")
+        if self.tool_history:
+            recent = self.tool_history[-3:]  # 最近3步
+            lines.append("📝 最近步骤:")
+            for step in recent:
+                lines.append(f"  • {step}")
+        lines.append(f"🔄 进度: 第 {self.current_turn}/{self.max_turns} 轮")
+        return "\n".join(lines)
 
 class NoraController:
     """处理机器人的核心业务逻辑。"""
@@ -29,6 +92,17 @@ class NoraController:
         self.skill_loader = SkillLoader()
         self.sessions: Dict[str, Any] = {}
         self.generation_tasks: Dict[str, asyncio.Task] = {}
+        
+        # 前后端分离：每个 chat_id 一个 WorkerStatus
+        self.worker_status: Dict[str, WorkerStatus] = {}
+        # 消息队列：后端忙碌时暂存用户新消息
+        self.pending_messages: Dict[str, List[str]] = {}
+        
+        # 快速模型（用于前端即时回复，轻量省 token）
+        try:
+            self.fast_llm = get_llm_client(model_alias="fast")
+        except Exception:
+            self.fast_llm = self.llm  # fallback 到主模型
         
         # 消息历史管理
         history_cfg = config.get_message_history_config()
@@ -56,18 +130,47 @@ class NoraController:
 
     async def handle_new_message(self, chat_id: str, text: str):
         """处理来自聚合器的新消息/命令。"""
-        # 降级为 DEBUG，避免刷屏
         logger.debug(f"[{chat_id}] 收到新聚合消息: '{text[:50]}...'")
         
         # 特殊处理 /start 命令
         if text.strip().startswith("/start"):
+            # /start 始终抢占
+            if chat_id in self.generation_tasks:
+                self.generation_tasks[chat_id].cancel()
+                await asyncio.sleep(0.1)
             self.sessions[chat_id] = {"history": [], "interrupted_thought": ""}
             self.message_history.clear_chat_history("telegram", chat_id, keep_pinned=True)
+            status = self.worker_status.get(chat_id)
+            if status:
+                status.finish()
+            self.pending_messages.pop(chat_id, None)
             await self.adapter.send_message(chat_id, "N.O.R.A. Core 已启动。")
             logger.info(f"[{chat_id}] Session已重置 by /start command.")
             return
 
-        # --- 抢占逻辑 ---
+        # --- 前后端分离逻辑 ---
+        status = self.worker_status.get(chat_id)
+        if status and status.busy:
+            # 后端忙碌：走前端快速回复路径
+            logger.info(f"[{chat_id}] 后端忙碌，走前端快速回复路径。")
+            
+            # 保存用户消息到数据库（不丢消息）
+            self.message_history.add_message(
+                platform="telegram",
+                chat_id=chat_id,
+                role="user",
+                content=text
+            )
+            
+            # 将新消息加入待处理队列
+            self.pending_messages.setdefault(chat_id, []).append(text)
+            
+            # 生成前端快速回复
+            await self._frontend_reply(chat_id, text, status)
+            return
+
+        # --- 正常流程：后端空闲，启动新任务 ---
+        # 旧的抢占逻辑保留，以防万一有残留任务
         if chat_id in self.generation_tasks:
             logger.info(f"[{chat_id}] 抢占：取消正在进行的生成任务。")
             self.generation_tasks[chat_id].cancel()
@@ -76,18 +179,69 @@ class NoraController:
         task = asyncio.create_task(self._generate_response(chat_id, text))
         self.generation_tasks[chat_id] = task
 
+    async def _frontend_reply(self, chat_id: str, user_text: str, status: WorkerStatus):
+        """前端快速回复：告诉用户后端正在忙，并提供进度概括。"""
+        progress = status.get_summary()
+        
+        # 用快速模型生成自然语言回复
+        prompt = (
+            f"你是 Nora，用户刚发了新消息，但你正在忙着处理之前的请求。\n"
+            f"用户新消息: \"{user_text}\"\n\n"
+            f"你当前的工作状态:\n{progress}\n\n"
+            f"请用简短友好的语气（1-3句话）告诉用户：\n"
+            f"1. 你正在忙着处理之前的事情（简要说明在做什么）\n"
+            f"2. 已经收到了他们的新消息，会在忙完后处理\n"
+            f"不要用 Markdown 格式，不要列清单，像聊天一样说话。"
+        )
+        
+        try:
+            response = ""
+            stream = self.fast_llm.chat_stream(
+                system_prompt="你是 Nora，一个友好的 AI 助手。用简短自然的口语风格回复。",
+                user_prompt=prompt,
+                history=[],
+                tools=[]
+            )
+            async for chunk in stream:
+                if isinstance(chunk, dict) and chunk.get("type") == "text":
+                    response += chunk["content"]
+                elif isinstance(chunk, str):
+                    response += chunk
+            
+            if response.strip():
+                await self.adapter.send_message(chat_id, response.strip())
+                # 保存前端回复到数据库
+                self.message_history.add_message(
+                    platform="telegram",
+                    chat_id=chat_id,
+                    role="assistant",
+                    content=response.strip()
+                )
+            else:
+                # fallback: 快速模型无输出，用固定文案
+                fallback = f"收到～ 我正在处理之前的请求（{status.phase}），完成后马上看你的新消息！"
+                await self.adapter.send_message(chat_id, fallback)
+        except Exception as e:
+            logger.warning(f"[{chat_id}] 前端快速回复失败: {e}")
+            fallback = f"收到～ 我正在忙着处理之前的请求，完成后会看你的新消息！"
+            await self.adapter.send_message(chat_id, fallback)
+
     async def _generate_response(self, chat_id: str, text: str):
         """内部生成逻辑。"""
         # Ensure session keys exist
         session = self.sessions.setdefault(chat_id, {"history": [], "interrupted_thought": "", "pending_text": ""})
-        # 降级为 DEBUG
         logger.debug(f"[{chat_id}] 开始生成响应。History length: {len(session['history'])}")
+        
+        # --- 初始化后端状态追踪 ---
+        MAX_TURNS = 30
+        status = self.worker_status.setdefault(chat_id, WorkerStatus())
+        status.start(query=text, max_turns=MAX_TURNS)
         
         try:
             if self.tui_callback: self.tui_callback(f"🏃 Handling new message...")
-            # 初始不显示 typing，等待判断是否需要工具调用
             
             # --- 0. 保存用户消息到数据库 ---
+            status.update("保存消息", "正在保存用户消息...")
             self.message_history.add_message(
                 platform="telegram",
                 chat_id=chat_id,
@@ -96,14 +250,13 @@ class NoraController:
             )
             
             # --- 1. RAG 记忆检索 (Memory Retrieval) ---
-            # 只在没有被抢占的情况下检索，或者对最新的 text 进行检索
             rag_context = ""
             if self.rag.enabled:
+                status.update("记忆检索", "正在从大脑检索相关记忆 (RAG)...")
                 if self.tui_callback: self.tui_callback("🧠 Retrieving memories (RAG)...")
                 logger.debug(f"[{chat_id}] 正在从大脑检索相关记忆...")
                 rag_context = self.rag.get_context_string(text, top_k=2)
                 if rag_context:
-                    # 保留 INFO，但精简内容
                     logger.info(f"[{chat_id}] RAG 命中: {len(rag_context.splitlines())} lines.")
                 else:
                     logger.debug(f"[{chat_id}] RAG 未检索到强相关记忆。")
@@ -165,7 +318,6 @@ class NoraController:
             system_prompt = get_system_prompt(instructions)
 
             # --- 3. 执行循环 (Tool Execution Loop) ---
-            MAX_TURNS = 30
             current_turn = 0
             final_response_buffer = ""
             latest_tool_output = ""  # Safeguard: fallback to show tool output if LLM stays silent
@@ -182,9 +334,13 @@ class NoraController:
             
             # Typing 状态跟踪（在所有 turns 中保持）
             typing_started = False
+            
+            status.update("思考中", "正在生成回复...")
 
             while current_turn < MAX_TURNS:
                 current_turn += 1
+                status.current_turn = current_turn
+                status.update("思考中", f"第 {current_turn}/{MAX_TURNS} 轮推理...")
                 if self.tui_callback: self.tui_callback(f"🤔 Thinking... (Turn {current_turn}/{MAX_TURNS})")
                 logger.debug(f"[{chat_id}] Turn {current_turn}/{MAX_TURNS}")
                 
@@ -384,7 +540,10 @@ class NoraController:
                     
                     
                     # Execute Tool
+                    status.update("工具调用", f"正在执行 {tool_name}...")
+                    status.log_tool(tool_name, tool_args)
                     tool_result = await self.tool_manager.execute(tool_name, cast(Dict[str, Any], tool_args))
+                    status.update("处理结果", f"{tool_name} 执行完毕，正在分析结果...")
                     logger.info(f"[{chat_id}] 🔧 Tool Result for {tool_name}: {tool_result[:100]}...")
 
                     # --- TRUNCATION SAFETY VALVE ---
@@ -564,15 +723,13 @@ class NoraController:
 
         except asyncio.CancelledError:
             # --- 抢占发生：抢救现场 ---
-            # 1. Save the User's input that triggered this specific task (it hasn't been added to history yet!)
             session["pending_text"] = text
             
-            # 2. Save the AI's partial thought
             if 'final_response_buffer' in locals() and final_response_buffer:
                 session["interrupted_thought"] = final_response_buffer
                 logger.info(f"[{chat_id}] 抢占成功：保存了部分思路 ('{final_response_buffer[:30]}...') 和用户输入。")
             else:
-                session["interrupted_thought"] = "" # Nothing generated yet
+                session["interrupted_thought"] = ""
                 logger.info(f"[{chat_id}] 抢占成功：尚未生成内容，仅保存了用户输入。")
         
         except Exception as e:
@@ -581,9 +738,34 @@ class NoraController:
             await self.adapter.send_message(chat_id, "抱歉，处理您的请求时出现内部错误。")
             
         finally:
+            # 标记后端完成
+            status.finish()
             if self.tui_callback: self.tui_callback("✅ Idle")
             self.generation_tasks.pop(chat_id, None)
             logger.debug(f"[{chat_id}] 本次生成任务结束。")
+            
+            # --- 处理排队消息 ---
+            await self._process_pending_messages(chat_id)
+
+    async def _process_pending_messages(self, chat_id: str):
+        """后端完成后，处理队列中积攒的用户消息。"""
+        pending = self.pending_messages.pop(chat_id, [])
+        if not pending:
+            return
+        
+        # 合并所有排队消息为一条（避免逐条触发完整的工具循环）
+        if len(pending) == 1:
+            combined = pending[0]
+        else:
+            combined = "（以下是我之前排队的多条消息，请一起处理）\n" + "\n".join(
+                f"- {msg}" for msg in pending
+            )
+        
+        logger.info(f"[{chat_id}] 开始处理 {len(pending)} 条排队消息。")
+        
+        # 递归调用，走正常流程
+        task = asyncio.create_task(self._generate_response(chat_id, combined))
+        self.generation_tasks[chat_id] = task
 
     async def _async_save_memory(self, text: str, metadata: Dict[str, Any]):
         """异步保存记忆，避免阻塞主线程。"""
