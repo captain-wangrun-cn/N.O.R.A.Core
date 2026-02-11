@@ -44,10 +44,40 @@
 > **项目背景**  
 > 本项目是一个纯个人娱乐项目，初衷是想要一个能像真人一样的对话对象，而不是单纯"问一句答一句"的人工智能。所有思路和设计由作者提供并指导，99% 的代码由 AI 协助完成。看不顺眼也请受着 :)
 
-## 文档列表
+## 文档索引
 
-- [消息抢占机制](./preemption.md) - 实时响应的核心设计
-- [技能系统](./skills.md) - 可扩展能力架构
+### 🧠 核心与交互 (Core Interactions)
+
+- **[双进程架构 (Dual-Process Architecture)](./dual-process-architecture.md)**
+  - _Current State_: 实现了"脑口分离"，前端负责快响应/打断，后端负责深度思考。
+- **[消息抢占机制 (Preemption)](./preemption.md)**
+  - _Legacy Context_: 早期打断逻辑的设计思路，现已整合进双进程架构中。
+- **[时间感知 (Timestamp Insertion)](./timestamp-insertion.md)**
+  - 让 AI 理解 "上午"、"刚才" 等时间概念，解决跨时段对话的上下文断层。
+
+### 🧩 技能与执行 (Skills & Execution)
+
+- **[技能系统 (Skills)](./skills.md)**
+  - 为什么我们需要让 AI "做事" 而不仅仅是聊天。
+- **[技能增强 (Skill Enhancement)](./skill-enhancement.md)**
+  - 优化技能的发现与创建流程，避免低效的文件系统遍历。
+- **[工作区隔离 (Workspace Isolation)](./workspace.md)**
+  - 限制 AI 的文件访问权限，防止误操作系统关键文件。
+
+### 💾 记忆与上下文 (Memory & Context)
+
+- **[消息历史管理 (Message History)](./message_history.md)**
+  - 四层存储策略 (Raw, Compressed, Vector, Archive)。
+- **[消息压缩 (Message Compression)](./message-compression.md)**
+  - 针对长对话的 Token 优化策略。
+
+### 🛡️ 监控与运维 (Ops & Monitoring)
+
+- **[日志系统 (Logging)](./logging.md)**
+  - 结构化日志设计，区分用户可见与调试信息。
+- **[工具循环控制 (Tool Loop Detection)](./tool-loop.md)**
+  - 防止 AI 陷入死循环的保护机制。
+
 - [工具循环控制](./tool-loop.md) - 防止 LLM 陷入死循环
 - [日志系统](./logging.md) - 分级、轮转、过滤策略
 - [工作区隔离](./workspace.md) - 安全边界与路径管理

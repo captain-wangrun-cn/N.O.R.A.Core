@@ -1,96 +1,101 @@
 # N.O.R.A. Core (Project Echo)
 
-**N.O.R.A.** (Neural Optimized Responsive Assistant) Core is a lightweight, memory-enhanced AI assistant framework designed for personal companionship and high efficiency.
+**N.O.R.A.** (Neural Optimized Responsive Assistant) Core 是一个主要用于自娱自乐的 AI 助手框架，旨在提供个人陪伴和一点点效率提升。虽然不敢说完美，但在长期记忆和拟人化交互方面做了一些微小的尝试。
 
-## 🏗 Architecture
+## 🏗 架构设计 (Architecture)
 
-- **Brain**: Python Controller + Dynamic LLM Router (Gemini Flash/Pro).
-- **Memory (RAG)**: SiliconFlow Embedding API + Qdrant Vector DB.
-- **Skills**: Hot-reloadable Python tools (`tools/` directory).
-- **Interface**: Telegram Bot API.
+更多细节请查阅 [架构文档索引](docs/architecture/README.md)。
 
-## 🚀 Setup
+### 💡 一些不成熟的想法 (Key Concepts)
 
-1. Clone the repo:
+- **[双进程大脑 (Dual-Process Brain)](docs/architecture/dual-process-architecture.md)**: 尝试模仿了 "脑口分离" 的设计。用一个响应快的小模型来处理即时回复和打断（比如用户说"停"、"换一个"），后台再用大模型慢慢处理繁重的逻辑。
+- **[抢占与打断 (Preemption)](docs/architecture/preemption.md)**: 试图让机器人支持被随时打断。用户可以在它思考或做事时插嘴，它会尽量像真人一样由小模型接管并停下手中的活。
+- **[记忆增强 (Memory & RAG)](docs/architecture/message_history.md)**: 混合了一点 RAG 技术。结合 SiliconFlow Embeddings、Qdrant 向量库和本地 SQLite 存储，希望能让它记得更久一点。
+- **技能系统 (Skills)**: 支持热重载的 Python 工具（位于 `tools/` 目录）。可以在运行时动态生成或修改，虽然还在持续完善中。
+- **交互接口**: 目前通过统一的 `BaseAdapter` 接口支持 Telegram Bot API。
+
+## 🚀 快速开始 (Setup)
+
+1. 克隆仓库:
 
    ```bash
    git clone https://github.com/captain-wangrun-cn/N.O.R.A.Core.git
    cd N.O.R.A.Core
    ```
 
-2. Install dependencies:
+2. 安装依赖:
 
    ```bash
    pip install -r requirements.txt
    ```
 
-3. Configure using the CLI wizard:
+3. 配置 (使用 CLI 向导):
 
    ```bash
    python cli.py --configure
    ```
 
-   Or use the interactive menu:
+   或者使用交互式菜单:
 
    ```bash
    python cli.py
    ```
 
-4. Run:
+4. 运行:
    ```bash
    python main.py
    ```
 
-## 🛠 Management CLI
+## 🛠 管理工具 (Management CLI)
 
-N.O.R.A. Core includes a powerful CLI tool (`cli.py`) for configuration and maintenance:
+N.O.R.A. Core 包含一个简易的 CLI 工具 (`cli.py`) 用于配置和维护：
 
 ```bash
-# Interactive menu
+# 交互式菜单
 python cli.py
 
-# Direct commands
-python cli.py --configure      # Run configuration wizard
-python cli.py --test-qdrant    # Test Qdrant connection
-python cli.py --test-rag       # Test RAG system
-python cli.py --clean-rag      # Clean RAG data
+# 直接命令
+python cli.py --configure      # 运行配置向导
+python cli.py --test-qdrant    # 测试 Qdrant 连接
+python cli.py --test-rag       # 测试 RAG 系统
+python cli.py --clean-rag      # 清理 RAG 数据 (慎用)
 ```
 
-See [CLI Usage Guide](docs/CLI_USAGE.md) for detailed documentation.
+详见 [CLI 使用指南](docs/CLI_USAGE.md)。
 
-## � Cost Tracking
+## 💰 成本追踪 (Cost Tracking)
 
-N.O.R.A. Core automatically tracks LLM API usage and costs:
+为了防止 Token 用得太快心疼，内置了一个简单的计费追踪：
 
-- **Auto-pricing**: Built-in pricing for Gemini and OpenAI models
-- **Custom pricing**: Support for custom model prices
-- **Detailed stats**: View costs by time period, model, or alias
+- **自动定价**: 内置了 Gemini 和 OpenAI 的参考价格
+- **自定义定价**: 支持配置自定义模型价格
+- **统计查看**: 可以按时间、模型查看大概的花费
 
 ```bash
-# View total costs
+# 查看总花费
 python view_costs.py
 
-# View today's costs
+# 查看今日花费
 python view_costs.py --today
 
-# View costs for specific provider
+# 查看特定提供商的花费
 python view_costs.py --provider gemini
 
-# View costs for specific model alias
+# 查看特定模型别名的花费
 python view_costs.py --alias smart
 ```
 
-Cost data is stored in `<workspace>/cost_tracker.db` and can be configured via the CLI wizard.
+成本数据存储在 `<workspace>/cost_tracker.db`。
 
-## �📂 Structure
+## 📂 目录结构 (Structure)
 
-- `main.py`: Entry point and Bot Controller.
-- `brain/`: LLM routing and logic.
-- `core/`: Core components (Controller, Cost Tracker).
-- `memory/`: RAG and MongoDB connectors.
-- `skills/`: Dynamic skill scripts.
-- `utils/`: Helpers.
+- `main.py`: 启动入口和 Bot 控制器。
+- `brain/`: LLM 路由策略与思考逻辑。
+- `core/`: 核心组件 (控制器、成本追踪)。
+- `memory/`: 记忆系统 (RAG 与 数据库连接)。
+- `skills/`: 动态技能脚本 (Tools)。
+- `utils/`: 通用工具类。
 
-## 📝 License
+## 📝 许可证 (License)
 
-Private / Personal Use Only.
+仅供个人学习与自娱自乐使用 (Private / Personal Use Only)。
