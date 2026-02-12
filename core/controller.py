@@ -376,7 +376,7 @@ class NoraController:
                 status.update("记忆检索", "正在从大脑检索相关记忆 (RAG)...")
                 if self.tui_callback: self.tui_callback("🧠 Retrieving memories (RAG)...")
                 logger.debug(f"[{chat_id}] 正在从大脑检索相关记忆...")
-                rag_context = self.rag.get_context_string(text, top_k=2)
+                rag_context = self.rag.get_context_string(text, user_id=chat_id, top_k=2)
                 if rag_context:
                     logger.info(f"[{chat_id}] RAG 命中: {len(rag_context.splitlines())} lines.")
                 else:
@@ -764,7 +764,7 @@ class NoraController:
                 # Fallback: LLM stayed silent; do one final LLM call to summarize the tool output
                 temp_history.append({
                     "role": "user",
-                    "content": "【系统提示】工具已执行完毕，请根据以上工具输出，用自然语言向用户总结执行结果。不要直接输出原始命令行内容。"
+                    "content": "【系统提示】工具已执行完毕，请根据以上工具输出，用自然语言总结执行结果。不要直接输出原始命令行内容。"
                 })
                 stream = self.llm.chat_stream(
                     system_prompt=system_prompt,
@@ -822,7 +822,7 @@ class NoraController:
             # --- 5. RAG 记忆存储 (Memory Storage) ---
             if self.rag.enabled:
                 # Store the initial user prompt
-                asyncio.create_task(self._async_save_memory(text, {"role": "user", "chat_id": chat_id}))
+                asyncio.create_task(self._async_save_memory(text, chat_id, {"role": "user", "chat_id": chat_id}))
                 
                 # Combine all parts of the assistant's turn for a complete memory
                 full_assistant_turn = " ".join([h['content'] for h in temp_history if h['role'] == 'assistant'])
@@ -830,7 +830,7 @@ class NoraController:
                     full_assistant_turn += " " + final_response_buffer
                 
                 if full_assistant_turn.strip():
-                     asyncio.create_task(self._async_save_memory(full_assistant_turn.strip(), {"role": "assistant", "chat_id": chat_id}))
+                     asyncio.create_task(self._async_save_memory(full_assistant_turn.strip(), chat_id, {"role": "assistant", "chat_id": chat_id}))
 
             # Update session history (in-memory cache, DB is source of truth)
             session["history"] = temp_history
@@ -903,12 +903,12 @@ class NoraController:
         task = asyncio.create_task(self._generate_response(chat_id, combined))
         self.generation_tasks[chat_id] = task
 
-    async def _async_save_memory(self, text: str, metadata: Dict[str, Any]):
+    async def _async_save_memory(self, text: str, user_id: str, metadata: Dict[str, Any]):
         """异步保存记忆，避免阻塞主线程。"""
         try:
             # 由于 RAG.add_memory 是同步的 (requests 是同步的)，我们需要在 executor 中运行它
             # 或者如果 RAG 内部实现了异步更好。目前先简单用 to_thread
-            await asyncio.to_thread(self.rag.add_memory, text, metadata)
+            await asyncio.to_thread(self.rag.add_memory, text, user_id, metadata)
             # 降级为 DEBUG，因为每次对话都会触发两次，太吵了
             logger.debug(f"[{metadata.get('chat_id')}] 记忆已异步保存 (Role: {metadata.get('role')})")
         except Exception as e:
