@@ -554,7 +554,7 @@ class TelegramAdapter(BaseAdapter):
         
         # 查找对应的回复消息
         for msg in history:
-            if msg["msg_id"] == reply_msg_id:
+            if msg.get("message_id") == reply_msg_id:
                 return msg["content"]
         
         return None
