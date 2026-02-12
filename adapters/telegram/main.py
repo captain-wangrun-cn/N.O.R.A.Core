@@ -290,7 +290,14 @@ class TelegramAdapter(BaseAdapter):
         chat_id = str(update.effective_chat.id)
         if self._message_handler:
             # Propagate start command as a special message
-            await self._message_handler(chat_id, "/start")
+            context = {
+                "chat_id": chat_id,
+                "user_id": str(update.effective_user.id) if update.effective_user else chat_id,
+                "text": "/start",
+                "chat_type": update.effective_chat.type,
+                "user_name": update.effective_user.first_name if update.effective_user else "Unknown"
+            }
+            await self._message_handler(context)
 
     async def _clear_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not update.effective_chat:
@@ -372,7 +379,14 @@ class TelegramAdapter(BaseAdapter):
             text = f"[回复: {reply_info}]\n{text}"
         
         if self._aggregator:
-            await self._aggregator.add_message(chat_id, text)
+            context = {
+                "chat_id": chat_id,
+                "user_id": str(update.effective_user.id) if update.effective_user else chat_id,
+                "text": text,
+                "chat_type": update.effective_chat.type,
+                "user_name": update.effective_user.first_name if update.effective_user else "Unknown"
+            }
+            await self._aggregator.add_message(chat_id, context)
 
     async def _handle_photo(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """处理图片消息"""
@@ -404,7 +418,14 @@ class TelegramAdapter(BaseAdapter):
             text = f"[回复: {reply_info}]\n{text}"
         
         if self._aggregator:
-            await self._aggregator.add_message(chat_id, text)
+            context = {
+                "chat_id": chat_id,
+                "user_id": str(update.effective_user.id) if update.effective_user else chat_id,
+                "text": text,
+                "chat_type": update.effective_chat.type,
+                "user_name": update.effective_user.first_name if update.effective_user else "Unknown"
+            }
+            await self._aggregator.add_message(chat_id, context)
         
         logger.info(f"[{chat_id}] 收到图片: {file_path}")
 
@@ -439,7 +460,14 @@ class TelegramAdapter(BaseAdapter):
             text = f"[回复: {reply_info}]\n{text}"
         
         if self._aggregator:
-            await self._aggregator.add_message(chat_id, text)
+            context = {
+                "chat_id": chat_id,
+                "user_id": str(update.effective_user.id) if update.effective_user else chat_id,
+                "text": text,
+                "chat_type": update.effective_chat.type,
+                "user_name": update.effective_user.first_name if update.effective_user else "Unknown"
+            }
+            await self._aggregator.add_message(chat_id, context)
         
         logger.info(f"[{chat_id}] 收到文档: {file_path}")
 
@@ -473,7 +501,14 @@ class TelegramAdapter(BaseAdapter):
             text = f"[回复: {reply_info}]\n{text}"
         
         if self._aggregator:
-            await self._aggregator.add_message(chat_id, text)
+            context = {
+                "chat_id": chat_id,
+                "user_id": str(update.effective_user.id) if update.effective_user else chat_id,
+                "text": text,
+                "chat_type": update.effective_chat.type,
+                "user_name": update.effective_user.first_name if update.effective_user else "Unknown"
+            }
+            await self._aggregator.add_message(chat_id, context)
         
         logger.info(f"[{chat_id}] 收到贴纸: {emoji} from {set_name}")
 
@@ -492,7 +527,14 @@ class TelegramAdapter(BaseAdapter):
         text = f"[按钮点击: {callback_data}]"
         
         if self._aggregator:
-            await self._aggregator.add_message(chat_id, text)
+            context = {
+                "chat_id": chat_id,
+                "user_id": str(query.from_user.id) if query.from_user else chat_id,
+                "text": text,
+                "chat_type": query.message.chat.type if query.message else "private",
+                "user_name": query.from_user.first_name if query.from_user else "Unknown"
+            }
+            await self._aggregator.add_message(chat_id, context)
         
         logger.info(f"[{chat_id}] 收到回调: {callback_data}")
 

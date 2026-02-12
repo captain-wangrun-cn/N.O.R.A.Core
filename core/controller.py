@@ -96,7 +96,7 @@ class NoraController:
         # 前后端分离：每个 chat_id 一个 WorkerStatus
         self.worker_status: Dict[str, WorkerStatus] = {}
         # 消息队列：后端忙碌时暂存用户新消息
-        self.pending_messages: Dict[str, List[str]] = {}
+        self.pending_messages: Dict[str, List[Dict[str, Any]]] = {}
         
         # 快速模型（用于前端即时回复，轻量省 token）
         try:
@@ -128,8 +128,14 @@ class NoraController:
         
         logger.info(f"NoraController 已初始化。RAG: {'Online' if self.rag.enabled else 'Offline'}, MessageHistory: Online")
 
-    async def handle_new_message(self, chat_id: str, text: str):
-        """处理来自聚合器的新消息/命令。"""
+    async def handle_new_message(self, context: Dict[str, Any]):
+        """处理来自适配器的新消息/命令。"""
+        chat_id = context["chat_id"]
+        user_id = context["user_id"]
+        text = context["text"]
+        chat_type = context.get("chat_type", "private")
+        user_name = context.get("user_name", "User")
+
         logger.debug(f"[{chat_id}] 收到新聚合消息: '{text[:50]}...'")
         
         # 特殊处理 /start 命令
@@ -139,7 +145,8 @@ class NoraController:
                 self.generation_tasks[chat_id].cancel()
                 await asyncio.sleep(0.1)
             self.sessions[chat_id] = {"history": [], "interrupted_thought": ""}
-            self.message_history.clear_chat_history("telegram", chat_id, keep_pinned=True)
+            storage_id = chat_id if chat_type != "private" else user_id
+            self.message_history.clear_chat_history("telegram", storage_id, keep_pinned=True)
             status = self.worker_status.get(chat_id)
             if status:
                 status.finish()
@@ -155,11 +162,14 @@ class NoraController:
             logger.info(f"[{chat_id}] 后端忙碌，分析用户意图...")
             
             # 保存用户消息到数据库（不丢消息）
+            storage_id = chat_id if chat_type != "private" else user_id
+            message_content = f"{user_name}: {text}" if chat_type != "private" else text
             self.message_history.add_message(
                 platform="telegram",
-                chat_id=chat_id,
+                chat_id=storage_id,
                 role="user",
-                content=text
+                content=message_content,
+                user_id=user_id
             )
             
             # LLM 判断意图并生成回复
@@ -171,9 +181,10 @@ class NoraController:
             await self.adapter.send_message(chat_id, reply)
             self.message_history.add_message(
                 platform="telegram",
-                chat_id=chat_id,
+                chat_id=storage_id,
                 role="assistant",
-                content=reply
+                content=reply,
+                user_id="assistant"
             )
             
             # 根据 action 执行操作
@@ -185,7 +196,7 @@ class NoraController:
                 return
             else:  # action == "queue"
                 # 入队列，等后端完成后处理
-                self.pending_messages.setdefault(chat_id, []).append(text)
+                self.pending_messages.setdefault(chat_id, []).append(context)
                 return
 
         # --- 正常流程：后端空闲，启动新任务 ---
@@ -195,7 +206,7 @@ class NoraController:
             self.generation_tasks[chat_id].cancel()
             await asyncio.sleep(0.1)
 
-        task = asyncio.create_task(self._generate_response(chat_id, text))
+        task = asyncio.create_task(self._generate_response(context))
         self.generation_tasks[chat_id] = task
 
     async def _detect_interrupt_intent_and_reply(self, chat_id: str, text: str, status: WorkerStatus) -> Dict[str, str]:
@@ -325,7 +336,13 @@ class NoraController:
             # 调用方已发送回复，直接执行后续操作
             if reason == "change":
                 # 启动新任务处理 user_text
-                task = asyncio.create_task(self._generate_response(chat_id, user_text))
+                context = {
+                    "chat_id": chat_id,
+                    "user_id": chat_id, # Fallback, might need better user_id handling
+                    "text": user_text,
+                    "chat_type": "private" # Fallback
+                }
+                task = asyncio.create_task(self._generate_response(context))
                 self.generation_tasks[chat_id] = task
         else:
             # 需要生成并发送回复（兼容旧调用方式）
@@ -344,11 +361,26 @@ class NoraController:
                     role="assistant", content=reply
                 )
                 # 启动新任务
-                task = asyncio.create_task(self._generate_response(chat_id, user_text))
+                context = {
+                    "chat_id": chat_id,
+                    "user_id": chat_id, # Fallback
+                    "text": user_text,
+                    "chat_type": "private" # Fallback
+                }
+                task = asyncio.create_task(self._generate_response(context))
                 self.generation_tasks[chat_id] = task
 
-    async def _generate_response(self, chat_id: str, text: str):
+    async def _generate_response(self, context: Dict[str, Any]):
         """内部生成逻辑。"""
+        chat_id = context["chat_id"]
+        user_id = context["user_id"]
+        text = context["text"]
+        chat_type = context.get("chat_type", "private")
+        user_name = context.get("user_name", "User")
+
+        # 确定用于存储和检索的唯一ID
+        storage_id = chat_id if chat_type != "private" else user_id
+
         # Ensure session keys exist
         session = self.sessions.setdefault(chat_id, {"history": [], "interrupted_thought": "", "pending_text": ""})
         logger.debug(f"[{chat_id}] 开始生成响应。History length: {len(session['history'])}")
@@ -363,11 +395,13 @@ class NoraController:
             
             # --- 0. 保存用户消息到数据库 ---
             status.update("保存消息", "正在保存用户消息...")
+            message_content = f"{user_name}: {text}" if chat_type != "private" else text
             self.message_history.add_message(
                 platform="telegram",
-                chat_id=chat_id,
+                chat_id=storage_id,
                 role="user",
-                content=text
+                content=message_content,
+                user_id=user_id
             )
             
             # --- 1. RAG 记忆检索 (Memory Retrieval) ---
@@ -376,7 +410,7 @@ class NoraController:
                 status.update("记忆检索", "正在从大脑检索相关记忆 (RAG)...")
                 if self.tui_callback: self.tui_callback("🧠 Retrieving memories (RAG)...")
                 logger.debug(f"[{chat_id}] 正在从大脑检索相关记忆...")
-                rag_context = self.rag.get_context_string(text, user_id=chat_id, top_k=2)
+                rag_context = self.rag.get_context_string(text, user_id=storage_id, top_k=2)
                 if rag_context:
                     logger.info(f"[{chat_id}] RAG 命中: {len(rag_context.splitlines())} lines.")
                 else:
@@ -430,7 +464,7 @@ class NoraController:
                     f"但还没说完就被新的消息打断了。）\n\n"
                     f"--- 新的消息 ---\n"
                     f"{text}\n\n"
-                    f"【指令】请将我刚才未说完的思路与现在的新问题结合，给出一个连贯、完整的最终回复。不要让我感觉对话断裂了。"
+                    f"【指令】请将我刚才未说完的思路与現在的新问题结合，给出一个连贯、完整的最终回复。不要让我感觉对话断裂了。"
                 )
                 # Clear buffers after consumption
                 session["pending_text"] = ""
@@ -446,7 +480,7 @@ class NoraController:
             force_no_tools = False  # 循环检测触发后，下一轮禁用工具
             
             # 临时历史，从数据库加载持久化上下文
-            db_context = self.message_history.get_context_messages("telegram", chat_id)
+            db_context = self.message_history.get_context_messages("telegram", storage_id)
             temp_history = [
                 {"role": msg["role"], "content": msg["content"]}
                 for msg in db_context
@@ -814,15 +848,16 @@ class NoraController:
             if final_response_buffer:
                 self.message_history.add_message(
                     platform="telegram",
-                    chat_id=chat_id,
+                    chat_id=storage_id,
                     role="assistant",
-                    content=final_response_buffer
+                    content=final_response_buffer,
+                    user_id="assistant"
                 )
             
             # --- 5. RAG 记忆存储 (Memory Storage) ---
             if self.rag.enabled:
                 # Store the initial user prompt
-                asyncio.create_task(self._async_save_memory(text, chat_id, {"role": "user", "chat_id": chat_id}))
+                asyncio.create_task(self._async_save_memory(message_content, storage_id, {"role": "user", "chat_id": chat_id}))
                 
                 # Combine all parts of the assistant's turn for a complete memory
                 full_assistant_turn = " ".join([h['content'] for h in temp_history if h['role'] == 'assistant'])
@@ -830,7 +865,7 @@ class NoraController:
                     full_assistant_turn += " " + final_response_buffer
                 
                 if full_assistant_turn.strip():
-                     asyncio.create_task(self._async_save_memory(full_assistant_turn.strip(), chat_id, {"role": "assistant", "chat_id": chat_id}))
+                     asyncio.create_task(self._async_save_memory(full_assistant_turn.strip(), storage_id, {"role": "assistant", "chat_id": chat_id}))
 
             # Update session history (in-memory cache, DB is source of truth)
             session["history"] = temp_history
@@ -891,16 +926,19 @@ class NoraController:
         
         # 合并所有排队消息为一条（避免逐条触发完整的工具循环）
         if len(pending) == 1:
-            combined = pending[0]
+            combined_context = pending[0]
         else:
-            combined = "（以下是我之前排队的多条消息，请一起处理）\n" + "\n".join(
-                f"- {msg}" for msg in pending
+            # 合并文本，保留第一个消息的上下文
+            combined_text = "（以下是我之前排队的多条消息，请一起处理）\n" + "\n".join(
+                f"- {p['text']}" for p in pending
             )
+            combined_context = pending[0].copy()
+            combined_context["text"] = combined_text
         
         logger.info(f"[{chat_id}] 开始处理 {len(pending)} 条排队消息。")
         
         # 递归调用，走正常流程
-        task = asyncio.create_task(self._generate_response(chat_id, combined))
+        task = asyncio.create_task(self._generate_response(combined_context))
         self.generation_tasks[chat_id] = task
 
     async def _async_save_memory(self, text: str, user_id: str, metadata: Dict[str, Any]):
