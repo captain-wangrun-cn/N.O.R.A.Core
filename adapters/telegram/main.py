@@ -426,3 +426,168 @@ class TelegramAdapter(BaseAdapter):
                 return msg["content"]
         
         return None
+
+    async def send_message(self, chat_id: str, text: str) -> str:
+        """
+        发送消息，自动检测并发送嵌入的富媒体文件。
+        
+        支持的嵌入语法:
+          - Markdown:  ![alt](path/to/file.png)
+          - HTML:      <img src="path/to/file.png">
+          - 自定义标记: [image: path] / [file: path] / [audio: path] / [video: path] / [doc: path]
+          - 原始路径:  /path/to/file.ext (自动识别)
+        
+        支持的媒体类型:
+          - 图片: png, jpg, jpeg, webp, bmp
+          - GIF动图: gif
+          - 视频: mp4, mkv, avi, mov, webm
+          - 音频: mp3, ogg, wav, flac, m4a, opus
+          - 文档/代码: pdf, py, js, json, zip, 等等
+        """
+        # 1. 提取所有文件路径
+        file_entries = []  # [(path, media_type, is_url)]
+        missing_files = []
+        for match in self.FILE_PATTERN.finditer(text):
+            # FILE_PATTERN 有5个捕获组: (1)Markdown, (2)HTML img, (3)自定义标记, (4)URL, (5)本地路径
+            path = next((g for g in match.groups() if g), None)
+            if path:
+                path = path.strip()
+                is_url = path.startswith(('http://', 'https://'))
+                if is_url:
+                    media_type = self._classify_file(path)
+                    file_entries.append((path, media_type, True))
+                    logger.info(f"[{chat_id}] 检测到媒体URL: {path} ({media_type})")
+                elif os.path.isfile(path):
+                    media_type = self._classify_file(path)
+                    file_entries.append((path, media_type, False))
+                    logger.info(f"[{chat_id}] 检测到媒体文件: {path} ({media_type})")
+                else:
+                    missing_files.append(path)
+                    logger.warning(f"[{chat_id}] 文件路径不存在，跳过: {path}")
+
+        # 2. 清理文本中的文件引用（无论文件是否存在都清理，不要把 [image:...] 原样显示）
+        clean_text = self.FILE_PATTERN.sub('', text).strip()
+        clean_text = re.sub(r'\n{3,}', '\n\n', clean_text).strip()
+        
+        # 如果有文件不存在，在文末追加提示
+        if missing_files:
+            not_found_hint = "\n\n⚠️ 以下文件未找到:\n" + "\n".join(f"  • {p}" for p in missing_files)
+            clean_text += not_found_hint
+
+        # 3. 发送文本部分
+        last_message_id = None
+        if clean_text:
+            # Markdown → HTML 转换（LLM 有时会输出 Markdown 格式）
+            html_text = _markdown_to_html(clean_text)
+            
+            # 分割超长消息（Telegram 限制 4096 字符）
+            html_chunks = _split_long_text(html_text, TG_MSG_MAX_LENGTH)
+            
+            for chunk_html in html_chunks:
+                try:
+                    message = await self._send_with_retry(
+                        lambda: self.application.bot.send_message(
+                            chat_id=chat_id,
+                            text=chunk_html,
+                            parse_mode="HTML"
+                        )
+                    )
+                except Exception as html_err:
+                    logger.warning(f"[{chat_id}] HTML 发送失败 ({html_err})，降级为纯文本。")
+                    # HTML 解析失败，降级发送纯文本（去除所有标签）
+                    plain_chunk = re.sub(r'<[^>]+>', '', chunk_html)
+                    # 纯文本也可能过长（标签去掉后不一定短多少），再次分割
+                    plain_parts = _split_long_text(plain_chunk or chunk_html, TG_MSG_MAX_LENGTH)
+                    for part in plain_parts:
+                        message = await self._send_with_retry(
+                            lambda: self.application.bot.send_message(
+                                chat_id=chat_id,
+                                text=part
+                            )
+                        )
+                last_message_id = str(message.message_id)
+
+        # 4. 逐个发送媒体文件
+        for file_path, media_type, is_url in file_entries:
+            caption = os.path.basename(file_path)
+            try:
+                if is_url:
+                    # URL 直接通过 Telegram 发送，不走本地文件读取
+                    if media_type == 'photo':
+                        await self.application.bot.send_chat_action(chat_id=chat_id, action=ChatAction.UPLOAD_PHOTO)
+                        message = await self._send_with_retry(lambda: self.application.bot.send_photo(chat_id=chat_id, photo=file_path, caption=caption))
+                    elif media_type == 'gif':
+                        await self.application.bot.send_chat_action(chat_id=chat_id, action=ChatAction.UPLOAD_PHOTO)
+                        message = await self._send_with_retry(lambda: self.application.bot.send_animation(chat_id=chat_id, animation=file_path, caption=caption))
+                    elif media_type == 'video':
+                        await self.application.bot.send_chat_action(chat_id=chat_id, action=ChatAction.UPLOAD_VIDEO)
+                        message = await self._send_with_retry(lambda: self.application.bot.send_video(chat_id=chat_id, video=file_path, caption=caption))
+                    elif media_type in ('audio', 'voice'):
+                        await self.application.bot.send_chat_action(chat_id=chat_id, action=ChatAction.UPLOAD_VOICE)
+                        message = await self._send_with_retry(lambda: self.application.bot.send_audio(chat_id=chat_id, audio=file_path, caption=caption))
+                    else:
+                        await self.application.bot.send_chat_action(chat_id=chat_id, action=ChatAction.UPLOAD_DOCUMENT)
+                        message = await self._send_with_retry(lambda: self.application.bot.send_document(chat_id=chat_id, document=file_path, caption=caption))
+                else:
+                    if media_type == 'photo':
+                        message = await self._send_photo_smart(chat_id, file_path, caption)
+                    elif media_type == 'gif':
+                        await self.application.bot.send_chat_action(chat_id=chat_id, action=ChatAction.UPLOAD_PHOTO)
+                        with open(file_path, 'rb') as f:
+                            message = await self._send_with_retry(lambda: self.application.bot.send_animation(
+                                chat_id=chat_id, animation=f, caption=caption
+                            ))
+                    elif media_type == 'video':
+                        await self.application.bot.send_chat_action(chat_id=chat_id, action=ChatAction.UPLOAD_VIDEO)
+                        with open(file_path, 'rb') as f:
+                            message = await self._send_with_retry(lambda: self.application.bot.send_video(
+                                chat_id=chat_id, video=f, caption=caption
+                            ))
+                    elif media_type == 'audio':
+                        await self.application.bot.send_chat_action(chat_id=chat_id, action=ChatAction.UPLOAD_VOICE)
+                        with open(file_path, 'rb') as f:
+                            message = await self._send_with_retry(lambda: self.application.bot.send_audio(
+                                chat_id=chat_id, audio=f, caption=caption
+                            ))
+                    elif media_type == 'voice':
+                        await self.application.bot.send_chat_action(chat_id=chat_id, action=ChatAction.UPLOAD_VOICE)
+                        with open(file_path, 'rb') as f:
+                            message = await self._send_with_retry(lambda: self.application.bot.send_voice(
+                                chat_id=chat_id, voice=f, caption=caption
+                            ))
+                    else:  # document (including code files)
+                        await self.application.bot.send_chat_action(chat_id=chat_id, action=ChatAction.UPLOAD_DOCUMENT)
+                        with open(file_path, 'rb') as f:
+                            message = await self._send_with_retry(lambda: self.application.bot.send_document(
+                                chat_id=chat_id, document=f, caption=caption
+                            ))
+                last_message_id = str(message.message_id)
+                logger.info(f"[{chat_id}] 已发送{media_type}: {file_path}")
+            except Exception as e:
+                logger.error(f"[{chat_id}] 发送{media_type}失败 {file_path}: {e}")
+                message = await self._send_with_retry(
+                    lambda: self.application.bot.send_message(
+                        chat_id=chat_id,
+                        text=("⚠️ 无法发送文件: {file_path}\n类型: {media_type}\n错误: {err}\n"
+                             "已达到重试上限，建议检查网络或稍后再试。"
+                        ).format(file_path=file_path, media_type=media_type, err=e)
+                    )
+                )
+                last_message_id = str(message.message_id)
+
+        # 5. 兜底：如果什么都没发出去，发原始文本
+        if last_message_id is None:
+            message = await self.application.bot.send_message(
+                chat_id=chat_id,
+                text=text or "(empty message)"
+            )
+            last_message_id = str(message.message_id)
+
+        return last_message_id
+
+    async def start_typing(self, chat_id: str):
+        await self.application.bot.send_chat_action(chat_id=chat_id, action=ChatAction.TYPING)
+
+    async def stop_typing(self, chat_id: str):
+        # Telegram doesn't have a "stop typing" action, it's implicit.
+        pass
