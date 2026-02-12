@@ -953,6 +953,61 @@ def test_rag():
         logger.error(f"❌ 测试 RAG 时出错: {e}")
 
 
+def show_status():
+    """显示 N.O.R.A. Core 的运行状态"""
+    logger.info("📊 N.O.R.A. Core 运行状态")
+    logger.info("="*50)
+
+    # 1. 配置文件检查
+    try:
+        import config
+        cfg = config.get_config()
+        if not cfg:
+            logger.error("❌ 配置文件 (config.yml): 未找到或为空")
+            return
+            
+        logger.info("✅ 配置文件 (config.yml): 已加载")
+        
+        # 显示关键配置
+        provider = cfg.get("llm", {}).get("provider", "N/A")
+        smart_model = cfg.get("llm", {}).get("models", {}).get("smart", "N/A")
+        logger.info(f"  - LLM Provider: {provider}")
+        logger.info(f"  - Smart Model: {smart_model}")
+        
+    except FileNotFoundError:
+        logger.error("❌ 配置文件 (config.yml): 未找到")
+        return
+    except Exception as e:
+        logger.error(f"❌ 配置文件 (config.yml): 加载失败 - {e}")
+        return
+
+    # 2. 聊天记录数据库
+    try:
+        _, db_path = _load_message_history()
+        if db_path.exists():
+            conn = sqlite3.connect(str(db_path))
+            conn.execute("SELECT 1 FROM messages LIMIT 1")
+            conn.close()
+            logger.info(f"✅ 聊天记录数据库: 连接正常 ({db_path})")
+        else:
+            logger.warning(f"⚠️  聊天记录数据库: 未找到 ({db_path})")
+    except Exception as e:
+        logger.error(f"❌ 聊天记录数据库: 连接失败 - {e}")
+
+    # 3. Qdrant 连接
+    try:
+        from memory.vector import VectorStore
+        vs = VectorStore()
+        if vs.client:
+            logger.info(f"✅ Qdrant 向量数据库: 连接正常 ({vs.host}:{vs.port})")
+        else:
+            logger.error("❌ Qdrant 向量数据库: 连接失败")
+    except Exception as e:
+        logger.error(f"❌ Qdrant 向量数据库: 连接失败 - {e}")
+
+    logger.info("="*50)
+
+
 # --- 主菜单 ---
 
 def main_menu():
@@ -961,6 +1016,7 @@ def main_menu():
     
     choices = [
         "🔧 运行配置向导",
+        "📊 查看运行状态",
         "🧪 测试 Qdrant 连接",
         "🧪 测试 RAG 系统",
         "💬 聊天记录管理",
@@ -984,6 +1040,8 @@ def main_menu():
         
         if choice == "🔧 运行配置向导":
             run_wizard()
+        elif choice == "📊 查看运行状态":
+            show_status()
         elif choice == "🧪 测试 Qdrant 连接":
             test_qdrant()
         elif choice == "🧪 测试 RAG 系统":
@@ -997,57 +1055,56 @@ def main_menu():
 # --- CLI 入口 ---
 
 def main():
-    """命令行入口"""
-    parser = argparse.ArgumentParser(
-        description="N.O.R.A. Core 管理工具",
-        formatter_class=argparse.RawDescriptionHelpFormatter,
-        epilog="""
-示例:
-  python cli.py                    # 显示交互式主菜单
-  python cli.py --configure        # 直接运行配置向导
-  python cli.py --test-qdrant      # 测试 Qdrant 连接
-  python cli.py --test-rag         # 测试 RAG 系统
-  python cli.py --clean-rag        # 清理 RAG 数据
-        """
-    )
-    
-    parser.add_argument('--configure', action='store_true', help='运行配置向导')
-    parser.add_argument('--test-qdrant', action='store_true', help='测试 Qdrant 连接')
-    parser.add_argument('--test-rag', action='store_true', help='测试 RAG 系统')
-    parser.add_argument('--clean-rag', action='store_true', help='清理 RAG 数据')
-    parser.add_argument('--history-stats', action='store_true', help='查看聊天记录统计')
-    parser.add_argument('--clear-history', action='store_true', help='清空全部聊天记录（保留标记，除非指定 --include-pinned）')
-    parser.add_argument('--clear-history-chat', type=str, help='按 chat_id 清空聊天记录（默认保留标记）')
-    parser.add_argument('--platform', type=str, default='telegram', help='结合 --clear-history-chat 指定平台，默认 telegram')
-    parser.add_argument('--include-pinned', action='store_true', help='与清理选项一起使用，包含已标记消息')
-    
-    args = parser.parse_args()
-    
-    # 如果没有指定任何参数，显示主菜单
-    # 注意：--platform 和 --include-pinned 有默认值，需要单独检查操作性参数
-    has_action = (args.configure or args.test_qdrant or args.test_rag or args.clean_rag or
-                  args.history_stats or args.clear_history or args.clear_history_chat)
-    
-    if not has_action:
-        main_menu()
-        return
-    
-    # 执行指定的操作
-    if args.configure:
-        run_wizard()
-    elif args.test_qdrant:
-        test_qdrant()
-    elif args.test_rag:
-        test_rag()
-    elif args.clean_rag:
-        clean_rag()
-    elif args.history_stats:
-        show_history_stats()
-    elif args.clear_history:
-        clear_history_all(include_pinned=args.include_pinned)
-    elif args.clear_history_chat:
-        clear_history_chat(chat_id=args.clear_history_chat, platform=args.platform, include_pinned=args.include_pinned)
+    """主 CLI 入口函数"""
+    parser = argparse.ArgumentParser(description="N.O.R.A. Core - 命令行管理工具")
+    subparsers = parser.add_subparsers(dest="command", help="可用命令")
 
+    # 'wizard' 命令
+    subparsers.add_parser("wizard", help="运行交互式配置向导")
+
+    # 'status' 命令
+    subparsers.add_parser("status", help="显示系统运行状态")
+
+    # 'test-rag' 命令
+    subparsers.add_parser("test-rag", help="测试 RAG 系统")
+
+    # 'test-qdrant' 命令
+    subparsers.add_parser("test-qdrant", help="测试 Qdrant 连接")
+
+    # 'history' 命令
+    history_parser = subparsers.add_parser("history", help="聊天记录管理")
+    history_subparsers = history_parser.add_subparsers(dest="history_command", help="历史记录操作")
+    history_subparsers.add_parser("stats", help="显示统计信息")
+    clear_parser = history_subparsers.add_parser("clear", help="清理历史记录")
+    clear_parser.add_argument("--all", action="store_true", help="清理所有聊天")
+    clear_parser.add_argument("--chat-id", type=str, help="要清理的聊天 ID")
+    clear_parser.add_argument("--platform", type=str, default="telegram", help="平台名称")
+    clear_parser.add_argument("--include-pinned", action="store_true", help="同时清理已标记的消息")
+
+    args = parser.parse_args()
+
+    if args.command == "wizard":
+        run_wizard()
+    elif args.command == "status":
+        show_status()
+    elif args.command == "test-rag":
+        test_rag()
+    elif args.command == "test-qdrant":
+        test_qdrant()
+    elif args.command == "history":
+        if args.history_command == "stats":
+            show_history_stats()
+        elif args.history_command == "clear":
+            if args.all:
+                clear_history_all(args.include_pinned)
+            elif args.chat_id:
+                clear_history_chat(args.chat_id, args.platform, args.include_pinned)
+            else:
+                print("请指定 --all 或 --chat-id")
+        else:
+            history_menu()
+    else:
+        main_menu()
 
 if __name__ == "__main__":
     main()
