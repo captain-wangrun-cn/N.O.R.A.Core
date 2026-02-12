@@ -239,22 +239,20 @@ class TelegramAdapter(BaseAdapter):
         self.application.add_handler(sticker_handler)
         self.application.add_handler(callback_handler)
         
-        # Get bot's username for mention detection
-        loop = asyncio.get_event_loop()
-        loop.run_until_complete(self._get_bot_username())
+        # Use post_init to run async setup, which is more reliable
+        self.application.post_init = self._post_init_setup
 
         print("Telegram Adapter is running...")
         self.application.run_polling(stop_signals=None)
 
-    async def _get_bot_username(self):
+    async def _post_init_setup(self, application: Application):
         """获取并存储机器人的用户名。"""
         try:
-            bot_info = await self.application.bot.get_me()
+            bot_info = await application.bot.get_me()
             self.bot_username = bot_info.username
             logger.info(f"成功获取机器人用户名: @{self.bot_username}")
         except Exception as e:
             logger.error(f"无法获取机器人用户名: {e}")
-            # Fallback or handle error appropriately
             self.bot_username = None
 
     async def _should_process_message(self, update: Update) -> bool:
@@ -276,11 +274,11 @@ class TelegramAdapter(BaseAdapter):
                 if update.message.reply_to_message.from_user.id == self.application.bot.id:
                     return True
             
-            # 2b. 检查是否 @机器人
+            # 2b. 检查是否 @机器人 (case-insensitive)
             if self.bot_username:
                 # 检查文本消息或媒体消息的标题
                 text_to_check = update.message.text or update.message.caption or ""
-                if f"@{self.bot_username}" in text_to_check:
+                if f"@{self.bot_username.lower()}" in text_to_check.lower():
                     return True
         
         # 默认不处理
