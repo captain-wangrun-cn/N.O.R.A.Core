@@ -137,6 +137,41 @@ def _split_long_text(text: str, max_length: int = TG_MSG_MAX_LENGTH) -> List[str
 class TelegramAdapter(BaseAdapter):
     """Telegram 平台适配器。"""
 
+    # --- 富媒体自动检测 ---
+    # 文件扩展名 → 媒体类型映射
+    MEDIA_TYPES = {
+        'photo':    {'.png', '.jpg', '.jpeg', '.webp', '.bmp'},
+        'gif':      {'.gif'},
+        'video':    {'.mp4', '.mkv', '.avi', '.mov', '.webm'},
+        'audio':    {'.mp3', '.ogg', '.wav', '.flac', '.m4a', '.opus'},
+        'voice':    {'.oga'},  # Telegram voice message format
+        'document': {
+            '.pdf', '.doc', '.docx', '.xls', '.xlsx', '.ppt', '.pptx',
+            '.zip', '.rar', '.7z', '.tar', '.gz',
+            '.py', '.js', '.ts', '.java', '.c', '.cpp', '.h', '.cs',
+            '.go', '.rs', '.rb', '.php', '.sh', '.bat', '.ps1',
+            '.json', '.yml', '.yaml', '.toml', '.xml', '.csv',
+            '.md', '.txt', '.log', '.ini', '.cfg', '.conf',
+            '.html', '.css', '.sql', '.r', '.kt', '.swift',
+        },
+    }
+
+    # 统一匹配：支持多种嵌入语法 + 原始文件路径 + HTTP URLs
+    FILE_PATTERN = re.compile(
+        r'(?:!\[.*?\]\((.*?)\))|'                  # Markdown: ![alt](path)
+        r'(?:<img\s+src="(.*?)"[^>]*>)|'            # HTML: <img src="path">
+        r'(?:\[(?:image|file|audio|video|doc):\s*(.*?)\])|'  # 自定义: [image: path]...
+        r'(?:^|\s)((?:https?://[^\s]+\.(?:' +
+        '|'.join(
+            ext.lstrip('.') for exts in MEDIA_TYPES.values() for ext in exts
+        ) + r'))\b)|'                               # URL匹配: http://example.com/image.png
+        r'(?:^|\s)((?:/|\.{0,2}/|[a-zA-Z]:\\)[^\s<>"\']+\.(?:' +
+        '|'.join(
+            ext.lstrip('.') for exts in MEDIA_TYPES.values() for ext in exts
+        ) + r'))\b',                                 # 原始文件路径
+        re.IGNORECASE | re.MULTILINE
+    )
+
     def __init__(self):
         super().__init__() # Call parent __init__
         token = config.get_telegram_token()
@@ -426,6 +461,16 @@ class TelegramAdapter(BaseAdapter):
                 return msg["content"]
         
         return None
+
+    def _classify_file(self, path: str) -> str:
+        """根据扩展名判断文件类型"""
+        # 移除 URL 参数以便正确判断扩展名 (如 image.jpg?v=1)
+        clean_path = path.split('?')[0].split('#')[0]
+        ext = os.path.splitext(clean_path)[1].lower()
+        for media_type, extensions in self.MEDIA_TYPES.items():
+            if ext in extensions:
+                return media_type
+        return 'document'  # 未知扩展名默认作为文档发送
 
     async def send_message(self, chat_id: str, text: str) -> str:
         """
