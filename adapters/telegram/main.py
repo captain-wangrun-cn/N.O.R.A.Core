@@ -1,5 +1,5 @@
 from telegram import Update, Message, InlineKeyboardMarkup, InlineKeyboardButton
-from telegram.ext import ApplicationBuilder, ContextTypes, CommandHandler, MessageHandler, filters, CallbackQueryHandler
+from telegram.ext import Application, ApplicationBuilder, ContextTypes, CommandHandler, MessageHandler, filters, CallbackQueryHandler
 from telegram.constants import ChatAction, ParseMode
 from telegram.error import TimedOut, RetryAfter
 from typing import Callable, Any, Optional, List, Dict
