@@ -49,11 +49,17 @@ class VectorStore:
                         distance=models.Distance.COSINE
                     )
                 )
-                logger.info(f"Collection '{self.collection_name}' 创建成功。")
+                # 为 user_id 创建 payload 索引
+                self.client.create_payload_index(
+                    collection_name=self.collection_name,
+                    field_name="user_id",
+                    field_schema=models.PayloadSchemaType.KEYWORD
+                )
+                logger.info(f"Collection '{self.collection_name}' 创建成功，并为 'user_id' 创建索引。")
         except Exception as e:
             logger.error(f"检查/创建 Collection 失败: {e}")
 
-    def upsert(self, text: str, vector: List[float], metadata: Dict[str, Any] = None) -> bool:
+    def upsert(self, text: str, vector: List[float], metadata: Optional[Dict[str, Any]] = None) -> bool:
         """
         插入或更新一条记忆。
         """
@@ -88,11 +94,23 @@ class VectorStore:
         if not self.client: return []
 
         try:
+            qdrant_filter = None
+            if filter_criteria:
+                qdrant_filter = models.Filter(
+                    must=[
+                        models.FieldCondition(
+                            key=key,
+                            match=models.MatchValue(value=value)
+                        ) for key, value in filter_criteria.items()
+                    ]
+                )
+
             # 适配 Qdrant Client v1.10+ (search 方法可能被 query_points 替代或环境差异)
             # 使用 query_points 接口
             response = self.client.query_points(
                 collection_name=self.collection_name,
                 query=vector,
+                query_filter=qdrant_filter,
                 limit=top_k
             )
             

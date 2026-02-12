@@ -23,7 +23,7 @@ class RAGEngine:
         else:
             logger.warning("RAGEngine 未就绪 (Embedding 或 VectorStore 异常)。记忆系统已降级为仅短期记忆。")
 
-    def add_memory(self, text: str, metadata: Dict[str, Any] = None) -> bool:
+    def add_memory(self, text: str, user_id: str, metadata: Optional[Dict[str, Any]] = None) -> bool:
         """
         存储一条新记忆。
         过程: Text -> Vector -> DB
@@ -39,13 +39,13 @@ class RAGEngine:
                 return False
 
             # 2. 存入数据库
-            return self.vector_store.upsert(text, vector, metadata)
+            return self.vector_store.upsert(text, vector, metadata={"user_id": user_id, **(metadata or {})})
             
         except Exception as e:
             logger.error(f"存储记忆时发生错误: {e}")
             return False
 
-    def retrieve_memory(self, query_text: str, top_k: int = 5) -> List[Dict[str, Any]]:
+    def retrieve_memory(self, query_text: str, user_id: str, top_k: int = 5) -> List[Dict[str, Any]]:
         """
         检索相关记忆。
         过程: Query -> Vector -> DB Search
@@ -60,18 +60,18 @@ class RAGEngine:
                 return []
 
             # 2. 搜索数据库
-            results = self.vector_store.query(vector, top_k)
+            results = self.vector_store.query(vector, top_k, filter_criteria={"user_id": user_id})
             return results
             
         except Exception as e:
             logger.error(f"检索记忆时发生错误: {e}")
             return []
 
-    def get_context_string(self, query_text: str, top_k: int = 5) -> str:
+    def get_context_string(self, query_text: str, user_id: str, top_k: int = 5) -> str:
         """
         [Helper] 检索并格式化为适合注入 Prompt 的字符串。
         """
-        memories = self.retrieve_memory(query_text, top_k)
+        memories = self.retrieve_memory(query_text, user_id, top_k)
         if not memories:
             return ""
 
