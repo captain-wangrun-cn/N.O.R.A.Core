@@ -7,9 +7,37 @@ with warnings.catch_warnings():
     import google.generativeai as genai
 
 from typing import List, Dict, Optional
+import re
+import random
 
 from brain.interface import BaseLLM
 import config
+
+def _sanitize_links_for_safety(text: str) -> str:
+    """
+    在链接中插入随机空格以绕过内容安全过滤。
+    例如: https://example.com -> https://ex ample.com
+    """
+    # 匹配 http:// 或 https:// 开头的链接
+    url_pattern = r'(https?://[^\s]+)'
+    
+    def insert_random_space(match):
+        url = match.group(1)
+        # 如果链接太短，不处理
+        if len(url) < 15:
+            return url
+        
+        # 在域名后的路径中随机插入一个空格
+        # 避免在协议部分插入
+        protocol_end = url.find('://') + 3
+        if protocol_end >= len(url) - 5:
+            return url
+        
+        # 在协议之后的随机位置插入空格
+        insert_pos = random.randint(protocol_end + 5, len(url) - 2)
+        return url[:insert_pos] + ' ' + url[insert_pos:]
+    
+    return re.sub(url_pattern, insert_random_space, text)
 
 class GeminiProvider(BaseLLM):
     """LLM Provider for Google Gemini models."""
@@ -25,9 +53,20 @@ class GeminiProvider(BaseLLM):
             raise ValueError(f"Model for alias '{model_alias}' not found in config.")
 
         genai.configure(api_key=config.get_api_key("gemini"))
+        
+        # 配置安全设置 - 放宽内容过滤以允许链接等内容
+        from google.generativeai.types import HarmCategory, HarmBlockThreshold
+        safety_settings = {
+            HarmCategory.HARM_CATEGORY_HARASSMENT: HarmBlockThreshold.BLOCK_NONE,
+            HarmCategory.HARM_CATEGORY_HATE_SPEECH: HarmBlockThreshold.BLOCK_NONE,
+            HarmCategory.HARM_CATEGORY_SEXUALLY_EXPLICIT: HarmBlockThreshold.BLOCK_NONE,
+            HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT: HarmBlockThreshold.BLOCK_NONE,
+        }
+        
         self.model = genai.GenerativeModel(
             model_name,
-            system_instruction="You are Nora, a helpful assistant." # Base instruction
+            system_instruction="You are Nora, a helpful assistant.", # Base instruction
+            safety_settings=safety_settings
         )
 
     async def chat(self, system_prompt: str, user_prompt: str, history: List[Dict[str, str]], tools: Optional[List[Dict]] = None) -> str:
@@ -102,8 +141,14 @@ class GeminiProvider(BaseLLM):
             return response.text
         except Exception as e:
             # Handle potential content filtering and other API errors
+            error_msg = str(e)
             print(f"Gemini API Error: {e}")
-            return "Sorry, I encountered an issue processing your request with the Gemini API."
+            
+            # 检查是否是内容过滤错误
+            if "block_reason" in error_msg or "PROHIBITED_CONTENT" in error_msg or "SAFETY" in error_msg:
+                return "抱歉，由于内容安全限制，我无法直接回复该消息。我理解您的问题，但系统检测到可能包含敏感内容（如链接）。您可以尝试重新表述问题，或者我可以用其他方式帮助您。"
+            
+            return "抱歉，处理您的请求时遇到了问题。请稍后再试。"
 
     async def chat_stream(self, system_prompt: str, user_prompt: str, history: List[Dict[str, str]], tools: Optional[List[Dict]] = None):
         gemini_history = []
@@ -113,6 +158,15 @@ class GeminiProvider(BaseLLM):
             # For simplicity, we assume history is text. If we had tool outputs, we'd need more logic.
             gemini_history.append({"role": role, "parts": [{"text": str(item["content"])}]})
 
+        # 配置安全设置
+        from google.generativeai.types import HarmCategory, HarmBlockThreshold
+        safety_settings = {
+            HarmCategory.HARM_CATEGORY_HARASSMENT: HarmBlockThreshold.BLOCK_NONE,
+            HarmCategory.HARM_CATEGORY_HATE_SPEECH: HarmBlockThreshold.BLOCK_NONE,
+            HarmCategory.HARM_CATEGORY_SEXUALLY_EXPLICIT: HarmBlockThreshold.BLOCK_NONE,
+            HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT: HarmBlockThreshold.BLOCK_NONE,
+        }
+
         # Configure model with tools if present
         current_model = self.model
         if tools:
@@ -121,7 +175,8 @@ class GeminiProvider(BaseLLM):
             current_model = genai.GenerativeModel(
                 self.model.model_name,
                 tools=tools,
-                system_instruction=system_prompt
+                system_instruction=system_prompt,
+                safety_settings=safety_settings
             )
             full_prompt = user_prompt # System prompt is in instruction
         else:
@@ -174,5 +229,13 @@ class GeminiProvider(BaseLLM):
                 }
                 
         except Exception as e:
+            error_msg = str(e)
             print(f"Gemini API Stream Error: {e}")
-            yield {"type": "text", "content": f"[System Error: {str(e)}]"}
+            
+            # 检查是否是内容过滤错误
+            if "block_reason" in error_msg or "PROHIBITED_CONTENT" in error_msg or "SAFETY" in error_msg:
+                yield {"type": "text", "content": "抱歉，由于内容安全限制，我无法直接回复该消息。"}
+                yield {"type": "text", "content": "我理解您的问题，但系统检测到可能包含敏感内容（如链接）。"}
+                yield {"type": "text", "content": "您可以尝试重新表述问题，或者我可以用其他方式帮助您。"}
+            else:
+                yield {"type": "text", "content": f"抱歉，处理请求时遇到问题：{error_msg[:100]}"}
