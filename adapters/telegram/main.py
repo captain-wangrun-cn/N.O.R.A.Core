@@ -179,7 +179,7 @@ class TelegramAdapter(BaseAdapter):
             raise ValueError("Telegram Bot Token not found in config.")
         
         self.application = ApplicationBuilder().token(token).build()
-        self._message_handler: Callable[[str, str], Any] | None = None
+        self._message_handler: Callable[[Dict[str, Any]], Any] | None = None
         self._aggregator: MessageAggregator | None = None
         self.message_history = MessageHistory()
         self._reply_contexts: Dict[str, Dict] = {}  # 存储回复上下文 {chat_id: {msg_id: context}}
@@ -210,7 +210,7 @@ class TelegramAdapter(BaseAdapter):
                 logger.warning(f"发送超时，{wait}s 后重试 (attempt {attempt}/{retries})")
                 await asyncio.sleep(wait)
 
-    def run(self, message_handler: Callable[[str, str], Any]):
+    def run(self, message_handler: Callable[[Dict[str, Any]], Any]):
         self._message_handler = message_handler
         app_config = config.get_config()
         interaction_config = app_config.get("interaction", {}) if app_config else {}
@@ -218,7 +218,7 @@ class TelegramAdapter(BaseAdapter):
 
         self._aggregator = MessageAggregator(
             timeout=buffer_timeout,
-            on_complete=self._message_handler
+            on_complete=self.on_aggregator_complete
         )
 
         start_handler = CommandHandler('start', self._start_command)
@@ -369,9 +369,11 @@ class TelegramAdapter(BaseAdapter):
             return
         chat_id = str(update.effective_chat.id)
         self.current_chat_id = chat_id # Set current chat_id
-        if not update.message or not update.message.text:
+        text = update.message.text if update.message else ""
+        
+        # 如果是空消息（例如，只有一张图片），也需要继续处理
+        if not text and not (update.message and (update.message.photo or update.message.document or update.message.sticker)):
             return
-        text = update.message.text
         
         # 处理回复消息
         reply_info = await self._extract_reply_info(update.message)
@@ -379,14 +381,14 @@ class TelegramAdapter(BaseAdapter):
             text = f"[回复: {reply_info}]\n{text}"
         
         if self._aggregator:
-            context = {
+            full_context = {
                 "chat_id": chat_id,
                 "user_id": str(update.effective_user.id) if update.effective_user else chat_id,
                 "text": text,
                 "chat_type": update.effective_chat.type,
                 "user_name": update.effective_user.first_name if update.effective_user else "Unknown"
             }
-            await self._aggregator.add_message(chat_id, context)
+            await self._aggregator.add_message(chat_id, text or "", full_context)
 
     async def _handle_photo(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """处理图片消息"""
@@ -418,14 +420,14 @@ class TelegramAdapter(BaseAdapter):
             text = f"[回复: {reply_info}]\n{text}"
         
         if self._aggregator:
-            context = {
+            full_context = {
                 "chat_id": chat_id,
                 "user_id": str(update.effective_user.id) if update.effective_user else chat_id,
                 "text": text,
                 "chat_type": update.effective_chat.type,
                 "user_name": update.effective_user.first_name if update.effective_user else "Unknown"
             }
-            await self._aggregator.add_message(chat_id, context)
+            await self._aggregator.add_message(chat_id, text, full_context)
         
         logger.info(f"[{chat_id}] 收到图片: {file_path}")
 
@@ -460,14 +462,14 @@ class TelegramAdapter(BaseAdapter):
             text = f"[回复: {reply_info}]\n{text}"
         
         if self._aggregator:
-            context = {
+            full_context = {
                 "chat_id": chat_id,
                 "user_id": str(update.effective_user.id) if update.effective_user else chat_id,
                 "text": text,
                 "chat_type": update.effective_chat.type,
                 "user_name": update.effective_user.first_name if update.effective_user else "Unknown"
             }
-            await self._aggregator.add_message(chat_id, context)
+            await self._aggregator.add_message(chat_id, text, full_context)
         
         logger.info(f"[{chat_id}] 收到文档: {file_path}")
 
@@ -501,16 +503,16 @@ class TelegramAdapter(BaseAdapter):
             text = f"[回复: {reply_info}]\n{text}"
         
         if self._aggregator:
-            context = {
+            full_context = {
                 "chat_id": chat_id,
                 "user_id": str(update.effective_user.id) if update.effective_user else chat_id,
                 "text": text,
                 "chat_type": update.effective_chat.type,
                 "user_name": update.effective_user.first_name if update.effective_user else "Unknown"
             }
-            await self._aggregator.add_message(chat_id, context)
+            await self._aggregator.add_message(chat_id, text, full_context)
         
-        logger.info(f"[{chat_id}] 收到贴纸: {emoji} from {set_name}")
+        logger.info(f"[{chat_id}] 收到贴纸: {file_path}")
 
     async def _handle_callback(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """处理 inline keyboard 回调"""
@@ -527,14 +529,14 @@ class TelegramAdapter(BaseAdapter):
         text = f"[按钮点击: {callback_data}]"
         
         if self._aggregator:
-            context = {
+            full_context = {
                 "chat_id": chat_id,
                 "user_id": str(query.from_user.id) if query.from_user else chat_id,
                 "text": text,
                 "chat_type": query.message.chat.type if query.message else "private",
                 "user_name": query.from_user.first_name if query.from_user else "Unknown"
             }
-            await self._aggregator.add_message(chat_id, context)
+            await self._aggregator.add_message(chat_id, text, full_context)
         
         logger.info(f"[{chat_id}] 收到回调: {callback_data}")
 
@@ -579,7 +581,7 @@ class TelegramAdapter(BaseAdapter):
             # 先尝试缩小分辨率（Telegram 照片最大边 4096px 就够了）
             max_dimension = 4096
             if max(img.size) > max_dimension:
-                img.thumbnail((max_dimension, max_dimension), Image.LANCZOS)
+                img.thumbnail((max_dimension, max_dimension), Image.Resampling.LANCZOS)
 
             # 二分法找到合适的质量
             quality_low, quality_high = 10, 95
@@ -605,7 +607,7 @@ class TelegramAdapter(BaseAdapter):
             # 如果即使最低质量还是太大，进一步缩小分辨率
             for scale in [0.75, 0.5, 0.25]:
                 new_size = (int(img.size[0] * scale), int(img.size[1] * scale))
-                resized = img.resize(new_size, Image.LANCZOS)
+                resized = img.resize(new_size, Image.Resampling.LANCZOS)
                 buf = io.BytesIO()
                 resized.save(buf, format='JPEG', quality=60, optimize=True)
                 if buf.tell() <= target_size:
@@ -879,3 +881,8 @@ class TelegramAdapter(BaseAdapter):
     async def stop_typing(self, chat_id: str):
         # Telegram doesn't have a "stop typing" action, it's implicit.
         pass
+
+    async def on_aggregator_complete(self, context: Dict[str, Any]):
+        """当消息聚合完成时调用。"""
+        if self._message_handler:
+            await self._message_handler(context)
