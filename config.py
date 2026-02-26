@@ -33,6 +33,9 @@ def get_api_key(provider=None):
     provider = provider or get_llm_provider()
     return get_config().get("llm", {}).get("api_keys", {}).get(provider)
 
+def get_base_url():
+    return get_config().get("llm", {}).get("base_url")
+
 def get_model_name(model_alias="smart"):
     """Gets the model name for a given alias (e.g., 'smart', 'fast')."""
     return get_config().get("llm", {}).get("models", {}).get(model_alias)

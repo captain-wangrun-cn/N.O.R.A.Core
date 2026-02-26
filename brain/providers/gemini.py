@@ -148,7 +148,8 @@ class GeminiProvider(BaseLLM):
             if "block_reason" in error_msg or "PROHIBITED_CONTENT" in error_msg or "SAFETY" in error_msg:
                 return "抱歉，由于内容安全限制，我无法直接回复该消息。我理解您的问题，但系统检测到可能包含敏感内容（如链接）。您可以尝试重新表述问题，或者我可以用其他方式帮助您。"
             
-            return "抱歉，处理您的请求时遇到了问题。请稍后再试。"
+            # 对于其他所有错误，返回一个包含具体错误信息的前缀消息
+            return f"抱歉，处理您的请求时遇到了问题：{error_msg}"
 
     async def chat_stream(self, system_prompt: str, user_prompt: str, history: List[Dict[str, str]], tools: Optional[List[Dict]] = None):
         gemini_history = []

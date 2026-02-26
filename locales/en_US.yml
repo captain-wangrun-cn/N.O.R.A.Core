@@ -6,6 +6,7 @@ wizard:
   provider_prompt: "Which primary LLM provider will you use?"
   gemini_key_prompt: "Please enter your Google Gemini API Key:"
   openai_key_prompt: "Please enter your OpenAI API Key:"
+  openai_base_url_prompt: "OpenAI API Base URL (default https://api.openai.com/v1; support self-hosted compatible endpoints):"
   model_fetch_error: "Could not fetch models: {error}"
   model_select_prompt: "Select the model for the '{role}' role:"
   manual_entry: "--- Manually Enter ---"

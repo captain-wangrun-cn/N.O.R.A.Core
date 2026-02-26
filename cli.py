@@ -58,9 +58,9 @@ def get_gemini_models(api_key: str):
         questionary.print(t('wizard.model_fetch_error', error=e), style="bold red").ask()
         return None
 
-def get_openai_models(api_key: str):
+def get_openai_models(api_key: str, base_url: Optional[str] = None):
     try:
-        client = openai.OpenAI(api_key=api_key)
+        client = openai.OpenAI(api_key=api_key, base_url=base_url or None)
         models = sorted([model.id for model in client.models.list() if "gpt" in model.id.lower()])
         return models
     except Exception as e:
@@ -308,7 +308,15 @@ class StepAPIKeys(ConfigStep):
                 t('wizard.openai_key_prompt'),
                 default=self.state.get("openai_key", "")
             ).ask()
-            return self.state['openai_key'] is not None
+            if self.state['openai_key'] is None:
+                return False
+
+            base_url_default = self.state.get("openai_base_url", "https://api.openai.com/v1")
+            self.state['openai_base_url'] = questionary.text(
+                t('wizard.openai_base_url_prompt'),
+                default=base_url_default
+            ).ask()
+            return self.state['openai_base_url'] is not None
         return False # Should not happen
 
 class StepDatabase(ConfigStep):
@@ -530,7 +538,7 @@ class StepModels(ConfigStep):
         if provider == 'gemini' and api_key:
             model_list = get_gemini_models(api_key)
         elif provider == 'openai' and api_key:
-            model_list = get_openai_models(api_key)
+            model_list = get_openai_models(api_key, self.state.get('openai_base_url'))
 
         if model_list is None: # API call failed
             return False 
@@ -631,6 +639,7 @@ def run_wizard():
                 'provider': cfg.get("llm", {}).get("provider"),
                 'gemini_key': cfg.get("llm", {}).get("api_keys", {}).get("gemini"),
                 'openai_key': cfg.get("llm", {}).get("api_keys", {}).get("openai"),
+                'openai_base_url': cfg.get("llm", {}).get("base_url"),
                 'models': cfg.get("llm", {}).get("models", {}),
                 'memory': cfg.get("memory", {}),
                 'tavily': cfg.get("tavily", {}),
@@ -670,6 +679,10 @@ def run_wizard():
         'memory': state.get('memory', {}),
         'cost_tracking': state.get('cost_tracking', {'enabled': True})
     }
+
+    # 仅在选择 OpenAI 时保存 base_url（避免污染 Gemini 配置）
+    if state.get('provider') == 'openai' and state.get('openai_base_url'):
+        final_config['llm']['base_url'] = state.get('openai_base_url')
     
     # 添加 Tavily 配置（如果存在）
     if state.get('tavily'):

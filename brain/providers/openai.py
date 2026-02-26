@@ -13,7 +13,10 @@ class OpenAIProvider(BaseLLM):
             raise ValueError("OPENAI_API_KEY is not set in the config.")
         
         self.model_alias = model_alias
-        self.client = openai.AsyncOpenAI(api_key=config.get_api_key("openai"))
+        self.client = openai.AsyncOpenAI(
+            api_key=config.get_api_key("openai"),
+            base_url=config.get_base_url()
+        )
         self.model = config.get_model_name(model_alias)
         if not self.model:
             raise ValueError(f"Model for alias '{model_alias}' not found in config.")

@@ -23,6 +23,9 @@ llm:
     gemini: "YOUR_GEMINI_API_KEY"
     openai: "YOUR_OPENAI_API_KEY"
 
+  # Optional: custom base URL for OpenAI compatible endpoints
+  # base_url: "https://api.openai.com/v1"
+
   # Model aliases used by the application
   models:
     smart: "gemini-1.5-pro-latest"
