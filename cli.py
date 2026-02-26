@@ -15,6 +15,7 @@ warnings.filterwarnings("ignore", category=FutureWarning, module="google.generat
 
 import google.generativeai as genai
 import openai
+from openai import PermissionDeniedError
 from typing import Dict, Any, List, Tuple, Optional
 
 from memory.message_history import MessageHistory
@@ -59,12 +60,31 @@ def get_gemini_models(api_key: str):
         return None
 
 def get_openai_models(api_key: str, base_url: Optional[str] = None):
+    def fetch_models(client):
+        return sorted([model.id for model in client.models.list() if "gpt" in model.id.lower()])
+
     try:
         client = openai.OpenAI(api_key=api_key, base_url=base_url or None)
-        models = sorted([model.id for model in client.models.list() if "gpt" in model.id.lower()])
-        return models
+        return fetch_models(client)
+    except PermissionDeniedError as e:
+        status = getattr(e, "status_code", None) or getattr(e, "status", None)
+        if status == 403:
+            try:
+                ua_client = openai.OpenAI(
+                    api_key=api_key,
+                    base_url=base_url or None,
+                    default_headers={
+                        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 Safari/537.36"
+                    },
+                )
+                return fetch_models(ua_client)
+            except Exception as retry_err:
+                questionary.print(t('wizard.model_fetch_error', error=retry_err), style="bold red")
+                return None
+        questionary.print(t('wizard.model_fetch_error', error=e), style="bold red")
+        return None
     except Exception as e:
-        questionary.print(t('wizard.model_fetch_error', error=e), style="bold red").ask()
+        questionary.print(t('wizard.model_fetch_error', error=e), style="bold red")
         return None
 
 
