@@ -15,97 +15,13 @@ from datetime import datetime, timedelta
 from typing import Dict, Optional, Tuple
 from pathlib import Path
 
+import config
+
 logger = logging.getLogger(__name__)
 
 
 class CostTracker:
     """LLM 成本跟踪器"""
-    
-    # Gemini 官方定价 (2026-02, USD per million tokens)
-    # https://ai.google.dev/pricing
-    # 上下文长度: <=200k (-short), >200k (-long)
-    GEMINI_PRICES = {
-        # === Gemini 3 模型 (预览版) ===
-        # Pro 预览版 - 提示 <=200k
-        "gemini-3-pro-preview": {"input": 2.00, "output": 12.00},
-        "gemini-3-pro-preview-short": {"input": 2.00, "output": 12.00},
-        # Pro 预览版 - 提示 >200k
-        "gemini-3-pro-preview-long": {"input": 4.00, "output": 18.00},
-        
-        # Flash 预览版 - 文字/图片/视频
-        "gemini-3-flash-preview": {"input": 0.50, "output": 3.00},
-        "gemini-3-flash-preview-short": {"input": 0.50, "output": 3.00},
-        # Flash 预览版 - 音频
-        "gemini-3-flash-preview-audio": {"input": 1.00, "output": 3.00},
-        
-        # === Gemini 2.5 稳定版 ===
-        # Pro - 提示 <=200k
-        "gemini-2.5-pro": {"input": 1.25, "output": 10.00},
-        "gemini-2.5-pro-short": {"input": 1.25, "output": 10.00},
-        # Pro - 提示 >200k
-        "gemini-2.5-pro-long": {"input": 2.50, "output": 15.00},
-        
-        # Flash - 文字/图片/视频
-        "gemini-2.5-flash": {"input": 0.30, "output": 2.50},
-        "gemini-2.5-flash-short": {"input": 0.30, "output": 2.50},
-        # Flash - 音频
-        "gemini-2.5-flash-audio": {"input": 1.00, "output": 2.50},
-        
-        # Flash-Lite - 文字/图片/视频
-        "gemini-2.5-flash-lite": {"input": 0.10, "output": 0.40},
-        "gemini-2.5-flash-lite-short": {"input": 0.10, "output": 0.40},
-        # Flash-Lite - 音频
-        "gemini-2.5-flash-lite-audio": {"input": 0.30, "output": 0.40},
-        
-        # === Gemini 2.5 预览版 ===
-        "gemini-2.5-flash-preview-09-2025": {"input": 0.30, "output": 2.50},
-        "gemini-2.5-flash-lite-preview-09-2025": {"input": 0.10, "output": 0.40},
-        
-        # === Gemini 2.0 稳定版 ===
-        # Flash - 文字/图片/视频
-        "gemini-2.0-flash": {"input": 0.10, "output": 0.40},
-        "gemini-2.0-flash-short": {"input": 0.10, "output": 0.40},
-        # Flash - 音频
-        "gemini-2.0-flash-audio": {"input": 0.70, "output": 0.40},
-        
-        # Flash-Lite - 最经济的模型
-        "gemini-2.0-flash-lite": {"input": 0.075, "output": 0.30},
-        
-        # === Gemini 1.5 模型 (旧版本，仍保留向后兼容) ===
-        # Pro - 短上下文 (128k context)
-        "gemini-1.5-pro-latest": {"input": 1.25, "output": 5.00},
-        "gemini-1.5-pro": {"input": 1.25, "output": 5.00},
-        "gemini-1.5-pro-short": {"input": 1.25, "output": 5.00},
-        "gemini-1.5-pro-latest-short": {"input": 1.25, "output": 5.00},
-        # Pro - 长上下文 (>200k, 最高2M)
-        "gemini-1.5-pro-long": {"input": 2.50, "output": 10.00},
-        "gemini-1.5-pro-latest-long": {"input": 2.50, "output": 10.00},
-        
-        # Flash - 短上下文 (128k context)
-        "gemini-1.5-flash-latest": {"input": 0.075, "output": 0.30},
-        "gemini-1.5-flash": {"input": 0.075, "output": 0.30},
-        "gemini-1.5-flash-short": {"input": 0.075, "output": 0.30},
-        "gemini-1.5-flash-latest-short": {"input": 0.075, "output": 0.30},
-        # Flash - 长上下文 (>200k, 最高1M)
-        "gemini-1.5-flash-long": {"input": 0.15, "output": 0.60},
-        "gemini-1.5-flash-latest-long": {"input": 0.15, "output": 0.60},
-        
-        # === 免费实验版 ===
-        "gemini-2.0-flash-exp": {"input": 0.00, "output": 0.00},
-        "gemini-exp-1206": {"input": 0.00, "output": 0.00},
-    }
-    
-    # OpenAI 官方定价 (2026-02, USD per million tokens)
-    # https://openai.com/api/pricing/
-    OPENAI_PRICES = {
-        "gpt-4o": {"input": 2.50, "output": 10.00},
-        "gpt-4o-mini": {"input": 0.15, "output": 0.60},
-        "gpt-4-turbo": {"input": 10.00, "output": 30.00},
-        "gpt-4": {"input": 30.00, "output": 60.00},
-        "gpt-3.5-turbo": {"input": 0.50, "output": 1.50},
-        "o1-preview": {"input": 15.00, "output": 60.00},
-        "o1-mini": {"input": 3.00, "output": 12.00},
-    }
     
     def __init__(self, db_path: str = None, custom_prices: Dict[str, Dict[str, float]] = None):
         """
@@ -122,7 +38,14 @@ class CostTracker:
             db_path = os.path.join(workspace.root, "cost_tracker.db")
         
         self.db_path = db_path
-        self.custom_prices = custom_prices or {}
+        # 若未显式传入，则从配置文件加载 cost_tracking.custom_prices
+        if custom_prices is None:
+            cfg = config.get_config() if hasattr(config, "get_config") else {}
+            self.custom_prices = (
+                cfg.get("cost_tracking", {}).get("custom_prices", {}) if cfg else {}
+            )
+        else:
+            self.custom_prices = custom_prices
         
         # 对于 :memory: 数据库，需要保持持久连接
         self._persistent_conn = None
@@ -207,30 +130,8 @@ class CostTracker:
         Returns:
             {"input": price_per_million, "output": price_per_million} or None
         """
-        # 优先自定义价格
         if model in self.custom_prices:
             return self.custom_prices[model]
-        
-        # 内置价格 - 精确匹配优先，然后模糊匹配
-        if provider == "gemini":
-            # 先尝试精确匹配
-            if model in self.GEMINI_PRICES:
-                return self.GEMINI_PRICES[model]
-            # 再尝试模糊匹配（从最长的开始，避免短模式误匹配）
-            sorted_patterns = sorted(self.GEMINI_PRICES.keys(), key=len, reverse=True)
-            for model_pattern in sorted_patterns:
-                if model_pattern in model:
-                    return self.GEMINI_PRICES[model_pattern]
-        elif provider == "openai":
-            # 先尝试精确匹配
-            if model in self.OPENAI_PRICES:
-                return self.OPENAI_PRICES[model]
-            # 再尝试模糊匹配
-            sorted_patterns = sorted(self.OPENAI_PRICES.keys(), key=len, reverse=True)
-            for model_pattern in sorted_patterns:
-                if model_pattern in model:
-                    return self.OPENAI_PRICES[model_pattern]
-        
         logger.warning(f"No price data for {provider}/{model}. Cost will be 0.")
         return None
     

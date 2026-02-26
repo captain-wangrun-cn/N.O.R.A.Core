@@ -569,6 +569,16 @@ class StepModels(ConfigStep):
         models['coder'] = self.select_model(model_list, 'coder', provider)
         models['summary'] = self.select_model(model_list, 'summary', provider)  # 添加总结模型
         self.state['models'] = models
+
+        # 记录选定模型的价格用于后续配置写入
+        tracker = CostTracker(db_path=":memory:")
+        model_prices = {}
+        for model_alias, model_name in models.items():
+            price = tracker.get_model_price(provider, model_name)
+            if price:
+                model_prices[model_name] = price
+        # 保存到 state，稍后写入 cost_tracking.custom_prices
+        self.state['model_prices'] = model_prices
         return True
 
 
@@ -707,6 +717,15 @@ def run_wizard():
     # 添加 Tavily 配置（如果存在）
     if state.get('tavily'):
         final_config['tavily'] = state['tavily']
+
+    # 将模型选择的价格写入配置，便于后续成本计算
+    model_prices = state.get('model_prices', {})
+    if model_prices:
+        if 'cost_tracking' not in final_config:
+            final_config['cost_tracking'] = {'enabled': True}
+        existing_custom = final_config['cost_tracking'].get('custom_prices', {}) or {}
+        existing_custom.update(model_prices)
+        final_config['cost_tracking']['custom_prices'] = existing_custom
 
     print(t('wizard.summary_title'))
     print(yaml.dump(final_config, indent=2, allow_unicode=True))
