@@ -519,6 +519,22 @@ class StepTimezone(ConfigStep):
         return True
 
 class StepModels(ConfigStep):
+    def _prompt_price(self, model_name: str) -> Optional[Dict[str, float]]:
+        questionary.print(f"⚠️ 模型 {model_name} 未配置价格，请手动输入（USD per million tokens）", style="bold yellow")
+        try:
+            input_price = questionary.text("  输入 token 价格:").ask()
+            if input_price is None:
+                return None
+            output_price = questionary.text("  输出 token 价格:").ask()
+            if output_price is None:
+                return None
+            return {
+                "input": float(input_price or 0),
+                "output": float(output_price or 0)
+            }
+        except ValueError:
+            questionary.print("价格格式错误，已跳过该模型。", style="bold red")
+            return None
     def select_model(self, model_list, role_key, provider):
         role_name = t(f'roles.{role_key}')
         current_models = self.state.get('models', {})
@@ -578,6 +594,10 @@ class StepModels(ConfigStep):
             price = tracker.get_model_price(provider, model_name)
             if price:
                 model_prices[model_name] = price
+            else:
+                manual_price = self._prompt_price(model_name)
+                if manual_price:
+                    model_prices[model_name] = manual_price
         # 保存到 state，稍后写入 cost_tracking.custom_prices
         self.state['model_prices'] = model_prices
         return True

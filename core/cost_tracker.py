@@ -46,6 +46,9 @@ class CostTracker:
             )
         else:
             self.custom_prices = custom_prices
+
+        # 缓存已提示过的缺失价格模型，避免重复警告刷屏
+        self._warned_models = set()
         
         # 对于 :memory: 数据库，需要保持持久连接
         self._persistent_conn = None
@@ -132,7 +135,9 @@ class CostTracker:
         """
         if model in self.custom_prices:
             return self.custom_prices[model]
-        logger.warning(f"No price data for {provider}/{model}. Cost will be 0.")
+        if model not in self._warned_models:
+            logger.warning(f"No price data for {provider}/{model}. Cost will be 0.")
+            self._warned_models.add(model)
         return None
     
     def calculate_cost(
