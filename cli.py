@@ -61,7 +61,7 @@ def get_gemini_models(api_key: str):
 
 def get_openai_models(api_key: str, base_url: Optional[str] = None):
     def fetch_models(client):
-        return sorted([model.id for model in client.models.list() if "gpt" in model.id.lower()])
+        return sorted([model.id for model in client.models.list()])
 
     try:
         client = openai.OpenAI(api_key=api_key, base_url=base_url or None)
@@ -331,24 +331,12 @@ class StepAPIKeys(ConfigStep):
             if self.state['openai_key'] is None:
                 return False
 
-            use_custom_base = questionary.confirm(
-                t('wizard.openai_base_url_confirm'),
-                default=bool(self.state.get("openai_base_url"))
-            ).ask()
-            if use_custom_base is None:
-                return False
-
             base_url_default = self.state.get("openai_base_url") or "https://api.openai.com/v1"
-            if use_custom_base:
-                self.state['openai_base_url'] = questionary.text(
-                    t('wizard.openai_base_url_prompt'),
-                    default=base_url_default
-                ).ask()
-                return self.state['openai_base_url'] is not None
-            else:
-                # 选择默认官方端点
-                self.state['openai_base_url'] = "https://api.openai.com/v1"
-                return True
+            self.state['openai_base_url'] = questionary.text(
+                t('wizard.openai_base_url_prompt'),
+                default=base_url_default
+            ).ask()
+            return self.state['openai_base_url'] is not None
         return False # Should not happen
 
 class StepDatabase(ConfigStep):
