@@ -16,6 +16,7 @@ warnings.filterwarnings("ignore", category=FutureWarning, module="google.generat
 import google.generativeai as genai
 import openai
 from openai import PermissionDeniedError
+from core.cost_tracker import CostTracker
 from typing import Dict, Any, List, Tuple, Optional
 
 from memory.message_history import MessageHistory
