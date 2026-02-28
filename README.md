@@ -43,7 +43,11 @@
 
 4. 运行:
    ```bash
+   # 带 TUI（默认）
    python main.py
+
+   # 无 TUI / 纯命令行
+   python main.py --no-tui
    ```
 
 ## 🛠 管理工具 (Management CLI)
@@ -55,10 +59,10 @@ N.O.R.A. Core 包含一个简易的 CLI 工具 (`cli.py`) 用于配置和维护�
 python cli.py
 
 # 直接命令
-python cli.py --configure      # 运行配置向导
-python cli.py --test-qdrant    # 测试 Qdrant 连接
-python cli.py --test-rag       # 测试 RAG 系统
-python cli.py --clean-rag      # 清理 RAG 数据 (慎用)
+python cli.py wizard           # 运行配置向导
+python cli.py test-qdrant      # 测试 Qdrant 连接
+python cli.py test-rag         # 测试 RAG 系统
+python cli.py history          # 聊天记录管理
 ```
 
 详见 [CLI 使用指南](docs/CLI_USAGE.md)。
