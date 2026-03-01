@@ -25,6 +25,12 @@ from memory.message_history import MessageHistory
 logging.basicConfig(level=logging.INFO, format='%(levelname)s: %(message)s')
 logger = logging.getLogger(__name__)
 
+# Default fake User-Agent for OpenAI-compatible endpoints
+DEFAULT_FAKE_UA = (
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Chrome/121.0 Safari/537.36"
+)
+
 # --- i18n 配置 ---
 LOCALE_DIR = "locales"
 DEFAULT_LOCALE = "zh_CN"
@@ -337,7 +343,14 @@ class StepAPIKeys(ConfigStep):
                 t('wizard.openai_base_url_prompt'),
                 default=base_url_default
             ).ask()
-            return self.state['openai_base_url'] is not None
+            if self.state['openai_base_url'] is None:
+                return False
+            use_fake_ua = questionary.confirm(
+                t('wizard.openai_user_agent_prompt'),
+                default=bool(self.state.get("openai_user_agent"))
+            ).ask()
+            self.state['openai_user_agent'] = DEFAULT_FAKE_UA if use_fake_ua else ""
+            return use_fake_ua is not None
         return False # Should not happen
 
 class StepDatabase(ConfigStep):

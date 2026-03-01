@@ -18,6 +18,9 @@ llm:
   # Supported providers: "gemini", "openai"
   provider: "gemini"
 
+  # Optional: custom User-Agent for LLM HTTP requests (e.g., mimic browser UA)
+  # user_agent: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0 Safari/537.36"
+
   # API keys for the providers
   api_keys:
     gemini: "YOUR_GEMINI_API_KEY"

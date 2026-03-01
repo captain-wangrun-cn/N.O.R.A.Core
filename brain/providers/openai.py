@@ -13,9 +13,14 @@ class OpenAIProvider(BaseLLM):
             raise ValueError("OPENAI_API_KEY is not set in the config.")
         
         self.model_alias = model_alias
+        # Optional custom User-Agent to mimic browser if needed
+        ua = config.get_llm_user_agent()
+        default_headers = {"User-Agent": ua} if ua else None
+
         self.client = openai.AsyncOpenAI(
             api_key=config.get_api_key("openai"),
-            base_url=config.get_base_url()
+            base_url=config.get_base_url(),
+            default_headers=default_headers
         )
         self.model = config.get_model_name(model_alias)
         if not self.model:

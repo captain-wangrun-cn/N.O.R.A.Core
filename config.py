@@ -5,6 +5,12 @@ import os
 CONFIG_FILE = "config.yml"
 _config = None
 
+
+def _safe_config():
+    """Return loaded config dict or empty dict as fallback."""
+    cfg = get_config()
+    return cfg if cfg is not None else {}
+
 def load_config():
     """Loads the YAML configuration file."""
     global _config
@@ -24,27 +30,39 @@ def get_config():
 
 # --- Helper accessors ---
 def get_telegram_token():
-    return get_config().get("telegram", {}).get("bot_token")
+    cfg = _safe_config()
+    return cfg.get("telegram", {}).get("bot_token")
 
 def get_llm_provider():
-    return get_config().get("llm", {}).get("provider", "gemini")
+    cfg = _safe_config()
+    return cfg.get("llm", {}).get("provider", "gemini")
 
 def get_api_key(provider=None):
     provider = provider or get_llm_provider()
-    return get_config().get("llm", {}).get("api_keys", {}).get(provider)
+    cfg = _safe_config()
+    return cfg.get("llm", {}).get("api_keys", {}).get(provider)
 
 def get_base_url():
-    return get_config().get("llm", {}).get("base_url")
+    cfg = _safe_config()
+    return cfg.get("llm", {}).get("base_url")
 
 def get_model_name(model_alias="smart"):
     """Gets the model name for a given alias (e.g., 'smart', 'fast')."""
-    return get_config().get("llm", {}).get("models", {}).get(model_alias)
+    cfg = _safe_config()
+    return cfg.get("llm", {}).get("models", {}).get(model_alias)
+
+def get_llm_user_agent():
+    """Optional custom User-Agent for LLM HTTP requests."""
+    cfg = _safe_config()
+    return cfg.get("llm", {}).get("user_agent")
 
 def get_message_history_config():
     """Gets the message history configuration."""
-    return get_config().get("memory", {}).get("message_history", {})
+    cfg = _safe_config()
+    return cfg.get("memory", {}).get("message_history", {})
 
 def get_workspace_config():
     """Gets the workspace configuration."""
-    return get_config().get("workspace", {})
+    cfg = _safe_config()
+    return cfg.get("workspace", {})
 

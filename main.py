@@ -83,7 +83,7 @@ def run_with_tui():
     try:
         config.load_config()
     except FileNotFoundError as e:
-        print(f"FATAL: {e}. Please run 'python configure.py' first.")
+        print(f"FATAL: {e}. Please run 'python cli.py' first.")
         sys.exit(1)
 
     tui_ready_event = threading.Event()
