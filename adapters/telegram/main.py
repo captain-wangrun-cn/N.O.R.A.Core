@@ -9,7 +9,7 @@ import logging
 import io
 import asyncio
 
-from adapters.base import BaseAdapter
+from adapters.base import BaseAdapter, PlatformFeatures
 from adapters.aggregator import MessageAggregator
 import config
 from memory.message_history import MessageHistory
@@ -137,6 +137,28 @@ def _split_long_text(text: str, max_length: int = TG_MSG_MAX_LENGTH) -> List[str
 class TelegramAdapter(BaseAdapter):
     """Telegram 平台适配器。"""
 
+    # ------------------------------------------------------------------
+    # 平台元信息
+    # ------------------------------------------------------------------
+
+    @property
+    def platform_name(self) -> str:
+        return "telegram"
+
+    @property
+    def platform_features(self) -> PlatformFeatures:
+        return PlatformFeatures(
+            supports_edit_message=True,
+            supports_delete_message=True,
+            supports_reactions=False,       # Telegram Bot API 对 reaction 支持有限
+            supports_typing_indicator=True,
+            supports_rich_media=True,
+            supports_reply=True,
+            supports_threads=False,
+            supports_buttons=True,
+            max_message_length=TG_MSG_MAX_LENGTH,
+        )
+
     # --- 富媒体自动检测 ---
     # 文件扩展名 → 媒体类型映射
     MEDIA_TYPES = {
@@ -173,13 +195,12 @@ class TelegramAdapter(BaseAdapter):
     )
 
     def __init__(self):
-        super().__init__() # Call parent __init__
+        super().__init__()
         token = config.get_telegram_token()
         if not token:
             raise ValueError("Telegram Bot Token not found in config.")
         
         self.application = ApplicationBuilder().token(token).build()
-        self._message_handler: Callable[[Dict[str, Any]], Any] | None = None
         self._aggregator: MessageAggregator | None = None
         self.message_history = MessageHistory()
         self._reply_contexts: Dict[str, Dict] = {}  # 存储回复上下文 {chat_id: {msg_id: context}}
@@ -242,11 +263,12 @@ class TelegramAdapter(BaseAdapter):
         # Use post_init to run async setup, which is more reliable
         self.application.post_init = self._post_init_setup
 
-        print("Telegram Adapter is running...")
+        logger.info("Telegram Adapter is running...")
         self.application.run_polling(stop_signals=None)
 
     async def _post_init_setup(self, application: Application):
-        """获取并存储机器人的用户名。"""
+        """完成 Telegram 启动后初始化，并触发生命周期钩子。"""
+        await self.startup()
         try:
             bot_info = await application.bot.get_me()
             self.bot_username = bot_info.username
@@ -254,6 +276,8 @@ class TelegramAdapter(BaseAdapter):
         except Exception as e:
             logger.error(f"无法获取机器人用户名: {e}")
             self.bot_username = None
+        # 触发基类 on_ready 钩子
+        await self.on_ready()
 
     async def _should_process_message(self, update: Update) -> bool:
         """判断是否应该处理收到的消息。"""
@@ -290,14 +314,14 @@ class TelegramAdapter(BaseAdapter):
         chat_id = str(update.effective_chat.id)
         if self._message_handler:
             # Propagate start command as a special message
-            context = {
+            event_context = {
                 "chat_id": chat_id,
                 "user_id": str(update.effective_user.id) if update.effective_user else chat_id,
                 "text": "/start",
                 "chat_type": update.effective_chat.type,
                 "user_name": update.effective_user.first_name if update.effective_user else "Unknown"
             }
-            await self._message_handler(context)
+            await self._message_handler(event_context)
 
     async def _clear_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not update.effective_chat:
@@ -376,9 +400,10 @@ class TelegramAdapter(BaseAdapter):
             return
         
         # 处理回复消息
-        reply_info = await self._extract_reply_info(update.message)
-        if reply_info:
-            text = f"[回复: {reply_info}]\n{text}"
+        if update.message:
+            reply_info = await self._extract_reply_info(update.message)
+            if reply_info:
+                text = f"[回复: {reply_info}]\n{text}"
         
         if self._aggregator:
             full_context = {
@@ -713,7 +738,7 @@ class TelegramAdapter(BaseAdapter):
         
         return re.sub(url_pattern, insert_zero_width_space, text)
 
-    async def send_message(self, chat_id: str, text: str) -> str:
+    async def send_message(self, chat_id: str, text: str, **kwargs) -> str:
         """
         发送消息，自动检测并发送嵌入的富媒体文件。
         
@@ -882,7 +907,74 @@ class TelegramAdapter(BaseAdapter):
         # Telegram doesn't have a "stop typing" action, it's implicit.
         pass
 
+    # ------------------------------------------------------------------
+    # 消息编辑 / 删除（覆盖基类默认实现）
+    # ------------------------------------------------------------------
+
+    async def edit_message(self, chat_id: str, message_id: str, new_text: str, **kwargs) -> bool:
+        """编辑一条已发送的 Telegram 消息。"""
+        try:
+            html_text = _markdown_to_html(new_text)
+            await self._send_with_retry(
+                lambda: self.application.bot.edit_message_text(
+                    chat_id=chat_id,
+                    message_id=int(message_id),
+                    text=html_text,
+                    parse_mode="HTML",
+                )
+            )
+            return True
+        except Exception as e:
+            logger.warning(f"[{chat_id}] 编辑消息 {message_id} 失败: {e}")
+            return False
+
+    async def delete_message(self, chat_id: str, message_id: str, **kwargs) -> bool:
+        """删除一条 Telegram 消息。"""
+        try:
+            await self._send_with_retry(
+                lambda: self.application.bot.delete_message(
+                    chat_id=chat_id,
+                    message_id=int(message_id),
+                )
+            )
+            return True
+        except Exception as e:
+            logger.warning(f"[{chat_id}] 删除消息 {message_id} 失败: {e}")
+            return False
+
+    # ------------------------------------------------------------------
+    # 生命周期
+    # ------------------------------------------------------------------
+
+    async def shutdown(self) -> None:
+        """优雅关闭 Telegram 适配器。"""
+        logger.info("[telegram] 正在关闭 Telegram 适配器…")
+        try:
+            await self.application.stop()
+            await self.application.shutdown()
+        except Exception as e:
+            logger.error(f"[telegram] 关闭时出错: {e}")
+        await super().shutdown()
+
+    # ------------------------------------------------------------------
+    # 健康检查
+    # ------------------------------------------------------------------
+
+    async def health_check(self) -> Dict[str, Any]:
+        """返回 Telegram 适配器的健康状态。"""
+        base = await super().health_check()
+        base["bot_username"] = self.bot_username
+        try:
+            me = await self.application.bot.get_me()
+            base["bot_id"] = me.id
+            base["ok"] = True
+        except Exception:
+            base["ok"] = False
+        return base
+
     async def on_aggregator_complete(self, context: Dict[str, Any]):
         """当消息聚合完成时调用。"""
         if self._message_handler:
-            await self._message_handler(context)
+            processed_context = await self.before_message(context)
+            result = await self._message_handler(processed_context)
+            await self.after_message(processed_context, result)
