@@ -533,7 +533,7 @@ class NoraController:
                                     text_to_send = part.strip()
                                     # 过滤掉包含工具调用语法的泄漏内容
                                     if text_to_send and not re.search(
-                                        r'(?:execute_skill|write_file|read_file|edit_file|exec_command|list_dir|create_new_skill)\s*\(',
+                                        r'(?:execute_skill|write_file|read_file|edit_file|exec_command|list_dir|create_new_skill|search)\s*\(',
                                         text_to_send
                                     ):
                                         await self.adapter.send_message(chat_id, text_to_send)
@@ -593,7 +593,7 @@ class NoraController:
                     # --- Loop Detection and Intervention ---
                     # Build a loop key from tool name + target (path/command) for file ops.
                     # This avoids false positives when LLM writes to different files sequentially.
-                    _file_tools = {"write_file", "edit_file", "read_file", "create_new_skill", "list_dir"}
+                    _file_tools = {"write_file", "edit_file", "read_file", "create_new_skill", "list_dir", "search"}
                     if tool_name in _file_tools and isinstance(tool_args, dict):
                         _target = tool_args.get("path", tool_args.get("skill_name", ""))
                         # For edit_file, use a broader key: any edit on the same file counts together
@@ -782,7 +782,7 @@ class NoraController:
             if final_response_buffer:
                 # 过滤掉可能泄漏的工具调用语法
                 clean_response = re.sub(
-                    r'(?:execute_skill|write_file|read_file|edit_file|exec_command|list_dir|create_new_skill)\s*\([^)]*\)',
+                    r'(?:execute_skill|write_file|read_file|edit_file|exec_command|list_dir|create_new_skill|search)\s*\([^)]*\)',
                     '', final_response_buffer
                 ).strip()
                 # 过滤掉 "返回结果:" + 原始 JSON/代码块

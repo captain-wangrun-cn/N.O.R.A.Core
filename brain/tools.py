@@ -3,6 +3,7 @@
 import os
 import json
 import re
+import glob
 import subprocess
 import logging
 import inspect
@@ -74,6 +75,7 @@ class ToolManager:
         self.register(self.create_new_skill)
         self.register(self.execute_skill)
         self.register(self.read_file)
+        self.register(self.search)
         self.register(self.write_file)
         self.register(self.edit_file)
         self.register(self.list_dir)
@@ -305,6 +307,121 @@ class ToolManager:
                     return header + result
         except Exception as e:
             return f"Error reading file: {e}"
+
+    def search(
+        self,
+        query: str,
+        path: str = ".",
+        include_pattern: str = "**/*",
+        is_regex: bool = False,
+        case_sensitive: bool = False,
+        max_results: int = 50,
+    ) -> str:
+        """
+        Searches text in files (similar to IDE/Copilot search) and returns matched file/line snippets.
+
+        :param query: Search keyword or regex pattern.
+        :param path: Root directory to search in. Defaults to workspace root '.'.
+        :param include_pattern: Glob pattern for files, e.g. '**/*.py', 'docs/**/*.md'.
+        :param is_regex: Whether query should be treated as a regular expression.
+        :param case_sensitive: Whether search is case-sensitive.
+        :param max_results: Maximum number of matched lines to return (1-200).
+        """
+        if not query:
+            return "Error: query cannot be empty."
+
+        try:
+            max_results = max(1, min(int(max_results), 200))
+            target_root = os.path.abspath(path)
+            if not os.path.exists(target_root):
+                return f"Error: path '{path}' does not exist."
+
+            if os.path.isfile(target_root):
+                candidate_files = [target_root]
+            else:
+                candidate_files = []
+                search_pattern = os.path.join(target_root, include_pattern.replace("/", os.sep))
+                for abs_file in glob.glob(search_pattern, recursive=True):
+                    if os.path.isfile(abs_file):
+                        name = os.path.basename(abs_file)
+                        rel_path = os.path.relpath(abs_file, target_root).replace("\\", "/")
+                        if (
+                            name.startswith('.')
+                            or name.startswith('__')
+                            or rel_path.startswith('.')
+                            or "/__" in f"/{rel_path}"
+                        ):
+                            continue
+                        candidate_files.append(abs_file)
+
+                # 兼容 "**/*.py" 在部分平台不匹配根目录文件的情况
+                if include_pattern.startswith("**/"):
+                    fallback_pattern = include_pattern[3:]
+                    fallback_search_pattern = os.path.join(target_root, fallback_pattern.replace("/", os.sep))
+                    for abs_file in glob.glob(fallback_search_pattern, recursive=True):
+                        if os.path.isfile(abs_file) and abs_file not in candidate_files:
+                            candidate_files.append(abs_file)
+
+            flags = 0 if case_sensitive else re.IGNORECASE
+            pattern = re.compile(query, flags) if is_regex else None
+
+            results = []
+            scanned_files = 0
+
+            for file_path in candidate_files:
+                safe, reason = self._is_path_safe(file_path)
+                if not safe:
+                    logger.debug(f"Skip sensitive file in search: {file_path} ({reason})")
+                    continue
+
+                scanned_files += 1
+                try:
+                    with open(file_path, 'r', encoding='utf-8') as f:
+                        for line_no, line in enumerate(f, start=1):
+                            text = line.rstrip("\n")
+                            matched = False
+                            if is_regex:
+                                matched = bool(pattern.search(text)) if pattern else False
+                            else:
+                                if case_sensitive:
+                                    matched = query in text
+                                else:
+                                    matched = query.lower() in text.lower()
+
+                            if matched:
+                                rel = os.path.relpath(file_path, target_root).replace("\\", "/")
+                                preview = text.strip()
+                                if len(preview) > 220:
+                                    preview = preview[:220] + "..."
+                                results.append(f"{rel}:{line_no}: {preview}")
+                                if len(results) >= max_results:
+                                    break
+                except UnicodeDecodeError:
+                    continue
+                except Exception as e:
+                    logger.debug(f"Search skipped file '{file_path}': {e}")
+                    continue
+
+                if len(results) >= max_results:
+                    break
+
+            header = (
+                f"Search results for '{query}' in '{path}' "
+                f"(pattern='{include_pattern}', regex={is_regex}, case_sensitive={case_sensitive})."
+            )
+
+            if not results:
+                return f"{header}\nNo matches found. Scanned {scanned_files} file(s)."
+
+            suffix = ""
+            if len(results) >= max_results:
+                suffix = f"\nReached max_results={max_results}. Narrow query/pattern for more precise results."
+
+            return f"{header}\n" + "\n".join(results) + suffix
+        except re.error as e:
+            return f"Error: invalid regex pattern: {e}"
+        except Exception as e:
+            return f"Error searching files: {e}"
 
     def write_file(self, path: str, content: str) -> str:
         """Writes content to a file, overwriting it."""
