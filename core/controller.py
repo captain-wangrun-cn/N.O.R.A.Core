@@ -507,6 +507,14 @@ class NoraController:
                     tools=[] if force_no_tools else self.tool_manager.get_tool_schemas()
                 )
                 force_no_tools = False  # 重置，仅影响紧跟的一轮
+
+                # 一进入生成阶段即提示 typing，避免 Telegram 输入状态过短
+                if (not typing_started) and getattr(self.adapter.platform_features, "supports_typing_indicator", False):
+                    try:
+                        await self.adapter.start_typing(chat_id)
+                        typing_started = True
+                    except Exception:
+                        logger.debug("typing indicator failed to start", exc_info=True)
                 
                 response_text_buffer = ""
                 tool_call = None
@@ -518,11 +526,6 @@ class NoraController:
                     if isinstance(chunk, dict):
                         if chunk["type"] == "text":
                             content = chunk["content"]
-                            
-                            # 开始接收文本内容时，显示 typing 状态（表示在聊天）
-                            if not typing_started:
-                                await self.adapter.start_typing(chat_id)
-                                typing_started = True
                             
                             response_text_buffer += content
                             
