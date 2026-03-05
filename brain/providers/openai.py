@@ -1,8 +1,13 @@
+import asyncio
 import openai
 from typing import List, Dict, Optional
+from openai import APIConnectionError, APITimeoutError, RateLimitError, APIStatusError
+import logging
 
 from brain.interface import BaseLLM
 import config
+
+logger = logging.getLogger(__name__)
 
 class OpenAIProvider(BaseLLM):
     """LLM Provider for OpenAI models."""
@@ -26,6 +31,33 @@ class OpenAIProvider(BaseLLM):
         if not self.model:
             raise ValueError(f"Model for alias '{model_alias}' not found in config.")
 
+    async def _with_retry(self, fn, max_retries: int = 3, base_delay: float = 1.0):
+        """
+        对可恢复错误做指数退避重试。
+        仅在以下场景重试：连接/超时/限流/5xx。
+        """
+        attempt = 0
+        while True:
+            try:
+                return await fn()
+            except APIStatusError as e:
+                status = getattr(e, "status_code", getattr(e, "status", None))
+                if status not in ([429] + list(range(500, 600))):
+                    raise
+                attempt += 1
+                if attempt > max_retries:
+                    raise
+                wait = base_delay * (2 ** (attempt - 1))
+                logger.warning(f"OpenAI APIStatusError {status}, retry {attempt}/{max_retries} in {wait}s: {e}")
+                await asyncio.sleep(wait)
+            except (APIConnectionError, APITimeoutError, RateLimitError) as e:
+                attempt += 1
+                if attempt > max_retries:
+                    raise
+                wait = base_delay * (2 ** (attempt - 1))
+                logger.warning(f"OpenAI transient error, retry {attempt}/{max_retries} in {wait}s: {e}")
+                await asyncio.sleep(wait)
+
     async def chat(self, system_prompt: str, user_prompt: str, history: List[Dict[str, str]], tools: Optional[List[Dict]] = None) -> str:
         messages = [
             {"role": "system", "content": system_prompt},
@@ -34,10 +66,10 @@ class OpenAIProvider(BaseLLM):
         ]
         
         try:
-            response = await self.client.chat.completions.create(
+            response = await self._with_retry(lambda: self.client.chat.completions.create(
                 model=self.model,
-                messages=messages,
-            )
+                messages=messages,  # type: ignore[arg-type]
+            ))
             # 保存 usage 信息
             if response.usage:
                 self.last_usage = {
@@ -57,12 +89,12 @@ class OpenAIProvider(BaseLLM):
         ]
         
         try:
-            stream = await self.client.chat.completions.create(
+            stream = await self._with_retry(lambda: self.client.chat.completions.create(
                 model=self.model,
-                messages=messages,
+                messages=messages,  # type: ignore[arg-type]
                 stream=True,
                 stream_options={"include_usage": True}  # 请求 OpenAI 在流中返回 usage
-            )
+            ))
             
             input_tokens = 0
             output_tokens = 0
