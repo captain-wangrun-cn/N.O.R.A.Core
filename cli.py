@@ -19,7 +19,7 @@ from openai import PermissionDeniedError
 from core.cost_tracker import CostTracker
 from typing import Dict, Any, List, Tuple, Optional
 
-from memory.message_history import MessageHistory
+from memory.message_history import MessageHistory, get_default_message_history_db
 
 # Configure logger for CLI operations
 logging.basicConfig(level=logging.INFO, format='%(levelname)s: %(message)s')
@@ -123,7 +123,8 @@ def get_model_price_info(provider: str, model_name: str) -> str:
 def _load_message_history() -> Tuple[MessageHistory, Path]:
     import config
     history_cfg = config.get_message_history_config()
-    db_path = Path(history_cfg.get("db_path", "memory/message_history.db"))
+    raw_db_path = history_cfg.get("db_path")
+    db_path = Path(raw_db_path) if raw_db_path else get_default_message_history_db()
     mh = MessageHistory(
         db_path=str(db_path),
         raw_window=history_cfg.get("raw_window", 50),

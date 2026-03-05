@@ -7,7 +7,17 @@ from typing import List, Dict, Optional, Tuple
 from pathlib import Path
 import logging
 
+from workspace_config import get_workspace_manager
+
 logger = logging.getLogger(__name__)
+
+
+def get_default_message_history_db() -> Path:
+    """返回 workspace 下的默认聊天记录数据库路径，并确保目录存在。"""
+    workspace = get_workspace_manager()
+    path = Path(workspace.data_dir) / "memory" / "message_history.db"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    return path
 
 
 class MessageHistory:
@@ -23,14 +33,14 @@ class MessageHistory:
     
     def __init__(
         self,
-        db_path: str = "memory/message_history.db",
+        db_path: Optional[str] = None,
         raw_window: int = 50,      # 原始消息窗口大小
         compress_window: int = 200, # 开始压缩的阈值
         compress_ratio: int = 10,   # 压缩比例 (10:1)
         archive_threshold: int = 500, # 归档阈值
         timezone: str = "Asia/Shanghai"  # 时间戳显示时区
     ):
-        self.db_path = Path(db_path)
+        self.db_path = Path(db_path) if db_path else get_default_message_history_db()
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         
         self.raw_window = raw_window
@@ -174,13 +184,13 @@ class MessageHistory:
             INSERT INTO messages (platform, chat_id, user_id, role, content, timestamp, metadata, is_pinned)
             VALUES (?, ?, ?, ?, ?, ?, ?, ?)
         """, (platform, chat_id, user_id, role, content, timestamp, metadata_json, int(is_pinned)))
-        
-        message_id = cursor.lastrowid
+
+        message_id = int(cursor.lastrowid or 0)
         conn.commit()
         conn.close()
-        
+
         logger.debug(f"[{platform}/{chat_id}] 添加消息 #{message_id}: {role}")
-        
+
         # 异步触发压缩检查（不阻塞）
         # 只在有运行中的事件循环时才创建任务
         try:
@@ -189,7 +199,7 @@ class MessageHistory:
             # 没有运行中的事件循环，跳过压缩检查
             # 这在测试或同步环境中是正常的
             pass
-        
+
         return message_id
     
     def get_context_messages(

@@ -106,8 +106,9 @@ class NoraController:
         
         # 消息历史管理
         history_cfg = config.get_message_history_config()
+        db_path = history_cfg.get("db_path")
         self.message_history = MessageHistory(
-            db_path=history_cfg.get("db_path", "memory/message_history.db"),
+            db_path=db_path,
             raw_window=history_cfg.get("raw_window", 50),
             compress_window=history_cfg.get("compress_window", 200),
             compress_ratio=history_cfg.get("compress_ratio", 10),

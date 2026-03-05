@@ -1,5 +1,5 @@
 import asyncio
-from memory.message_history import MessageHistory
+from memory.message_history import MessageHistory, get_default_message_history_db
 
 
 async def test_message_history():
@@ -154,7 +154,8 @@ if __name__ == "__main__":
     asyncio.run(demo_integration())
     
     print("\n💡 提示:")
-    print("  - 数据库位于: memory/message_history.db")
+    default_db = get_default_message_history_db()
+    print(f"  - 数据库位于: {default_db}")
     print("  - 可以使用 SQLite 客户端查看数据")
     print("  - 压缩和归档是自动异步执行的")
     print("  - 重要消息可以通过 pin_message() 永久保留")

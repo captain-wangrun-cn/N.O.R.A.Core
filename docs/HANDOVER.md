@@ -3,7 +3,28 @@
 - 目标：多平台智能体内核，包含 LLM 适配、工具/技能体系、成本追踪、记忆/RAG。
 - 当前状态：可运行，自测通过；近期完成“脑口分离”与打断队列；成本追踪依赖用户配置价格（无内置价表）。
 
-## 近期关键改动（截至 2026-02-28）
+## 近期关键改动（截至 2026-03-05）
+
+### 🆕 身份与记忆系统（SOUL.md / USER.md / MEMORY.md）— 2026-03-05
+参考 OpenClaw 的工作区设计理念，新增持久化身份与记忆文件系统：
+
+**新增文件：**
+- `SOUL.md` — AI 的灵魂：人设、语气、边界、性格。定义"你是谁"。
+- `USER.md` — 用户档案：名字、偏好、背景、当前关注。定义"你在帮助谁"。
+- `MEMORY.md` — 长期记忆：重要决策、用户偏好、持久事实、经验教训。
+- `memory/YYYY-MM-DD.md` — 每日记忆：当天事件、笔记和临时上下文。
+
+**代码改动：**
+- `brain/prompts.py`：新增 `load_identity_context()` 函数，在每次会话开始时自动加载 SOUL/USER/MEMORY + 每日记忆，注入到 system prompt。SOUL.md 同时替代 `persona_nora.jinja` 作为人设来源（后者作为回退）。
+- `brain/tools.py`：注册三个新工具 `update_soul`、`update_user`、`update_memory`，允许 LLM 自行维护这些文件。`update_memory` 支持 `daily=true` 参数追加每日记忆。
+- `brain/templates/system.jinja`：新增"身份与记忆协议"，指导 LLM 何时/如何使用这三个工具更新文件。
+
+**设计理念（来自 OpenClaw）：**
+- 每次会话 LLM 是全新实例，连续性通过文件持久化
+- LLM 可自主更新 SOUL（需通知用户）、USER、MEMORY
+- 身份上下文自动注入，无需手动配置
+
+### 之前的改动（截至 2026-02-28）
 1) **脑口分离 / 打断队列（core/controller.py）**
    - `WorkerStatus` 跟踪阶段/步骤/耗时；忙时用 `fast_llm` 判定 stop / change / queue 并即时回复。
    - 支持取消 asyncio 任务、排队新消息，`pending_messages` 完成后自动处理。

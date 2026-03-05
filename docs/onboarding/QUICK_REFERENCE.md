@@ -116,8 +116,22 @@ python tui.py
 | 文件 | 作用 |
 |------|------|
 | `brain/templates/system.jinja` | **主系统提示词** — 所有行为规则、协议、约定 |
-| `brain/templates/persona_nora.jinja` | 人设提示词（Nora 的性格） |
-| `brain/prompts.py` | 提示词组装逻辑 |
+| `brain/templates/persona_nora.jinja` | 人设提示词回退（Nora 的性格，当 SOUL.md 不存在时使用） |
+| `brain/prompts.py` | 提示词组装逻辑 + 身份上下文加载 |
 | `adapters/telegram/PROMPT.md` | Telegram 平台特定提示（格式、长度等） |
 
-> ⚠️ 修改行为时，优先改 `system.jinja`；修改性格时，改 `persona_nora.jinja`。
+> ⚠️ 修改行为时，优先改 `system.jinja`；修改性格/人设时，改 `SOUL.md`（优先）或 `persona_nora.jinja`（回退）。
+
+---
+
+## 7. 身份与记忆文件（Identity & Memory）
+
+| 文件 | 作用 | LLM 可修改 |
+|------|------|-----------|
+| `SOUL.md` | AI 的灵魂：人设、语气、边界、性格 | ✅ 通过 `update_soul` 工具（修改后须通知用户） |
+| `USER.md` | 用户档案：名字、偏好、背景 | ✅ 通过 `update_user` 工具 |
+| `MEMORY.md` | 长期记忆：决策、偏好、事实 | ✅ 通过 `update_memory` 工具 |
+| `memory/YYYY-MM-DD.md` | 每日记忆日志 | ✅ 通过 `update_memory(content, daily=true)` |
+
+> 这些文件在每次会话开始时自动加载到 system prompt 中。
+> 设计参考：[OpenClaw](https://github.com/openclaw/openclaw) 的工作区文件系统。
