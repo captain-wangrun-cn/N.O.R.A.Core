@@ -747,6 +747,8 @@ def run_wizard():
     # 仅在选择 OpenAI 时保存 base_url（避免污染 Gemini 配置）
     if state.get('provider') == 'openai' and state.get('openai_base_url'):
         final_config['llm']['base_url'] = state.get('openai_base_url')
+    if state.get('provider') == 'openai' and state.get('openai_user_agent'):
+        final_config['llm']['user_agent'] = state.get('openai_user_agent')
     
     # 添加 Tavily 配置（如果存在）
     if state.get('tavily'):
