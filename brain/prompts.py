@@ -9,6 +9,7 @@ from jinja2 import Environment, FileSystemLoader
 import os
 import sys  # Added sys import for path manipulation
 import logging
+import shutil
 from datetime import datetime, timezone
 from typing import Optional
 
@@ -31,10 +32,12 @@ WORKSPACE_MEMORY_DIR = os.path.join(WORKSPACE_DATA_DIR, "memory")
 LEGACY_MEMORY_DIR = os.path.join(PROJECT_ROOT, "memory")
 os.makedirs(WORKSPACE_MEMORY_DIR, exist_ok=True)
 
-# 身份/用户/记忆文件路径（记忆优先使用 workspace 路径，回退到仓库根目录兼容旧数据）
-SOUL_FILE = os.path.join(PROJECT_ROOT, "SOUL.md")
-USER_FILE = os.path.join(PROJECT_ROOT, "USER.md")
+# 身份/用户/记忆文件路径（优先 workspace，回退仓库根目录兼容旧数据）
+WORKSPACE_SOUL_FILE = os.path.join(WORKSPACE_ROOT, "SOUL.md")
+WORKSPACE_USER_FILE = os.path.join(WORKSPACE_ROOT, "USER.md")
 WORKSPACE_MEMORY_FILE = os.path.join(WORKSPACE_MEMORY_DIR, "MEMORY.md")
+LEGACY_SOUL_FILE = os.path.join(PROJECT_ROOT, "SOUL.md")
+LEGACY_USER_FILE = os.path.join(PROJECT_ROOT, "USER.md")
 LEGACY_MEMORY_FILE = os.path.join(PROJECT_ROOT, "MEMORY.md")
 
 # 注入到 system prompt 的最大字符数（防止 token 爆炸）
@@ -53,6 +56,27 @@ def _read_file_safe(path: str, max_chars: int = BOOTSTRAP_MAX_CHARS) -> str:
     except Exception as e:
         logger.warning(f"读取文件失败 {path}: {e}")
     return ""
+
+
+def _ensure_workspace_identity_files():
+    """
+    如果 workspace 下缺少 SOUL/USER/MEMORY，则从仓库默认文件复制过去。
+    """
+    mapping = [
+        (WORKSPACE_SOUL_FILE, LEGACY_SOUL_FILE),
+        (WORKSPACE_USER_FILE, LEGACY_USER_FILE),
+        (WORKSPACE_MEMORY_FILE, LEGACY_MEMORY_FILE),
+    ]
+    for dst, src in mapping:
+        if os.path.exists(dst):
+            continue
+        if src and os.path.exists(src):
+            os.makedirs(os.path.dirname(dst), exist_ok=True)
+            try:
+                shutil.copyfile(src, dst)
+                logger.info(f"已将默认文件复制到 workspace: {dst}")
+            except Exception as e:
+                logger.warning(f"复制 {src} 到 {dst} 失败: {e}")
 
 
 def _resolve_memory_file(filename: str) -> str:
@@ -80,13 +104,15 @@ def load_identity_context() -> str:
     加载 SOUL.md + USER.md + MEMORY.md + 每日记忆，拼接为身份上下文注入块。
     在每次会话开始时调用，注入到 system prompt。
     """
+    _ensure_workspace_identity_files()
+
     sections = []
 
-    soul = _read_file_safe(SOUL_FILE)
+    soul = _read_file_safe(WORKSPACE_SOUL_FILE)
     if soul:
         sections.append(f"<soul>\n{soul}\n</soul>")
 
-    user = _read_file_safe(USER_FILE)
+    user = _read_file_safe(WORKSPACE_USER_FILE)
     if user:
         sections.append(f"<user_profile>\n{user}\n</user_profile>")
 
@@ -106,7 +132,10 @@ def load_identity_context() -> str:
     )
 
 
-def get_system_prompt(instructions: list = None, platform: str = None) -> str:
+from typing import List
+
+
+def get_system_prompt(instructions: Optional[List[str]] = None, platform: Optional[str] = None) -> str:
     """
     使用 Jinja2 模板渲染最终的 System Prompt。
     
@@ -114,8 +143,10 @@ def get_system_prompt(instructions: list = None, platform: str = None) -> str:
         instructions: 额外的指令列表
         platform: 当前运行的平台名称 (如 'telegram'), 用于加载特定的 prompt
     """
+    _ensure_workspace_identity_files()
+
     # 从 SOUL.md 读取人设（如果存在），否则回退到 persona_nora.jinja
-    soul_content = _read_file_safe(SOUL_FILE)
+    soul_content = _read_file_safe(WORKSPACE_SOUL_FILE)
     if soul_content:
         persona_prompt = soul_content
     else:
