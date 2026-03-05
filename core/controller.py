@@ -533,7 +533,7 @@ class NoraController:
                                     text_to_send = part.strip()
                                     # 过滤掉包含工具调用语法的泄漏内容
                                     if text_to_send and not re.search(
-                                        r'(?:execute_skill|write_file|read_file|edit_file|exec_command|list_dir|create_new_skill|search)\s*\(',
+                                        r'(?:execute_skill|execute_tool_plan|write_file|read_file|edit_file|exec_command|list_dir|create_new_skill|search)\s*\(',
                                         text_to_send
                                     ):
                                         await self.adapter.send_message(chat_id, text_to_send)
@@ -782,7 +782,7 @@ class NoraController:
             if final_response_buffer:
                 # 过滤掉可能泄漏的工具调用语法
                 clean_response = re.sub(
-                    r'(?:execute_skill|write_file|read_file|edit_file|exec_command|list_dir|create_new_skill|search)\s*\([^)]*\)',
+                    r'(?:execute_skill|execute_tool_plan|write_file|read_file|edit_file|exec_command|list_dir|create_new_skill|search)\s*\([^)]*\)',
                     '', final_response_buffer
                 ).strip()
                 # 过滤掉 "返回结果:" + 原始 JSON/代码块

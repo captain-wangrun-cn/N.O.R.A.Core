@@ -74,6 +74,7 @@ class ToolManager:
     def _register_tools(self):
         self.register(self.create_new_skill)
         self.register(self.execute_skill)
+        self.register(self.execute_tool_plan)
         self.register(self.read_file)
         self.register(self.search)
         self.register(self.write_file)
@@ -101,6 +102,163 @@ class ToolManager:
         except Exception as e:
             logger.error(f"Tool execution error for {name}: {e}", exc_info=True)
             return f"Error executing {name}: {str(e)}"
+
+    async def execute_tool_plan(
+        self,
+        plan_json: str,
+        stop_on_error: bool = True,
+        dedupe_successful: bool = True,
+        max_steps: int = 20,
+    ) -> str:
+        """
+        Executes multiple tools sequentially in ONE call, with detailed success/failure/skip logs.
+
+        :param plan_json: JSON array of steps. Example: '[{"name":"search","args":{"query":"ToolManager"}}, {"name":"read_file","args":{"path":"brain/tools.py","start_line":1,"end_line":60}}]'
+        :param stop_on_error: If true, stop immediately when one step fails and return failure detail.
+        :param dedupe_successful: If true, skip duplicated calls that already succeeded in this plan.
+        :param max_steps: Safety limit for plan length (1-50).
+        """
+        try:
+            max_steps = max(1, min(int(max_steps), 50))
+            steps = json.loads(plan_json)
+        except json.JSONDecodeError as e:
+            return f"Error: invalid plan_json: {e}"
+        except Exception as e:
+            return f"Error: invalid execute_tool_plan parameters: {e}"
+
+        if not isinstance(steps, list):
+            return "Error: plan_json must be a JSON array of tool steps."
+        if not steps:
+            return "Error: empty tool plan."
+
+        if len(steps) > max_steps:
+            steps = steps[:max_steps]
+
+        success_signatures = set()
+        details = []
+        success_count = 0
+        failed_count = 0
+        skipped_count = 0
+        aborted = False
+
+        def _preview(text: str, limit: int = 500) -> str:
+            if len(text) <= limit:
+                return text
+            return text[:limit] + f" ... [truncated {len(text) - limit} chars]"
+
+        for i, step in enumerate(steps, start=1):
+            if not isinstance(step, dict):
+                failed_count += 1
+                details.append({
+                    "step": i,
+                    "status": "failed",
+                    "tool": "<invalid>",
+                    "error": "Step must be an object with fields: name, args",
+                })
+                if stop_on_error:
+                    aborted = True
+                    break
+                continue
+
+            tool_name = step.get("name")
+            tool_args = step.get("args", {})
+            if not isinstance(tool_name, str) or not tool_name:
+                failed_count += 1
+                details.append({
+                    "step": i,
+                    "status": "failed",
+                    "tool": "<invalid>",
+                    "error": "Missing or invalid tool name.",
+                })
+                if stop_on_error:
+                    aborted = True
+                    break
+                continue
+
+            if tool_name == "execute_tool_plan":
+                failed_count += 1
+                details.append({
+                    "step": i,
+                    "status": "failed",
+                    "tool": tool_name,
+                    "error": "Nested execute_tool_plan is not allowed.",
+                })
+                if stop_on_error:
+                    aborted = True
+                    break
+                continue
+
+            if not isinstance(tool_args, dict):
+                failed_count += 1
+                details.append({
+                    "step": i,
+                    "status": "failed",
+                    "tool": tool_name,
+                    "error": "Tool args must be an object (dict).",
+                })
+                if stop_on_error:
+                    aborted = True
+                    break
+                continue
+
+            signature = f"{tool_name}:{json.dumps(tool_args, sort_keys=True, ensure_ascii=False)}"
+            if dedupe_successful and signature in success_signatures:
+                skipped_count += 1
+                details.append({
+                    "step": i,
+                    "status": "skipped_duplicate_success",
+                    "tool": tool_name,
+                    "args": tool_args,
+                    "reason": "Same tool+args already succeeded earlier in this plan.",
+                })
+                continue
+
+            result = await self.execute(tool_name, tool_args)
+            result_lower = result.lower().strip()
+            is_failed = (
+                result_lower.startswith("error")
+                or result_lower.startswith("refused")
+                or " failed" in result_lower
+            )
+
+            if is_failed:
+                failed_count += 1
+                details.append({
+                    "step": i,
+                    "status": "failed",
+                    "tool": tool_name,
+                    "args": tool_args,
+                    "result_preview": _preview(result),
+                })
+                if stop_on_error:
+                    aborted = True
+                    break
+            else:
+                success_count += 1
+                success_signatures.add(signature)
+                details.append({
+                    "step": i,
+                    "status": "success",
+                    "tool": tool_name,
+                    "args": tool_args,
+                    "result_preview": _preview(result),
+                })
+
+        payload = {
+            "type": "tool_plan_result",
+            "summary": {
+                "total_steps": len(steps),
+                "executed_steps": success_count + failed_count,
+                "success": success_count,
+                "failed": failed_count,
+                "skipped": skipped_count,
+                "aborted": aborted,
+                "stop_on_error": bool(stop_on_error),
+                "dedupe_successful": bool(dedupe_successful),
+            },
+            "steps": details,
+        }
+        return json.dumps(payload, ensure_ascii=False, indent=2)
 
     def create_new_skill(self, skill_name: str, description: str) -> str:
         """
