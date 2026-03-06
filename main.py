@@ -108,9 +108,13 @@ def run_headless(console_level=logging.INFO):
     setup_unified_logging(console_level=console_level, file_level=logging.DEBUG)
     logging.info("启动 N.O.R.A. Core (无 TUI 模式)...")
 
+    def headless_status_callback(text: str):
+        """在无 TUI 模式下输出原本 TUI 底部状态。"""
+        logging.info(f"[STATUS] {text}")
+
     try:
         adapter = TelegramAdapter()
-        controller = NoraController(adapter, tui_callback=None)
+        controller = NoraController(adapter, tui_callback=headless_status_callback)
         adapter.run(message_handler=controller.handle_new_message)
     except Exception as exc:
         logging.critical(f"启动失败: {exc}", exc_info=True)
