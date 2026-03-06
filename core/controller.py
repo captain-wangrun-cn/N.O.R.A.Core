@@ -47,43 +47,6 @@ def _is_tool_call_leak(text: str) -> bool:
     return False
 
 
-# --- Empty Promise Detection ---
-# 检测模型表达了"要去执行操作"的意图但没有实际调用工具的情况
-# 这些模式检测中文/英文中"要去修改/更新/写入文件"的表达
-_EMPTY_PROMISE_PATTERNS = [
-    # 中文：表达即将操作文件的意图
-    re.compile(r'(?:现在就去|马上|立刻|这就|我来|让我).*?(?:更新|修改|编辑|写入|创建|读取|查看|处理|保存)', re.DOTALL),
-    # 中文：提到具体文件名+动作
-    re.compile(r'(?:更新|修改|编辑|写入|保存).*?(?:\.md|\.py|\.json|\.yml|\.txt|文件)'),
-    # 中文：操作文件的明确意图词
-    re.compile(r'(?:铭刻到|记录到|写进|存到|保存到).*?(?:\.md|文件|灵魂|记忆)'),
-    # 英文
-    re.compile(r"(?:let me|i'?ll|going to|about to|now i will).*?(?:update|modify|edit|write|create|read|save)", re.IGNORECASE),
-    # "请稍等" 类表达（暗示异步操作，但实际没有）
-    re.compile(r'(?:请稍等|稍等一下|等一下|马上好|请等一会|wait a moment)', re.IGNORECASE),
-]
-
-
-def _is_empty_promise(text: str, has_tool_call: bool) -> bool:
-    """
-    检测"空承诺"：模型声称要去操作文件但实际没有调用工具。
-    
-    仅在 has_tool_call=False 时触发。如果模型同时输出了文字和 tool_call，
-    那不算空承诺（文字是预告，tool_call 是实际操作）。
-    """
-    if has_tool_call:
-        return False
-    
-    text_stripped = text.strip()
-    if not text_stripped or len(text_stripped) < 5:
-        return False
-    
-    for pattern in _EMPTY_PROMISE_PATTERNS:
-        if pattern.search(text_stripped):
-            return True
-    return False
-
-
 def _try_parse_leaked_tool_call(text: str) -> Optional[Dict[str, Any]]:
     """
     尝试从泄漏的文本中解析出工具调用的名称和参数。
@@ -735,11 +698,14 @@ class NoraController:
                 if self.tui_callback: self.tui_callback(f"🤔 Thinking... (Turn {current_turn}/{MAX_TURNS})")
                 logger.debug(f"[{chat_id}] Turn {current_turn}/{MAX_TURNS}")
                 
+                _tools_for_turn = [] if force_no_tools else self.tool_manager.get_tool_schemas()
+                logger.debug(f"[{chat_id}] Passing {len(_tools_for_turn)} tool schemas to LLM")
+                
                 stream = self.llm.chat_stream(
                     system_prompt=system_prompt,
                     user_prompt=full_user_prompt if current_turn == 1 else " (Continue processing tool outputs...)",
                     history=temp_history,
-                    tools=[] if force_no_tools else self.tool_manager.get_tool_schemas()
+                    tools=_tools_for_turn
                 )
                 force_no_tools = False  # 重置，仅影响紧跟的一轮
 
@@ -780,6 +746,7 @@ class NoraController:
                         
                         elif chunk["type"] == "tool_call":
                             tool_call = chunk
+                            logger.debug(f"[{chat_id}] Received tool_call chunk from LLM: {chunk.get('name', '?')}")
                             # 检测到工具调用，停止 typing（不再是聊天状态）
                             # Telegram 的 typing 状态会自动过期，无需显式停止
                             # IMMEDIATELY clear text buffer if tool call is detected, to prevent leaking thoughts.
@@ -814,6 +781,14 @@ class NoraController:
                 # Append text to final buffer (visible to user)
                 if response_text_buffer:
                     final_response_buffer += response_text_buffer
+                
+                # --- Stream 结束后状态总结 ---
+                logger.debug(
+                    f"[{chat_id}] Turn {current_turn} stream ended: "
+                    f"tool_call={'YES: ' + tool_call.get('name', '?') if tool_call else 'NO'}, "
+                    f"text_len={len(final_response_buffer)}, "
+                    f"usage={usage_data}"
+                )
                 
                 # --- 泄漏拦截：如果 LLM 以文本输出了工具调用，尝试解析并真正执行 ---
                 if not tool_call and final_response_buffer and _is_tool_call_leak(final_response_buffer):
@@ -1027,33 +1002,12 @@ class NoraController:
                     # Loop continues to let LLM process the result
                     continue
                 else:
-                    # --- 空承诺检测：模型声称要操作但没有调用工具 ---
-                    # 仅在第一轮触发（避免纠正循环），且只触发一次
-                    empty_promise_triggered = session.get("_empty_promise_triggered", False)
-                    if (not empty_promise_triggered 
-                        and current_turn == 1 
-                        and final_response_buffer 
-                        and _is_empty_promise(final_response_buffer, has_tool_call=False)):
-                        logger.warning(
-                            f"[{chat_id}] 检测到空承诺: 模型声称要执行操作但没有调用工具。"
-                            f" 回复内容: {final_response_buffer[:100]}..."
-                        )
-                        session["_empty_promise_triggered"] = True
-                        # 把模型的空承诺放入 history，注入纠正指令
-                        temp_history.append({"role": "assistant", "content": final_response_buffer})
-                        temp_history.append({
-                            "role": "user",
-                            "content": (
-                                "【系统纠正】你刚才说要去操作文件，但实际上并没有调用任何工具！"
-                                "你不能只是口头说'我去更新'——你必须通过 function calling 机制真正调用工具来执行操作。"
-                                "请立即使用 edit_file 或 write_file 工具来完成你承诺的操作。不要再只发文字了。"
-                            )
-                        })
-                        # 不发出空承诺文字给用户，清空 buffer
-                        final_response_buffer = ""
-                        continue  # 让 LLM 重新生成并真正调用工具
-                    
                     # No tool call -> Final response
+                    logger.debug(
+                        f"[{chat_id}] Turn {current_turn} ended with no tool_call. "
+                        f"Response buffer length: {len(final_response_buffer)}, "
+                        f"preview: {final_response_buffer[:120]}..."
+                    )
                     break
             
             # If loop exhausted MAX_TURNS with pending tool work, inject a wrap-up prompt and do one final LLM call
