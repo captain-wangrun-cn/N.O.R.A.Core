@@ -11,6 +11,8 @@ wizard:
   openai_base_url_confirm: "是否使用自定义 OpenAI 兼容 Base URL？(否则使用官方 https://api.openai.com/v1)"
   model_fetch_error: "无法获取模型列表: {error}"
   model_select_prompt: "请为 '{role}' 角色选择模型:"
+  model_select_prompt_with_usage: "请为 '{role}' 角色选择模型（用途：{usage}）:"
+  model_role_usage_hint: "ℹ️ {role} 将用于：{usage}"
   manual_entry: "--- 手动输入 ---"
   manual_prompt: "请为 '{role}' 手动输入模型名称:"
   summary_title: "\n--- 配置总览 ---"
@@ -33,7 +35,13 @@ wizard:
     - "确认保存"
 
 roles:
-  smart: "智能模型 (用于复杂推理)"
-  fast: "快速模型 (用于聊天和简单任务)"
+  smart: "主对话模型 (日常对话 + 复杂推理)"
+  fast: "快速响应模型 (忙碌时打断判断/即时回复)"
   coder: "代码模型 (用于代码生成)"
   summary: "总结模型 (用于消息历史压缩)"
+
+roles_usage:
+  smart: "默认主对话、复杂推理、工具规划、多轮决策"
+  fast: "仅在后端忙碌时用于打断意图判断和快速回复"
+  coder: "代码生成、重构、修复与技术实现"
+  summary: "消息历史压缩、摘要归档、上下文精炼"

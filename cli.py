@@ -551,6 +551,7 @@ class StepModels(ConfigStep):
             return None
     def select_model(self, model_list, role_key, provider):
         role_name = t(f'roles.{role_key}')
+        role_usage = t(f'roles_usage.{role_key}')
         current_models = self.state.get('models', {})
         default_model = current_models.get(role_key) # Get existing value
         
@@ -571,8 +572,17 @@ class StepModels(ConfigStep):
         if default_model and default_model in model_list:
             kwargs['default'] = default_model
 
+        # 在选择前明确提示该角色模型的用途，降低误选概率
+        purpose_hint = t('wizard.model_role_usage_hint', role=role_name, usage=role_usage)
+        if purpose_hint != 'wizard.model_role_usage_hint':
+            questionary.print(purpose_hint, style="bold cyan")
+
+        model_prompt = t('wizard.model_select_prompt_with_usage', role=role_name, usage=role_usage)
+        if model_prompt == 'wizard.model_select_prompt_with_usage':
+            model_prompt = t('wizard.model_select_prompt', role=role_name)
+
         selection = questionary.select(
-            t('wizard.model_select_prompt', role=role_name),
+            model_prompt,
             choices=choices_with_prices,
             **kwargs
         ).ask()

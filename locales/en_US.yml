@@ -10,6 +10,8 @@ wizard:
   openai_base_url_confirm: "Do you want to use a custom OpenAI-compatible Base URL? (Otherwise defaults to https://api.openai.com/v1)"
   model_fetch_error: "Could not fetch models: {error}"
   model_select_prompt: "Select the model for the '{role}' role:"
+  model_select_prompt_with_usage: "Select the model for '{role}' (usage: {usage}):"
+  model_role_usage_hint: "ℹ️ {role} will be used for: {usage}"
   manual_entry: "--- Manually Enter ---"
   manual_prompt: "Manually enter model name for '{role}':"
   summary_title: "\n--- Configuration Summary ---"
@@ -24,7 +26,13 @@ wizard:
     - "Confirmation"
 
 roles:
-  smart: "smart (for complex reasoning)"
-  fast: "fast (for chat and simple tasks)"
+  smart: "primary chat model (daily conversation + complex reasoning)"
+  fast: "quick-response model (busy-time interrupt intent + instant replies)"
   coder: "coder (for code generation)"
   summary: "summary (for message history compression)"
+
+roles_usage:
+  smart: "default main conversation, complex reasoning, tool planning, and multi-step decisions"
+  fast: "used only when backend is busy for interrupt intent detection and quick replies"
+  coder: "code generation, refactoring, fixes, and implementation"
+  summary: "message history compression, archival summaries, and context condensation"
