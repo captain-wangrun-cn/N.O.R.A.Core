@@ -14,6 +14,8 @@ wizard:
   model_role_usage_hint: "ℹ️ {role} will be used for: {usage}"
   manual_entry: "--- Manually Enter ---"
   manual_prompt: "Manually enter model name for '{role}':"
+  embed_dimensions_prompt: "Embedding vector dimensions (must match the model output):"
+  invalid_positive_integer: "Please enter a positive integer"
   summary_title: "\n--- Configuration Summary ---"
   save_confirm: "Save this configuration?"
   success_message: "✅ Configuration saved to {file}"

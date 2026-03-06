@@ -382,6 +382,25 @@ class StepEmbedding(ConfigStep):
         mem_cfg = self.state.get('memory', {})
         embed_cfg = mem_cfg.get('embedding', {})
 
+        def _suggest_dimensions(selected_provider: str, selected_model: str, current_dim: int) -> int:
+            """根据 provider/model 给出维度建议值（不强制）。"""
+            model_lower = (selected_model or "").lower()
+            provider_lower = (selected_provider or "").lower()
+
+            # 常见模型经验值
+            if "bge-m3" in model_lower:
+                return 1024
+            if "text-embedding-3-large" in model_lower:
+                return 3072
+            if "text-embedding-3-small" in model_lower:
+                return 1536
+
+            # provider 兜底
+            if provider_lower == "openai":
+                return 1536
+
+            return current_dim
+
         # Provider Selection
         prov_def = embed_cfg.get('provider', 'siliconflow')
         choices = ["siliconflow", "openai", "openrouter", "custom"]
@@ -418,6 +437,18 @@ class StepEmbedding(ConfigStep):
         model = questionary.text(t('wizard.embed_model_prompt'), default=model_def).ask()
         if model is None: return False
 
+        # Dimensions（允许自定义）
+        dim_def = int(embed_cfg.get('dimensions', 1536) or 1536)
+        dim_suggested = _suggest_dimensions(provider, model, dim_def)
+        dim_text = questionary.text(
+            t('wizard.embed_dimensions_prompt'),
+            default=str(dim_suggested),
+            validate=lambda x: (x.isdigit() and int(x) > 0) or t('wizard.invalid_positive_integer')
+        ).ask()
+        if dim_text is None:
+            return False
+        dimensions = int(dim_text)
+
         # Save
         if 'memory' not in self.state: self.state['memory'] = {}
         self.state['memory']['embedding'] = {
@@ -425,7 +456,7 @@ class StepEmbedding(ConfigStep):
             'base_url': base_url,
             'api_key': api_key,
             'model': model,
-            'dimensions': 1536 # default for text-embedding-3-small
+            'dimensions': dimensions
         }
         return True
 

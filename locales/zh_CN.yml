@@ -27,6 +27,8 @@ wizard:
   embed_base_url_prompt: "Embedding API Base URL (已自动预填):"
   embed_key_prompt: "Embedding API Key (若留空则复用 LLM Key):"
   embed_model_prompt: "Embedding 模型名称 (推荐 BAAI/bge-m3):"
+  embed_dimensions_prompt: "Embedding 向量维度 (必须与模型实际输出一致):"
+  invalid_positive_integer: "请输入大于 0 的整数"
   steps:
     - "Telegram 设置"
     - "LLM 服务商设置"
