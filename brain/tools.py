@@ -625,6 +625,34 @@ class ToolManager:
 
             # 1. Try exact match first
             if old_code in content:
+                match_count = content.count(old_code)
+                if match_count > 1:
+                    # 多处匹配：LLM 给的 old_code 不够精确，需要更多上下文
+                    # 找出每个匹配位置的行号
+                    positions = []
+                    search_start = 0
+                    for _ in range(match_count):
+                        idx = content.find(old_code, search_start)
+                        if idx == -1:
+                            break
+                        line_no = content[:idx].count('\n') + 1
+                        # 提取匹配位置的上下文（前后各 1 行）
+                        lines = content.split('\n')
+                        context_start = max(0, line_no - 2)
+                        context_end = min(len(lines), line_no + old_code.count('\n') + 1)
+                        context_preview = '\n'.join(lines[context_start:context_end])
+                        positions.append(f"  Match {len(positions)+1} at line {line_no}: ...{context_preview[:120]}...")
+                        search_start = idx + len(old_code)
+                    
+                    positions_str = '\n'.join(positions)
+                    logger.warning(f"edit_file: old_code matches {match_count} locations in {abs_path}")
+                    return (
+                        f"Error: old_code matches {match_count} different locations in {path}. "
+                        f"Please include more surrounding context in old_code to uniquely identify the target.\n"
+                        f"Matched positions:\n{positions_str}\n\n"
+                        f"Tip: Include the heading or a few lines above/below the target to make old_code unique."
+                    )
+                
                 new_content = content.replace(old_code, new_code, 1)
                 if new_content == content:
                     logger.warning(f"edit_file: old_code == new_code (no actual change) for {abs_path}")
@@ -642,23 +670,44 @@ class ToolManager:
             norm_old = normalize(old_code)
             lines = content.split('\n')
 
-            # Sliding window over lines to find the best match
+            # Sliding window over lines to find ALL matches first
             old_line_count = max(1, old_code.count('\n') + 1)
-            # Widen the window search range to handle more varying empty lines/formatting
+            all_norm_matches = []  # list of (window_size, line_index)
             for window_size in range(max(1, old_line_count - 5), old_line_count + 6):
                 for i in range(len(lines) - window_size + 1):
                     window = '\n'.join(lines[i:i + window_size])
                     if normalize(window) == norm_old:
-                        # Found a match with normalized whitespace
-                        new_lines = lines[:i] + new_code.split('\n') + lines[i + window_size:]
-                        new_content = '\n'.join(new_lines)
-                        if new_content == content:
-                            logger.warning(f"edit_file: normalized match but no actual change for {abs_path}")
-                            return f"Warning: edit_file matched old_code (normalized) in {path}, but result is identical — no changes made."
-                        with open(abs_path, 'w', encoding='utf-8') as f:
-                            f.write(new_content)
-                        logger.info(f"edit_file: normalized match at lines {i+1}-{i+window_size} for {abs_path}")
-                        return f"Successfully edited {path} (matched with normalized whitespace)."
+                        all_norm_matches.append((window_size, i))
+            
+            if len(all_norm_matches) > 1:
+                # 多处匹配，要求 LLM 给更精确的上下文
+                positions = []
+                for ws, idx in all_norm_matches[:5]:  # 最多展示 5 处
+                    context_start = max(0, idx - 1)
+                    context_end = min(len(lines), idx + ws + 1)
+                    preview = '\n'.join(lines[context_start:context_end])
+                    positions.append(f"  Match at line {idx+1}: ...{preview[:120]}...")
+                positions_str = '\n'.join(positions)
+                logger.warning(f"edit_file: old_code matches {len(all_norm_matches)} locations (normalized) in {abs_path}")
+                return (
+                    f"Error: old_code matches {len(all_norm_matches)} different locations in {path} (normalized whitespace). "
+                    f"Please include more surrounding context in old_code to uniquely identify the target.\n"
+                    f"Matched positions:\n{positions_str}\n\n"
+                    f"Tip: Include the heading or a few lines above/below the target to make old_code unique."
+                )
+            
+            if len(all_norm_matches) == 1:
+                window_size, i = all_norm_matches[0]
+                # Found a unique match with normalized whitespace
+                new_lines = lines[:i] + new_code.split('\n') + lines[i + window_size:]
+                new_content = '\n'.join(new_lines)
+                if new_content == content:
+                    logger.warning(f"edit_file: normalized match but no actual change for {abs_path}")
+                    return f"Warning: edit_file matched old_code (normalized) in {path}, but result is identical — no changes made."
+                with open(abs_path, 'w', encoding='utf-8') as f:
+                    f.write(new_content)
+                logger.info(f"edit_file: normalized match at lines {i+1}-{i+window_size} for {abs_path}")
+                return f"Successfully edited {path} (matched with normalized whitespace)."
 
             logger.warning(f"edit_file: old_code not found in {abs_path} (file size: {len(content)} chars)")
             return (
