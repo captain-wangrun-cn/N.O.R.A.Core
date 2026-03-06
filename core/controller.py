@@ -15,6 +15,7 @@ from skills.loader import SkillLoader
 from core.cost_tracker import get_cost_tracker
 import config
 import json
+from core.routing import parse_route_decision_response
 
 logger = logging.getLogger(__name__)
 
@@ -252,20 +253,27 @@ class WorkerStatus:
         self.max_turns: int = 0
         self.started_at: float = 0.0
         self.original_query: str = ""  # 用户最初问的问题
+        self.mode: str = "idle"  # idle | front_chat | backend_task
 
     def start(self, query: str, max_turns: int = 30):
-        self.busy = True
-        self.phase = "初始化"
-        self.detail = "正在准备处理请求..."
+        # 默认进入前脑对话流程，不占用“后端忙碌”状态
+        # 仅在真正执行后端任务（工具/技能等）时再切到 busy=True
+        self.busy = False
+        self.mode = "front_chat"
+        self.phase = "前脑回复"
+        self.detail = "正在组织自然对话回复..."
         self.tool_history = []
         self.current_turn = 0
         self.max_turns = max_turns
         self.started_at = time.time()
         self.original_query = query
 
-    def update(self, phase: str, detail: str = ""):
+    def update(self, phase: str, detail: str = "", *, backend_busy: Optional[bool] = None):
         self.phase = phase
         self.detail = detail
+        if backend_busy is not None:
+            self.busy = backend_busy
+            self.mode = "backend_task" if backend_busy else "front_chat"
 
     def log_tool(self, tool_name: str, tool_args: Any):
         """记录一次工具调用的简略描述。"""
@@ -279,6 +287,7 @@ class WorkerStatus:
 
     def finish(self):
         self.busy = False
+        self.mode = "idle"
         self.phase = "完成"
         self.detail = ""
 
@@ -290,6 +299,7 @@ class WorkerStatus:
         lines = [
             f"📌 正在处理: \"{self.original_query[:80]}\"",
             f"⏱ 已用时 {elapsed} 秒 | 阶段: {self.phase}",
+            f"🧠 当前模式: {'后脑任务' if self.busy else '前脑对话'}",
         ]
         if self.detail:
             lines.append(f"🔧 {self.detail}")
@@ -338,7 +348,8 @@ class NoraController:
         )
         
         # 成本跟踪
-        cost_cfg = config.get_config().get("cost_tracking", {})
+        global_cfg = config.get_config() or {}
+        cost_cfg = global_cfg.get("cost_tracking", {})
         self.cost_tracking_enabled = cost_cfg.get("enabled", True)
         if self.cost_tracking_enabled:
             custom_prices = cost_cfg.get("custom_prices", {})
@@ -349,6 +360,53 @@ class NoraController:
             logger.info("成本跟踪已禁用")
         
         logger.info(f"NoraController 已初始化。RAG: {'Online' if self.rag.enabled else 'Offline'}, MessageHistory: Online")
+
+    async def _detect_route_to_backend(self, chat_id: str, text: str) -> bool:
+        """使用 fast_llm 判断该消息应走前脑还是后脑。"""
+        prompt = (
+            "你是消息路由器。请判断下面这条用户消息应该走哪条路径：\n"
+            "- front: 普通聊天、寒暄、情绪回应、风格调整、短问答\n"
+            "- backend: 需要执行任务、调用工具/技能、文件或代码操作、命令执行\n\n"
+            f"用户消息：{text}\n\n"
+            "只能输出一种格式，不要解释：ROUTE:front 或 ROUTE:backend"
+        )
+
+        try:
+            response = ""
+            stream = self.fast_llm.chat_stream(
+                system_prompt="你是严格的路由分类器。只输出 ROUTE:front 或 ROUTE:backend。",
+                user_prompt=prompt,
+                history=[],
+                tools=[]
+            )
+            async for chunk in stream:
+                if isinstance(chunk, dict) and chunk.get("type") == "text":
+                    response += chunk.get("content", "")
+                elif isinstance(chunk, str):
+                    response += chunk
+
+            route = parse_route_decision_response(response)
+            logger.info(f"[{chat_id}] LLM路由判定: route={route}, raw='{response.strip()[:80]}'")
+            return route == "backend"
+        except Exception as e:
+            # 保守回退：异常时默认前脑，不误触发“后脑忙碌”
+            logger.warning(f"[{chat_id}] LLM路由判定失败，回退前脑路径: {e}")
+            return False
+
+    async def _start_routed_task(self, context: Dict[str, Any]):
+        """按 LLM 路由到前脑/后脑任务，并登记 generation_tasks。"""
+        chat_id = context["chat_id"]
+        text = context.get("text", "")
+
+        route_to_backend = await self._detect_route_to_backend(chat_id, text)
+        if route_to_backend:
+            logger.info(f"[{chat_id}] 路由决策: 后脑任务路径")
+            task = asyncio.create_task(self._generate_response(context))
+        else:
+            logger.info(f"[{chat_id}] 路由决策: 前脑对话路径")
+            task = asyncio.create_task(self._generate_front_chat_response(context))
+
+        self.generation_tasks[chat_id] = task
 
     async def handle_new_message(self, context: Dict[str, Any]):
         """处理来自适配器的新消息/命令。"""
@@ -380,8 +438,8 @@ class NoraController:
         # --- 前后端分离逻辑 ---
         status = self.worker_status.get(chat_id)
         if status and status.busy:
-            # 后端忙碌：用 fast 模型判断用户意图并生成回复
-            logger.info(f"[{chat_id}] 后端忙碌，分析用户意图...")
+            # 后脑任务忙碌：用 fast 模型判断用户意图并生成回复
+            logger.info(f"[{chat_id}] 后脑任务忙碌，分析用户意图...")
             
             # 保存用户消息到数据库（不丢消息）
             storage_id = chat_id if chat_type != "private" else user_id
@@ -428,8 +486,7 @@ class NoraController:
             self.generation_tasks[chat_id].cancel()
             await asyncio.sleep(0.1)
 
-        task = asyncio.create_task(self._generate_response(context))
-        self.generation_tasks[chat_id] = task
+        await self._start_routed_task(context)
 
     async def _detect_interrupt_intent_and_reply(self, chat_id: str, text: str, status: WorkerStatus) -> Dict[str, str]:
         """
@@ -564,8 +621,7 @@ class NoraController:
                     "text": user_text,
                     "chat_type": "private" # Fallback
                 }
-                task = asyncio.create_task(self._generate_response(context))
-                self.generation_tasks[chat_id] = task
+                await self._start_routed_task(context)
         else:
             # 需要生成并发送回复（兼容旧调用方式）
             if reason == "stop":
@@ -589,8 +645,116 @@ class NoraController:
                     "text": user_text,
                     "chat_type": "private" # Fallback
                 }
-                task = asyncio.create_task(self._generate_response(context))
-                self.generation_tasks[chat_id] = task
+                await self._start_routed_task(context)
+
+    async def _generate_front_chat_response(self, context: Dict[str, Any]):
+        """前脑快速回复路径：仅自然对话，不启用工具/技能调用。"""
+        chat_id = context["chat_id"]
+        user_id = context["user_id"]
+        text = context["text"]
+        chat_type = context.get("chat_type", "private")
+        user_name = context.get("user_name", "User")
+        storage_id = chat_id if chat_type != "private" else user_id
+
+        session = self.sessions.setdefault(chat_id, {"history": [], "interrupted_thought": "", "pending_text": ""})
+        status = self.worker_status.setdefault(chat_id, WorkerStatus())
+        status.start(query=text, max_turns=1)
+        status.update("前脑回复", "正在组织自然对话回复...", backend_busy=False)
+
+        final_response_buffer = ""
+        try:
+            if self.tui_callback:
+                self.tui_callback("💬 Front chat reply...")
+
+            # 保存用户消息
+            message_content = f"{user_name}: {text}" if chat_type != "private" else text
+            self.message_history.add_message(
+                platform="telegram",
+                chat_id=storage_id,
+                role="user",
+                content=message_content,
+                user_id=user_id,
+            )
+
+            # 轻量历史上下文
+            db_context = self.message_history.get_context_messages("telegram", storage_id)
+            temp_history = [
+                {"role": msg["role"], "content": msg["content"]}
+                for msg in db_context[-12:]
+                if msg["role"] in ("user", "assistant", "system")
+            ]
+
+            system_prompt = get_system_prompt([
+                "【前脑模式】当前是普通对话，请直接自然回复，不要调用工具，不要进入任务执行流程。"
+            ])
+
+            usage_data = None
+            stream = self.fast_llm.chat_stream(
+                system_prompt=system_prompt,
+                user_prompt=text,
+                history=temp_history,
+                tools=[]
+            )
+
+            async for raw_chunk in stream:
+                chunk = cast(Dict[str, Any], raw_chunk) if isinstance(raw_chunk, dict) else raw_chunk
+                if isinstance(chunk, dict):
+                    if chunk.get("type") == "text":
+                        final_response_buffer += chunk.get("content", "")
+                    elif chunk.get("type") == "usage":
+                        usage_data = {
+                            "input_tokens": chunk.get("input_tokens", 0),
+                            "output_tokens": chunk.get("output_tokens", 0),
+                        }
+                elif isinstance(chunk, str):
+                    final_response_buffer += chunk
+
+            if self.cost_tracking_enabled and self.cost_tracker and usage_data:
+                provider = config.get_llm_provider()
+                model = config.get_model_name("fast")
+                self.cost_tracker.log_usage(
+                    provider=provider,
+                    model=model,
+                    input_tokens=usage_data["input_tokens"],
+                    output_tokens=usage_data["output_tokens"],
+                    model_alias="fast",
+                    context="front_chat"
+                )
+
+            clean_response = _clean_tool_call_leaks(final_response_buffer).strip()
+            if not clean_response:
+                clean_response = "我在～你继续说。"
+
+            await self.adapter.send_message(chat_id, clean_response)
+            self.message_history.add_message(
+                platform="telegram",
+                chat_id=storage_id,
+                role="assistant",
+                content=clean_response,
+                user_id="assistant",
+            )
+
+            session["history"] = temp_history + [{"role": "assistant", "content": clean_response}]
+
+        except asyncio.CancelledError:
+            status.finish()
+            session["pending_text"] = text
+            session["interrupted_thought"] = final_response_buffer if final_response_buffer else ""
+            raise
+        except Exception:
+            logger.error(f"[{chat_id}] 前脑回复失败。", exc_info=True)
+            try:
+                await self.adapter.send_message(chat_id, "抱歉，刚刚没接住，你可以再说一次吗？")
+            except Exception:
+                pass
+        finally:
+            status.finish()
+            if self.tui_callback:
+                self.tui_callback("✅ Idle")
+            self.generation_tasks.pop(chat_id, None)
+
+            if not self._was_interrupted(chat_id):
+                await self._process_pending_messages(chat_id)
 
     async def _generate_response(self, context: Dict[str, Any]):
         """内部生成逻辑。"""
@@ -962,10 +1126,10 @@ class NoraController:
                     
                     
                     # Execute Tool
-                    status.update("工具调用", f"正在执行 {tool_name}...")
+                    status.update("工具调用", f"正在执行 {tool_name}...", backend_busy=True)
                     status.log_tool(tool_name, tool_args)
                     tool_result = await self.tool_manager.execute(tool_name, cast(Dict[str, Any], tool_args))
-                    status.update("处理结果", f"{tool_name} 执行完毕，正在分析结果...")
+                    status.update("处理结果", f"{tool_name} 执行完毕，正在分析结果...", backend_busy=True)
                     logger.info(f"[{chat_id}] 🔧 Tool Result for {tool_name}: {tool_result[:100]}...")
 
                     # --- TRUNCATION SAFETY VALVE ---
@@ -1246,8 +1410,7 @@ class NoraController:
         logger.info(f"[{chat_id}] 开始处理 {len(pending)} 条排队消息。")
         
         # 递归调用，走正常流程
-        task = asyncio.create_task(self._generate_response(combined_context))
-        self.generation_tasks[chat_id] = task
+        await self._start_routed_task(combined_context)
 
     async def _async_save_memory(self, text: str, user_id: str, metadata: Dict[str, Any]):
         """异步保存记忆，避免阻塞主线程。"""
