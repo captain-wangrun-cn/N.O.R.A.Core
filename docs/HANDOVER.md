@@ -3,26 +3,58 @@
 - 目标：多平台智能体内核，包含 LLM 适配、工具/技能体系、成本追踪、记忆/RAG。
 - 当前状态：可运行，自测通过；近期完成“脑口分离”与打断队列；成本追踪依赖用户配置价格（无内置价表）。
 
-## 近期关键改动（截至 2026-03-05）
+## 近期关键改动（截至 2026-03-06）
 
-### 🆕 身份与记忆系统（SOUL.md / USER.md / MEMORY.md）— 2026-03-05
-参考 OpenClaw 的工作区设计理念，新增持久化身份与记忆文件系统：
+### 🆕 工具调用泄漏防护体系（2026-03-06）
 
-**新增文件：**
-- `SOUL.md` — AI 的灵魂：人设、语气、边界、性格。定义"你是谁"。
-- `USER.md` — 用户档案：名字、偏好、背景、当前关注。定义"你在帮助谁"。
-- `MEMORY.md` — 长期记忆：重要决策、用户偏好、持久事实、经验教训。
-- `memory/YYYY-MM-DD.md` — 每日记忆：当天事件、笔记和临时上下文。
+**问题：** LLM 有时会以文本形式"伪造"工具调用（如输出 `execute_tool('edit_file', {...})` 或 `<execute_skill>...</execute_skill>`），而不是真正使用 function calling 机制。用户会看到原始的调用代码。
 
-**代码改动：**
-- `brain/prompts.py`：新增 `load_identity_context()` 函数，在每次会话开始时自动加载 SOUL/USER/MEMORY + 每日记忆，注入到 system prompt。SOUL.md 同时替代 `persona_nora.jinja` 作为人设来源（后者作为回退）。
-- `brain/tools.py`：注册三个新工具 `update_soul`、`update_user`、`update_memory`，允许 LLM 自行维护这些文件。`update_memory` 支持 `daily=true` 参数追加每日记忆。
-- `brain/templates/system.jinja`：新增"身份与记忆协议"，指导 LLM 何时/如何使用这三个工具更新文件。
+**三层防护（已实现）：**
+1. **Prompt 层** — `brain/templates/system.jinja`：
+   - 新增"工具调用方式 — 严格规范"章节，明确列出所有禁止的伪调用格式
+   - 在"主动执行协议"中强化 function calling 要求，明确区分"调用工具"和"写出调用代码"
+   - "工具与技能的区别"中反复强调只能通过 function calling 完成
+2. **实时过滤层** — `core/controller.py` → `_is_tool_call_leak()`：
+   - 在 `[SPLIT]` 分段发送时拦截包含泄漏文本的段落，阻止发送给用户
+3. **最终输出清理层** — `core/controller.py` → `_clean_tool_call_leaks()`：
+   - 在最终响应发送前，清理所有泄漏模式（XML 标签、函数调用语法、JSON 参数块等）
+   - 保留自然语言部分，仅移除泄漏内容
 
-**设计理念（来自 OpenClaw）：**
-- 每次会话 LLM 是全新实例，连续性通过文件持久化
-- LLM 可自主更新 SOUL（需通知用户）、USER、MEMORY
-- 身份上下文自动注入，无需手动配置
+**检测覆盖的泄漏模式：**
+- `tool_name(...)` 函数调用格式
+- `<execute_skill>...</execute_skill>` XML 标签格式
+- `execute_tool('tool_name', {...})` 间接调用格式
+- 包含 `old_code`/`new_code`/`file_path`/`args_json` 的 JSON 块
+
+**文件改动：** `brain/templates/system.jinja`、`core/controller.py`、`docs/onboarding/COMMON_PITFALLS.md`
+
+### 🆕 身份与记忆文件策略重构（2026-03-06）
+
+本轮已将身份/记忆策略从“每会话全新实例”改为**N.O.R.A Core 持续运行 + 文件作为可变 prompt**：
+
+**核心行为变更：**
+- `SOUL.md` / `USER.md` / `MEMORY.md` 仍用于注入系统提示，但定位为“可变提示块”，不是“唯一连续性来源”。
+- 每日记忆（`YYYY-MM-DD.md`）**不再自动注入**系统提示（防止上下文膨胀），需要时由模型显式读取。
+
+**路径与初始化变更：**
+- `brain/prompts.py` 现在优先读取 workspace：
+   - `workspace/SOUL.md`
+   - `workspace/USER.md`
+   - `workspace/data/memory/MEMORY.md`
+- 首次运行若 workspace 缺失上述文件，会自动从仓库根目录同名文件复制默认版本。
+- 仍保留旧路径回退读取（兼容历史文件）。
+
+**聊天记录数据库路径迁移：**
+- `memory/message_history.py` 新增 `get_default_message_history_db()`，默认 DB 路径迁移为：
+   - `workspace/data/memory/message_history.db`
+- `core/controller.py` 与 `cli.py` 已改为使用该默认路径（当 `config.yml` 未显式配置 `memory.message_history.db_path` 时）。
+
+**工具策略修正：**
+- 已移除 `update_soul` / `update_user` / `update_memory` 专用工具。
+- 统一使用通用文件工具 `read_file` / `edit_file` / `write_file` 维护身份与记忆文件。
+
+**Telegram typing 体验改进：**
+- `core/controller.py` 调整 typing 触发时机：进入 LLM 生成阶段即触发 `start_typing`，而非等待首个 text chunk，减少“输入状态过短暂”问题。
 
 ### 之前的改动（截至 2026-02-28）
 1) **脑口分离 / 打断队列（core/controller.py）**

@@ -91,3 +91,22 @@
 
 ### ⚠️ 同一文件 `edit_file` ≥ 3 次会被强制引导
 - `controller.py` 中有计数器，对同一文件 `edit_file` 达 3 次时，会注入系统提示强制改用 `write_file`。
+
+---
+
+## 8. 工具调用泄漏 (Tool Call Text Leak)
+
+### ❌ LLM 以文本形式输出工具调用，而非真正使用 function calling
+- **现象：** AI 在回复中写出 `execute_tool('edit_file', {...})`、`<execute_skill>...</execute_skill>` 等文本，而不是真正调用工具。用户看到了原始的工具调用代码。
+- **原因：**
+  1. LLM 从 system prompt 中的示例和工具描述中"学到"了调用语法，然后以文本形式模仿输出。
+  2. 某些模型（特别是 context 较长或多轮对话后）可能退化为文本模式。
+  3. System prompt 中工具调用的示例写法可能误导模型。
+- **防护层（已实现）：**
+  1. **Prompt 层：** `system.jinja` 中有"工具调用方式 — 严格规范"条目，明确禁止文本形式的工具调用。
+  2. **[SPLIT] 过滤层：** `controller.py` 中 `_is_tool_call_leak()` 函数在实时分段发送时拦截泄漏文本。
+  3. **最终输出过滤层：** `controller.py` 中 `_clean_tool_call_leaks()` 函数在最终发送前清理泄漏。
+- **如果仍然出现：**
+  1. 检查 `system.jinja` 中的工具调用示例是否过多或过于具体——减少纯文本形式的调用示例。
+  2. 检查 `_TOOL_LEAK_PATTERNS` 是否覆盖了新的泄漏模式，按需添加。
+  3. 确认 LLM provider（`brain/providers/gemini.py` 或 `openai.py`）正确传递了 `tools` 参数到 API。

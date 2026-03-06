@@ -18,6 +18,80 @@ import json
 
 logger = logging.getLogger(__name__)
 
+# --- Tool Call Leak Detection & Cleaning ---
+# 工具名列表，用于检测 LLM 以文本形式"假装"调用工具的泄漏
+_TOOL_NAMES = r'(?:execute_skill|execute_tool_plan|execute_tool|write_file|read_file|edit_file|exec_command|list_dir|create_new_skill|search|get_available_skills|delegate_to_coder)'
+
+# 组合正则：匹配各种泄漏格式
+_TOOL_LEAK_PATTERNS = [
+    # 1. 函数调用格式: tool_name(...) 或 tool_name('...', {...})
+    re.compile(_TOOL_NAMES + r"""\s*\(""", re.IGNORECASE),
+    # 2. XML 标签格式: <execute_skill>...</execute_skill> 或 <execute_tool>
+    re.compile(r'</?(?:execute_skill|execute_tool|tool_call|function_call)\b', re.IGNORECASE),
+    # 3. execute_tool('tool_name', {...}) 格式
+    re.compile(r"""execute_tool\s*\(\s*['"]""", re.IGNORECASE),
+    # 4. JSON-like 工具调用块: {"name": "edit_file", "args": ...} 或 {"file_path": ..., "old_code": ..., "new_code": ...}
+    re.compile(r"""['"](?:old_code|new_code|file_path|args_json)['"]\s*:\s*['"]""", re.IGNORECASE),
+]
+
+
+def _is_tool_call_leak(text: str) -> bool:
+    """检测文本是否包含工具调用泄漏（LLM 以文本输出工具调用而非真正使用 function calling）。"""
+    for pattern in _TOOL_LEAK_PATTERNS:
+        if pattern.search(text):
+            return True
+    return False
+
+
+def _clean_tool_call_leaks(text: str) -> str:
+    """
+    从最终响应中清除工具调用泄漏文本，返回清理后的自然语言部分。
+    如果整段文本都是泄漏，返回空字符串。
+    """
+    cleaned = text
+
+    # 1. 移除 XML 标签块: <execute_skill>...</execute_skill> 等
+    cleaned = re.sub(
+        r'<execute_skill>[\s\S]*?</execute_skill>',
+        '', cleaned, flags=re.IGNORECASE
+    )
+    cleaned = re.sub(
+        r'<execute_tool>[\s\S]*?</execute_tool>',
+        '', cleaned, flags=re.IGNORECASE
+    )
+    cleaned = re.sub(
+        r'</?(?:execute_skill|execute_tool|tool_call|function_call)\b[^>]*>',
+        '', cleaned, flags=re.IGNORECASE
+    )
+
+    # 2. 移除函数调用格式: execute_tool('edit_file', {...}) 等（可能跨多行）
+    cleaned = re.sub(
+        r"""execute_tool\s*\(\s*['"][^'"]*['"]\s*,\s*\{[^}]*\}\s*\)""",
+        '', cleaned, flags=re.IGNORECASE | re.DOTALL
+    )
+
+    # 3. 移除 tool_name({...}) 格式的泄漏
+    cleaned = re.sub(
+        _TOOL_NAMES + r"""\s*\([^)]*\)""",
+        '', cleaned, flags=re.IGNORECASE
+    )
+
+    # 4. 移除 "返回结果:" + 代码块
+    cleaned = re.sub(
+        r'返回结果[：:]\s*```[\s\S]*?```', '', cleaned
+    )
+
+    # 5. 移除包含 old_code/new_code 等参数的 JSON 块
+    cleaned = re.sub(
+        r"""\{\s*['"](?:file_path|old_code|new_code|path|args_json)['"][\s\S]*?\}""",
+        '', cleaned, flags=re.IGNORECASE
+    )
+
+    # 清理多余空行
+    cleaned = re.sub(r'\n{3,}', '\n\n', cleaned).strip()
+
+    return cleaned
+
 
 class WorkerStatus:
     """后端工作状态追踪器 —— 记录当前正在做什么，供前端查询。"""
@@ -536,10 +610,7 @@ class NoraController:
                                 for part in parts[:-1]:
                                     text_to_send = part.strip()
                                     # 过滤掉包含工具调用语法的泄漏内容
-                                    if text_to_send and not re.search(
-                                        r'(?:execute_skill|execute_tool_plan|write_file|read_file|edit_file|exec_command|list_dir|create_new_skill|search)\s*\(',
-                                        text_to_send
-                                    ):
+                                    if text_to_send and not _is_tool_call_leak(text_to_send):
                                         await self.adapter.send_message(chat_id, text_to_send)
                                         # Important: keep final buffer synchronized
                                         temp_history.append({"role": "assistant", "content": text_to_send})
@@ -784,15 +855,8 @@ class NoraController:
             # --- 4. 发送响应 ---
             # If the loop completes and there's still text in the buffer, it's the final message.
             if final_response_buffer:
-                # 过滤掉可能泄漏的工具调用语法
-                clean_response = re.sub(
-                    r'(?:execute_skill|execute_tool_plan|write_file|read_file|edit_file|exec_command|list_dir|create_new_skill|search)\s*\([^)]*\)',
-                    '', final_response_buffer
-                ).strip()
-                # 过滤掉 "返回结果:" + 原始 JSON/代码块
-                clean_response = re.sub(
-                    r'返回结果[：:]\s*```[\s\S]*?```', '', clean_response
-                ).strip()
+                # 过滤掉可能泄漏的工具调用语法（多种格式）
+                clean_response = _clean_tool_call_leaks(final_response_buffer)
                 if clean_response:
                     await self.adapter.send_message(chat_id, clean_response)
                 elif latest_meaningful_output:
