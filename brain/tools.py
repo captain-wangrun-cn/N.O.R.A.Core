@@ -375,9 +375,18 @@ class ToolManager:
             return "Available skills:\\n" + "\\n".join([f"- {s}" for s in skill_folders])
         except Exception as e: return f"Error listing skills: {e}"
 
+    def _resolve_path(self, path: str) -> str:
+        """
+        统一路径解析：相对路径基于 WORKSPACE_ROOT，绝对路径保持不变。
+        这确保 LLM 传入 'USER.md' 时解析到 workspace/USER.md 而非仓库根目录。
+        """
+        if os.path.isabs(path):
+            return os.path.normpath(path)
+        return os.path.normpath(os.path.join(WORKSPACE_ROOT, path))
+
     def _is_path_safe(self, path: str) -> tuple:
         """Check if a path is safe to access. Returns (is_safe, reason)."""
-        abs_path = os.path.abspath(path)
+        abs_path = self._resolve_path(path)
         basename = os.path.basename(abs_path)
         if basename in SENSITIVE_FILES:
             return False, f"Access denied: '{basename}' contains sensitive data (API keys, tokens). You should not read this file."
@@ -390,7 +399,7 @@ class ToolManager:
         :param path: The directory path to list. Defaults to workspace root '.'.
         """
         try:
-            target = os.path.abspath(path)
+            target = self._resolve_path(path)
             if not os.path.isdir(target):
                 return f"Error: '{path}' is not a directory."
             entries = sorted(os.listdir(target))
@@ -435,7 +444,8 @@ class ToolManager:
             if end_line is not None:
                 end_line = int(end_line)
             
-            with open(path, 'r', encoding='utf-8') as f:
+            abs_path = self._resolve_path(path)
+            with open(abs_path, 'r', encoding='utf-8') as f:
                 if start_line is None and end_line is None:
                     # 读取全文
                     return f.read()
@@ -490,7 +500,7 @@ class ToolManager:
 
         try:
             max_results = max(1, min(int(max_results), 200))
-            target_root = os.path.abspath(path)
+            target_root = self._resolve_path(path)
             if not os.path.exists(target_root):
                 return f"Error: path '{path}' does not exist."
 
@@ -584,7 +594,7 @@ class ToolManager:
     def write_file(self, path: str, content: str) -> str:
         """Writes content to a file, overwriting it."""
         try:
-            abs_path = os.path.abspath(path)
+            abs_path = self._resolve_path(path)
             logger.debug(f"write_file called: path={path} -> abs={abs_path}, content_len={len(content)}")
             os.makedirs(os.path.dirname(abs_path), exist_ok=True)
             with open(abs_path, 'w', encoding='utf-8') as f: f.write(content)
@@ -605,7 +615,7 @@ class ToolManager:
         if not safe:
             return reason
         try:
-            abs_path = os.path.abspath(path)
+            abs_path = self._resolve_path(path)
             logger.debug(f"edit_file called: path={path} -> abs={abs_path}")
             logger.debug(f"edit_file old_code({len(old_code)} chars): {old_code[:200]}{'...' if len(old_code) > 200 else ''}")
             logger.debug(f"edit_file new_code({len(new_code)} chars): {new_code[:200]}{'...' if len(new_code) > 200 else ''}")
