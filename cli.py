@@ -9,6 +9,7 @@ import logging
 import sys
 import sqlite3
 from pathlib import Path
+import shutil
 
 # Suppress warnings
 warnings.filterwarnings("ignore", category=FutureWarning, module="google.generativeai")
@@ -20,6 +21,7 @@ from core.cost_tracker import CostTracker
 from typing import Dict, Any, List, Tuple, Optional
 
 from memory.message_history import MessageHistory, get_default_message_history_db
+from workspace_config import get_workspace_manager
 
 # Configure logger for CLI operations
 logging.basicConfig(level=logging.INFO, format='%(levelname)s: %(message)s')
@@ -1088,6 +1090,45 @@ def show_status():
     logger.info("📊 N.O.R.A. Core 运行状态")
     logger.info("="*50)
 
+
+def reset_identity_files(force: bool = False):
+    """
+    调试功能：重置身份相关文件（SOUL/USER/MEMORY）。
+    将仓库根目录的默认文件覆盖到 workspace 对应位置。
+    """
+    project_root = Path(__file__).resolve().parent
+    workspace = get_workspace_manager()
+
+    targets = [
+        (project_root / "SOUL.md", Path(workspace.root) / "SOUL.md"),
+        (project_root / "USER.md", Path(workspace.root) / "USER.md"),
+        (project_root / "MEMORY.md", Path(workspace.data_dir) / "memory" / "MEMORY.md"),
+    ]
+
+    if not force:
+        ok = questionary.confirm(
+            "⚠️ 这会用仓库默认内容覆盖 workspace 中的 SOUL/USER/MEMORY，是否继续？",
+            default=False
+        ).ask()
+        if not ok:
+            logger.info("已取消重置。")
+            return
+
+    reset_count = 0
+    for src, dst in targets:
+        if not src.exists():
+            logger.warning("⚠️ 源文件不存在，跳过: %s", src)
+            continue
+        try:
+            dst.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copyfile(str(src), str(dst))
+            logger.info("✅ 已重置: %s", dst)
+            reset_count += 1
+        except Exception as e:
+            logger.error("❌ 重置失败: %s -> %s (%s)", src, dst, e)
+
+    logger.info("🎯 身份文件重置完成，共处理 %d 个文件。", reset_count)
+
     # 1. 配置文件检查
     try:
         import config
@@ -1151,6 +1192,7 @@ def main_menu():
         "🧪 测试 RAG 系统",
         "💬 聊天记录管理",
         "🧹 清理 RAG 数据",
+        "🛠️ 调试: 重置身份文件(SOUL/USER/MEMORY)",
         "❌ 退出"
     ]
     
@@ -1180,6 +1222,8 @@ def main_menu():
             history_menu()
         elif choice == "🧹 清理 RAG 数据":
             clean_rag()
+        elif choice == "🛠️ 调试: 重置身份文件(SOUL/USER/MEMORY)":
+            reset_identity_files(force=False)
 
 
 # --- CLI 入口 ---
@@ -1211,6 +1255,17 @@ def main():
     clear_parser.add_argument("--platform", type=str, default="telegram", help="平台名称")
     clear_parser.add_argument("--include-pinned", action="store_true", help="同时清理已标记的消息")
 
+    # 'reset-identity' 命令
+    reset_identity_parser = subparsers.add_parser(
+        "reset-identity",
+        help="调试功能：重置 workspace 的 SOUL/USER/MEMORY 文件"
+    )
+    reset_identity_parser.add_argument(
+        "--yes",
+        action="store_true",
+        help="跳过确认，直接执行覆盖"
+    )
+
     args = parser.parse_args()
 
     if args.command == "wizard":
@@ -1233,6 +1288,8 @@ def main():
                 print("请指定 --all 或 --chat-id")
         else:
             history_menu()
+    elif args.command == "reset-identity":
+        reset_identity_files(force=bool(args.yes))
     else:
         main_menu()
 
