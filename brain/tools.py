@@ -584,8 +584,11 @@ class ToolManager:
     def write_file(self, path: str, content: str) -> str:
         """Writes content to a file, overwriting it."""
         try:
-            os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
-            with open(path, 'w', encoding='utf-8') as f: f.write(content)
+            abs_path = os.path.abspath(path)
+            logger.debug(f"write_file called: path={path} -> abs={abs_path}, content_len={len(content)}")
+            os.makedirs(os.path.dirname(abs_path), exist_ok=True)
+            with open(abs_path, 'w', encoding='utf-8') as f: f.write(content)
+            logger.info(f"write_file: wrote {len(content)} chars to {abs_path}")
             return f"Successfully wrote to {path}"
         except Exception as e: return f"Error writing file: {e}"
 
@@ -602,14 +605,23 @@ class ToolManager:
         if not safe:
             return reason
         try:
-            with open(path, 'r', encoding='utf-8') as f:
+            abs_path = os.path.abspath(path)
+            logger.debug(f"edit_file called: path={path} -> abs={abs_path}")
+            logger.debug(f"edit_file old_code({len(old_code)} chars): {old_code[:200]}{'...' if len(old_code) > 200 else ''}")
+            logger.debug(f"edit_file new_code({len(new_code)} chars): {new_code[:200]}{'...' if len(new_code) > 200 else ''}")
+            
+            with open(abs_path, 'r', encoding='utf-8') as f:
                 content = f.read()
 
             # 1. Try exact match first
             if old_code in content:
                 new_content = content.replace(old_code, new_code, 1)
-                with open(path, 'w', encoding='utf-8') as f:
+                if new_content == content:
+                    logger.warning(f"edit_file: old_code == new_code (no actual change) for {abs_path}")
+                    return f"Warning: edit_file matched old_code in {path}, but new_code is identical — no changes made."
+                with open(abs_path, 'w', encoding='utf-8') as f:
                     f.write(new_content)
+                logger.info(f"edit_file: exact match succeeded for {abs_path}")
                 return f"Successfully edited {path}."
 
             # 2. Fallback: normalized whitespace matching
@@ -630,10 +642,15 @@ class ToolManager:
                         # Found a match with normalized whitespace
                         new_lines = lines[:i] + new_code.split('\n') + lines[i + window_size:]
                         new_content = '\n'.join(new_lines)
-                        with open(path, 'w', encoding='utf-8') as f:
+                        if new_content == content:
+                            logger.warning(f"edit_file: normalized match but no actual change for {abs_path}")
+                            return f"Warning: edit_file matched old_code (normalized) in {path}, but result is identical — no changes made."
+                        with open(abs_path, 'w', encoding='utf-8') as f:
                             f.write(new_content)
+                        logger.info(f"edit_file: normalized match at lines {i+1}-{i+window_size} for {abs_path}")
                         return f"Successfully edited {path} (matched with normalized whitespace)."
 
+            logger.warning(f"edit_file: old_code not found in {abs_path} (file size: {len(content)} chars)")
             return (
                 f"Error: 'old_code' not found in {path} (even after whitespace normalization). "
                 f"Tip: Use 'write_file' to overwrite the entire file instead of edit_file."
