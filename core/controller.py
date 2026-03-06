@@ -217,6 +217,29 @@ def _clean_tool_call_leaks(text: str) -> str:
     return cleaned
 
 
+# --- Tool Usage Nudge Detection ---
+
+def _should_nudge_tool_use(user_text: str, response_text: str) -> tuple:
+    """
+    极简检测：LLM 是否应该用工具却只给了文本回复。
+    
+    唯一判据：回复中包含 ``` 代码块。
+    当 LLM 拥有 function calling 能力时，如果它在回复中贴出代码块
+    （命令/脚本/代码片段），几乎一定意味着它在"建议用户自己跑"
+    而非通过工具直接执行。
+    
+    返回 (should_nudge: bool, reason: str)
+    """
+    if not response_text or len(response_text.strip()) < 50:
+        return False, ""
+    
+    # 唯一信号：回复中出现代码块
+    if '```' in response_text:
+        return True, "response contains code block without tool call"
+    
+    return False, ""
+
+
 class WorkerStatus:
     """后端工作状态追踪器 —— 记录当前正在做什么，供前端查询。"""
 
@@ -1002,12 +1025,47 @@ class NoraController:
                     # Loop continues to let LLM process the result
                     continue
                 else:
-                    # No tool call -> Final response
+                    # No tool call -> Possibly final response, but check if LLM SHOULD have used tools
                     logger.debug(
                         f"[{chat_id}] Turn {current_turn} ended with no tool_call. "
                         f"Response buffer length: {len(final_response_buffer)}, "
                         f"preview: {final_response_buffer[:120]}..."
                     )
+                    
+                    # --- 工具使用自觉性检测 (Tool Usage Nudge) ---
+                    # 仅在第一轮（LLM 首次回复时）检测：如果用户请求明显需要工具操作，
+                    # 但 LLM 只给出了纯文本回复（如"建议您运行..."、给出代码块让用户自己跑），
+                    # 则注入纠正提示让 LLM 重新生成并真正调用工具。
+                    if current_turn == 1 and not session.get("_tool_nudge_done"):
+                        should_nudge, nudge_reason = _should_nudge_tool_use(
+                            user_text=text,
+                            response_text=final_response_buffer,
+                        )
+                        if should_nudge:
+                            logger.warning(
+                                f"[{chat_id}] 检测到 LLM 应该使用工具但未调用 "
+                                f"(reason={nudge_reason}). 注入纠正提示。"
+                            )
+                            session["_tool_nudge_done"] = True  # 只纠正一次，防止无限循环
+                            # 把 LLM 的纯文本回复作为"思考过程"放入历史，但不发送给用户
+                            if final_response_buffer.strip():
+                                temp_history.append({
+                                    "role": "assistant",
+                                    "content": final_response_buffer
+                                })
+                            final_response_buffer = ""  # 清空，等 LLM 重新生成
+                            temp_history.append({
+                                "role": "user",
+                                "content": (
+                                    "【系统纠正】你刚才只用文本描述了你要做的操作，但没有真正执行！"
+                                    "你拥有完整的工具权限（read_file, write_file, edit_file, exec_command, "
+                                    "execute_skill 等）。请**立即通过 function calling 真正调用工具来执行操作**，"
+                                    "不要只是告诉用户该怎么做。\n"
+                                    "记住：你是执行者，不是建议者。用户期望你直接完成任务。"
+                                )
+                            })
+                            continue  # 让 LLM 带着纠正提示重新生成
+                    
                     break
             
             # If loop exhausted MAX_TURNS with pending tool work, inject a wrap-up prompt and do one final LLM call

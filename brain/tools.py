@@ -721,11 +721,29 @@ class ToolManager:
         except Exception as e: return f"Error executing command: {e}"
 
     def _generate_schema(self, func: Callable) -> Dict[str, Any]:
-        """Generates a JSON schema for a function."""
+        """Generates a JSON schema for a function, including parameter descriptions from docstrings."""
         import typing
         sig = inspect.signature(func)
         doc = inspect.getdoc(func) or ""
-        desc = doc.strip().split("\\n")[0]
+        
+        # 提取函数描述（docstring 第一段，直到空行或 :param）
+        desc_lines = []
+        for line in doc.strip().split("\n"):
+            stripped = line.strip()
+            if stripped.startswith(":param") or stripped.startswith(":return") or stripped.startswith("Examples:"):
+                break
+            if not stripped and desc_lines:  # 空行分隔描述和参数
+                break
+            desc_lines.append(stripped)
+        desc = " ".join(desc_lines).strip() or doc.strip().split("\n")[0]
+        
+        # 提取 :param 注释，构建参数描述映射
+        param_descriptions = {}
+        for match in re.finditer(r':param\s+(\w+):\s*(.+?)(?=\n\s*:|$)', doc, re.DOTALL):
+            param_name = match.group(1)
+            param_desc = ' '.join(match.group(2).strip().split())  # 规范化空白
+            param_descriptions[param_name] = param_desc
+        
         parameters = {"type": "OBJECT", "properties": {}, "required": []}
         for name, param in sig.parameters.items():
             if name == 'self': continue
@@ -749,7 +767,12 @@ class ToolManager:
             elif annotation == float:
                 param_type = "NUMBER"
             
-            parameters["properties"][name] = {"type": param_type}
+            prop = {"type": param_type}
+            # 添加参数描述（如果存在）
+            if name in param_descriptions:
+                prop["description"] = param_descriptions[name]
+            
+            parameters["properties"][name] = prop
             if param.default == inspect.Parameter.empty:
                 parameters["required"].append(name)
         return {"name": func.__name__, "description": desc, "parameters": parameters}
