@@ -229,6 +229,78 @@ def test_convert_history_unknown_role():
     print("✅ test_convert_history_unknown_role passed")
 
 
+def test_empty_promise_detection():
+    """测试空承诺检测——模型声称要操作文件但没有 tool_call。"""
+    import re
+    
+    # 从 controller.py 复制检测逻辑（避免导入整个 controller 的重依赖链）
+    _EMPTY_PROMISE_PATTERNS = [
+        re.compile(r'(?:现在就去|马上|立刻|这就|我来|让我).*?(?:更新|修改|编辑|写入|创建|读取|查看|处理|保存)', re.DOTALL),
+        re.compile(r'(?:更新|修改|编辑|写入|保存).*?(?:\.md|\.py|\.json|\.yml|\.txt|文件)'),
+        re.compile(r'(?:铭刻到|记录到|写进|存到|保存到).*?(?:\.md|文件|灵魂|记忆)'),
+        re.compile(r"(?:let me|i'?ll|going to|about to|now i will).*?(?:update|modify|edit|write|create|read|save)", re.IGNORECASE),
+        re.compile(r'(?:请稍等|稍等一下|等一下|马上好|请等一会|wait a moment)', re.IGNORECASE),
+    ]
+
+    def _is_empty_promise(text, has_tool_call):
+        if has_tool_call:
+            return False
+        text_stripped = text.strip()
+        if not text_stripped or len(text_stripped) < 5:
+            return False
+        for pattern in _EMPTY_PROMISE_PATTERNS:
+            if pattern.search(text_stripped):
+                return True
+        return False
+    
+    # === 应该检测为空承诺的情况（has_tool_call=False） ===
+    promise_texts = [
+        # 截图中的真实案例
+        "Nora会把您的这些偏好和期望更新到 USER.md 文件里，这样就能时刻提醒自己。\nNora现在就去更新 USER.md 文件哦！请稍等一下。",
+        # 各种表达方式
+        "好的主人，我现在就去修改 SOUL.md 文件~",
+        "让我来帮您更新一下 USER.md 吧",
+        "我马上为您编辑这个文件",
+        "这就去保存到 MEMORY.md 里",
+        "我会把这些铭刻到灵魂深处",
+        "请稍等一下，我正在处理",
+        "I'll update the file now, please wait a moment",
+        "Let me edit that for you right away",
+    ]
+    
+    for text in promise_texts:
+        result = _is_empty_promise(text, has_tool_call=False)
+        status = "✅" if result else "❌"
+        print(f"{status} Expected=True, Got={result} | {text[:60]}...")
+        assert result, f"Should detect as empty promise: {text[:60]}..."
+    
+    # === 不应该检测为空承诺的情况 ===
+    non_promise_texts = [
+        # 纯对话
+        "你好主人~ 今天过得怎么样？",
+        "哈哈，这个真的很有趣呢",
+        # 已完成的汇报（不含"要去做"的意图）
+        "文件已经修改完毕了，主人 ✨",
+        "我已经帮您处理好了~",
+        # 不涉及工具操作
+        "这首歌真好听",
+        "Nora觉得主人很棒！",
+    ]
+    
+    for text in non_promise_texts:
+        result = _is_empty_promise(text, has_tool_call=False)
+        status = "✅" if not result else "❌"
+        print(f"{status} Expected=False, Got={result} | {text[:60]}...")
+        assert not result, f"Should NOT detect as empty promise: {text[:60]}..."
+    
+    # === 有 tool_call 时不应该触发 ===
+    result = _is_empty_promise("我现在就去修改文件", has_tool_call=True)
+    assert not result, "Should not trigger when has_tool_call=True"
+    print("✅ has_tool_call=True correctly bypasses detection")
+    
+    print("✅ test_empty_promise_detection passed")
+
+
 if __name__ == "__main__":
     test_convert_tools_schema()
     test_convert_tools_schema_passthrough()
@@ -238,4 +310,5 @@ if __name__ == "__main__":
     test_convert_history_multiple_tool_calls()
     test_convert_history_orphan_tool_response()
     test_convert_history_unknown_role()
+    test_empty_promise_detection()
     print("\n🎉 All OpenAI provider tests passed!")

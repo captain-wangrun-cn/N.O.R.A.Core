@@ -262,6 +262,11 @@ class OpenAIProvider(BaseLLM):
             converted_tools = self._convert_tools_schema(tools)
             if converted_tools:
                 kwargs["tools"] = converted_tools
+                logger.info(f"OpenAI chat_stream: passing {len(converted_tools)} tools to API (model={self.model})")
+            else:
+                logger.warning("OpenAI chat_stream: tools provided but conversion resulted in empty list")
+        else:
+            logger.debug("OpenAI chat_stream: no tools provided")
         
         # stream_options 不是所有 OpenAI 兼容 API 都支持，尝试传入
         kwargs["stream_options"] = {"include_usage": True}
@@ -329,6 +334,11 @@ class OpenAIProvider(BaseLLM):
                                 pending_tool_calls[idx]["arguments"] += tc_chunk.function.arguments
             
             # === 流结束后，yield 所有累积完成的 tool_calls ===
+            if pending_tool_calls:
+                logger.info(f"OpenAI stream finished: {len(pending_tool_calls)} tool_call(s) accumulated")
+            else:
+                logger.debug("OpenAI stream finished: no tool_calls received from API")
+            
             for idx in sorted(pending_tool_calls.keys()):
                 tc = pending_tool_calls[idx]
                 tool_name = tc["name"]
