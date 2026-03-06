@@ -438,7 +438,7 @@ class TelegramAdapter(BaseAdapter):
         
         # 构造消息
         reply_info = await self._extract_reply_info(update.message)
-        text = f"[图片: {file_path}]"
+        text = f"[image: {file_path}]"
         if caption:
             text += f"\n{caption}"
         if reply_info:
@@ -480,7 +480,7 @@ class TelegramAdapter(BaseAdapter):
         
         # 构造消息
         reply_info = await self._extract_reply_info(update.message)
-        text = f"[文件: {file_path}]"
+        text = f"[file: {file_path}]"
         if caption:
             text += f"\n{caption}"
         if reply_info:
@@ -523,7 +523,7 @@ class TelegramAdapter(BaseAdapter):
         
         # 构造消息
         reply_info = await self._extract_reply_info(update.message)
-        text = f"[贴纸: {emoji} 来自 {set_name}]\n[文件: {file_path}]"
+        text = f"[sticker: {emoji} from {set_name}]\n[file: {file_path}]"
         if reply_info:
             text = f"[回复: {reply_info}]\n{text}"
         

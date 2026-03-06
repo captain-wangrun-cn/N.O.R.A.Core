@@ -31,7 +31,7 @@ def parse_route_decision_response(response_text: str) -> str:
 def has_image_input(text: str) -> bool:
     """
     判断消息中是否包含图片输入痕迹。
-    兼容 Telegram 适配器写入的格式（如 [图片: path]）及常见图片扩展名链接/路径。
+    兼容统一媒体标识格式（如 [image: path]）及常见图片扩展名链接/路径。
     """
     if not text:
         return False
@@ -39,7 +39,7 @@ def has_image_input(text: str) -> bool:
     s = text.lower()
 
     # 结构化标记（适配器常见格式）
-    if "[图片:" in s or "[image:" in s:
+    if "[image:" in s:
         return True
 
     # 常见图片 URL/路径扩展名

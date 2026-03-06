@@ -18,7 +18,7 @@ def test_parse_route_fallback_to_front():
 
 
 def test_has_image_input_with_tag():
-    assert has_image_input("[图片: downloads/telegram/photo_xxx.jpg]\n帮我看看这张图") is True
+    assert has_image_input("[image: downloads/telegram/photo_xxx.jpg]\n帮我看看这张图") is True
 
 
 def test_has_image_input_with_image_url():
