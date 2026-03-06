@@ -926,7 +926,9 @@ class NoraController:
                                 "role": "user",
                                 "content": (
                                     "【系统提示】你已经连续多次对同一个文件使用 edit_file。这是低效的做法。"
-                                    "请停止 edit_file，改用 read_file 读取完整内容后，用 write_file 一次性写入所有修改。"
+                                    "请先 read_file 获取更完整上下文，并让 old_code 精确到目标片段。"
+                                    "如果工具返回了 multiple matches，请根据返回的 [index] 重新调用 edit_file 并传入 match_index。"
+                                    "除非你明确要重写整个文件，否则不要直接用 write_file 覆盖。"
                                     "如果不需要继续修改，请直接给用户回复结果。"
                                 )
                             })

@@ -602,19 +602,28 @@ class ToolManager:
             return f"Successfully wrote to {path}"
         except Exception as e: return f"Error writing file: {e}"
 
-    def edit_file(self, path: str, old_code: str, new_code: str) -> str:
+    def edit_file(self, path: str, old_code: str, new_code: str, match_index: Optional[int] = None) -> str:
         """
-        Performs a find-and-replace on a file. Tries exact match first, then falls back to
-        whitespace-normalized matching. If editing is difficult, consider using 'write_file' to
-        overwrite the entire file content instead.
+        Performs a precise find-and-replace on a file.
+        Tries exact match first, then falls back to whitespace-normalized matching.
+        If old_code matches multiple locations, provide match_index (1-based) to select the exact target.
         :param path: Path to the file to edit.
         :param old_code: The code snippet to find (approximate whitespace is OK).
         :param new_code: The replacement code snippet.
+        :param match_index: Optional 1-based index of which matched location to replace when multiple matches exist.
         """
         safe, reason = self._is_path_safe(path)
         if not safe:
             return reason
         try:
+            if match_index is not None:
+                try:
+                    match_index = int(match_index)
+                except Exception:
+                    return "Error: match_index must be an integer (1-based)."
+                if match_index < 1:
+                    return "Error: match_index must be >= 1 (1-based)."
+
             abs_path = self._resolve_path(path)
             logger.debug(f"edit_file called: path={path} -> abs={abs_path}")
             logger.debug(f"edit_file old_code({len(old_code)} chars): {old_code[:200]}{'...' if len(old_code) > 200 else ''}")
@@ -623,43 +632,76 @@ class ToolManager:
             with open(abs_path, 'r', encoding='utf-8') as f:
                 content = f.read()
 
+            def _format_matches_with_context(matches: list, all_lines: list, max_items: int = 10) -> str:
+                """格式化匹配列表，返回带 index/line/context 的可读文本。"""
+                lines_out = []
+                for item in matches[:max_items]:
+                    line_no = item["line_no"]
+                    context_start = max(1, line_no - 2)
+                    context_end = min(len(all_lines), item["end_line"] + 2)
+                    context = "\n".join(all_lines[context_start - 1:context_end])
+                    if len(context) > 260:
+                        context = context[:260] + "..."
+                    lines_out.append(
+                        f"  [{item['index']}] line {line_no}-{item['end_line']}:\n"
+                        f"{context}"
+                    )
+                if len(matches) > max_items:
+                    lines_out.append(f"  ... and {len(matches) - max_items} more matches")
+                return "\n\n".join(lines_out)
+
             # 1. Try exact match first
             if old_code in content:
-                match_count = content.count(old_code)
-                if match_count > 1:
-                    # 多处匹配：LLM 给的 old_code 不够精确，需要更多上下文
-                    # 找出每个匹配位置的行号
-                    positions = []
-                    search_start = 0
-                    for _ in range(match_count):
-                        idx = content.find(old_code, search_start)
-                        if idx == -1:
-                            break
-                        line_no = content[:idx].count('\n') + 1
-                        # 提取匹配位置的上下文（前后各 1 行）
-                        lines = content.split('\n')
-                        context_start = max(0, line_no - 2)
-                        context_end = min(len(lines), line_no + old_code.count('\n') + 1)
-                        context_preview = '\n'.join(lines[context_start:context_end])
-                        positions.append(f"  Match {len(positions)+1} at line {line_no}: ...{context_preview[:120]}...")
-                        search_start = idx + len(old_code)
-                    
-                    positions_str = '\n'.join(positions)
-                    logger.warning(f"edit_file: old_code matches {match_count} locations in {abs_path}")
+                lines = content.split('\n')
+                exact_matches = []
+                search_start = 0
+                exact_idx = 0
+                old_line_span = max(1, old_code.count('\n') + 1)
+                while True:
+                    idx = content.find(old_code, search_start)
+                    if idx == -1:
+                        break
+                    exact_idx += 1
+                    line_no = content.count('\n', 0, idx) + 1
+                    exact_matches.append({
+                        "index": exact_idx,
+                        "offset": idx,
+                        "line_no": line_no,
+                        "end_line": line_no + old_line_span - 1,
+                    })
+                    search_start = idx + len(old_code)
+
+                if len(exact_matches) > 1 and match_index is None:
+                    logger.warning(f"edit_file: old_code matches {len(exact_matches)} exact locations in {abs_path}")
                     return (
-                        f"Error: old_code matches {match_count} different locations in {path}. "
-                        f"Please include more surrounding context in old_code to uniquely identify the target.\n"
-                        f"Matched positions:\n{positions_str}\n\n"
-                        f"Tip: Include the heading or a few lines above/below the target to make old_code unique."
+                        f"Error: old_code matches {len(exact_matches)} exact locations in {path}. "
+                        f"Please call edit_file again with match_index (1-based) to select one target.\n\n"
+                        f"Available matches:\n{_format_matches_with_context(exact_matches, lines)}\n\n"
+                        f"Example: edit_file(path=\"{path}\", old_code=..., new_code=..., match_index=2)"
                     )
-                
-                new_content = content.replace(old_code, new_code, 1)
+
+                if match_index is not None:
+                    if match_index > len(exact_matches):
+                        return (
+                            f"Error: match_index {match_index} is out of range. "
+                            f"This old_code has {len(exact_matches)} exact match(es) in {path}."
+                        )
+                    target = exact_matches[match_index - 1]
+                else:
+                    target = exact_matches[0]
+
+                start = target["offset"]
+                end = start + len(old_code)
+                new_content = content[:start] + new_code + content[end:]
                 if new_content == content:
                     logger.warning(f"edit_file: old_code == new_code (no actual change) for {abs_path}")
                     return f"Warning: edit_file matched old_code in {path}, but new_code is identical — no changes made."
                 with open(abs_path, 'w', encoding='utf-8') as f:
                     f.write(new_content)
-                logger.info(f"edit_file: exact match succeeded for {abs_path}")
+                logger.info(
+                    f"edit_file: exact match succeeded for {abs_path} "
+                    f"(selected index={target['index']}, line={target['line_no']})"
+                )
                 return f"Successfully edited {path}."
 
             # 2. Fallback: normalized whitespace matching
@@ -679,25 +721,39 @@ class ToolManager:
                     if normalize(window) == norm_old:
                         all_norm_matches.append((window_size, i))
             
-            if len(all_norm_matches) > 1:
-                # 多处匹配，要求 LLM 给更精确的上下文
-                positions = []
-                for ws, idx in all_norm_matches[:5]:  # 最多展示 5 处
-                    context_start = max(0, idx - 1)
-                    context_end = min(len(lines), idx + ws + 1)
-                    preview = '\n'.join(lines[context_start:context_end])
-                    positions.append(f"  Match at line {idx+1}: ...{preview[:120]}...")
-                positions_str = '\n'.join(positions)
-                logger.warning(f"edit_file: old_code matches {len(all_norm_matches)} locations (normalized) in {abs_path}")
-                return (
-                    f"Error: old_code matches {len(all_norm_matches)} different locations in {path} (normalized whitespace). "
-                    f"Please include more surrounding context in old_code to uniquely identify the target.\n"
-                    f"Matched positions:\n{positions_str}\n\n"
-                    f"Tip: Include the heading or a few lines above/below the target to make old_code unique."
-                )
-            
-            if len(all_norm_matches) == 1:
-                window_size, i = all_norm_matches[0]
+            if all_norm_matches:
+                norm_matches = []
+                for idx_num, (window_size, i) in enumerate(all_norm_matches, start=1):
+                    line_no = i + 1
+                    norm_matches.append({
+                        "index": idx_num,
+                        "line_no": line_no,
+                        "end_line": line_no + window_size - 1,
+                        "window_size": window_size,
+                        "line_index": i,
+                    })
+
+                if len(norm_matches) > 1 and match_index is None:
+                    logger.warning(f"edit_file: old_code matches {len(norm_matches)} normalized locations in {abs_path}")
+                    return (
+                        f"Error: old_code matches {len(norm_matches)} locations in {path} (normalized whitespace). "
+                        f"Please call edit_file again with match_index (1-based) to select one target.\n\n"
+                        f"Available matches:\n{_format_matches_with_context(norm_matches, lines)}\n\n"
+                        f"Example: edit_file(path=\"{path}\", old_code=..., new_code=..., match_index=2)"
+                    )
+
+                if match_index is not None:
+                    if match_index > len(norm_matches):
+                        return (
+                            f"Error: match_index {match_index} is out of range. "
+                            f"This old_code has {len(norm_matches)} normalized match(es) in {path}."
+                        )
+                    target = norm_matches[match_index - 1]
+                else:
+                    target = norm_matches[0]
+
+                window_size = target["window_size"]
+                i = target["line_index"]
                 # Found a unique match with normalized whitespace
                 new_lines = lines[:i] + new_code.split('\n') + lines[i + window_size:]
                 new_content = '\n'.join(new_lines)
@@ -706,13 +762,16 @@ class ToolManager:
                     return f"Warning: edit_file matched old_code (normalized) in {path}, but result is identical — no changes made."
                 with open(abs_path, 'w', encoding='utf-8') as f:
                     f.write(new_content)
-                logger.info(f"edit_file: normalized match at lines {i+1}-{i+window_size} for {abs_path}")
+                logger.info(
+                    f"edit_file: normalized match at lines {i+1}-{i+window_size} for {abs_path} "
+                    f"(selected index={target['index']})"
+                )
                 return f"Successfully edited {path} (matched with normalized whitespace)."
 
             logger.warning(f"edit_file: old_code not found in {abs_path} (file size: {len(content)} chars)")
             return (
                 f"Error: 'old_code' not found in {path} (even after whitespace normalization). "
-                f"Tip: Use 'write_file' to overwrite the entire file instead of edit_file."
+                f"Tip: Use read_file to get more surrounding context, then retry edit_file with a more specific old_code."
             )
         except Exception as e:
             return f"Error editing file: {e}"
