@@ -31,7 +31,11 @@ _TOOL_LEAK_PATTERNS = [
     # 3. execute_tool('tool_name', {...}) 格式
     re.compile(r"""execute_tool\s*\(\s*['"]""", re.IGNORECASE),
     # 4. JSON-like 工具调用块: {"name": "edit_file", "args": ...} 或 {"file_path": ..., "old_code": ..., "new_code": ...}
-    re.compile(r"""['"](?:old_code|new_code|file_path|args_json)['"]\s*:\s*['"]""", re.IGNORECASE),
+    re.compile(r"""['"](?:old_code|new_code|file_path|args_json)['"]\s*[:=]""", re.IGNORECASE),
+    # 5. Python 关键字参数格式: old_code="""...""" 或 new_code="..." (截图中出现的模式)
+    re.compile(r"""(?:old_code|new_code|file_path)\s*=\s*(?:['"]{1,3})""", re.IGNORECASE),
+    # 6. 代码块中包含工具调用（如 ```python\n edit_file(...)）
+    re.compile(r'```\s*(?:python)?\s*\n\s*' + _TOOL_NAMES, re.IGNORECASE),
 ]
 
 
@@ -41,6 +45,114 @@ def _is_tool_call_leak(text: str) -> bool:
         if pattern.search(text):
             return True
     return False
+
+
+def _try_parse_leaked_tool_call(text: str) -> Optional[Dict[str, Any]]:
+    """
+    尝试从泄漏的文本中解析出工具调用的名称和参数。
+    如果解析成功，返回 {"name": str, "args": dict}；否则返回 None。
+    
+    支持的格式：
+    1. tool_name(path="...", old_code="...", new_code="...")
+    2. tool_name("path", "content")
+    3. execute_tool('tool_name', {...})
+    4. tool_name(path, content) — 位置参数
+    5. 三引号形式: new_code='''...''' 或 new_code=\"\"\"...\"\"\"
+    """
+    
+    def _extract_string_arg(text: str, arg_name: str) -> Optional[str]:
+        """提取命名参数值，支持单引号、双引号和三引号。"""
+        # 三引号优先（最贪婪）
+        for quote in ['"""', "'''"]:
+            pattern = re.escape(arg_name) + r'\s*=\s*' + re.escape(quote) + r'([\s\S]*?)' + re.escape(quote)
+            m = re.search(pattern, text)
+            if m:
+                return m.group(1)
+        # 单引号/双引号
+        for quote in ['"', "'"]:
+            pattern = re.escape(arg_name) + r'\s*=\s*' + re.escape(quote) + r'((?:[^' + quote + r'\\]|\\.)*)' + re.escape(quote)
+            m = re.search(pattern, text, re.DOTALL)
+            if m:
+                return m.group(1)
+        return None
+    
+    # Pattern 1: edit_file(path="...", old_code="...", new_code="...")
+    match = re.search(
+        r'(edit_file|write_file|read_file)\s*\(',
+        text, re.IGNORECASE
+    )
+    if match:
+        tool_name = match.group(1).lower()
+        call_text = text[match.start():]  # 从工具名开始的子串
+        
+        # 提取 path 参数
+        file_path = _extract_string_arg(call_text, "path")
+        if not file_path:
+            # 尝试位置参数: tool_name("path", ...)
+            pos_match = re.search(r'\(\s*["\']([^"\']+)["\']', call_text)
+            if pos_match:
+                file_path = pos_match.group(1)
+        
+        if file_path and tool_name == "edit_file":
+            old_code = _extract_string_arg(call_text, "old_code")
+            new_code = _extract_string_arg(call_text, "new_code")
+            if old_code is not None and new_code is not None:
+                return {
+                    "name": "edit_file",
+                    "args": {
+                        "path": file_path,
+                        "old_code": old_code,
+                        "new_code": new_code,
+                    }
+                }
+        elif file_path and tool_name == "write_file":
+            content = _extract_string_arg(call_text, "content")
+            if not content:
+                # 位置参数形式: write_file("path", "content")  或三引号
+                # 尝试匹配第二个参数
+                after_path = call_text[call_text.find(file_path) + len(file_path):]
+                for quote in ['"""', "'''", '"', "'"]:
+                    esc = re.escape(quote)
+                    if quote in ['"""', "'''"]:
+                        m = re.search(esc + r'([\s\S]*?)' + esc, after_path)
+                    else:
+                        m = re.search(esc + r'((?:[^' + quote + r'\\]|\\.)*)' + esc, after_path, re.DOTALL)
+                    if m:
+                        content = m.group(1)
+                        break
+            if content is not None:
+                return {
+                    "name": "write_file",
+                    "args": {"path": file_path, "content": content}
+                }
+    
+    # Pattern 2: execute_tool('tool_name', {...})
+    match = re.search(
+        r"execute_tool\s*\(\s*['\"](\w+)['\"]\s*,\s*(\{[\s\S]*?\})\s*\)",
+        text, re.IGNORECASE
+    )
+    if match:
+        tool_name = match.group(1)
+        try:
+            args = json.loads(match.group(2))
+            return {"name": tool_name, "args": args}
+        except json.JSONDecodeError:
+            pass
+    
+    # Pattern 3: execute_skill("skill_name", '{"key": "value"}')
+    match = re.search(
+        r'execute_skill\s*\(\s*["\'](\w+)["\']\s*,\s*["\'](\{.+?\})["\']',
+        text, re.IGNORECASE | re.DOTALL
+    )
+    if match:
+        skill_name = match.group(1)
+        try:
+            args = json.loads(match.group(2))
+            return {"name": "execute_skill", "args": {"skill_name": skill_name, "args_json": json.dumps(args)}}
+        except json.JSONDecodeError:
+            pass
+    
+    return None
 
 
 def _clean_tool_call_leaks(text: str) -> str:
@@ -70,9 +182,9 @@ def _clean_tool_call_leaks(text: str) -> str:
         '', cleaned, flags=re.IGNORECASE | re.DOTALL
     )
 
-    # 3. 移除 tool_name({...}) 格式的泄漏
+    # 3. 移除 tool_name({...}) 格式的泄漏（跨多行）
     cleaned = re.sub(
-        _TOOL_NAMES + r"""\s*\([^)]*\)""",
+        _TOOL_NAMES + r"""\s*\([\s\S]*?\)""",
         '', cleaned, flags=re.IGNORECASE
     )
 
@@ -84,6 +196,18 @@ def _clean_tool_call_leaks(text: str) -> str:
     # 5. 移除包含 old_code/new_code 等参数的 JSON 块
     cleaned = re.sub(
         r"""\{\s*['"](?:file_path|old_code|new_code|path|args_json)['"][\s\S]*?\}""",
+        '', cleaned, flags=re.IGNORECASE
+    )
+
+    # 6. 移除 Python 关键字参数格式: old_code="""...""", new_code="..."
+    cleaned = re.sub(
+        r"""(?:old_code|new_code|file_path)\s*=\s*(?:'{3}[\s\S]*?'{3}|"{3}[\s\S]*?"{3}|"[^"]*"|'[^']*')""",
+        '', cleaned, flags=re.IGNORECASE
+    )
+
+    # 7. 移除代码块中的工具调用
+    cleaned = re.sub(
+        r'```\s*(?:python)?\s*\n[\s\S]*?```',
         '', cleaned, flags=re.IGNORECASE
     )
 
@@ -512,9 +636,9 @@ class NoraController:
                 skill_desc = "\n".join([f"- {s['name']}: {s['description']} (Path: {s.get('path', 'N/A')})" for s in skills])
                 instructions.append(
                     f"【可用技能 (Available Skills)】\n{skill_desc}\n\n"
-                    f"⚠️ 执行技能时，**必须**使用 `execute_skill(skill_name, args_json)` 工具。\n"
-                    f"**严禁**使用 `exec_command` 运行技能脚本（如 `python3 skills/xxx/main.py`）。\n"
-                    f"示例: execute_skill(\"pixiv_manager\", '{{\"keyword\": \"碧蓝航线\", \"limit\": \"5\"}}')"
+                    f"⚠️ 执行技能时，**必须通过 function calling 机制**使用 execute_skill 工具（参数: skill_name, args_json）。\n"
+                    f"**严禁**使用 exec_command 运行技能脚本。\n"
+                    f"**严禁**在回复文本中写出调用语法——必须通过 function calling API 真正调用。"
                 )
 
             if "\n" in text.strip(): 
@@ -653,10 +777,41 @@ class NoraController:
                 # Append text to final buffer (visible to user)
                 if response_text_buffer:
                     final_response_buffer += response_text_buffer
-                    # In a real app, we might send this incrementally. 
-                    # For now, we wait for atomic send at the end (as per design), 
-                    # OR we could send partials if we supported it.
-                    # Current design: Atomic Output.
+                
+                # --- 泄漏拦截：如果 LLM 以文本输出了工具调用，尝试解析并真正执行 ---
+                if not tool_call and final_response_buffer and _is_tool_call_leak(final_response_buffer):
+                    parsed = _try_parse_leaked_tool_call(final_response_buffer)
+                    if parsed:
+                        logger.warning(
+                            f"[{chat_id}] 检测到工具调用泄漏并成功解析: {parsed['name']}({parsed['args']}). "
+                            f"将自动执行该工具调用。"
+                        )
+                        tool_call = {"type": "tool_call", "name": parsed["name"], "args": parsed["args"]}
+                        # 清除泄漏文本，保留泄漏前的自然语言部分
+                        natural_text = _clean_tool_call_leaks(final_response_buffer).strip()
+                        final_response_buffer = natural_text
+                        # 如果有自然语言前缀（如"好的，我来帮您修改~"），先发出去
+                        if natural_text and not _is_tool_call_leak(natural_text):
+                            await self.adapter.send_message(chat_id, natural_text)
+                            temp_history.append({"role": "assistant", "content": natural_text})
+                            final_response_buffer = ""
+                    else:
+                        # 解析失败，注入纠正提示让 LLM 重新用 function calling
+                        logger.warning(
+                            f"[{chat_id}] 检测到工具调用泄漏但无法解析。注入纠正提示。"
+                        )
+                        # 清理泄漏的文本
+                        final_response_buffer = _clean_tool_call_leaks(final_response_buffer)
+                        temp_history.append({
+                            "role": "user",
+                            "content": (
+                                "【系统纠正】你刚才把工具调用以文本形式输出了，这是错误的！"
+                                "用户看到了原始的调用代码。请使用 function calling 机制来真正调用工具，"
+                                "不要在文本回复中写出 edit_file(...)、write_file(...) 等调用语法。"
+                                "现在请重新执行你想做的操作——通过 function calling 真正调用工具。"
+                            )
+                        })
+                        continue  # 让 LLM 重新生成
                 
                 # If tool call detected
                 if tool_call:
@@ -811,15 +966,23 @@ class NoraController:
                     if tool_name in _user_facing_tools and not _is_error:
                         latest_meaningful_output = truncated_result
                     
-                    # Append history for tools
-                    if current_turn == 1 and full_user_prompt not in [h['content'] for h in temp_history]:
+                    # Append history for tools — 使用结构化格式让 provider 正确转换
+                    if current_turn == 1 and full_user_prompt not in [h.get('content', '') for h in temp_history]:
                         temp_history.append({"role": "user", "content": full_user_prompt})
                     
-                    # Store tool invocation in history, but do NOT leak placeholder text to the session history content
-                    # If there's real text in response_text_buffer, we keep it; otherwise, we use a internal label
-                    # assistant_msg = response_text_buffer if response_text_buffer else f"（正在调用工具: {tool_name}）"
-                    # temp_history.append({"role": "assistant", "content": assistant_msg})
-                    temp_history.append({"role": "user", "content": f"【Tool Output for {tool_name}】\n{truncated_result}"})
+                    # 记录 tool_call（模型发出的调用请求）
+                    temp_history.append({
+                        "role": "tool_call",
+                        "tool_name": tool_name,
+                        "tool_args": tool_args,
+                        "content": f"Calling {tool_name}",
+                    })
+                    # 记录 tool_response（工具执行结果）
+                    temp_history.append({
+                        "role": "tool_response",
+                        "tool_name": tool_name,
+                        "content": truncated_result,
+                    })
                     
                     # CRITICAL: Sync current progress back to the main session immediately to prevent state loss on preemption
                     session["history"] = list(temp_history)

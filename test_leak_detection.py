@@ -8,7 +8,11 @@ _TOOL_LEAK_PATTERNS = [
     re.compile(_TOOL_NAMES + r"""\s*\(""", re.IGNORECASE),
     re.compile(r'</?(?:execute_skill|execute_tool|tool_call|function_call)\b', re.IGNORECASE),
     re.compile(r"""execute_tool\s*\(\s*['"]""", re.IGNORECASE),
-    re.compile(r"""['"](?:old_code|new_code|file_path|args_json)['"]\s*:\s*['"]""", re.IGNORECASE),
+    re.compile(r"""['"](?:old_code|new_code|file_path|args_json)['"]\s*[:=]""", re.IGNORECASE),
+    # Python 关键字参数格式: old_code="""...""" 或 new_code="..."
+    re.compile(r"""(?:old_code|new_code|file_path)\s*=\s*(?:['"]{1,3})""", re.IGNORECASE),
+    # 代码块中包含工具调用
+    re.compile(r'```\s*(?:python)?\s*\n\s*' + _TOOL_NAMES, re.IGNORECASE),
 ]
 
 
@@ -41,6 +45,10 @@ test_cases = [
     ('write_file("SOUL.md", "content here")', True),
     ('read_file("config.py")', True),
     ('execute_tool(\'edit_file\', {\'path\': \'SOUL.md\', \'old_code\': \'1. **可靠\', \'new_code\': \'1. **可靠与依赖\'})', True),
+    # P1 截图中的实际泄漏模式: new_code="""..."""
+    ('edit_file(\n    path="USER.md",\n    new_code="""- 期望 Nora 能够体贴、可靠，成为主人的依赖。\n- 喜欢Nora语气轻柔、温暖、治愈。"""\n)', True),
+    # 代码块中的工具调用
+    ('```python\nedit_file(\n  path="SOUL.md",\n  old_code="x"\n)\n```', True),
     
     # Should NOT be detected as leaks (normal text)
     ('你好主人，我来帮你处理~', False),

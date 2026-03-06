@@ -69,12 +69,67 @@ class GeminiProvider(BaseLLM):
             safety_settings=safety_settings
         )
 
-    async def chat(self, system_prompt: str, user_prompt: str, history: List[Dict[str, str]], tools: Optional[List[Dict]] = None) -> str:
-        # Convert OpenAI-style history to Gemini's format
+    def _convert_history(self, history: List[Dict[str, str]]) -> list:
+        """
+        将 controller 的 temp_history（含 tool_call/tool_response）转换为 Gemini 原生格式。
+        tool_call → model role + function_call part
+        tool_response → user role + function_response part
+        普通消息 → text part
+        """
         gemini_history = []
         for item in history:
-            role = "user" if item["role"] == "user" else "model"
-            gemini_history.append({"role": role, "parts": [{"text": item["content"]}]})
+            role_raw = item.get("role", "user")
+            content = str(item.get("content", ""))
+
+            if role_raw == "tool_call":
+                tool_name = item.get("tool_name", "unknown")
+                tool_args = item.get("tool_args", {})
+                try:
+                    gemini_history.append({
+                        "role": "model",
+                        "parts": [genai.protos.Part(
+                            function_call=genai.protos.FunctionCall(
+                                name=tool_name,
+                                args=tool_args
+                            )
+                        )]
+                    })
+                except Exception:
+                    # Fallback: 如果 protos 不可用，用文本格式
+                    gemini_history.append({
+                        "role": "model",
+                        "parts": [{"text": f"[Calling tool: {tool_name}]"}]
+                    })
+                continue
+            elif role_raw == "tool_response":
+                tool_name = item.get("tool_name", "unknown")
+                try:
+                    gemini_history.append({
+                        "role": "user",
+                        "parts": [genai.protos.Part(
+                            function_response=genai.protos.FunctionResponse(
+                                name=tool_name,
+                                response={"result": content}
+                            )
+                        )]
+                    })
+                except Exception:
+                    # Fallback
+                    gemini_history.append({
+                        "role": "user",
+                        "parts": [{"text": f"[Tool result for {tool_name}]\n{content}"}]
+                    })
+                continue
+
+            # 普通文本消息
+            role = "user" if role_raw == "user" else "model"
+            gemini_history.append({"role": role, "parts": [{"text": content}]})
+        
+        return gemini_history
+
+    async def chat(self, system_prompt: str, user_prompt: str, history: List[Dict[str, str]], tools: Optional[List[Dict]] = None) -> str:
+        # Convert history to Gemini's format, handling tool_call/tool_response
+        gemini_history = self._convert_history(history)
         
         try:
             # Re-initialize model with tools if provided (Gemini defines tools at model level or chat level)
@@ -152,12 +207,7 @@ class GeminiProvider(BaseLLM):
             return f"抱歉，处理您的请求时遇到了问题：{error_msg}"
 
     async def chat_stream(self, system_prompt: str, user_prompt: str, history: List[Dict[str, str]], tools: Optional[List[Dict]] = None):
-        gemini_history = []
-        for item in history:
-            role = "user" if item["role"] == "user" else "model"
-            # Gemini history must be text-only for now, or adapt tool_response
-            # For simplicity, we assume history is text. If we had tool outputs, we'd need more logic.
-            gemini_history.append({"role": role, "parts": [{"text": str(item["content"])}]})
+        gemini_history = self._convert_history(history)
 
         # 配置安全设置
         from google.generativeai.types import HarmCategory, HarmBlockThreshold

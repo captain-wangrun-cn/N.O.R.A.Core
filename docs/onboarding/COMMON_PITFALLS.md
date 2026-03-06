@@ -97,16 +97,26 @@
 ## 8. 工具调用泄漏 (Tool Call Text Leak)
 
 ### ❌ LLM 以文本形式输出工具调用，而非真正使用 function calling
-- **现象：** AI 在回复中写出 `execute_tool('edit_file', {...})`、`<execute_skill>...</execute_skill>` 等文本，而不是真正调用工具。用户看到了原始的工具调用代码。
+- **现象：** AI 在回复中写出 `execute_tool('edit_file', {...})`、`<execute_skill>...</execute_skill>` 等文本，或带 `new_code="""..."""` 的 Python 代码块，而不是真正调用工具。用户看到了原始的工具调用代码。
 - **原因：**
   1. LLM 从 system prompt 中的示例和工具描述中"学到"了调用语法，然后以文本形式模仿输出。
-  2. 某些模型（特别是 context 较长或多轮对话后）可能退化为文本模式。
-  3. System prompt 中工具调用的示例写法可能误导模型。
-- **防护层（已实现）：**
-  1. **Prompt 层：** `system.jinja` 中有"工具调用方式 — 严格规范"条目，明确禁止文本形式的工具调用。
-  2. **[SPLIT] 过滤层：** `controller.py` 中 `_is_tool_call_leak()` 函数在实时分段发送时拦截泄漏文本。
-  3. **最终输出过滤层：** `controller.py` 中 `_clean_tool_call_leaks()` 函数在最终发送前清理泄漏。
+  2. **Gemini history 格式不正确**：工具调用/结果以纯文本格式追加到 history，导致 Gemini 在后续轮次中也以文本形式输出工具调用，而非触发 function calling。
+  3. 某些模型（特别是 context 较长或多轮对话后）可能退化为文本模式。
+  4. System prompt 中工具调用的示例写法可能误导模型。
+- **防护层（已实现，四层防护）：**
+  1. **Prompt 层：** `system.jinja` 中有"工具调用方式 — 严格规范"条目，明确禁止文本形式的工具调用。已清理所有可被模仿的调用语法示例。
+  2. **History 格式层：** `controller.py` 中将工具调用以 `tool_call` / `tool_response` 结构化格式写入 history，provider 会将其转换为原生格式（Gemini: `function_call`/`function_response` parts；OpenAI: assistant/user messages）。
+  3. **泄漏拦截 + 自动执行层：** `controller.py` 中 `_try_parse_leaked_tool_call()` 在检测到泄漏时，尝试解析并真正执行工具调用；解析失败则注入纠正提示让 LLM 重新生成。
+  4. **最终输出过滤层：** `_is_tool_call_leak()` 和 `_clean_tool_call_leaks()` 在 [SPLIT] 实时分段和最终发送前清理泄漏文本。
 - **如果仍然出现：**
-  1. 检查 `system.jinja` 中的工具调用示例是否过多或过于具体——减少纯文本形式的调用示例。
+  1. 检查 `system.jinja` 中是否有新增的工具调用文本示例——绝不要在 prompt 中写出 `tool_name("arg1", "arg2")` 形式的代码。
   2. 检查 `_TOOL_LEAK_PATTERNS` 是否覆盖了新的泄漏模式，按需添加。
-  3. 确认 LLM provider（`brain/providers/gemini.py` 或 `openai.py`）正确传递了 `tools` 参数到 API。
+  3. 确认 LLM provider 正确传递了 `tools` 参数到 API。
+  4. 检查 `_try_parse_leaked_tool_call()` 是否能解析新的泄漏格式。
+
+### ⚠️ 双脑架构中"反复要求修改但没执行"
+- **现象：** 用户反复要求修改文件，但后台显示没有执行工具。
+- **原因：**
+  1. 当工具泄漏（P1 问题）发生时，后端 `_generate_response` 认为已"完成"（因为没有真正的 tool_call），文件从未被修改。
+  2. 用户连续发消息时，可能命中双脑架构的"忙碌"路径，消息被 fast_llm 处理为 queue/queue/queue，没有触发新的完整生成流程。
+- **修复：** 解决 P1（泄漏 → 自动执行）后，此问题自动消失。
