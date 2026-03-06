@@ -31,10 +31,12 @@ roles:
   smart: "primary chat model (daily conversation + complex reasoning)"
   fast: "quick-response model (busy-time interrupt intent + instant replies)"
   coder: "coder (for code generation)"
+  image: "image model (for image input understanding)"
   summary: "summary (for message history compression)"
 
 roles_usage:
   smart: "default main conversation, complex reasoning, tool planning, and multi-step decisions"
   fast: "used only when backend is busy for interrupt intent detection and quick replies"
   coder: "code generation, refactoring, fixes, and implementation"
+  image: "used when message includes image input for visual understanding"
   summary: "message history compression, archival summaries, and context condensation"

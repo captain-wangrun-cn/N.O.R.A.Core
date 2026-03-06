@@ -34,6 +34,7 @@ llm:
     smart: "gemini-1.5-pro-latest"
     fast: "gemini-1.5-flash-latest"
     coder: "gemini-1.5-pro-latest"
+    image: "gemini-1.5-pro-latest" # 用于图片输入理解的模型
     summary: "gemini-1.5-flash-latest" # 用于消息历史总结的模型
 
 memory:

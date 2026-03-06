@@ -1,3 +1,6 @@
+import re
+
+
 def parse_route_decision_response(response_text: str) -> str:
     """
     解析路由模型输出。
@@ -23,3 +26,22 @@ def parse_route_decision_response(response_text: str) -> str:
     if "backend" in text:
         return "backend"
     return "front"
+
+
+def has_image_input(text: str) -> bool:
+    """
+    判断消息中是否包含图片输入痕迹。
+    兼容 Telegram 适配器写入的格式（如 [图片: path]）及常见图片扩展名链接/路径。
+    """
+    if not text:
+        return False
+
+    s = text.lower()
+
+    # 结构化标记（适配器常见格式）
+    if "[图片:" in s or "[image:" in s:
+        return True
+
+    # 常见图片 URL/路径扩展名
+    image_ext_pattern = r"\.(?:png|jpe?g|webp|bmp|gif)(?:[?#][^\s\]]*)?"
+    return re.search(image_ext_pattern, s, re.IGNORECASE) is not None

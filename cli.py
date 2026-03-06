@@ -641,6 +641,7 @@ class StepModels(ConfigStep):
         models['smart'] = self.select_model(model_list, 'smart', provider)
         models['fast'] = self.select_model(model_list, 'fast', provider)
         models['coder'] = self.select_model(model_list, 'coder', provider)
+        models['image'] = self.select_model(model_list, 'image', provider)  # 图片输入专用模型
         models['summary'] = self.select_model(model_list, 'summary', provider)  # 添加总结模型
         self.state['models'] = models
 

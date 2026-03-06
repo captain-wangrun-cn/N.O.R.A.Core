@@ -15,7 +15,7 @@ from skills.loader import SkillLoader
 from core.cost_tracker import get_cost_tracker
 import config
 import json
-from core.routing import parse_route_decision_response
+from core.routing import parse_route_decision_response, has_image_input
 
 logger = logging.getLogger(__name__)
 
@@ -334,6 +334,14 @@ class NoraController:
             self.fast_llm = get_llm_client(model_alias="fast")
         except Exception:
             self.fast_llm = self.llm  # fallback 到主模型
+
+        # 图片专用模型（可选）
+        self.image_llm = None
+        try:
+            if config.get_model_name("image"):
+                self.image_llm = get_llm_client(model_alias="image")
+        except Exception:
+            self.image_llm = None
         
         # 消息历史管理
         history_cfg = config.get_message_history_config()
@@ -360,6 +368,19 @@ class NoraController:
             logger.info("成本跟踪已禁用")
         
         logger.info(f"NoraController 已初始化。RAG: {'Online' if self.rag.enabled else 'Offline'}, MessageHistory: Online")
+
+    def _select_generation_llm(self, text: str, default_alias: str = "smart"):
+        """
+        根据输入内容选择生成模型。
+        - 检测到图片输入且 image 模型可用：返回 image
+        - 否则返回 default_alias 对应模型（通常 smart/fast）
+        """
+        if has_image_input(text) and self.image_llm is not None:
+            return self.image_llm, "image"
+
+        if default_alias == "fast":
+            return self.fast_llm, "fast"
+        return self.llm, default_alias
 
     async def _detect_route_to_backend(self, chat_id: str, text: str) -> bool:
         """使用 fast_llm 判断该消息应走前脑还是后脑。"""
@@ -661,6 +682,8 @@ class NoraController:
         status.start(query=text, max_turns=1)
         status.update("前脑回复", "正在组织自然对话回复...", backend_busy=False)
 
+        generation_llm, generation_alias = self._select_generation_llm(text, default_alias="fast")
+
         final_response_buffer = ""
         try:
             if self.tui_callback:
@@ -689,7 +712,7 @@ class NoraController:
             ])
 
             usage_data = None
-            stream = self.fast_llm.chat_stream(
+            stream = generation_llm.chat_stream(
                 system_prompt=system_prompt,
                 user_prompt=text,
                 history=temp_history,
@@ -711,13 +734,13 @@ class NoraController:
 
             if self.cost_tracking_enabled and self.cost_tracker and usage_data:
                 provider = config.get_llm_provider()
-                model = config.get_model_name("fast")
+                model = config.get_model_name(generation_alias) or config.get_model_name("fast")
                 self.cost_tracker.log_usage(
                     provider=provider,
                     model=model,
                     input_tokens=usage_data["input_tokens"],
                     output_tokens=usage_data["output_tokens"],
-                    model_alias="fast",
+                    model_alias=generation_alias,
                     context="front_chat"
                 )
 
@@ -775,6 +798,7 @@ class NoraController:
         MAX_TURNS = 30
         status = self.worker_status.setdefault(chat_id, WorkerStatus())
         status.start(query=text, max_turns=MAX_TURNS)
+        generation_llm, generation_alias = self._select_generation_llm(text, default_alias="smart")
         
         try:
             if self.tui_callback: self.tui_callback(f"🏃 Handling new message...")
@@ -888,7 +912,7 @@ class NoraController:
                 _tools_for_turn = [] if force_no_tools else self.tool_manager.get_tool_schemas()
                 logger.debug(f"[{chat_id}] Passing {len(_tools_for_turn)} tool schemas to LLM")
                 
-                stream = self.llm.chat_stream(
+                stream = generation_llm.chat_stream(
                     system_prompt=system_prompt,
                     user_prompt=full_user_prompt if current_turn == 1 else " (Continue processing tool outputs...)",
                     history=temp_history,
@@ -955,13 +979,13 @@ class NoraController:
                 # 记录成本（如果启用）
                 if self.cost_tracking_enabled and self.cost_tracker and usage_data:
                     provider = config.get_llm_provider()
-                    model = config.get_model_name("smart")  # 默认使用 smart 模型
+                    model = config.get_model_name(generation_alias) or config.get_model_name("smart")
                     self.cost_tracker.log_usage(
                         provider=provider,
                         model=model,
                         input_tokens=usage_data["input_tokens"],
                         output_tokens=usage_data["output_tokens"],
-                        model_alias="smart",
+                        model_alias=generation_alias,
                         context="chat"
                     )
                 
@@ -1241,7 +1265,7 @@ class NoraController:
                     "role": "user",
                     "content": "【系统提示】工具调用轮次已达上限，请立即基于已有的工具结果，给用户一个简洁的最终回复。"
                 })
-                stream = self.llm.chat_stream(
+                stream = generation_llm.chat_stream(
                     system_prompt=system_prompt,
                     user_prompt="请总结以上工具操作的结果，给出最终回答。",
                     history=temp_history,
@@ -1272,7 +1296,7 @@ class NoraController:
                     "role": "user",
                     "content": "【系统提示】工具已执行完毕，请根据以上工具输出，用自然语言总结执行结果。不要直接输出原始命令行内容。"
                 })
-                stream = self.llm.chat_stream(
+                stream = generation_llm.chat_stream(
                     system_prompt=system_prompt,
                     user_prompt="请总结以上操作的执行结果。",
                     history=temp_history,
@@ -1297,7 +1321,7 @@ class NoraController:
                     "role": "user",
                     "content": f"【系统提示】工具输出如下，请用自然语言简要告诉用户结果：\n{latest_tool_output[:1000]}"
                 })
-                stream = self.llm.chat_stream(
+                stream = generation_llm.chat_stream(
                     system_prompt=system_prompt,
                     user_prompt="请简要总结操作结果。",
                     history=temp_history,
