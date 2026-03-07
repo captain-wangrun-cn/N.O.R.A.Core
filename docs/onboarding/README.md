@@ -102,7 +102,6 @@ python view_costs.py --today
 - [ ] 了解 `brain/templates/system.jinja` 中的行为约定
 - [ ] 确认 `config.yml` 存在且配置正确
 - [ ] 确认 `workspace/data/memory/message_history.db` 是否存在（有则说明有历史数据）
-- [ ] 确认 `workspace/SOUL.md`、`workspace/USER.md`、`workspace/data/memory/MEMORY.md` 已就绪（首次会自动复制默认模板）
 - [ ] 运行 `pytest` 确认测试状态
 - [ ] 查看 `git log --oneline -10` 了解最近改动
 

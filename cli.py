@@ -9,7 +9,6 @@ import logging
 import sys
 import sqlite3
 from pathlib import Path
-import shutil
 
 # Suppress warnings
 warnings.filterwarnings("ignore", category=FutureWarning, module="google.generativeai")
@@ -21,7 +20,6 @@ from core.cost_tracker import CostTracker
 from typing import Dict, Any, List, Tuple, Optional
 
 from memory.message_history import MessageHistory, get_default_message_history_db
-from workspace_config import get_workspace_manager
 
 # Configure logger for CLI operations
 logging.basicConfig(level=logging.INFO, format='%(levelname)s: %(message)s')
@@ -384,25 +382,6 @@ class StepEmbedding(ConfigStep):
         mem_cfg = self.state.get('memory', {})
         embed_cfg = mem_cfg.get('embedding', {})
 
-        def _suggest_dimensions(selected_provider: str, selected_model: str, current_dim: int) -> int:
-            """根据 provider/model 给出维度建议值（不强制）。"""
-            model_lower = (selected_model or "").lower()
-            provider_lower = (selected_provider or "").lower()
-
-            # 常见模型经验值
-            if "bge-m3" in model_lower:
-                return 1024
-            if "text-embedding-3-large" in model_lower:
-                return 3072
-            if "text-embedding-3-small" in model_lower:
-                return 1536
-
-            # provider 兜底
-            if provider_lower == "openai":
-                return 1536
-
-            return current_dim
-
         # Provider Selection
         prov_def = embed_cfg.get('provider', 'siliconflow')
         choices = ["siliconflow", "openai", "openrouter", "custom"]
@@ -439,18 +418,6 @@ class StepEmbedding(ConfigStep):
         model = questionary.text(t('wizard.embed_model_prompt'), default=model_def).ask()
         if model is None: return False
 
-        # Dimensions（允许自定义）
-        dim_def = int(embed_cfg.get('dimensions', 1536) or 1536)
-        dim_suggested = _suggest_dimensions(provider, model, dim_def)
-        dim_text = questionary.text(
-            t('wizard.embed_dimensions_prompt'),
-            default=str(dim_suggested),
-            validate=lambda x: (x.isdigit() and int(x) > 0) or t('wizard.invalid_positive_integer')
-        ).ask()
-        if dim_text is None:
-            return False
-        dimensions = int(dim_text)
-
         # Save
         if 'memory' not in self.state: self.state['memory'] = {}
         self.state['memory']['embedding'] = {
@@ -458,7 +425,7 @@ class StepEmbedding(ConfigStep):
             'base_url': base_url,
             'api_key': api_key,
             'model': model,
-            'dimensions': dimensions
+            'dimensions': 1536 # default for text-embedding-3-small
         }
         return True
 
@@ -584,7 +551,6 @@ class StepModels(ConfigStep):
             return None
     def select_model(self, model_list, role_key, provider):
         role_name = t(f'roles.{role_key}')
-        role_usage = t(f'roles_usage.{role_key}')
         current_models = self.state.get('models', {})
         default_model = current_models.get(role_key) # Get existing value
         
@@ -605,17 +571,8 @@ class StepModels(ConfigStep):
         if default_model and default_model in model_list:
             kwargs['default'] = default_model
 
-        # 在选择前明确提示该角色模型的用途，降低误选概率
-        purpose_hint = t('wizard.model_role_usage_hint', role=role_name, usage=role_usage)
-        if purpose_hint != 'wizard.model_role_usage_hint':
-            questionary.print(purpose_hint, style="bold cyan")
-
-        model_prompt = t('wizard.model_select_prompt_with_usage', role=role_name, usage=role_usage)
-        if model_prompt == 'wizard.model_select_prompt_with_usage':
-            model_prompt = t('wizard.model_select_prompt', role=role_name)
-
         selection = questionary.select(
-            model_prompt,
+            t('wizard.model_select_prompt', role=role_name),
             choices=choices_with_prices,
             **kwargs
         ).ask()
@@ -641,7 +598,6 @@ class StepModels(ConfigStep):
         models['smart'] = self.select_model(model_list, 'smart', provider)
         models['fast'] = self.select_model(model_list, 'fast', provider)
         models['coder'] = self.select_model(model_list, 'coder', provider)
-        models['image'] = self.select_model(model_list, 'image', provider)  # 图片输入专用模型
         models['summary'] = self.select_model(model_list, 'summary', provider)  # 添加总结模型
         self.state['models'] = models
 
@@ -1091,45 +1047,6 @@ def show_status():
     logger.info("📊 N.O.R.A. Core 运行状态")
     logger.info("="*50)
 
-
-def reset_identity_files(force: bool = False):
-    """
-    调试功能：重置身份相关文件（SOUL/USER/MEMORY）。
-    将仓库根目录的默认文件覆盖到 workspace 对应位置。
-    """
-    project_root = Path(__file__).resolve().parent
-    workspace = get_workspace_manager()
-
-    targets = [
-        (project_root / "SOUL.md", Path(workspace.root) / "SOUL.md"),
-        (project_root / "USER.md", Path(workspace.root) / "USER.md"),
-        (project_root / "MEMORY.md", Path(workspace.data_dir) / "memory" / "MEMORY.md"),
-    ]
-
-    if not force:
-        ok = questionary.confirm(
-            "⚠️ 这会用仓库默认内容覆盖 workspace 中的 SOUL/USER/MEMORY，是否继续？",
-            default=False
-        ).ask()
-        if not ok:
-            logger.info("已取消重置。")
-            return
-
-    reset_count = 0
-    for src, dst in targets:
-        if not src.exists():
-            logger.warning("⚠️ 源文件不存在，跳过: %s", src)
-            continue
-        try:
-            dst.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copyfile(str(src), str(dst))
-            logger.info("✅ 已重置: %s", dst)
-            reset_count += 1
-        except Exception as e:
-            logger.error("❌ 重置失败: %s -> %s (%s)", src, dst, e)
-
-    logger.info("🎯 身份文件重置完成，共处理 %d 个文件。", reset_count)
-
     # 1. 配置文件检查
     try:
         import config
@@ -1193,7 +1110,6 @@ def main_menu():
         "🧪 测试 RAG 系统",
         "💬 聊天记录管理",
         "🧹 清理 RAG 数据",
-        "🛠️ 调试: 重置身份文件(SOUL/USER/MEMORY)",
         "❌ 退出"
     ]
     
@@ -1223,8 +1139,6 @@ def main_menu():
             history_menu()
         elif choice == "🧹 清理 RAG 数据":
             clean_rag()
-        elif choice == "🛠️ 调试: 重置身份文件(SOUL/USER/MEMORY)":
-            reset_identity_files(force=False)
 
 
 # --- CLI 入口 ---
@@ -1256,17 +1170,6 @@ def main():
     clear_parser.add_argument("--platform", type=str, default="telegram", help="平台名称")
     clear_parser.add_argument("--include-pinned", action="store_true", help="同时清理已标记的消息")
 
-    # 'reset-identity' 命令
-    reset_identity_parser = subparsers.add_parser(
-        "reset-identity",
-        help="调试功能：重置 workspace 的 SOUL/USER/MEMORY 文件"
-    )
-    reset_identity_parser.add_argument(
-        "--yes",
-        action="store_true",
-        help="跳过确认，直接执行覆盖"
-    )
-
     args = parser.parse_args()
 
     if args.command == "wizard":
@@ -1289,8 +1192,6 @@ def main():
                 print("请指定 --all 或 --chat-id")
         else:
             history_menu()
-    elif args.command == "reset-identity":
-        reset_identity_files(force=bool(args.yes))
     else:
         main_menu()
 

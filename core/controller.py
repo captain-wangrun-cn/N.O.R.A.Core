@@ -15,230 +15,8 @@ from skills.loader import SkillLoader
 from core.cost_tracker import get_cost_tracker
 import config
 import json
-from core.routing import has_image_input, parse_front_brain_response
 
 logger = logging.getLogger(__name__)
-
-# --- Tool Call Leak Detection & Cleaning ---
-# 工具名列表，用于检测 LLM 以文本形式"假装"调用工具的泄漏
-_TOOL_NAMES = r'(?:execute_skill|execute_tool_plan|execute_tool|write_file|read_file|edit_file|exec_command|list_dir|create_new_skill|search|get_available_skills|delegate_to_coder)'
-
-# 组合正则：匹配各种泄漏格式
-_TOOL_LEAK_PATTERNS = [
-    # 1. 函数调用格式: tool_name(...) 或 tool_name('...', {...})
-    re.compile(_TOOL_NAMES + r"""\s*\(""", re.IGNORECASE),
-    # 2. XML 标签格式: <execute_skill>...</execute_skill> 或 <execute_tool>
-    re.compile(r'</?(?:execute_skill|execute_tool|tool_call|function_call)\b', re.IGNORECASE),
-    # 3. execute_tool('tool_name', {...}) 格式
-    re.compile(r"""execute_tool\s*\(\s*['"]""", re.IGNORECASE),
-    # 4. JSON-like 工具调用块: {"name": "edit_file", "args": ...} 或 {"file_path": ..., "old_code": ..., "new_code": ...}
-    re.compile(r"""['"](?:old_code|new_code|file_path|args_json)['"]\s*[:=]""", re.IGNORECASE),
-    # 5. Python 关键字参数格式: old_code="""...""" 或 new_code="..." (截图中出现的模式)
-    re.compile(r"""(?:old_code|new_code|file_path)\s*=\s*(?:['"]{1,3})""", re.IGNORECASE),
-    # 6. 代码块中包含工具调用（如 ```python\n edit_file(...)）
-    re.compile(r'```\s*(?:python)?\s*\n\s*' + _TOOL_NAMES, re.IGNORECASE),
-]
-
-
-def _is_tool_call_leak(text: str) -> bool:
-    """检测文本是否包含工具调用泄漏（LLM 以文本输出工具调用而非真正使用 function calling）。"""
-    for pattern in _TOOL_LEAK_PATTERNS:
-        if pattern.search(text):
-            return True
-    return False
-
-
-def _try_parse_leaked_tool_call(text: str) -> Optional[Dict[str, Any]]:
-    """
-    尝试从泄漏的文本中解析出工具调用的名称和参数。
-    如果解析成功，返回 {"name": str, "args": dict}；否则返回 None。
-    
-    支持的格式：
-    1. tool_name(path="...", old_code="...", new_code="...")
-    2. tool_name("path", "content")
-    3. execute_tool('tool_name', {...})
-    4. tool_name(path, content) — 位置参数
-    5. 三引号形式: new_code='''...''' 或 new_code=\"\"\"...\"\"\"
-    """
-    
-    def _extract_string_arg(text: str, arg_name: str) -> Optional[str]:
-        """提取命名参数值，支持单引号、双引号和三引号。"""
-        # 三引号优先（最贪婪）
-        for quote in ['"""', "'''"]:
-            pattern = re.escape(arg_name) + r'\s*=\s*' + re.escape(quote) + r'([\s\S]*?)' + re.escape(quote)
-            m = re.search(pattern, text)
-            if m:
-                return m.group(1)
-        # 单引号/双引号
-        for quote in ['"', "'"]:
-            pattern = re.escape(arg_name) + r'\s*=\s*' + re.escape(quote) + r'((?:[^' + quote + r'\\]|\\.)*)' + re.escape(quote)
-            m = re.search(pattern, text, re.DOTALL)
-            if m:
-                return m.group(1)
-        return None
-    
-    # Pattern 1: edit_file(path="...", old_code="...", new_code="...")
-    match = re.search(
-        r'(edit_file|write_file|read_file)\s*\(',
-        text, re.IGNORECASE
-    )
-    if match:
-        tool_name = match.group(1).lower()
-        call_text = text[match.start():]  # 从工具名开始的子串
-        
-        # 提取 path 参数
-        file_path = _extract_string_arg(call_text, "path")
-        if not file_path:
-            # 尝试位置参数: tool_name("path", ...)
-            pos_match = re.search(r'\(\s*["\']([^"\']+)["\']', call_text)
-            if pos_match:
-                file_path = pos_match.group(1)
-        
-        if file_path and tool_name == "edit_file":
-            old_code = _extract_string_arg(call_text, "old_code")
-            new_code = _extract_string_arg(call_text, "new_code")
-            if old_code is not None and new_code is not None:
-                return {
-                    "name": "edit_file",
-                    "args": {
-                        "path": file_path,
-                        "old_code": old_code,
-                        "new_code": new_code,
-                    }
-                }
-        elif file_path and tool_name == "write_file":
-            content = _extract_string_arg(call_text, "content")
-            if not content:
-                # 位置参数形式: write_file("path", "content")  或三引号
-                # 尝试匹配第二个参数
-                after_path = call_text[call_text.find(file_path) + len(file_path):]
-                for quote in ['"""', "'''", '"', "'"]:
-                    esc = re.escape(quote)
-                    if quote in ['"""', "'''"]:
-                        m = re.search(esc + r'([\s\S]*?)' + esc, after_path)
-                    else:
-                        m = re.search(esc + r'((?:[^' + quote + r'\\]|\\.)*)' + esc, after_path, re.DOTALL)
-                    if m:
-                        content = m.group(1)
-                        break
-            if content is not None:
-                return {
-                    "name": "write_file",
-                    "args": {"path": file_path, "content": content}
-                }
-    
-    # Pattern 2: execute_tool('tool_name', {...})
-    match = re.search(
-        r"execute_tool\s*\(\s*['\"](\w+)['\"]\s*,\s*(\{[\s\S]*?\})\s*\)",
-        text, re.IGNORECASE
-    )
-    if match:
-        tool_name = match.group(1)
-        try:
-            args = json.loads(match.group(2))
-            return {"name": tool_name, "args": args}
-        except json.JSONDecodeError:
-            pass
-    
-    # Pattern 3: execute_skill("skill_name", '{"key": "value"}')
-    match = re.search(
-        r'execute_skill\s*\(\s*["\'](\w+)["\']\s*,\s*["\'](\{.+?\})["\']',
-        text, re.IGNORECASE | re.DOTALL
-    )
-    if match:
-        skill_name = match.group(1)
-        try:
-            args = json.loads(match.group(2))
-            return {"name": "execute_skill", "args": {"skill_name": skill_name, "args_json": json.dumps(args)}}
-        except json.JSONDecodeError:
-            pass
-    
-    return None
-
-
-def _clean_tool_call_leaks(text: str) -> str:
-    """
-    从最终响应中清除工具调用泄漏文本，返回清理后的自然语言部分。
-    如果整段文本都是泄漏，返回空字符串。
-    """
-    cleaned = text
-
-    # 1. 移除 XML 标签块: <execute_skill>...</execute_skill> 等
-    cleaned = re.sub(
-        r'<execute_skill>[\s\S]*?</execute_skill>',
-        '', cleaned, flags=re.IGNORECASE
-    )
-    cleaned = re.sub(
-        r'<execute_tool>[\s\S]*?</execute_tool>',
-        '', cleaned, flags=re.IGNORECASE
-    )
-    cleaned = re.sub(
-        r'</?(?:execute_skill|execute_tool|tool_call|function_call)\b[^>]*>',
-        '', cleaned, flags=re.IGNORECASE
-    )
-
-    # 2. 移除函数调用格式: execute_tool('edit_file', {...}) 等（可能跨多行）
-    cleaned = re.sub(
-        r"""execute_tool\s*\(\s*['"][^'"]*['"]\s*,\s*\{[^}]*\}\s*\)""",
-        '', cleaned, flags=re.IGNORECASE | re.DOTALL
-    )
-
-    # 3. 移除 tool_name({...}) 格式的泄漏（跨多行）
-    cleaned = re.sub(
-        _TOOL_NAMES + r"""\s*\([\s\S]*?\)""",
-        '', cleaned, flags=re.IGNORECASE
-    )
-
-    # 4. 移除 "返回结果:" + 代码块
-    cleaned = re.sub(
-        r'返回结果[：:]\s*```[\s\S]*?```', '', cleaned
-    )
-
-    # 5. 移除包含 old_code/new_code 等参数的 JSON 块
-    cleaned = re.sub(
-        r"""\{\s*['"](?:file_path|old_code|new_code|path|args_json)['"][\s\S]*?\}""",
-        '', cleaned, flags=re.IGNORECASE
-    )
-
-    # 6. 移除 Python 关键字参数格式: old_code="""...""", new_code="..."
-    cleaned = re.sub(
-        r"""(?:old_code|new_code|file_path)\s*=\s*(?:'{3}[\s\S]*?'{3}|"{3}[\s\S]*?"{3}|"[^"]*"|'[^']*')""",
-        '', cleaned, flags=re.IGNORECASE
-    )
-
-    # 7. 移除代码块中的工具调用
-    cleaned = re.sub(
-        r'```\s*(?:python)?\s*\n[\s\S]*?```',
-        '', cleaned, flags=re.IGNORECASE
-    )
-
-    # 清理多余空行
-    cleaned = re.sub(r'\n{3,}', '\n\n', cleaned).strip()
-
-    return cleaned
-
-
-# --- Tool Usage Nudge Detection ---
-
-def _should_nudge_tool_use(user_text: str, response_text: str) -> tuple:
-    """
-    极简检测：LLM 是否应该用工具却只给了文本回复。
-    
-    唯一判据：回复中包含 ``` 代码块。
-    当 LLM 拥有 function calling 能力时，如果它在回复中贴出代码块
-    （命令/脚本/代码片段），几乎一定意味着它在"建议用户自己跑"
-    而非通过工具直接执行。
-    
-    返回 (should_nudge: bool, reason: str)
-    """
-    if not response_text or len(response_text.strip()) < 50:
-        return False, ""
-    
-    # 唯一信号：回复中出现代码块
-    if '```' in response_text:
-        return True, "response contains code block without tool call"
-    
-    return False, ""
 
 
 class WorkerStatus:
@@ -253,27 +31,20 @@ class WorkerStatus:
         self.max_turns: int = 0
         self.started_at: float = 0.0
         self.original_query: str = ""  # 用户最初问的问题
-        self.mode: str = "idle"  # idle | front_chat | backend_task
 
     def start(self, query: str, max_turns: int = 30):
-        # 默认进入前脑对话流程，不占用“后端忙碌”状态
-        # 仅在真正执行后端任务（工具/技能等）时再切到 busy=True
-        self.busy = False
-        self.mode = "front_chat"
-        self.phase = "前脑回复"
-        self.detail = "正在组织自然对话回复..."
+        self.busy = True
+        self.phase = "初始化"
+        self.detail = "正在准备处理请求..."
         self.tool_history = []
         self.current_turn = 0
         self.max_turns = max_turns
         self.started_at = time.time()
         self.original_query = query
 
-    def update(self, phase: str, detail: str = "", *, backend_busy: Optional[bool] = None):
+    def update(self, phase: str, detail: str = ""):
         self.phase = phase
         self.detail = detail
-        if backend_busy is not None:
-            self.busy = backend_busy
-            self.mode = "backend_task" if backend_busy else "front_chat"
 
     def log_tool(self, tool_name: str, tool_args: Any):
         """记录一次工具调用的简略描述。"""
@@ -287,7 +58,6 @@ class WorkerStatus:
 
     def finish(self):
         self.busy = False
-        self.mode = "idle"
         self.phase = "完成"
         self.detail = ""
 
@@ -299,7 +69,6 @@ class WorkerStatus:
         lines = [
             f"📌 正在处理: \"{self.original_query[:80]}\"",
             f"⏱ 已用时 {elapsed} 秒 | 阶段: {self.phase}",
-            f"🧠 当前模式: {'后脑任务' if self.busy else '前脑对话'}",
         ]
         if self.detail:
             lines.append(f"🔧 {self.detail}")
@@ -334,14 +103,6 @@ class NoraController:
             self.fast_llm = get_llm_client(model_alias="fast")
         except Exception:
             self.fast_llm = self.llm  # fallback 到主模型
-
-        # 图片专用模型（可选）
-        self.image_llm = None
-        try:
-            if config.get_model_name("image"):
-                self.image_llm = get_llm_client(model_alias="image")
-        except Exception:
-            self.image_llm = None
         
         # 消息历史管理
         history_cfg = config.get_message_history_config()
@@ -356,8 +117,7 @@ class NoraController:
         )
         
         # 成本跟踪
-        global_cfg = config.get_config() or {}
-        cost_cfg = global_cfg.get("cost_tracking", {})
+        cost_cfg = config.get_config().get("cost_tracking", {})
         self.cost_tracking_enabled = cost_cfg.get("enabled", True)
         if self.cost_tracking_enabled:
             custom_prices = cost_cfg.get("custom_prices", {})
@@ -368,26 +128,6 @@ class NoraController:
             logger.info("成本跟踪已禁用")
         
         logger.info(f"NoraController 已初始化。RAG: {'Online' if self.rag.enabled else 'Offline'}, MessageHistory: Online")
-
-    def _select_generation_llm(self, text: str, default_alias: str = "smart"):
-        """
-        根据输入内容选择生成模型。
-        - 检测到图片输入且 image 模型可用：返回 image
-        - 否则返回 default_alias 对应模型（通常 smart/fast）
-        """
-        if has_image_input(text) and self.image_llm is not None:
-            return self.image_llm, "image"
-
-        if default_alias == "fast":
-            return self.fast_llm, "fast"
-        return self.llm, default_alias
-
-    async def _start_routed_task(self, context: Dict[str, Any]):
-        """所有消息先进前脑，由前脑自行判断是否需要后脑。"""
-        chat_id = context["chat_id"]
-        logger.info(f"[{chat_id}] 路由策略: 前脑优先 (front-brain-first)")
-        task = asyncio.create_task(self._generate_front_chat_response(context))
-        self.generation_tasks[chat_id] = task
 
     async def handle_new_message(self, context: Dict[str, Any]):
         """处理来自适配器的新消息/命令。"""
@@ -419,8 +159,8 @@ class NoraController:
         # --- 前后端分离逻辑 ---
         status = self.worker_status.get(chat_id)
         if status and status.busy:
-            # 后脑任务忙碌：用 fast 模型判断用户意图并生成回复
-            logger.info(f"[{chat_id}] 后脑任务忙碌，分析用户意图...")
+            # 后端忙碌：用 fast 模型判断用户意图并生成回复
+            logger.info(f"[{chat_id}] 后端忙碌，分析用户意图...")
             
             # 保存用户消息到数据库（不丢消息）
             storage_id = chat_id if chat_type != "private" else user_id
@@ -467,7 +207,8 @@ class NoraController:
             self.generation_tasks[chat_id].cancel()
             await asyncio.sleep(0.1)
 
-        await self._start_routed_task(context)
+        task = asyncio.create_task(self._generate_response(context))
+        self.generation_tasks[chat_id] = task
 
     async def _detect_interrupt_intent_and_reply(self, chat_id: str, text: str, status: WorkerStatus) -> Dict[str, str]:
         """
@@ -602,7 +343,8 @@ class NoraController:
                     "text": user_text,
                     "chat_type": "private" # Fallback
                 }
-                await self._start_routed_task(context)
+                task = asyncio.create_task(self._generate_response(context))
+                self.generation_tasks[chat_id] = task
         else:
             # 需要生成并发送回复（兼容旧调用方式）
             if reason == "stop":
@@ -626,165 +368,8 @@ class NoraController:
                     "text": user_text,
                     "chat_type": "private" # Fallback
                 }
-                await self._start_routed_task(context)
-
-    async def _generate_front_chat_response(self, context: Dict[str, Any]):
-        """
-        前脑优先路径：
-        1. 先用快速模型生成自然对话回复，同时判断是否需要后脑（工具/技能）
-        2. 若不需要后脑 → 直接发送回复，结束
-        3. 若需要后脑 → 发送前脑回复（如"好的，马上处理~"）后启动后脑任务
-        """
-        chat_id = context["chat_id"]
-        user_id = context["user_id"]
-        text = context["text"]
-        chat_type = context.get("chat_type", "private")
-        user_name = context.get("user_name", "User")
-        storage_id = chat_id if chat_type != "private" else user_id
-
-        session = self.sessions.setdefault(chat_id, {"history": [], "interrupted_thought": "", "pending_text": ""})
-        status = self.worker_status.setdefault(chat_id, WorkerStatus())
-        status.start(query=text, max_turns=1)
-        status.update("前脑回复", "正在组织自然对话回复...", backend_busy=False)
-
-        generation_llm, generation_alias = self._select_generation_llm(text, default_alias="fast")
-
-        final_response_buffer = ""
-        try:
-            if self.tui_callback:
-                self.tui_callback("💬 Front chat reply...")
-
-            # 保存用户消息
-            message_content = f"{user_name}: {text}" if chat_type != "private" else text
-            self.message_history.add_message(
-                platform="telegram",
-                chat_id=storage_id,
-                role="user",
-                content=message_content,
-                user_id=user_id,
-            )
-
-            # 轻量历史上下文
-            db_context = self.message_history.get_context_messages("telegram", storage_id)
-            temp_history = [
-                {"role": msg["role"], "content": msg["content"]}
-                for msg in db_context[-12:]
-                if msg["role"] in ("user", "assistant", "system")
-            ]
-
-            # 前脑 prompt：包含路由判断指令
-            platform = getattr(self.adapter, 'platform_name', None) or 'telegram'
-            system_prompt = get_system_prompt([
-                "【前脑模式 — 路由判断】\n"
-                "你是前脑，负责即时回复用户并判断是否需要启动后脑（工具/技能执行）。\n\n"
-                "**规则：**\n"
-                "1. **始终先回复用户** — 用自然、友好的语言直接回应用户的消息。\n"
-                "2. **同时判断** 这条消息是否需要后脑介入（调用工具、执行技能、文件操作、命令执行等）。\n"
-                "3. 如果需要后脑：在你的回复**末尾**附加标记 `[NEED_BACKEND]`。\n"
-                "   - 例如：\"好的，让我来帮你查一下~ [NEED_BACKEND]\"\n"
-                "   - 例如：\"马上处理 ✨ [NEED_BACKEND]\"\n"
-                "4. 如果不需要后脑（纯聊天、问答、情绪回应等）：正常回复即可，不要加标记。\n"
-                "5. **不要调用任何工具**，工具调用由后脑负责。\n"
-                "6. **不要在回复中解释路由逻辑**，用户不需要知道前脑/后脑的存在。\n\n"
-                "**需要后脑的典型场景：**\n"
-                "- 用户要求执行操作（文件读写、代码修改、运行命令等）\n"
-                "- 用户要求使用技能（搜索、下载、天气查询等）\n"
-                "- 需要调用工具才能完成的任务\n"
-                "- 用户要求创建、修改或分析文件/代码\n\n"
-                "**不需要后脑的典型场景：**\n"
-                "- 普通聊天、寒暄、情绪安慰\n"
-                "- 知识问答（你能直接回答的）\n"
-                "- 闲聊、讨论、观点交流\n"
-                "- 对之前操作结果的追问（不需要新的工具调用时）"
-            ], platform=platform)
-
-            usage_data = None
-            stream = generation_llm.chat_stream(
-                system_prompt=system_prompt,
-                user_prompt=text,
-                history=temp_history,
-                tools=[]
-            )
-
-            async for raw_chunk in stream:
-                chunk = cast(Dict[str, Any], raw_chunk) if isinstance(raw_chunk, dict) else raw_chunk
-                if isinstance(chunk, dict):
-                    if chunk.get("type") == "text":
-                        final_response_buffer += chunk.get("content", "")
-                    elif chunk.get("type") == "usage":
-                        usage_data = {
-                            "input_tokens": chunk.get("input_tokens", 0),
-                            "output_tokens": chunk.get("output_tokens", 0),
-                        }
-                elif isinstance(chunk, str):
-                    final_response_buffer += chunk
-
-            if self.cost_tracking_enabled and self.cost_tracker and usage_data:
-                provider = config.get_llm_provider()
-                model = config.get_model_name(generation_alias) or config.get_model_name("fast")
-                self.cost_tracker.log_usage(
-                    provider=provider,
-                    model=model,
-                    input_tokens=usage_data["input_tokens"],
-                    output_tokens=usage_data["output_tokens"],
-                    model_alias=generation_alias,
-                    context="front_chat"
-                )
-
-            # --- 解析前脑回复：提取路由信号 ---
-            parsed = parse_front_brain_response(final_response_buffer)
-            clean_response = _clean_tool_call_leaks(parsed["user_reply"]).strip()
-            needs_backend = parsed["needs_backend"]
-
-            if not clean_response:
-                clean_response = "我在～你继续说。"
-
-            # 发送前脑回复给用户
-            await self.adapter.send_message(chat_id, clean_response)
-            self.message_history.add_message(
-                platform="telegram",
-                chat_id=storage_id,
-                role="assistant",
-                content=clean_response,
-                user_id="assistant",
-            )
-
-            session["history"] = temp_history + [{"role": "assistant", "content": clean_response}]
-
-            # --- 路由决策：是否需要后脑 ---
-            if needs_backend:
-                logger.info(f"[{chat_id}] 前脑判断需要后脑介入，启动后脑任务")
-                if self.tui_callback:
-                    self.tui_callback("🧠 Front→Backend handoff...")
-                # 先完成前脑状态清理
-                status.finish()
-                self.generation_tasks.pop(chat_id, None)
-                # 启动后脑任务（context 不变，后脑能看到完整历史）
-                backend_task = asyncio.create_task(self._generate_response(context))
-                self.generation_tasks[chat_id] = backend_task
-                return  # 前脑任务结束，后脑接管
-            else:
-                logger.info(f"[{chat_id}] 前脑直接回复完成，不需要后脑")
-
-        except asyncio.CancelledError:
-            status.finish()
-            session["pending_text"] = text
-            session["interrupted_thought"] = final_response_buffer if final_response_buffer else ""
-            raise
-        except Exception:
-            logger.error(f"[{chat_id}] 前脑回复失败。", exc_info=True)
-            try:
-                await self.adapter.send_message(chat_id, "抱歉，刚刚没接住，你可以再说一次吗？")
-            except Exception:
-                pass
-        finally:
-            status.finish()
-            if self.tui_callback:
-                self.tui_callback("✅ Idle")
-            self.generation_tasks.pop(chat_id, None)
-
-            if not self._was_interrupted(chat_id):
-                await self._process_pending_messages(chat_id)
+                task = asyncio.create_task(self._generate_response(context))
+                self.generation_tasks[chat_id] = task
 
     async def _generate_response(self, context: Dict[str, Any]):
         """内部生成逻辑。"""
@@ -805,7 +390,6 @@ class NoraController:
         MAX_TURNS = 30
         status = self.worker_status.setdefault(chat_id, WorkerStatus())
         status.start(query=text, max_turns=MAX_TURNS)
-        generation_llm, generation_alias = self._select_generation_llm(text, default_alias="smart")
         
         try:
             if self.tui_callback: self.tui_callback(f"🏃 Handling new message...")
@@ -854,9 +438,9 @@ class NoraController:
                 skill_desc = "\n".join([f"- {s['name']}: {s['description']} (Path: {s.get('path', 'N/A')})" for s in skills])
                 instructions.append(
                     f"【可用技能 (Available Skills)】\n{skill_desc}\n\n"
-                    f"⚠️ 执行技能时，**必须通过 function calling 机制**使用 execute_skill 工具（参数: skill_name, args_json）。\n"
-                    f"**严禁**使用 exec_command 运行技能脚本。\n"
-                    f"**严禁**在回复文本中写出调用语法——必须通过 function calling API 真正调用。"
+                    f"⚠️ 执行技能时，**必须**使用 `execute_skill(skill_name, args_json)` 工具。\n"
+                    f"**严禁**使用 `exec_command` 运行技能脚本（如 `python3 skills/xxx/main.py`）。\n"
+                    f"示例: execute_skill(\"pixiv_manager\", '{{\"keyword\": \"碧蓝航线\", \"limit\": \"5\"}}')"
                 )
 
             if "\n" in text.strip(): 
@@ -916,14 +500,11 @@ class NoraController:
                 if self.tui_callback: self.tui_callback(f"🤔 Thinking... (Turn {current_turn}/{MAX_TURNS})")
                 logger.debug(f"[{chat_id}] Turn {current_turn}/{MAX_TURNS}")
                 
-                _tools_for_turn = [] if force_no_tools else self.tool_manager.get_tool_schemas()
-                logger.debug(f"[{chat_id}] Passing {len(_tools_for_turn)} tool schemas to LLM")
-                
-                stream = generation_llm.chat_stream(
+                stream = self.llm.chat_stream(
                     system_prompt=system_prompt,
                     user_prompt=full_user_prompt if current_turn == 1 else " (Continue processing tool outputs...)",
                     history=temp_history,
-                    tools=_tools_for_turn
+                    tools=[] if force_no_tools else self.tool_manager.get_tool_schemas()
                 )
                 force_no_tools = False  # 重置，仅影响紧跟的一轮
 
@@ -955,7 +536,10 @@ class NoraController:
                                 for part in parts[:-1]:
                                     text_to_send = part.strip()
                                     # 过滤掉包含工具调用语法的泄漏内容
-                                    if text_to_send and not _is_tool_call_leak(text_to_send):
+                                    if text_to_send and not re.search(
+                                        r'(?:execute_skill|execute_tool_plan|write_file|read_file|edit_file|exec_command|list_dir|create_new_skill|search)\s*\(',
+                                        text_to_send
+                                    ):
                                         await self.adapter.send_message(chat_id, text_to_send)
                                         # Important: keep final buffer synchronized
                                         temp_history.append({"role": "assistant", "content": text_to_send})
@@ -964,7 +548,6 @@ class NoraController:
                         
                         elif chunk["type"] == "tool_call":
                             tool_call = chunk
-                            logger.debug(f"[{chat_id}] Received tool_call chunk from LLM: {chunk.get('name', '?')}")
                             # 检测到工具调用，停止 typing（不再是聊天状态）
                             # Telegram 的 typing 状态会自动过期，无需显式停止
                             # IMMEDIATELY clear text buffer if tool call is detected, to prevent leaking thoughts.
@@ -986,62 +569,23 @@ class NoraController:
                 # 记录成本（如果启用）
                 if self.cost_tracking_enabled and self.cost_tracker and usage_data:
                     provider = config.get_llm_provider()
-                    model = config.get_model_name(generation_alias) or config.get_model_name("smart")
+                    model = config.get_model_name("smart")  # 默认使用 smart 模型
                     self.cost_tracker.log_usage(
                         provider=provider,
                         model=model,
                         input_tokens=usage_data["input_tokens"],
                         output_tokens=usage_data["output_tokens"],
-                        model_alias=generation_alias,
+                        model_alias="smart",
                         context="chat"
                     )
                 
                 # Append text to final buffer (visible to user)
                 if response_text_buffer:
                     final_response_buffer += response_text_buffer
-                
-                # --- Stream 结束后状态总结 ---
-                logger.debug(
-                    f"[{chat_id}] Turn {current_turn} stream ended: "
-                    f"tool_call={'YES: ' + tool_call.get('name', '?') if tool_call else 'NO'}, "
-                    f"text_len={len(final_response_buffer)}, "
-                    f"usage={usage_data}"
-                )
-                
-                # --- 泄漏拦截：如果 LLM 以文本输出了工具调用，尝试解析并真正执行 ---
-                if not tool_call and final_response_buffer and _is_tool_call_leak(final_response_buffer):
-                    parsed = _try_parse_leaked_tool_call(final_response_buffer)
-                    if parsed:
-                        logger.warning(
-                            f"[{chat_id}] 检测到工具调用泄漏并成功解析: {parsed['name']}({parsed['args']}). "
-                            f"将自动执行该工具调用。"
-                        )
-                        tool_call = {"type": "tool_call", "name": parsed["name"], "args": parsed["args"]}
-                        # 清除泄漏文本，保留泄漏前的自然语言部分
-                        natural_text = _clean_tool_call_leaks(final_response_buffer).strip()
-                        final_response_buffer = natural_text
-                        # 如果有自然语言前缀（如"好的，我来帮您修改~"），先发出去
-                        if natural_text and not _is_tool_call_leak(natural_text):
-                            await self.adapter.send_message(chat_id, natural_text)
-                            temp_history.append({"role": "assistant", "content": natural_text})
-                            final_response_buffer = ""
-                    else:
-                        # 解析失败，注入纠正提示让 LLM 重新用 function calling
-                        logger.warning(
-                            f"[{chat_id}] 检测到工具调用泄漏但无法解析。注入纠正提示。"
-                        )
-                        # 清理泄漏的文本
-                        final_response_buffer = _clean_tool_call_leaks(final_response_buffer)
-                        temp_history.append({
-                            "role": "user",
-                            "content": (
-                                "【系统纠正】你刚才把工具调用以文本形式输出了，这是错误的！"
-                                "用户看到了原始的调用代码。请使用 function calling 机制来真正调用工具，"
-                                "不要在文本回复中写出 edit_file(...)、write_file(...) 等调用语法。"
-                                "现在请重新执行你想做的操作——通过 function calling 真正调用工具。"
-                            )
-                        })
-                        continue  # 让 LLM 重新生成
+                    # In a real app, we might send this incrementally. 
+                    # For now, we wait for atomic send at the end (as per design), 
+                    # OR we could send partials if we supported it.
+                    # Current design: Atomic Output.
                 
                 # If tool call detected
                 if tool_call:
@@ -1121,9 +665,7 @@ class NoraController:
                                 "role": "user",
                                 "content": (
                                     "【系统提示】你已经连续多次对同一个文件使用 edit_file。这是低效的做法。"
-                                    "请先 read_file 获取更完整上下文，并让 old_code 精确到目标片段。"
-                                    "如果工具返回了 multiple matches，请根据返回的 [index] 重新调用 edit_file 并传入 match_index。"
-                                    "除非你明确要重写整个文件，否则不要直接用 write_file 覆盖。"
+                                    "请停止 edit_file，改用 read_file 读取完整内容后，用 write_file 一次性写入所有修改。"
                                     "如果不需要继续修改，请直接给用户回复结果。"
                                 )
                             })
@@ -1157,10 +699,10 @@ class NoraController:
                     
                     
                     # Execute Tool
-                    status.update("工具调用", f"正在执行 {tool_name}...", backend_busy=True)
+                    status.update("工具调用", f"正在执行 {tool_name}...")
                     status.log_tool(tool_name, tool_args)
                     tool_result = await self.tool_manager.execute(tool_name, cast(Dict[str, Any], tool_args))
-                    status.update("处理结果", f"{tool_name} 执行完毕，正在分析结果...", backend_busy=True)
+                    status.update("处理结果", f"{tool_name} 执行完毕，正在分析结果...")
                     logger.info(f"[{chat_id}] 🔧 Tool Result for {tool_name}: {tool_result[:100]}...")
 
                     # --- TRUNCATION SAFETY VALVE ---
@@ -1198,23 +740,15 @@ class NoraController:
                     if tool_name in _user_facing_tools and not _is_error:
                         latest_meaningful_output = truncated_result
                     
-                    # Append history for tools — 使用结构化格式让 provider 正确转换
-                    if current_turn == 1 and full_user_prompt not in [h.get('content', '') for h in temp_history]:
+                    # Append history for tools
+                    if current_turn == 1 and full_user_prompt not in [h['content'] for h in temp_history]:
                         temp_history.append({"role": "user", "content": full_user_prompt})
                     
-                    # 记录 tool_call（模型发出的调用请求）
-                    temp_history.append({
-                        "role": "tool_call",
-                        "tool_name": tool_name,
-                        "tool_args": tool_args,
-                        "content": f"Calling {tool_name}",
-                    })
-                    # 记录 tool_response（工具执行结果）
-                    temp_history.append({
-                        "role": "tool_response",
-                        "tool_name": tool_name,
-                        "content": truncated_result,
-                    })
+                    # Store tool invocation in history, but do NOT leak placeholder text to the session history content
+                    # If there's real text in response_text_buffer, we keep it; otherwise, we use a internal label
+                    # assistant_msg = response_text_buffer if response_text_buffer else f"（正在调用工具: {tool_name}）"
+                    # temp_history.append({"role": "assistant", "content": assistant_msg})
+                    temp_history.append({"role": "user", "content": f"【Tool Output for {tool_name}】\n{truncated_result}"})
                     
                     # CRITICAL: Sync current progress back to the main session immediately to prevent state loss on preemption
                     session["history"] = list(temp_history)
@@ -1222,47 +756,7 @@ class NoraController:
                     # Loop continues to let LLM process the result
                     continue
                 else:
-                    # No tool call -> Possibly final response, but check if LLM SHOULD have used tools
-                    logger.debug(
-                        f"[{chat_id}] Turn {current_turn} ended with no tool_call. "
-                        f"Response buffer length: {len(final_response_buffer)}, "
-                        f"preview: {final_response_buffer[:120]}..."
-                    )
-                    
-                    # --- 工具使用自觉性检测 (Tool Usage Nudge) ---
-                    # 仅在第一轮（LLM 首次回复时）检测：如果用户请求明显需要工具操作，
-                    # 但 LLM 只给出了纯文本回复（如"建议您运行..."、给出代码块让用户自己跑），
-                    # 则注入纠正提示让 LLM 重新生成并真正调用工具。
-                    if current_turn == 1 and not session.get("_tool_nudge_done"):
-                        should_nudge, nudge_reason = _should_nudge_tool_use(
-                            user_text=text,
-                            response_text=final_response_buffer,
-                        )
-                        if should_nudge:
-                            logger.warning(
-                                f"[{chat_id}] 检测到 LLM 应该使用工具但未调用 "
-                                f"(reason={nudge_reason}). 注入纠正提示。"
-                            )
-                            session["_tool_nudge_done"] = True  # 只纠正一次，防止无限循环
-                            # 把 LLM 的纯文本回复作为"思考过程"放入历史，但不发送给用户
-                            if final_response_buffer.strip():
-                                temp_history.append({
-                                    "role": "assistant",
-                                    "content": final_response_buffer
-                                })
-                            final_response_buffer = ""  # 清空，等 LLM 重新生成
-                            temp_history.append({
-                                "role": "user",
-                                "content": (
-                                    "【系统纠正】你刚才只用文本描述了你要做的操作，但没有真正执行！"
-                                    "你拥有完整的工具权限（read_file, write_file, edit_file, exec_command, "
-                                    "execute_skill 等）。请**立即通过 function calling 真正调用工具来执行操作**，"
-                                    "不要只是告诉用户该怎么做。\n"
-                                    "记住：你是执行者，不是建议者。用户期望你直接完成任务。"
-                                )
-                            })
-                            continue  # 让 LLM 带着纠正提示重新生成
-                    
+                    # No tool call -> Final response
                     break
             
             # If loop exhausted MAX_TURNS with pending tool work, inject a wrap-up prompt and do one final LLM call
@@ -1272,7 +766,7 @@ class NoraController:
                     "role": "user",
                     "content": "【系统提示】工具调用轮次已达上限，请立即基于已有的工具结果，给用户一个简洁的最终回复。"
                 })
-                stream = generation_llm.chat_stream(
+                stream = self.llm.chat_stream(
                     system_prompt=system_prompt,
                     user_prompt="请总结以上工具操作的结果，给出最终回答。",
                     history=temp_history,
@@ -1290,8 +784,15 @@ class NoraController:
             # --- 4. 发送响应 ---
             # If the loop completes and there's still text in the buffer, it's the final message.
             if final_response_buffer:
-                # 过滤掉可能泄漏的工具调用语法（多种格式）
-                clean_response = _clean_tool_call_leaks(final_response_buffer)
+                # 过滤掉可能泄漏的工具调用语法
+                clean_response = re.sub(
+                    r'(?:execute_skill|execute_tool_plan|write_file|read_file|edit_file|exec_command|list_dir|create_new_skill|search)\s*\([^)]*\)',
+                    '', final_response_buffer
+                ).strip()
+                # 过滤掉 "返回结果:" + 原始 JSON/代码块
+                clean_response = re.sub(
+                    r'返回结果[：:]\s*```[\s\S]*?```', '', clean_response
+                ).strip()
                 if clean_response:
                     await self.adapter.send_message(chat_id, clean_response)
                 elif latest_meaningful_output:
@@ -1303,7 +804,7 @@ class NoraController:
                     "role": "user",
                     "content": "【系统提示】工具已执行完毕，请根据以上工具输出，用自然语言总结执行结果。不要直接输出原始命令行内容。"
                 })
-                stream = generation_llm.chat_stream(
+                stream = self.llm.chat_stream(
                     system_prompt=system_prompt,
                     user_prompt="请总结以上操作的执行结果。",
                     history=temp_history,
@@ -1328,7 +829,7 @@ class NoraController:
                     "role": "user",
                     "content": f"【系统提示】工具输出如下，请用自然语言简要告诉用户结果：\n{latest_tool_output[:1000]}"
                 })
-                stream = generation_llm.chat_stream(
+                stream = self.llm.chat_stream(
                     system_prompt=system_prompt,
                     user_prompt="请简要总结操作结果。",
                     history=temp_history,
@@ -1441,7 +942,8 @@ class NoraController:
         logger.info(f"[{chat_id}] 开始处理 {len(pending)} 条排队消息。")
         
         # 递归调用，走正常流程
-        await self._start_routed_task(combined_context)
+        task = asyncio.create_task(self._generate_response(combined_context))
+        self.generation_tasks[chat_id] = task
 
     async def _async_save_memory(self, text: str, user_id: str, metadata: Dict[str, Any]):
         """异步保存记忆，避免阻塞主线程。"""

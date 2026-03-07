@@ -375,18 +375,9 @@ class ToolManager:
             return "Available skills:\\n" + "\\n".join([f"- {s}" for s in skill_folders])
         except Exception as e: return f"Error listing skills: {e}"
 
-    def _resolve_path(self, path: str) -> str:
-        """
-        统一路径解析：相对路径基于 WORKSPACE_ROOT，绝对路径保持不变。
-        这确保 LLM 传入 'USER.md' 时解析到 workspace/USER.md 而非仓库根目录。
-        """
-        if os.path.isabs(path):
-            return os.path.normpath(path)
-        return os.path.normpath(os.path.join(WORKSPACE_ROOT, path))
-
     def _is_path_safe(self, path: str) -> tuple:
         """Check if a path is safe to access. Returns (is_safe, reason)."""
-        abs_path = self._resolve_path(path)
+        abs_path = os.path.abspath(path)
         basename = os.path.basename(abs_path)
         if basename in SENSITIVE_FILES:
             return False, f"Access denied: '{basename}' contains sensitive data (API keys, tokens). You should not read this file."
@@ -399,7 +390,7 @@ class ToolManager:
         :param path: The directory path to list. Defaults to workspace root '.'.
         """
         try:
-            target = self._resolve_path(path)
+            target = os.path.abspath(path)
             if not os.path.isdir(target):
                 return f"Error: '{path}' is not a directory."
             entries = sorted(os.listdir(target))
@@ -444,8 +435,7 @@ class ToolManager:
             if end_line is not None:
                 end_line = int(end_line)
             
-            abs_path = self._resolve_path(path)
-            with open(abs_path, 'r', encoding='utf-8') as f:
+            with open(path, 'r', encoding='utf-8') as f:
                 if start_line is None and end_line is None:
                     # 读取全文
                     return f.read()
@@ -500,7 +490,7 @@ class ToolManager:
 
         try:
             max_results = max(1, min(int(max_results), 200))
-            target_root = self._resolve_path(path)
+            target_root = os.path.abspath(path)
             if not os.path.exists(target_root):
                 return f"Error: path '{path}' does not exist."
 
@@ -594,114 +584,32 @@ class ToolManager:
     def write_file(self, path: str, content: str) -> str:
         """Writes content to a file, overwriting it."""
         try:
-            abs_path = self._resolve_path(path)
-            logger.debug(f"write_file called: path={path} -> abs={abs_path}, content_len={len(content)}")
-            os.makedirs(os.path.dirname(abs_path), exist_ok=True)
-            with open(abs_path, 'w', encoding='utf-8') as f: f.write(content)
-            logger.info(f"write_file: wrote {len(content)} chars to {abs_path}")
+            os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
+            with open(path, 'w', encoding='utf-8') as f: f.write(content)
             return f"Successfully wrote to {path}"
         except Exception as e: return f"Error writing file: {e}"
 
-    def edit_file(self, path: str, old_code: str, new_code: str, match_index: Optional[int] = None) -> str:
+    def edit_file(self, path: str, old_code: str, new_code: str) -> str:
         """
-        Performs a precise find-and-replace on a file.
-        Tries exact match first, then falls back to whitespace-normalized matching.
-        If old_code matches multiple locations, provide match_index (1-based) to select the exact target.
+        Performs a find-and-replace on a file. Tries exact match first, then falls back to
+        whitespace-normalized matching. If editing is difficult, consider using 'write_file' to
+        overwrite the entire file content instead.
         :param path: Path to the file to edit.
         :param old_code: The code snippet to find (approximate whitespace is OK).
         :param new_code: The replacement code snippet.
-        :param match_index: Optional 1-based index of which matched location to replace when multiple matches exist.
         """
         safe, reason = self._is_path_safe(path)
         if not safe:
             return reason
         try:
-            if match_index is not None:
-                try:
-                    match_index = int(match_index)
-                except Exception:
-                    return "Error: match_index must be an integer (1-based)."
-                if match_index < 1:
-                    return "Error: match_index must be >= 1 (1-based)."
-
-            abs_path = self._resolve_path(path)
-            logger.debug(f"edit_file called: path={path} -> abs={abs_path}")
-            logger.debug(f"edit_file old_code({len(old_code)} chars): {old_code[:200]}{'...' if len(old_code) > 200 else ''}")
-            logger.debug(f"edit_file new_code({len(new_code)} chars): {new_code[:200]}{'...' if len(new_code) > 200 else ''}")
-            
-            with open(abs_path, 'r', encoding='utf-8') as f:
+            with open(path, 'r', encoding='utf-8') as f:
                 content = f.read()
-
-            def _format_matches_with_context(matches: list, all_lines: list, max_items: int = 10) -> str:
-                """格式化匹配列表，返回带 index/line/context 的可读文本。"""
-                lines_out = []
-                for item in matches[:max_items]:
-                    line_no = item["line_no"]
-                    context_start = max(1, line_no - 2)
-                    context_end = min(len(all_lines), item["end_line"] + 2)
-                    context = "\n".join(all_lines[context_start - 1:context_end])
-                    if len(context) > 260:
-                        context = context[:260] + "..."
-                    lines_out.append(
-                        f"  [{item['index']}] line {line_no}-{item['end_line']}:\n"
-                        f"{context}"
-                    )
-                if len(matches) > max_items:
-                    lines_out.append(f"  ... and {len(matches) - max_items} more matches")
-                return "\n\n".join(lines_out)
 
             # 1. Try exact match first
             if old_code in content:
-                lines = content.split('\n')
-                exact_matches = []
-                search_start = 0
-                exact_idx = 0
-                old_line_span = max(1, old_code.count('\n') + 1)
-                while True:
-                    idx = content.find(old_code, search_start)
-                    if idx == -1:
-                        break
-                    exact_idx += 1
-                    line_no = content.count('\n', 0, idx) + 1
-                    exact_matches.append({
-                        "index": exact_idx,
-                        "offset": idx,
-                        "line_no": line_no,
-                        "end_line": line_no + old_line_span - 1,
-                    })
-                    search_start = idx + len(old_code)
-
-                if len(exact_matches) > 1 and match_index is None:
-                    logger.warning(f"edit_file: old_code matches {len(exact_matches)} exact locations in {abs_path}")
-                    return (
-                        f"Error: old_code matches {len(exact_matches)} exact locations in {path}. "
-                        f"Please call edit_file again with match_index (1-based) to select one target.\n\n"
-                        f"Available matches:\n{_format_matches_with_context(exact_matches, lines)}\n\n"
-                        f"Example: edit_file(path=\"{path}\", old_code=..., new_code=..., match_index=2)"
-                    )
-
-                if match_index is not None:
-                    if match_index > len(exact_matches):
-                        return (
-                            f"Error: match_index {match_index} is out of range. "
-                            f"This old_code has {len(exact_matches)} exact match(es) in {path}."
-                        )
-                    target = exact_matches[match_index - 1]
-                else:
-                    target = exact_matches[0]
-
-                start = target["offset"]
-                end = start + len(old_code)
-                new_content = content[:start] + new_code + content[end:]
-                if new_content == content:
-                    logger.warning(f"edit_file: old_code == new_code (no actual change) for {abs_path}")
-                    return f"Warning: edit_file matched old_code in {path}, but new_code is identical — no changes made."
-                with open(abs_path, 'w', encoding='utf-8') as f:
+                new_content = content.replace(old_code, new_code, 1)
+                with open(path, 'w', encoding='utf-8') as f:
                     f.write(new_content)
-                logger.info(
-                    f"edit_file: exact match succeeded for {abs_path} "
-                    f"(selected index={target['index']}, line={target['line_no']})"
-                )
                 return f"Successfully edited {path}."
 
             # 2. Fallback: normalized whitespace matching
@@ -712,66 +620,23 @@ class ToolManager:
             norm_old = normalize(old_code)
             lines = content.split('\n')
 
-            # Sliding window over lines to find ALL matches first
+            # Sliding window over lines to find the best match
             old_line_count = max(1, old_code.count('\n') + 1)
-            all_norm_matches = []  # list of (window_size, line_index)
+            # Widen the window search range to handle more varying empty lines/formatting
             for window_size in range(max(1, old_line_count - 5), old_line_count + 6):
                 for i in range(len(lines) - window_size + 1):
                     window = '\n'.join(lines[i:i + window_size])
                     if normalize(window) == norm_old:
-                        all_norm_matches.append((window_size, i))
-            
-            if all_norm_matches:
-                norm_matches = []
-                for idx_num, (window_size, i) in enumerate(all_norm_matches, start=1):
-                    line_no = i + 1
-                    norm_matches.append({
-                        "index": idx_num,
-                        "line_no": line_no,
-                        "end_line": line_no + window_size - 1,
-                        "window_size": window_size,
-                        "line_index": i,
-                    })
+                        # Found a match with normalized whitespace
+                        new_lines = lines[:i] + new_code.split('\n') + lines[i + window_size:]
+                        new_content = '\n'.join(new_lines)
+                        with open(path, 'w', encoding='utf-8') as f:
+                            f.write(new_content)
+                        return f"Successfully edited {path} (matched with normalized whitespace)."
 
-                if len(norm_matches) > 1 and match_index is None:
-                    logger.warning(f"edit_file: old_code matches {len(norm_matches)} normalized locations in {abs_path}")
-                    return (
-                        f"Error: old_code matches {len(norm_matches)} locations in {path} (normalized whitespace). "
-                        f"Please call edit_file again with match_index (1-based) to select one target.\n\n"
-                        f"Available matches:\n{_format_matches_with_context(norm_matches, lines)}\n\n"
-                        f"Example: edit_file(path=\"{path}\", old_code=..., new_code=..., match_index=2)"
-                    )
-
-                if match_index is not None:
-                    if match_index > len(norm_matches):
-                        return (
-                            f"Error: match_index {match_index} is out of range. "
-                            f"This old_code has {len(norm_matches)} normalized match(es) in {path}."
-                        )
-                    target = norm_matches[match_index - 1]
-                else:
-                    target = norm_matches[0]
-
-                window_size = target["window_size"]
-                i = target["line_index"]
-                # Found a unique match with normalized whitespace
-                new_lines = lines[:i] + new_code.split('\n') + lines[i + window_size:]
-                new_content = '\n'.join(new_lines)
-                if new_content == content:
-                    logger.warning(f"edit_file: normalized match but no actual change for {abs_path}")
-                    return f"Warning: edit_file matched old_code (normalized) in {path}, but result is identical — no changes made."
-                with open(abs_path, 'w', encoding='utf-8') as f:
-                    f.write(new_content)
-                logger.info(
-                    f"edit_file: normalized match at lines {i+1}-{i+window_size} for {abs_path} "
-                    f"(selected index={target['index']})"
-                )
-                return f"Successfully edited {path} (matched with normalized whitespace)."
-
-            logger.warning(f"edit_file: old_code not found in {abs_path} (file size: {len(content)} chars)")
             return (
                 f"Error: 'old_code' not found in {path} (even after whitespace normalization). "
-                f"Tip: Use read_file to get more surrounding context, then retry edit_file with a more specific old_code."
+                f"Tip: Use 'write_file' to overwrite the entire file instead of edit_file."
             )
         except Exception as e:
             return f"Error editing file: {e}"
@@ -829,29 +694,11 @@ class ToolManager:
         except Exception as e: return f"Error executing command: {e}"
 
     def _generate_schema(self, func: Callable) -> Dict[str, Any]:
-        """Generates a JSON schema for a function, including parameter descriptions from docstrings."""
+        """Generates a JSON schema for a function."""
         import typing
         sig = inspect.signature(func)
         doc = inspect.getdoc(func) or ""
-        
-        # 提取函数描述（docstring 第一段，直到空行或 :param）
-        desc_lines = []
-        for line in doc.strip().split("\n"):
-            stripped = line.strip()
-            if stripped.startswith(":param") or stripped.startswith(":return") or stripped.startswith("Examples:"):
-                break
-            if not stripped and desc_lines:  # 空行分隔描述和参数
-                break
-            desc_lines.append(stripped)
-        desc = " ".join(desc_lines).strip() or doc.strip().split("\n")[0]
-        
-        # 提取 :param 注释，构建参数描述映射
-        param_descriptions = {}
-        for match in re.finditer(r':param\s+(\w+):\s*(.+?)(?=\n\s*:|$)', doc, re.DOTALL):
-            param_name = match.group(1)
-            param_desc = ' '.join(match.group(2).strip().split())  # 规范化空白
-            param_descriptions[param_name] = param_desc
-        
+        desc = doc.strip().split("\\n")[0]
         parameters = {"type": "OBJECT", "properties": {}, "required": []}
         for name, param in sig.parameters.items():
             if name == 'self': continue
@@ -875,12 +722,7 @@ class ToolManager:
             elif annotation == float:
                 param_type = "NUMBER"
             
-            prop = {"type": param_type}
-            # 添加参数描述（如果存在）
-            if name in param_descriptions:
-                prop["description"] = param_descriptions[name]
-            
-            parameters["properties"][name] = prop
+            parameters["properties"][name] = {"type": param_type}
             if param.default == inspect.Parameter.empty:
                 parameters["required"].append(name)
         return {"name": func.__name__, "description": desc, "parameters": parameters}

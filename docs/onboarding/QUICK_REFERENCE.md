@@ -106,8 +106,8 @@ python tui.py
 | 文件 | 说明 |
 |------|------|
 | `workspace/data/memory/message_history.db` | 聊天记录 + 压缩总结（`messages` + `summaries` 表） |
-| `workspace/data/memory/cost_tracking.db` | 成本记录（若配置为默认路径） |
-| `workspace/data/memory/vector.db` | 向量数据库（若配置为默认路径） |
+| `memory/cost_tracking.db` | 成本记录 |
+| `memory/vector.db` | 向量数据库（Qdrant） |
 
 ---
 
@@ -126,12 +126,14 @@ python tui.py
 
 ## 7. 身份与记忆文件（Identity & Memory）
 
-| 文件 | 作用 | LLM 如何修改 |
-|------|------|--------------|
-| `workspace/SOUL.md`（缺失时自动从仓库根 `SOUL.md` 复制） | AI 灵魂：人设、语气、边界、性格 | 使用 `read_file`/`edit_file`/`write_file` |
-| `workspace/USER.md`（缺失时自动从仓库根 `USER.md` 复制） | 用户档案：名字、偏好、背景 | 使用 `read_file`/`edit_file`/`write_file` |
-| `workspace/data/memory/MEMORY.md`（缺失时自动从仓库根 `MEMORY.md` 复制） | 长期记忆块（作为可变 prompt） | 使用 `read_file`/`edit_file`/`write_file` |
-| `workspace/data/memory/YYYY-MM-DD.md` | 每日记忆日志（按需显式读取） | 使用 `read_file`/`edit_file`/`write_file` |
+| 文件 | 作用 | 修改方式 |
+|------|------|-----------|
+| `SOUL.md` | AI 的灵魂：人设、语气、边界、性格 | ✅ 通用文件工具 `read_file`/`write_file`/`edit_file` |
+| `USER.md` | 用户档案：名字、偏好、背景 | ✅ 通用文件工具 |
+| `data/memory/MEMORY.md` | 长期记忆：决策、偏好、事实 | ✅ 通用文件工具 |
+| `data/memory/YYYY-MM-DD.md` | 每日记忆日志 | ✅ 通用文件工具（按需读取） |
 
-> 当前实现中，每日记忆文件不会自动注入系统提示（避免上下文膨胀），需要时显式读取。
-> N.O.R.A.Core 会话并非每次“全新醒来”；这些文件用于可变提示同步，而非唯一连续性来源。
+> 注意：
+> - N.O.R.A Core 不是“每次会话全新实例”，这些文件主要作为可变 prompt 块。
+> - 当前默认仅自动注入 SOUL/USER/MEMORY，`daily memory` 不自动注入（按需读取）。
+> - 首次运行时若 workspace 缺少 SOUL/USER/MEMORY，会自动从仓库根默认文件复制过去。

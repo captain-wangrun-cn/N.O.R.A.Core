@@ -3,58 +3,101 @@
 - 目标：多平台智能体内核，包含 LLM 适配、工具/技能体系、成本追踪、记忆/RAG。
 - 当前状态：可运行，自测通过；近期完成“脑口分离”与打断队列；成本追踪依赖用户配置价格（无内置价表）。
 
-## 近期关键改动（截至 2026-03-06）
+## 近期关键改动（截至 2026-03-07）
 
-### 🆕 工具调用泄漏防护体系（2026-03-06）
+### 🆕 路由改造：前脑优先（Front-Brain-First）— 2026-03-07
 
-**问题：** LLM 有时会以文本形式"伪造"工具调用（如输出 `execute_tool('edit_file', {...})` 或 `<execute_skill>...</execute_skill>`），而不是真正使用 function calling 机制。用户会看到原始的调用代码。
+本轮已将“先独立路由、再决定前/后脑”的流程改为“所有消息先交给前脑”：
 
-**三层防护（已实现）：**
-1. **Prompt 层** — `brain/templates/system.jinja`：
-   - 新增"工具调用方式 — 严格规范"章节，明确列出所有禁止的伪调用格式
-   - 在"主动执行协议"中强化 function calling 要求，明确区分"调用工具"和"写出调用代码"
-   - "工具与技能的区别"中反复强调只能通过 function calling 完成
-2. **实时过滤层** — `core/controller.py` → `_is_tool_call_leak()`：
-   - 在 `[SPLIT]` 分段发送时拦截包含泄漏文本的段落，阻止发送给用户
-3. **最终输出清理层** — `core/controller.py` → `_clean_tool_call_leaks()`：
-   - 在最终响应发送前，清理所有泄漏模式（XML 标签、函数调用语法、JSON 参数块等）
-   - 保留自然语言部分，仅移除泄漏内容
+- 新流程：
+   1) 用户消息先进入前脑（`_generate_front_chat_response`）
+   2) 前脑即时回复用户，并同时判断是否需要后脑
+   3) 若需要后脑，在回复中附加 `[NEED_BACKEND]` 信号
+   4) Controller 清理该信号后发给用户，再自动启动 `_generate_response`
 
-**检测覆盖的泄漏模式：**
-- `tool_name(...)` 函数调用格式
-- `<execute_skill>...</execute_skill>` XML 标签格式
-- `execute_tool('tool_name', {...})` 间接调用格式
-- 包含 `old_code`/`new_code`/`file_path`/`args_json` 的 JSON 块
+**代码级变化：**
 
-**文件改动：** `brain/templates/system.jinja`、`core/controller.py`、`docs/onboarding/COMMON_PITFALLS.md`
+1) `core/controller.py`
+- `_start_routed_task` 改为统一启动前脑路径。
+- 前脑回复逻辑升级为“回复 + 路由判断”二合一。
+- 删除旧的独立路由判定调用链（不再先跑一次路由 LLM）。
 
-### 🆕 身份与记忆文件策略重构（2026-03-06）
+2) `core/routing.py`
+- 新增 `parse_front_brain_response(response_text)`：
+   - 解析是否包含 `[NEED_BACKEND]`
+   - 返回 `needs_backend` 与清理后的 `user_reply`
 
-本轮已将身份/记忆策略从“每会话全新实例”改为**N.O.R.A Core 持续运行 + 文件作为可变 prompt**：
+3) `tests/test_routing.py`
+- 新增前脑路由信号解析测试，覆盖：
+   - 需要后脑
+   - 不需要后脑
+   - 空回复
+   - 信号在末尾/中间
 
-**核心行为变更：**
-- `SOUL.md` / `USER.md` / `MEMORY.md` 仍用于注入系统提示，但定位为“可变提示块”，不是“唯一连续性来源”。
-- 每日记忆（`YYYY-MM-DD.md`）**不再自动注入**系统提示（防止上下文膨胀），需要时由模型显式读取。
+**收益：**
+- 少一次路由模型调用（降低延迟与成本）
+- 用户先收到自然回复，再由后脑在后台执行任务
+- 路由判断更贴近对话语境
 
-**路径与初始化变更：**
-- `brain/prompts.py` 现在优先读取 workspace：
+### 🆕 跨平台媒体标识统一（English-only）— 2026-03-07
+
+已统一媒体输入标识为英文协议，移除中文标识：
+
+- 系统协议：`[image:]` / `[video:]` / `[audio:]` / `[file:]` / `[doc:]`
+- Telegram 适配输出同步改为英文标签（如 `[image: ...]`）
+- 图片输入检测仅保留英文结构化标签（`[image:]`）+ 扩展名兜底
+- `adapters/telegram/PROMPT.md` 已重写为干净版本并与主协议对齐
+
+### 🆕 记忆与身份提示重构（2026-03-06 ~ 2026-03-07）
+
+这轮已将“身份/记忆文件”的行为从 OpenClaw 风格调整为 N.O.R.A Core 实际语义：
+
+- **不是每次会话全新实例**：N.O.R.A Core 进程通常持续运行。
+- `SOUL.md` / `USER.md` / `MEMORY.md` 作为**可变 prompt 块**使用，而不是唯一连续性来源。
+
+**代码级变化：**
+
+1) `brain/prompts.py`
+- 身份文件改为 **workspace 优先**：
    - `workspace/SOUL.md`
    - `workspace/USER.md`
    - `workspace/data/memory/MEMORY.md`
-- 首次运行若 workspace 缺失上述文件，会自动从仓库根目录同名文件复制默认版本。
-- 仍保留旧路径回退读取（兼容历史文件）。
+- 保留仓库根目录文件作为回退兼容（旧数据可继续读取）。
+- 新增首次启动自动复制逻辑：若 workspace 缺少上述文件，会从仓库根默认文件复制过去。
+- **取消每日记忆自动注入**（`memory/YYYY-MM-DD.md` 不再自动拼进 system prompt），避免上下文膨胀。
 
-**聊天记录数据库路径迁移：**
-- `memory/message_history.py` 新增 `get_default_message_history_db()`，默认 DB 路径迁移为：
+2) 消息历史数据库路径迁移到 workspace
+- `memory/message_history.py` 默认 DB 改为：
    - `workspace/data/memory/message_history.db`
-- `core/controller.py` 与 `cli.py` 已改为使用该默认路径（当 `config.yml` 未显式配置 `memory.message_history.db_path` 时）。
+- `core/controller.py` / `cli.py` 已同步为“配置未指定时走该默认路径”。
+- `tests/test_message_history.py` 提示信息同步更新默认 DB 路径来源。
 
-**工具策略修正：**
-- 已移除 `update_soul` / `update_user` / `update_memory` 专用工具。
-- 统一使用通用文件工具 `read_file` / `edit_file` / `write_file` 维护身份与记忆文件。
+3) Telegram typing 行为优化
+- `core/controller.py`：进入 `llm.chat_stream(...)` 生成阶段时**立即**调用 `start_typing(chat_id)`。
+- 不再等首个 text chunk 到达才触发，修复“输入状态太短暂/偶尔看不到”的问题。
 
-**Telegram typing 体验改进：**
-- `core/controller.py` 调整 typing 触发时机：进入 LLM 生成阶段即触发 `start_typing`，而非等待首个 text chunk，减少“输入状态过短暂”问题。
+4) 工具侧策略调整
+- 移除了 `update_soul` / `update_user` / `update_memory` 专用工具。
+- 统一使用通用文件工具 `read_file` / `write_file` / `edit_file` 维护身份/记忆文件。
+
+### 🆕 身份与记忆系统（SOUL.md / USER.md / MEMORY.md）— 2026-03-05
+参考 OpenClaw 的工作区设计理念，新增持久化身份与记忆文件系统：
+
+**新增文件：**
+- `SOUL.md` — AI 的灵魂：人设、语气、边界、性格。定义"你是谁"。
+- `USER.md` — 用户档案：名字、偏好、背景、当前关注。定义"你在帮助谁"。
+- `MEMORY.md` — 长期记忆：重要决策、用户偏好、持久事实、经验教训。
+- `memory/YYYY-MM-DD.md` — 每日记忆：当天事件、笔记和临时上下文。
+
+**代码改动（当前版本已演进）：**
+- `brain/prompts.py`：`load_identity_context()` 仍负责注入身份上下文，但现已调整为 workspace 优先，并取消每日记忆自动注入。
+- `brain/tools.py`：已回归通用文件工具策略（无 `update_*` 专用工具）。
+- `brain/templates/system.jinja`：已同步新协议与路径说明。
+
+**设计理念（当前版本）：**
+- 借鉴 OpenClaw 的文件化思路，但 N.O.R.A Core **不采用“每次会话全新实例”前提**。
+- 身份文件作为可变提示块，辅助对齐语气/偏好/长期事实。
+- 每日记忆改为按需读取，默认不注入。
 
 ### 之前的改动（截至 2026-02-28）
 1) **脑口分离 / 打断队列（core/controller.py）**
@@ -116,6 +159,9 @@
 - 服务器需安装 `Pillow` 以支持图片压缩；本地 lint 对 `google-generativeai` 的 `GenerativeModel` 导出警告可忽略，线上运行正常。
 - Telegram 适配：确认机器人 username 可获取；群聊仅响应 @ 或回复；私聊已修复未响应问题。
 - MessageAggregator 接口已改为 `add_message(chat_id, text, context)`，下游回调签名 `on_complete(context)`。
+- 身份文件主路径已迁移到 workspace（`workspace/SOUL.md`、`workspace/USER.md`、`workspace/data/memory/MEMORY.md`），旧路径仅作回退兼容。
+- 每日记忆（`workspace/data/memory/YYYY-MM-DD.md`）默认不自动注入；如业务需要可在 prompt 组装层手动恢复。
+- 聊天记录默认 DB 路径为 `workspace/data/memory/message_history.db`；若配置了 `memory.message_history.db_path` 则按配置优先。
 
 ## 快速检查清单
 - `config.cost_tracking.enabled` 是否开启。
@@ -124,7 +170,9 @@
 - 日志中是否能看到 `[Cost] provider/model: tokens = $cost`。
 - 后端忙碌时，新消息是否被 fast_llm 正确判定并回复（stop/change/queue）。
 - Telegram 私聊是否响应，群聊是否仅在 @ 机器人或回复时响应；消息是否带用户名；RAG/历史是否按 storage_id 隔离。
+- 生成阶段开始时 Telegram 是否立即出现 typing（而不是等首个 chunk）。
+- workspace 首次运行时是否自动复制 `SOUL.md`/`USER.md`/`MEMORY.md`。
 
 ## 交接
 - 记录人：GitHub Copilot
-- 日期：2026-02-28
+- 日期：2026-03-07

@@ -1,63 +1,76 @@
-# N.O.R.A. Core - 项目执行计划书
+# N.O.R.A. Core - 状态快照
 
-**文档版本:** 4.0 (Interactive Paradigm Shift)
-**更新日期:** 2026-02-06
-**当前状态:** Phase 3 (Skills) 核心功能完成，交互范式已升级。正在进行收尾工作。
-
----
-
-## 1. 核心愿景 (Grand Goal)
-
-**N.O.R.A. Core 的最终目标，是创造一个与主人共同成长的、拥有完美记忆的、永不消逝的数字灵魂。**
+**文档版本:** 5.0
+**更新日期:** 2026-03-07
+**当前状态:** 主干稳定；前脑优先路由已落地；媒体输入协议已统一。
 
 ---
 
-## 2. 今日战果 (Achievements - 2026-02-06)
+## 1. 当前架构状态
 
-**里程碑达成：交互范式革命 & 高级编程能力。**
+### 1.1 路由：前脑优先（已启用）
+- 所有用户消息先进入前脑（fast 模型）。
+- 前脑即时回复用户，并判断是否需要后脑执行任务。
+- 需要后脑时，前脑回复中附加 `[NEED_BACKEND]` 信号。
+- Controller 解析并移除该信号后发送给用户，再自动启动后脑工具循环。
 
-### A. 交互范式 (Phase 3.5 Completed)
-- **🧠 智能分段:** 实现了 `send_intermediate_message` 工具和相应的 Prompt 协议，使 Nora 能够像人类一样、有节奏地分段发送长消息。
-- **🛡️ 稳定性修复:**
-    - 解决了 Telegram HTML `<ul>` 标签不支持的崩溃问题。
-    - 解决了“消息过长”的崩溃问题，加入了工具输出截断器。
-- **🎯 认知矫正:**
-    - 通过重命名工具和强化 Prompt，解决了 `send_message` 导致的“工具 vs 技能”认知混淆。
-    - 注入了“用户指令至上”协议，解决了 Nora 因“过于主动”而忽略用户核心任务的问题。
+### 1.2 后脑任务循环（保持）
+- 后脑仍负责 RAG、工具调用、技能执行、结果总结。
+- `WorkerStatus` + `pending_messages` 的忙碌/打断/排队机制保持可用。
 
-### B. 高级编程能力 (Phase 3.2 Completed)
-- **🔪 代码手术刀:** 实现了 `edit_file` 工具，赋予 Nora 精准修改代码的能力。
-- **📞 专家委托:** 实现了 `delegate_to_coder` 工具和动态模型路由，使 Nora 能将复杂代码任务外包给专门的 Code LLM。
-- **⚙️ 配置向导:** 将 `coder` 模型的配置加入 `configure.py`，完善了项目工程化。
-
-### C. 技能系统 (Phase 3.1 Completed)
-- **🧩 拥抱标准:** 升级 `SkillLoader` 以全面支持 `Agent Skills` 开放标准的 YAML Frontmatter，并强化了技能模板 (`skill_creator`)。
-- **📖 先读后做:** 在 Prompt 中注入了“技能学习协议”，确保 Nora 在使用技能前会先阅读 `SKILL.md` 文档。
+### 1.3 媒体协议（已统一）
+- 统一使用 English-only 标识：`[image:]`、`[video:]`、`[audio:]`、`[file:]`、`[doc:]`。
+- 系统模板与 Telegram 适配已对齐。
 
 ---
 
-## 3. 已完成任务清单 (Phase 3)
+## 2. 近期已完成（2026-03-07）
 
-- [x] **Task 4.1 - 4.3:** 技能系统（加载、工具、执行循环）全线贯通。
-- [x] **Task 4.3.1 (衍生):** 实现 `edit_file` & `delegate_to_coder` 工具。
-- [x] **Task 4.3.2 (衍生):** 实现 `send_intermediate_message` 智能分段交互。
-- [x] **Task 4.3.3 (衍生):** 修复一系列由交互升级引发的认知和稳定性 Bug。
+- [x] 新增图片模型别名 `image`，并在输入含图片时自动切换模型（可选，缺省回退）。
+- [x] 主系统提示加入跨平台媒体输入协议。
+- [x] 清理中文媒体标签，统一到英文标签。
+- [x] 重写 `adapters/telegram/PROMPT.md`，去除历史损坏内容。
+- [x] 路由改为“前脑优先”，移除独立路由前置调用。
+- [x] 新增前脑路由信号解析函数与测试。
 
 ---
 
-## 4. 下一步行动纲领 (Next Actions)
+## 3. 关键文件映射
 
-- [x] **Task 5.1: 修复 `/start` 命令** (🐞 **已解决**)
-    - **成果:** 通过改为 `startswith("/start")` 解决了消息聚合导致的重置失效问题。
+- `core/controller.py`
+    - `_start_routed_task`：统一先走前脑。
+    - `_generate_front_chat_response`：前脑即时回复 + 路由判断 + 后脑交接。
+    - `_generate_response`：后脑工具循环（保留）。
+- `core/routing.py`
+    - `has_image_input`：图片输入检测。
+    - `parse_front_brain_response`：解析 `[NEED_BACKEND]` 信号。
+- `brain/templates/system.jinja`
+    - 跨平台媒体输入协议（英文标识）。
+- `adapters/telegram/main.py`
+    - 结构化媒体标签输出（英文）。
 
-#### **任务 5.2: 交互范式二度进化 - 流式分段** (🛡️ **已完成**)
-- **挑战:** 解决工具化分段发送导致的乱序、重复及无限循环问题。
-- **方案:** 引入 `[SPLIT]` 流式分割符，实现真正的实时同步发送。
-- **状态:** 已通过 `controller.py` 的深度重构实现。
+---
 
-#### **任务 4.4: 首批技能开发 - Web Search** (🚀 **即将开始**)
-- **目标:** 在全新的、稳固的架构上，创建第一个高级技能。
-- **步骤:**
-    1.  使用 `skill_creator` 创建 `skills/web_search/SKILL.md` (遵循新模板)。
-    2.  使用 `delegate_to_coder` 编写 `skills/web_search/search.py` 脚本。
-    3.  进行测试和验收。
+## 4. 验证状态
+
+- 路由与协议相关测试通过：
+    - `tests/test_routing.py`
+    - `tests/test_tool_plan.py`
+- 全量测试在当前环境下存在两类非本次改动问题：
+    1) 缺少 `config.yml`
+    2) 缺少 `tzdata`（时区测试失败）
+
+---
+
+## 5. 后续建议
+
+1. 给 `[NEED_BACKEND]` 增加更严格协议（仅允许末尾，避免误触）。
+2. 为“前脑判定 → 后脑交接”补充端到端回归测试。
+3. 如需跑全量测试，先补齐本地测试依赖：`config.yml` 与 `tzdata`。
+
+---
+
+## 6. 维护信息
+
+- 记录人：GitHub Copilot
+- 日期：2026-03-07

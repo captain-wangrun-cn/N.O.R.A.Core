@@ -11,7 +11,8 @@
 
 ## 核心目录
 - `core/`
-  - `controller.py`：主业务控制器，管理会话、LLM、工具、历史等。
+  - `controller.py`：主业务控制器，管理会话、LLM、工具、历史等（当前采用“前脑优先路由”：先前脑回复，再按需转后脑）。
+  - `routing.py`：路由辅助函数（媒体输入检测、前脑路由信号解析等）。
   - `cost_tracker.py`：成本记录与价格查询。
   - `__pycache__/`
 
@@ -25,8 +26,9 @@
   - `templates/`：Jinja 模板（系统与 persona）。
 
 - `adapters/`
-  - `base.py`：适配器基类。
+  - `base.py`：适配器基类（最小接口 + 生命周期/消息钩子 + 平台能力声明）。
   - `aggregator.py`：聚合器。
+  - `ADAPTER_GUIDE.md`：新平台适配器开发指南。
   - `telegram/`：Telegram 适配实现（`main.py`、`PROMPT.md`、`__init__.py`）。
 
 - `memory/`
@@ -49,9 +51,10 @@
 
 ## 配置与数据
 - `config.yml`（需自行提供，示例见 `config.example.yml`）。
-- `memory/message_history.db`：SQLite 聊天记录与摘要存储（路径可配置）。
+- `workspace/data/memory/message_history.db`：SQLite 聊天记录与摘要存储（路径可配置）。
 
 ## 运行要点
 - 入口：`main.py`（主流程）、`cli.py`（命令行工具）、`tui.py`（终端 UI）。
 - LLM 配置在 `config.yml` 的 `llm.*`；消息历史配置在 `memory.message_history.*`。
 - Telegram 适配器入口 `adapters/telegram/main.py`。
+- 路由策略：消息先进入前脑（fast 模型）做即时回复；若前脑回复中含 `[NEED_BACKEND]`，再启动后脑工具循环。
