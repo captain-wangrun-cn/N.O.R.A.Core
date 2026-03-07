@@ -1,4 +1,4 @@
-from core.routing import parse_route_decision_response, has_image_input
+from core.routing import parse_route_decision_response, has_image_input, parse_front_brain_response
 
 
 def test_parse_route_backend():
@@ -27,3 +27,39 @@ def test_has_image_input_with_image_url():
 
 def test_has_image_input_false_for_plain_text():
     assert has_image_input("今天我们聊聊天") is False
+
+
+# --- 前脑路由信号解析测试 ---
+
+def test_front_brain_needs_backend():
+    result = parse_front_brain_response("好的，让我来帮你查一下~ [NEED_BACKEND]")
+    assert result["needs_backend"] is True
+    assert result["user_reply"] == "好的，让我来帮你查一下~"
+    assert "[NEED_BACKEND]" not in result["user_reply"]
+
+
+def test_front_brain_no_backend():
+    result = parse_front_brain_response("今天天气不错呢，你有什么计划吗？")
+    assert result["needs_backend"] is False
+    assert result["user_reply"] == "今天天气不错呢，你有什么计划吗？"
+
+
+def test_front_brain_empty_response():
+    result = parse_front_brain_response("")
+    assert result["needs_backend"] is False
+    assert result["user_reply"] == ""
+
+
+def test_front_brain_backend_signal_at_end():
+    result = parse_front_brain_response("马上处理 ✨ [NEED_BACKEND]")
+    assert result["needs_backend"] is True
+    assert result["user_reply"] == "马上处理 ✨"
+
+
+def test_front_brain_backend_signal_mid_text():
+    """信号在文本中间的情况也应正常处理"""
+    result = parse_front_brain_response("好的 [NEED_BACKEND] 让我来看看")
+    assert result["needs_backend"] is True
+    assert "好的" in result["user_reply"]
+    assert "让我来看看" in result["user_reply"]
+    assert "[NEED_BACKEND]" not in result["user_reply"]

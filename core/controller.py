@@ -15,7 +15,7 @@ from skills.loader import SkillLoader
 from core.cost_tracker import get_cost_tracker
 import config
 import json
-from core.routing import parse_route_decision_response, has_image_input
+from core.routing import has_image_input, parse_front_brain_response
 
 logger = logging.getLogger(__name__)
 
@@ -382,51 +382,11 @@ class NoraController:
             return self.fast_llm, "fast"
         return self.llm, default_alias
 
-    async def _detect_route_to_backend(self, chat_id: str, text: str) -> bool:
-        """使用 fast_llm 判断该消息应走前脑还是后脑。"""
-        prompt = (
-            "你是消息路由器。请判断下面这条用户消息应该走哪条路径：\n"
-            "- front: 普通聊天、寒暄、情绪回应、风格调整、短问答\n"
-            "- backend: 需要执行任务、调用工具/技能、文件或代码操作、命令执行\n\n"
-            f"用户消息：{text}\n\n"
-            "只能输出一种格式，不要解释：ROUTE:front 或 ROUTE:backend"
-        )
-
-        try:
-            response = ""
-            stream = self.fast_llm.chat_stream(
-                system_prompt="你是严格的路由分类器。只输出 ROUTE:front 或 ROUTE:backend。",
-                user_prompt=prompt,
-                history=[],
-                tools=[]
-            )
-            async for chunk in stream:
-                if isinstance(chunk, dict) and chunk.get("type") == "text":
-                    response += chunk.get("content", "")
-                elif isinstance(chunk, str):
-                    response += chunk
-
-            route = parse_route_decision_response(response)
-            logger.info(f"[{chat_id}] LLM路由判定: route={route}, raw='{response.strip()[:80]}'")
-            return route == "backend"
-        except Exception as e:
-            # 保守回退：异常时默认前脑，不误触发“后脑忙碌”
-            logger.warning(f"[{chat_id}] LLM路由判定失败，回退前脑路径: {e}")
-            return False
-
     async def _start_routed_task(self, context: Dict[str, Any]):
-        """按 LLM 路由到前脑/后脑任务，并登记 generation_tasks。"""
+        """所有消息先进前脑，由前脑自行判断是否需要后脑。"""
         chat_id = context["chat_id"]
-        text = context.get("text", "")
-
-        route_to_backend = await self._detect_route_to_backend(chat_id, text)
-        if route_to_backend:
-            logger.info(f"[{chat_id}] 路由决策: 后脑任务路径")
-            task = asyncio.create_task(self._generate_response(context))
-        else:
-            logger.info(f"[{chat_id}] 路由决策: 前脑对话路径")
-            task = asyncio.create_task(self._generate_front_chat_response(context))
-
+        logger.info(f"[{chat_id}] 路由策略: 前脑优先 (front-brain-first)")
+        task = asyncio.create_task(self._generate_front_chat_response(context))
         self.generation_tasks[chat_id] = task
 
     async def handle_new_message(self, context: Dict[str, Any]):
@@ -669,7 +629,12 @@ class NoraController:
                 await self._start_routed_task(context)
 
     async def _generate_front_chat_response(self, context: Dict[str, Any]):
-        """前脑快速回复路径：仅自然对话，不启用工具/技能调用。"""
+        """
+        前脑优先路径：
+        1. 先用快速模型生成自然对话回复，同时判断是否需要后脑（工具/技能）
+        2. 若不需要后脑 → 直接发送回复，结束
+        3. 若需要后脑 → 发送前脑回复（如"好的，马上处理~"）后启动后脑任务
+        """
         chat_id = context["chat_id"]
         user_id = context["user_id"]
         text = context["text"]
@@ -707,9 +672,31 @@ class NoraController:
                 if msg["role"] in ("user", "assistant", "system")
             ]
 
+            # 前脑 prompt：包含路由判断指令
+            platform = getattr(self.adapter, 'platform_name', None) or 'telegram'
             system_prompt = get_system_prompt([
-                "【前脑模式】当前是普通对话，请直接自然回复，不要调用工具，不要进入任务执行流程。"
-            ])
+                "【前脑模式 — 路由判断】\n"
+                "你是前脑，负责即时回复用户并判断是否需要启动后脑（工具/技能执行）。\n\n"
+                "**规则：**\n"
+                "1. **始终先回复用户** — 用自然、友好的语言直接回应用户的消息。\n"
+                "2. **同时判断** 这条消息是否需要后脑介入（调用工具、执行技能、文件操作、命令执行等）。\n"
+                "3. 如果需要后脑：在你的回复**末尾**附加标记 `[NEED_BACKEND]`。\n"
+                "   - 例如：\"好的，让我来帮你查一下~ [NEED_BACKEND]\"\n"
+                "   - 例如：\"马上处理 ✨ [NEED_BACKEND]\"\n"
+                "4. 如果不需要后脑（纯聊天、问答、情绪回应等）：正常回复即可，不要加标记。\n"
+                "5. **不要调用任何工具**，工具调用由后脑负责。\n"
+                "6. **不要在回复中解释路由逻辑**，用户不需要知道前脑/后脑的存在。\n\n"
+                "**需要后脑的典型场景：**\n"
+                "- 用户要求执行操作（文件读写、代码修改、运行命令等）\n"
+                "- 用户要求使用技能（搜索、下载、天气查询等）\n"
+                "- 需要调用工具才能完成的任务\n"
+                "- 用户要求创建、修改或分析文件/代码\n\n"
+                "**不需要后脑的典型场景：**\n"
+                "- 普通聊天、寒暄、情绪安慰\n"
+                "- 知识问答（你能直接回答的）\n"
+                "- 闲聊、讨论、观点交流\n"
+                "- 对之前操作结果的追问（不需要新的工具调用时）"
+            ], platform=platform)
 
             usage_data = None
             stream = generation_llm.chat_stream(
@@ -744,10 +731,15 @@ class NoraController:
                     context="front_chat"
                 )
 
-            clean_response = _clean_tool_call_leaks(final_response_buffer).strip()
+            # --- 解析前脑回复：提取路由信号 ---
+            parsed = parse_front_brain_response(final_response_buffer)
+            clean_response = _clean_tool_call_leaks(parsed["user_reply"]).strip()
+            needs_backend = parsed["needs_backend"]
+
             if not clean_response:
                 clean_response = "我在～你继续说。"
 
+            # 发送前脑回复给用户
             await self.adapter.send_message(chat_id, clean_response)
             self.message_history.add_message(
                 platform="telegram",
@@ -758,6 +750,21 @@ class NoraController:
             )
 
             session["history"] = temp_history + [{"role": "assistant", "content": clean_response}]
+
+            # --- 路由决策：是否需要后脑 ---
+            if needs_backend:
+                logger.info(f"[{chat_id}] 前脑判断需要后脑介入，启动后脑任务")
+                if self.tui_callback:
+                    self.tui_callback("🧠 Front→Backend handoff...")
+                # 先完成前脑状态清理
+                status.finish()
+                self.generation_tasks.pop(chat_id, None)
+                # 启动后脑任务（context 不变，后脑能看到完整历史）
+                backend_task = asyncio.create_task(self._generate_response(context))
+                self.generation_tasks[chat_id] = backend_task
+                return  # 前脑任务结束，后脑接管
+            else:
+                logger.info(f"[{chat_id}] 前脑直接回复完成，不需要后脑")
 
         except asyncio.CancelledError:
             status.finish()

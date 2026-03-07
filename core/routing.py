@@ -45,3 +45,38 @@ def has_image_input(text: str) -> bool:
     # 常见图片 URL/路径扩展名
     image_ext_pattern = r"\.(?:png|jpe?g|webp|bmp|gif)(?:[?#][^\s\]]*)?"
     return re.search(image_ext_pattern, s, re.IGNORECASE) is not None
+
+
+# --- 前脑路由信号检测 ---
+
+# 前脑回复中触发后脑的标记
+_BACKEND_SIGNAL = "[NEED_BACKEND]"
+
+
+def parse_front_brain_response(response_text: str) -> dict:
+    """
+    解析前脑回复，提取路由信号和用户可见文本。
+
+    前脑回复可能包含 [NEED_BACKEND] 标记，表示需要后脑接管执行工具/技能。
+    该标记会从最终发送给用户的文本中移除。
+
+    Returns:
+        {
+            "needs_backend": bool,      # 是否需要后脑
+            "user_reply": str,          # 给用户看的清理后文本
+        }
+    """
+    if not response_text:
+        return {"needs_backend": False, "user_reply": ""}
+
+    needs_backend = _BACKEND_SIGNAL in response_text
+
+    # 清理标记，生成用户可见文本
+    user_reply = response_text.replace(_BACKEND_SIGNAL, "").strip()
+    # 清理多余空行
+    user_reply = re.sub(r'\n{3,}', '\n\n', user_reply)
+
+    return {
+        "needs_backend": needs_backend,
+        "user_reply": user_reply,
+    }
