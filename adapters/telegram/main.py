@@ -16,6 +16,7 @@ from memory.message_history import MessageHistory
 import sys
 import platform
 from brain.llm import get_llm_client
+from workspace_config import get_workspace_manager
 
 logger = logging.getLogger(__name__)
 
@@ -199,12 +200,69 @@ class TelegramAdapter(BaseAdapter):
         token = config.get_telegram_token()
         if not token:
             raise ValueError("Telegram Bot Token not found in config.")
+
+        workspace_manager = get_workspace_manager()
+        self.workspace_root = str(workspace_manager.root)
+        self.downloads_dir = str(workspace_manager.downloads_dir)
         
         self.application = ApplicationBuilder().token(token).build()
         self._aggregator: MessageAggregator | None = None
         self.message_history = MessageHistory()
         self._reply_contexts: Dict[str, Dict] = {}  # 存储回复上下文 {chat_id: {msg_id: context}}
         self.bot_username: Optional[str] = None
+
+    def _resolve_local_media_path(self, raw_path: str) -> Optional[str]:
+        """
+        解析富媒体中的本地文件路径。
+        支持以下输入：
+        - 绝对路径
+        - workspace/xxx 相对工作区路径
+        - downloads/xxx 相对下载目录路径
+        - 普通相对路径（优先按 workspace 根目录解析）
+        """
+        path = (raw_path or "").strip().strip('"').strip("'")
+        if not path:
+            return None
+
+        # 1) 直接存在（绝对路径或当前目录可达）
+        if os.path.isfile(path):
+            return path
+
+        normalized = path.replace('\\', '/')
+        candidates: List[str] = []
+
+        # 2) workspace/ 前缀映射到真实 workspace 根目录
+        if normalized.startswith("workspace/"):
+            rel = normalized[len("workspace/"):]
+            candidates.append(os.path.join(self.workspace_root, rel))
+        elif normalized == "workspace":
+            candidates.append(self.workspace_root)
+
+        # 3) downloads/ 前缀映射到 downloads 目录
+        if normalized.startswith("downloads/"):
+            rel = normalized[len("downloads/"):]
+            candidates.append(os.path.join(self.downloads_dir, rel))
+
+        # 4) ./ 或普通相对路径，优先相对于 workspace 根目录
+        if normalized.startswith("./"):
+            candidates.append(os.path.join(self.workspace_root, normalized[2:]))
+        if not os.path.isabs(path):
+            candidates.append(os.path.join(self.workspace_root, path))
+            candidates.append(os.path.join(os.getcwd(), path))
+
+        # 去重后检查
+        seen = set()
+        for c in candidates:
+            if not c:
+                continue
+            norm = os.path.normpath(c)
+            if norm in seen:
+                continue
+            seen.add(norm)
+            if os.path.isfile(norm):
+                return norm
+
+        return None
 
     async def _send_with_retry(self, send_coro_factory, retries: int = 2, base_delay: float = 1.0):
         """
@@ -768,13 +826,15 @@ class TelegramAdapter(BaseAdapter):
                     media_type = self._classify_file(path)
                     file_entries.append((path, media_type, True))
                     logger.info(f"[{chat_id}] 检测到媒体URL: {path} ({media_type})")
-                elif os.path.isfile(path):
-                    media_type = self._classify_file(path)
-                    file_entries.append((path, media_type, False))
-                    logger.info(f"[{chat_id}] 检测到媒体文件: {path} ({media_type})")
                 else:
-                    missing_files.append(path)
-                    logger.warning(f"[{chat_id}] 文件路径不存在，跳过: {path}")
+                    resolved_path = self._resolve_local_media_path(path)
+                    if resolved_path:
+                        media_type = self._classify_file(resolved_path)
+                        file_entries.append((resolved_path, media_type, False))
+                        logger.info(f"[{chat_id}] 检测到媒体文件: {path} -> {resolved_path} ({media_type})")
+                    else:
+                        missing_files.append(path)
+                        logger.warning(f"[{chat_id}] 文件路径不存在，跳过: {path}")
 
         # 2. 清理文本中的文件引用（无论文件是否存在都清理，不要把 [image:...] 原样显示）
         clean_text = self.FILE_PATTERN.sub('', text).strip()
