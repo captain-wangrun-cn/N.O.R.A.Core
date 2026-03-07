@@ -101,7 +101,7 @@ python view_costs.py --today
 - [ ] 了解 `core/controller.py` 的消息处理流程
 - [ ] 了解 `brain/templates/system.jinja` 中的行为约定
 - [ ] 确认 `config.yml` 存在且配置正确
-- [ ] 确认 `workspace/data/memory/message_history.db` 是否存在（有则说明有历史数据）
+- [ ] 确认 `data/memory/message_history.db` 是否存在（有则说明有历史数据）
 - [ ] 运行 `pytest` 确认测试状态
 - [ ] 查看 `git log --oneline -10` 了解最近改动
 

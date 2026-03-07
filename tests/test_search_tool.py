@@ -53,3 +53,34 @@ def test_search_supports_regex(tmp_path):
 
     assert "sample.txt:1:" in result
     assert "sample.txt:2:" in result
+
+
+def test_workspace_prefix_path_resolution_for_file_tools(tmp_path):
+    """验证 workspace/ 前缀会映射到真实 WORKSPACE_ROOT，而不是仓库内相对目录。"""
+    import brain.tools as tools_module
+
+    # 临时切换 WORKSPACE_ROOT 到 pytest 的临时目录
+    old_root = tools_module.WORKSPACE_ROOT
+    tools_module.WORKSPACE_ROOT = str(tmp_path)
+
+    try:
+        manager = _build_manager()
+
+        # 1) write_file: workspace/ 前缀
+        write_result = manager.write_file("workspace/data/hello.txt", "hello")
+        expected_file = tmp_path / "data" / "hello.txt"
+
+        assert expected_file.exists()
+        assert expected_file.read_text(encoding="utf-8") == "hello"
+        assert "Successfully wrote to" in write_result
+
+        # 2) read_file: workspace/ 前缀
+        read_result = manager.read_file("workspace/data/hello.txt")
+        assert read_result == "hello"
+
+        # 3) edit_file: workspace/ 前缀
+        edit_result = manager.edit_file("workspace/data/hello.txt", "hello", "hello world")
+        assert "Successfully edited" in edit_result
+        assert expected_file.read_text(encoding="utf-8") == "hello world"
+    finally:
+        tools_module.WORKSPACE_ROOT = old_root

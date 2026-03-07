@@ -383,6 +383,36 @@ class ToolManager:
             return False, f"Access denied: '{basename}' contains sensitive data (API keys, tokens). You should not read this file."
         return True, ""
 
+    def _resolve_workspace_path(self, path: str) -> str:
+        """
+        Normalize file-tool path inputs.
+
+        Supported forms:
+        - Absolute paths (kept as-is)
+        - workspace/xxx (mapped to real WORKSPACE_ROOT)
+        - workspace      (mapped to WORKSPACE_ROOT)
+        - Relative paths (resolved from current working directory)
+        """
+        raw = str(path or "").strip().strip('"').strip("'")
+        if not raw:
+            return raw
+
+        normalized = raw.replace("\\", "/")
+
+        # Absolute path
+        if os.path.isabs(raw):
+            return os.path.abspath(raw)
+
+        # workspace prefix mapping
+        if normalized == "workspace":
+            return os.path.abspath(str(WORKSPACE_ROOT))
+        if normalized.startswith("workspace/"):
+            rel = normalized[len("workspace/"):]
+            return os.path.abspath(os.path.join(str(WORKSPACE_ROOT), rel))
+
+        # Default relative path behavior
+        return os.path.abspath(raw)
+
     def list_dir(self, path: str = ".") -> str:
         """
         Lists the contents of a directory. Use this instead of 'exec_command ls'.
@@ -390,7 +420,7 @@ class ToolManager:
         :param path: The directory path to list. Defaults to workspace root '.'.
         """
         try:
-            target = os.path.abspath(path)
+            target = self._resolve_workspace_path(path)
             if not os.path.isdir(target):
                 return f"Error: '{path}' is not a directory."
             entries = sorted(os.listdir(target))
@@ -425,7 +455,8 @@ class ToolManager:
           read_file("app.py", 10, 20)      → Read lines 10-20 (inclusive)
           read_file("app.py", 50)          → Read from line 50 to end
         """
-        safe, reason = self._is_path_safe(path)
+        resolved_path = self._resolve_workspace_path(path)
+        safe, reason = self._is_path_safe(resolved_path)
         if not safe:
             return reason
         try:
@@ -435,7 +466,7 @@ class ToolManager:
             if end_line is not None:
                 end_line = int(end_line)
             
-            with open(path, 'r', encoding='utf-8') as f:
+            with open(resolved_path, 'r', encoding='utf-8') as f:
                 if start_line is None and end_line is None:
                     # 读取全文
                     return f.read()
@@ -461,7 +492,7 @@ class ToolManager:
                     result = ''.join(selected_lines)
                     
                     # 添加行号信息帮助 LLM 理解上下文
-                    header = f"# Lines {start_idx + 1}-{end_idx} of {total_lines} (File: {path})\n"
+                    header = f"# Lines {start_idx + 1}-{end_idx} of {total_lines} (File: {resolved_path})\n"
                     return header + result
         except Exception as e:
             return f"Error reading file: {e}"
@@ -490,7 +521,7 @@ class ToolManager:
 
         try:
             max_results = max(1, min(int(max_results), 200))
-            target_root = os.path.abspath(path)
+            target_root = self._resolve_workspace_path(path)
             if not os.path.exists(target_root):
                 return f"Error: path '{path}' does not exist."
 
@@ -584,9 +615,10 @@ class ToolManager:
     def write_file(self, path: str, content: str) -> str:
         """Writes content to a file, overwriting it."""
         try:
-            os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
-            with open(path, 'w', encoding='utf-8') as f: f.write(content)
-            return f"Successfully wrote to {path}"
+            resolved_path = self._resolve_workspace_path(path)
+            os.makedirs(os.path.dirname(resolved_path), exist_ok=True)
+            with open(resolved_path, 'w', encoding='utf-8') as f: f.write(content)
+            return f"Successfully wrote to {resolved_path}"
         except Exception as e: return f"Error writing file: {e}"
 
     def edit_file(self, path: str, old_code: str, new_code: str) -> str:
@@ -598,19 +630,20 @@ class ToolManager:
         :param old_code: The code snippet to find (approximate whitespace is OK).
         :param new_code: The replacement code snippet.
         """
-        safe, reason = self._is_path_safe(path)
+        resolved_path = self._resolve_workspace_path(path)
+        safe, reason = self._is_path_safe(resolved_path)
         if not safe:
             return reason
         try:
-            with open(path, 'r', encoding='utf-8') as f:
+            with open(resolved_path, 'r', encoding='utf-8') as f:
                 content = f.read()
 
             # 1. Try exact match first
             if old_code in content:
                 new_content = content.replace(old_code, new_code, 1)
-                with open(path, 'w', encoding='utf-8') as f:
+                with open(resolved_path, 'w', encoding='utf-8') as f:
                     f.write(new_content)
-                return f"Successfully edited {path}."
+                return f"Successfully edited {resolved_path}."
 
             # 2. Fallback: normalized whitespace matching
             import re
@@ -630,12 +663,12 @@ class ToolManager:
                         # Found a match with normalized whitespace
                         new_lines = lines[:i] + new_code.split('\n') + lines[i + window_size:]
                         new_content = '\n'.join(new_lines)
-                        with open(path, 'w', encoding='utf-8') as f:
+                        with open(resolved_path, 'w', encoding='utf-8') as f:
                             f.write(new_content)
-                        return f"Successfully edited {path} (matched with normalized whitespace)."
+                        return f"Successfully edited {resolved_path} (matched with normalized whitespace)."
 
             return (
-                f"Error: 'old_code' not found in {path} (even after whitespace normalization). "
+                f"Error: 'old_code' not found in {resolved_path} (even after whitespace normalization). "
                 f"Tip: Use 'write_file' to overwrite the entire file instead of edit_file."
             )
         except Exception as e:

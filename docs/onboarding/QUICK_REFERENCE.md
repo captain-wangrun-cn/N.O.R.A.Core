@@ -105,7 +105,7 @@ python tui.py
 
 | 文件 | 说明 |
 |------|------|
-| `workspace/data/memory/message_history.db` | 聊天记录 + 压缩总结（`messages` + `summaries` 表） |
+| `data/memory/message_history.db` | 聊天记录 + 压缩总结（`messages` + `summaries` 表） |
 | `memory/cost_tracking.db` | 成本记录 |
 | `memory/vector.db` | 向量数据库（Qdrant） |
 
