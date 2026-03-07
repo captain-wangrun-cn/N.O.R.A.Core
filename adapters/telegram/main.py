@@ -224,9 +224,9 @@ class TelegramAdapter(BaseAdapter):
         if not path:
             return None
 
-        # 1) 直接存在（绝对路径或当前目录可达）
-        if os.path.isfile(path):
-            return path
+        # 1) 绝对路径：按原样解析
+        if os.path.isabs(path):
+            return path if os.path.isfile(path) else None
 
         normalized = path.replace('\\', '/')
         candidates: List[str] = []
@@ -238,17 +238,21 @@ class TelegramAdapter(BaseAdapter):
         elif normalized == "workspace":
             candidates.append(self.workspace_root)
 
-        # 3) downloads/ 前缀映射到 downloads 目录
+        # 3) downloads/ / download/ 前缀映射到 downloads 目录
         if normalized.startswith("downloads/"):
             rel = normalized[len("downloads/"):]
             candidates.append(os.path.join(self.downloads_dir, rel))
+        elif normalized.startswith("download/"):
+            rel = normalized[len("download/"):]
+            candidates.append(os.path.join(self.downloads_dir, rel))
 
-        # 4) ./ 或普通相对路径，优先相对于 workspace 根目录
+        # 4) ./ 或普通相对路径：默认按 workspace 根目录解析（优先）
         if normalized.startswith("./"):
             candidates.append(os.path.join(self.workspace_root, normalized[2:]))
-        if not os.path.isabs(path):
-            candidates.append(os.path.join(self.workspace_root, path))
-            candidates.append(os.path.join(os.getcwd(), path))
+        candidates.append(os.path.join(self.workspace_root, path))
+
+        # 5) 兼容 fallback：当前进程工作目录（低优先级）
+        candidates.append(os.path.join(os.getcwd(), path))
 
         # 去重后检查
         seen = set()
