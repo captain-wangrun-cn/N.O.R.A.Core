@@ -84,3 +84,30 @@ def test_workspace_prefix_path_resolution_for_file_tools(tmp_path):
         assert expected_file.read_text(encoding="utf-8") == "hello world"
     finally:
         tools_module.WORKSPACE_ROOT = old_root
+
+
+def test_relative_filename_resolution_uses_workspace_root(tmp_path):
+    """验证裸文件名和 ./ 相对路径默认写入 WORKSPACE_ROOT。"""
+    import brain.tools as tools_module
+
+    old_root = tools_module.WORKSPACE_ROOT
+    tools_module.WORKSPACE_ROOT = str(tmp_path)
+
+    try:
+        manager = _build_manager()
+
+        # bare filename
+        result1 = manager.write_file("note.txt", "nora")
+        expected1 = tmp_path / "note.txt"
+        assert expected1.exists()
+        assert expected1.read_text(encoding="utf-8") == "nora"
+        assert "Successfully wrote to" in result1
+
+        # ./relative path
+        result2 = manager.write_file("./logs/run.log", "ok")
+        expected2 = tmp_path / "logs" / "run.log"
+        assert expected2.exists()
+        assert expected2.read_text(encoding="utf-8") == "ok"
+        assert "Successfully wrote to" in result2
+    finally:
+        tools_module.WORKSPACE_ROOT = old_root

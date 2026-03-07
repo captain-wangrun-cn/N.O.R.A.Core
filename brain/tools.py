@@ -391,7 +391,7 @@ class ToolManager:
         - Absolute paths (kept as-is)
         - workspace/xxx (mapped to real WORKSPACE_ROOT)
         - workspace      (mapped to WORKSPACE_ROOT)
-        - Relative paths (resolved from current working directory)
+        - Relative paths (resolved from WORKSPACE_ROOT)
         """
         raw = str(path or "").strip().strip('"').strip("'")
         if not raw:
@@ -410,8 +410,8 @@ class ToolManager:
             rel = normalized[len("workspace/"):]
             return os.path.abspath(os.path.join(str(WORKSPACE_ROOT), rel))
 
-        # Default relative path behavior
-        return os.path.abspath(raw)
+        # Default relative path behavior: resolve from WORKSPACE_ROOT
+        return os.path.abspath(os.path.join(str(WORKSPACE_ROOT), normalized))
 
     def list_dir(self, path: str = ".") -> str:
         """
