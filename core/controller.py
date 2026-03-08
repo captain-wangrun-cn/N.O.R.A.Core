@@ -9,6 +9,7 @@ from adapters.base import BaseAdapter
 from brain.llm import llm_client, get_llm_client
 from brain.prompts import get_system_prompt, render_template, get_soul_prompt
 from memory.rag import RAGEngine
+from memory.image_store import ImageStore
 from memory.message_history import MessageHistory
 from brain.tools import ToolManager
 from skills.loader import SkillLoader
@@ -87,13 +88,19 @@ class NoraController:
 
     _THINK_BLOCK_PATTERN = re.compile(r"<think>[\s\S]*?</think>", re.IGNORECASE)
     _THINK_INLINE_PATTERN = re.compile(r"</?think>", re.IGNORECASE)
+    # 匹配 LLM 返回的图片标签块: [IMAGE_TAGS:img_xxxx] ... [/IMAGE_TAGS]
+    _IMAGE_TAGS_PATTERN = re.compile(
+        r'\[IMAGE_TAGS:(img_[a-f0-9]+)\](.*?)\[/IMAGE_TAGS\]',
+        re.IGNORECASE | re.DOTALL,
+    )
 
     def __init__(self, adapter: BaseAdapter, tui_callback: Optional[Callable[[str], None]] = None):
         self.adapter = adapter
         self.tui_callback = tui_callback
         self.llm = llm_client
         self.rag = RAGEngine()
-        self.tool_manager = ToolManager(adapter) # Pass adapter to ToolManager
+        self.image_store = ImageStore()
+        self.tool_manager = ToolManager(adapter, image_store=self.image_store) # Pass adapter and image_store to ToolManager
         self.skill_loader = SkillLoader()
         self.sessions: Dict[str, Any] = {}
         self.generation_tasks: Dict[str, asyncio.Task] = {}
@@ -402,7 +409,7 @@ class NoraController:
         status.start(query=text, max_turns=MAX_TURNS)
 
         # 根据输入类型选择模型：图片消息优先走 image 模型
-        model_alias_in_use = "image" if has_image_input(text) else "smart"
+        model_alias_in_use = "image" if multimodal_images else "smart"
         active_llm = self.image_llm if model_alias_in_use == "image" else self.llm
         
         try:
@@ -460,6 +467,22 @@ class NoraController:
                 )
 
             full_user_prompt = text
+            
+            # 如果有图片，将图片 ID 信息注入到用户 prompt 中，并告知 LLM 返回图片标签
+            if multimodal_images:
+                image_id_lines = []
+                for img in multimodal_images:
+                    image_id_lines.append(f"- 图片 ID: {img['image_id']}  文件: {os.path.basename(img['path'])}")
+                image_hint = (
+                    "\n\n📎 本次消息附带了以下图片：\n"
+                    + "\n".join(image_id_lines)
+                    + "\n\n请在回复最末尾，为每张图片附上详细的描述标签（用于图片记忆检索），格式如下：\n"
+                    "[IMAGE_TAGS:img_xxxxxxxx]\n"
+                    "详细的图片描述标签，包括主题、场景、物体、颜色、风格、情绪、人物特征等，用逗号分隔\n"
+                    "[/IMAGE_TAGS]\n"
+                    "这些标签只用于后台存储，不会展示给用户。请确保标签尽可能详细丰富。"
+                )
+                full_user_prompt = full_user_prompt + image_hint
             
             # Check for salvaged context from previous interruption
             pending_text = session.get("pending_text", "")
@@ -774,6 +797,16 @@ class NoraController:
             logger.debug(f"[{chat_id}] 生成完成。")
             
             # --- 4. 发送响应 ---
+            # 先提取图片标签（在任何清理之前），供后续存储
+            image_tags_extracted: Dict[str, str] = {}  # image_id -> tags
+            if multimodal_images and final_response_buffer:
+                for m in self._IMAGE_TAGS_PATTERN.finditer(final_response_buffer):
+                    img_id = m.group(1).strip()
+                    tags_text = m.group(2).strip()
+                    if img_id and tags_text:
+                        image_tags_extracted[img_id] = tags_text
+                logger.debug(f"[{chat_id}] 已提取 {len(image_tags_extracted)} 个图片标签块。")
+
             # If the loop completes and there's still text in the buffer, it's the final message.
             if final_response_buffer:
                 # 过滤掉可能泄漏的工具调用语法
@@ -854,6 +887,25 @@ class NoraController:
                     user_id="assistant"
                 )
             
+            # --- 4.6 图片记忆存储 (Image Memory Storage) ---
+            if multimodal_images and self.image_store.enabled:
+                for img in multimodal_images:
+                    img_id = img["image_id"]
+                    tags = image_tags_extracted.get(img_id, "")
+                    if not tags:
+                        # LLM 没有按格式返回标签，用简单的文件名作为 fallback
+                        tags = f"用户发送的图片: {os.path.basename(img['path'])}"
+                    asyncio.create_task(
+                        self._async_save_image_metadata(
+                            image_id=img_id,
+                            file_path=img["path"],
+                            tags=tags,
+                            user_id=storage_id,
+                            chat_id=chat_id,
+                        )
+                    )
+                    logger.info(f"[{chat_id}] 图片 {img_id} 标签已提取并入库: '{tags[:60]}...'")
+            
             # --- 5. RAG 记忆存储 (Memory Storage) ---
             if self.rag.enabled:
                 # Store the initial user prompt
@@ -920,11 +972,13 @@ class NoraController:
 
     @classmethod
     def _strip_thinking_content(cls, text: str) -> str:
-        """移除模型可能泄漏的思维链标签内容（如 <think>...</think>）。"""
+        """移除模型可能泄漏的思维链标签内容（如 <think>...</think>）和图片标签块。"""
         if not text:
             return ""
         cleaned = cls._THINK_BLOCK_PATTERN.sub("", text)
         cleaned = cls._THINK_INLINE_PATTERN.sub("", cleaned)
+        # 移除 IMAGE_TAGS 块（不应展示给用户，仅后台存储用）
+        cleaned = cls._IMAGE_TAGS_PATTERN.sub("", cleaned)
         cleaned = re.sub(r'\n{3,}', '\n\n', cleaned).strip()
         return cleaned
 
@@ -961,4 +1015,26 @@ class NoraController:
             logger.debug(f"[{metadata.get('chat_id')}] 记忆已异步保存 (Role: {metadata.get('role')})")
         except Exception as e:
             logger.error(f"保存记忆失败: {e}")
+
+    async def _async_save_image_metadata(
+        self,
+        image_id: str,
+        file_path: str,
+        tags: str,
+        user_id: str,
+        chat_id: str,
+    ):
+        """异步保存图片元数据到 MongoDB + Qdrant。"""
+        try:
+            await asyncio.to_thread(
+                self.image_store.save_image_metadata,
+                image_id=image_id,
+                file_path=file_path,
+                tags=tags,
+                user_id=user_id,
+                chat_id=chat_id,
+            )
+            logger.debug(f"[{chat_id}] 图片元数据已异步保存: {image_id}")
+        except Exception as e:
+            logger.error(f"保存图片元数据失败: {image_id} - {e}")
 

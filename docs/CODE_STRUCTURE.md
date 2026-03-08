@@ -20,8 +20,9 @@
   - `interface.py`：LLM 接口定义。
   - `llm.py`：LLM 客户端获取与调用。
   - `logging_config.py`：日志配置。
+  - `multimodal.py`：多模态输入处理（图片标签提取、image_id 生成、二进制读取）。
   - `prompts.py`：提示词模板。
-  - `tools.py`：工具注册与调用。
+  - `tools.py`：工具注册与调用（含 `view_image` 图片检索工具）。
   - `providers/`：LLM 提供方适配（`gemini.py`、`openai.py`）。
   - `templates/`：Jinja 模板（系统与 persona）。
 
@@ -34,6 +35,7 @@
 - `memory/`
   - `message_history.py`：消息持久化、压缩、归档、上下文重建。
   - `embed.py` / `vector.py` / `rag.py` / `message_history.py` / `__pycache__/`：向量化、RAG 与消息历史。
+  - `image_store.py`：图片记忆存储（MongoDB + Qdrant 双写），图片元数据管理与多模式检索。
   - `message_history.py`（主要逻辑在此）。
 
 - `skills/`

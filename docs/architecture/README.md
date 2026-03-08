@@ -70,6 +70,8 @@
   - 四层存储策略 (Raw, Compressed, Vector, Archive)。
 - **[消息压缩 (Message Compression)](./message-compression.md)**
   - 针对长对话的 Token 优化策略。
+- **[图片记忆系统 (Image Memory)](./image-memory.md)**
+  - 图片 ID 分配、LLM 标签提取、MongoDB + Qdrant 双写、语义检索与 `view_image` 工具。
 
 ### 🛡️ 监控与运维 (Ops & Monitoring)
 

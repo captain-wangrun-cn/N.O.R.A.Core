@@ -8,12 +8,18 @@ import logging
 import mimetypes
 import os
 import re
+import uuid
 from typing import Any, Dict, List, Tuple
 
 logger = logging.getLogger(__name__)
 
 _IMAGE_TAG_PATTERN = re.compile(r'\[image:\s*(.*?)\]', re.IGNORECASE)
 _MAX_IMAGE_BYTES = 20 * 1024 * 1024  # 20MB safety limit per image
+
+
+def _generate_image_id() -> str:
+    """生成短且可读的图片 ID，格式: img_<8位hex>"""
+    return f"img_{uuid.uuid4().hex[:8]}"
 
 
 def _resolve_local_image_path(raw_path: str) -> str:
@@ -62,7 +68,7 @@ def extract_image_payloads(text: str) -> Tuple[str, List[Dict[str, Any]]]:
 
     Returns:
         clean_text: 移除 image 标签后的文本
-        images: [{"path", "mime_type", "bytes", "base64"}, ...]
+        images: [{"image_id", "path", "mime_type", "bytes", "base64"}, ...]
     """
     if not text:
         return "", []
@@ -93,7 +99,9 @@ def extract_image_payloads(text: str) -> Tuple[str, List[Dict[str, Any]]]:
             with open(resolved, "rb") as f:
                 raw_bytes = f.read()
 
+            image_id = _generate_image_id()
             images.append({
+                "image_id": image_id,
                 "path": resolved,
                 "mime_type": mime_type,
                 "bytes": raw_bytes,

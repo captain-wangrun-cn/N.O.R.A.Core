@@ -65,10 +65,11 @@ class ToolManager:
     """
     Manages and executes all available tools using a dual-layer system.
     """
-    def __init__(self, adapter: BaseAdapter):
+    def __init__(self, adapter: BaseAdapter, image_store=None):
         self._tools: Dict[str, Callable] = {}
         self._schemas: List[Dict[str, Any]] = []
         self.adapter = adapter
+        self.image_store = image_store  # memory.image_store.ImageStore 实例
         self._register_tools()
 
     def _register_tools(self):
@@ -82,6 +83,7 @@ class ToolManager:
         self.register(self.list_dir)
         self.register(self.get_available_skills)
         self.register(self.exec_command)
+        self.register(self.view_image)
 
     def register(self, func: Callable):
         self._tools[func.__name__] = func
@@ -725,6 +727,72 @@ class ToolManager:
         except subprocess.TimeoutExpired:
             return f"Error: Command timed out after {timeout} seconds. For long-running commands (apt install, pip install, etc.), use a higher timeout value, e.g. exec_command(command, timeout=300)."
         except Exception as e: return f"Error executing command: {e}"
+
+    def view_image(
+        self,
+        image_id: str = "",
+        keyword: str = "",
+        start_time: str = "",
+        end_time: str = "",
+        user_id: str = "",
+        limit: int = 10,
+    ) -> str:
+        """
+        Retrieves images from the image memory database. Supports multiple search modes:
+        1. By image_id: exact lookup (e.g. 'img_a1b2c3d4')
+        2. By keyword: semantic/text search on image tags (e.g. '猫咪', 'sunset beach')
+        3. By time range: filter by Unix timestamp (start_time/end_time)
+        4. If no parameters given: returns the most recent images.
+        :param image_id: Exact image ID to look up (e.g. 'img_a1b2c3d4').
+        :param keyword: Keyword or description for semantic/text search on image tags.
+        :param start_time: Start of time range as Unix timestamp string (e.g. '1709856000').
+        :param end_time: End of time range as Unix timestamp string (e.g. '1709942400').
+        :param user_id: Filter by user ID. If empty, searches all users.
+        :param limit: Maximum number of results (1-50, default 10).
+        """
+        if not self.image_store:
+            return "Error: Image memory system is not available (ImageStore not initialized)."
+        if not self.image_store.enabled:
+            return "Error: Image memory system is offline (MongoDB/Qdrant/Embedding not ready)."
+
+        try:
+            limit = max(1, min(int(limit), 50))
+            s_time = float(start_time) if start_time else None
+            e_time = float(end_time) if end_time else None
+        except (ValueError, TypeError) as e:
+            return f"Error: Invalid parameter value: {e}"
+
+        results = self.image_store.search_images(
+            image_id=image_id,
+            keyword=keyword,
+            start_time=s_time,
+            end_time=e_time,
+            user_id=user_id,
+            limit=limit,
+        )
+
+        if not results:
+            return "No images found matching the criteria."
+
+        # Format results for LLM consumption
+        output_lines = [f"Found {len(results)} image(s):\n"]
+        for i, img in enumerate(results, 1):
+            output_lines.append(f"--- Image {i} ---")
+            output_lines.append(f"  ID: {img.get('image_id', 'N/A')}")
+            output_lines.append(f"  File: {img.get('file_path', 'N/A')}")
+            output_lines.append(f"  Tags: {img.get('tags', img.get('text', 'N/A'))}")
+            ts = img.get("timestamp")
+            if ts:
+                from datetime import datetime, timezone
+                dt = datetime.fromtimestamp(float(ts), tz=timezone.utc)
+                output_lines.append(f"  Time: {dt.strftime('%Y-%m-%d %H:%M:%S UTC')}")
+            output_lines.append(f"  User: {img.get('user_id', 'N/A')}")
+            score = img.get("score")
+            if score is not None:
+                output_lines.append(f"  Relevance: {score:.3f}")
+            output_lines.append("")
+
+        return "\n".join(output_lines)
 
     def _generate_schema(self, func: Callable) -> Dict[str, Any]:
         """Generates a JSON schema for a function."""
