@@ -783,7 +783,7 @@ def run_wizard():
 # --- RAG/Qdrant 管理功能 ---
 
 def clean_qdrant():
-    """清理 Qdrant 向量数据库"""
+    """清理 Qdrant 向量数据库（删除所有 collections）"""
     try:
         from qdrant_client import QdrantClient
         import config
@@ -797,51 +797,52 @@ def clean_qdrant():
         
         host = qdrant_cfg.get("host", "localhost")
         port = qdrant_cfg.get("port", 6333)
-        collection_name = "nora_memory"
-        
         # 连接 Qdrant
         client = QdrantClient(host=host, port=port)
         
-        # 检查 collection 是否存在
+        # 列出所有 collections
         collections = client.get_collections()
-        exists = any(c.name == collection_name for c in collections.collections)
-        
-        if not exists:
-            logger.warning(f"⚠️  Collection '{collection_name}' 不存在，无需清理。")
+        collection_names = [c.name for c in collections.collections]
+
+        if not collection_names:
+            logger.info("ℹ️  Qdrant 中没有任何 collection，无需清理。")
             return
-        
-        # 确认删除
+
+        logger.warning("⚠️⚠️⚠️ 高危操作：即将删除 Qdrant 中所有 collections（不可恢复）！")
+        logger.warning(f"将删除 {len(collection_names)} 个 collection: {collection_names}")
+
+        # 第一次确认
         confirm = questionary.confirm(
-            f"⚠️  即将删除 Collection '{collection_name}' 及其所有数据。确定继续？",
+            "确认继续删除 Qdrant 所有 collections？",
             default=False
         ).ask()
         
         if not confirm:
             logger.info("❌ 操作已取消。")
             return
-        
-        # 删除 collection
-        client.delete_collection(collection_name=collection_name)
-        logger.info(f"✅ Collection '{collection_name}' 已成功删除！")
-        
-        # 询问是否重新创建
-        recreate = questionary.confirm(
-            "是否重新创建空的 collection？",
-            default=True
+
+        # 第二次确认：输入指定短语
+        second_confirm = questionary.text(
+            "二次确认：请输入 DELETE ALL 才会执行删除：",
+            default=""
         ).ask()
-        
-        if recreate:
-            from qdrant_client.http import models
-            vector_size = mem_cfg.get('embedding', {}).get('dimensions', 1536)
-            
-            client.create_collection(
-                collection_name=collection_name,
-                vectors_config=models.VectorParams(
-                    size=vector_size,
-                    distance=models.Distance.COSINE
-                )
-            )
-            logger.info(f"✅ Collection '{collection_name}' 已重新创建！")
+        if second_confirm != "DELETE ALL":
+            logger.info("❌ 二次确认未通过，操作已取消。")
+            return
+
+        # 删除全部 collections
+        deleted = 0
+        failed = 0
+        for name in collection_names:
+            try:
+                client.delete_collection(collection_name=name)
+                deleted += 1
+                logger.info(f"✅ 已删除 Qdrant collection: {name}")
+            except Exception as e:
+                failed += 1
+                logger.error(f"❌ 删除 Qdrant collection 失败: {name} ({e})")
+
+        logger.info(f"🧹 Qdrant 清理完成：成功 {deleted}，失败 {failed}")
         
     except ImportError:
         logger.error("❌ 找不到 qdrant_client 库。请先安装: pip install qdrant-client")
@@ -919,8 +920,8 @@ def clean_rag():
     
     # 询问清理范围
     choices = [
-        "仅 Qdrant 向量数据库",
-        "仅 MongoDB 消息历史",
+        "仅 Qdrant（所有Collections）",
+        "仅 MongoDB（所有Collections）",
         "全部清理（Qdrant + MongoDB）",
         "取消"
     ]
@@ -935,15 +936,15 @@ def clean_rag():
         return
     
     # 执行清理
-    if choice in ["仅 Qdrant 向量数据库", "全部清理（Qdrant + MongoDB）"]:
+    if choice in ["仅 Qdrant（所有Collections）", "全部清理（Qdrant + MongoDB）"]:
         clean_qdrant()
     
-    if choice in ["仅 MongoDB 消息历史", "全部清理（Qdrant + MongoDB）"]:
+    if choice in ["仅 MongoDB（所有Collections）", "全部清理（Qdrant + MongoDB）"]:
         clean_mongodb()
 
 
 def clean_mongodb():
-    """清理 MongoDB 消息历史"""
+    """清理 MongoDB（删除 nora 数据库下所有 collections）"""
     try:
         from pymongo import MongoClient
         import config
@@ -957,34 +958,58 @@ def clean_mongodb():
         
         mongo_uri = mongo_cfg.get("uri", "mongodb://localhost:27017/")
         db_name = "nora"
-        collection_name = "message_history"
-        
         # 连接 MongoDB
         client = MongoClient(mongo_uri)
         db = client[db_name]
-        collection = db[collection_name]
-        
-        # 获取当前文档数量
-        count = collection.count_documents({})
-        logger.info(f"📊 当前消息历史数量: {count}")
-        
-        if count == 0:
-            logger.info("ℹ️  消息历史为空，无需清理。")
+
+        # 获取所有 collection
+        collection_names = db.list_collection_names()
+        if not collection_names:
+            logger.info("ℹ️  MongoDB 中没有任何 collection，无需清理。")
+            client.close()
             return
-        
-        # 确认删除
+
+        total_docs = 0
+        for name in collection_names:
+            total_docs += db[name].count_documents({})
+
+        logger.warning("⚠️⚠️⚠️ 高危操作：即将删除 MongoDB 所有 collections（不可恢复）！")
+        logger.warning(f"目标数据库: {db_name} | collections: {collection_names} | 总文档数: {total_docs}")
+
+        # 第一次确认
         confirm = questionary.confirm(
-            f"⚠️  即将删除 {count} 条消息历史记录。确定继续？",
+            "确认继续删除 MongoDB 所有 collections？",
             default=False
         ).ask()
         
         if not confirm:
             logger.info("❌ 操作已取消。")
+            client.close()
             return
-        
-        # 删除所有文档
-        result = collection.delete_many({})
-        logger.info(f"✅ 已删除 {result.deleted_count} 条消息历史记录！")
+
+        # 第二次确认：输入指定短语
+        second_confirm = questionary.text(
+            "二次确认：请输入 DELETE ALL 才会执行删除：",
+            default=""
+        ).ask()
+        if second_confirm != "DELETE ALL":
+            logger.info("❌ 二次确认未通过，操作已取消。")
+            client.close()
+            return
+
+        # 删除所有 collections
+        dropped = 0
+        failed = 0
+        for name in collection_names:
+            try:
+                db.drop_collection(name)
+                dropped += 1
+                logger.info(f"✅ 已删除 MongoDB collection: {name}")
+            except Exception as e:
+                failed += 1
+                logger.error(f"❌ 删除 MongoDB collection 失败: {name} ({e})")
+
+        logger.info(f"🧹 MongoDB 清理完成：成功 {dropped}，失败 {failed}")
         
         client.close()
         
