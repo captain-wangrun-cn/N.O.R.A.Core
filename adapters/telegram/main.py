@@ -310,6 +310,7 @@ class TelegramAdapter(BaseAdapter):
         start_handler = CommandHandler('start', self._start_command)
         clear_handler = CommandHandler('clear', self._clear_command)
         status_handler = CommandHandler('status', self._status_command)
+        regenerate_proactive_handler = CommandHandler('regenerate_proactive', self._regenerate_proactive_command)
         msg_handler = MessageHandler(filters.TEXT & (~filters.COMMAND), self._handle_incoming_message)
         photo_handler = MessageHandler(filters.PHOTO, self._handle_photo)
         document_handler = MessageHandler(filters.Document.ALL, self._handle_document)
@@ -319,6 +320,7 @@ class TelegramAdapter(BaseAdapter):
         self.application.add_handler(start_handler)
         self.application.add_handler(clear_handler)
         self.application.add_handler(status_handler)
+        self.application.add_handler(regenerate_proactive_handler)
         self.application.add_handler(msg_handler)
         self.application.add_handler(photo_handler)
         self.application.add_handler(document_handler)
@@ -449,6 +451,37 @@ class TelegramAdapter(BaseAdapter):
             logger.error(f"[{chat_id}] 获取状态时出错: {e}", exc_info=True)
             if update.message:
                 await update.message.reply_text("❌ 获取系统状态时发生错误。")
+
+    async def _regenerate_proactive_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """
+        手动触发“重新生成主动消息计划”。
+
+        用法:
+        - /regenerate_proactive
+        - /regenerate_proactive append   (追加)
+        - /regenerate_proactive replace  (覆盖，默认)
+        """
+        if not update.effective_chat:
+            return
+        chat_id = str(update.effective_chat.id)
+        if not self._message_handler:
+            if update.message:
+                await update.message.reply_text("❌ 指令处理器未就绪。")
+            return
+
+        mode = (context.args[0].strip().lower() if context and context.args else "replace")
+        if mode not in ("replace", "append"):
+            mode = "replace"
+
+        # 透传为控制器命令，统一在 controller 层执行调度逻辑
+        event_context = {
+            "chat_id": chat_id,
+            "user_id": str(update.effective_user.id) if update.effective_user else chat_id,
+            "text": f"/regenerate_proactive {mode}",
+            "chat_type": update.effective_chat.type,
+            "user_name": update.effective_user.first_name if update.effective_user else "Unknown"
+        }
+        await self._message_handler(event_context)
 
     async def _handle_incoming_message(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not await self._should_process_message(update):

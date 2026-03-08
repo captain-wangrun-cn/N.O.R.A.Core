@@ -106,6 +106,27 @@ AI 可通过内置工具实时设置闹钟:
 | `proactive_system` | 主动消息生成 — system prompt |
 | `proactive_user` | 主动消息生成 — user prompt |
 
+### 3.6 手动重新生成指令
+
+通过 adapter 命令手动触发当天计划重建：
+
+- `/regenerate_proactive`：覆盖重建（默认）
+- `/regenerate_proactive replace`：覆盖重建
+- `/regenerate_proactive append`：保留原计划并追加
+
+返回结构示例：
+
+```json
+{
+  "success": true,
+  "skipped": false,
+  "date": "2026-03-09",
+  "count": 4,
+  "total_today": 4,
+  "message": "今日计划已重建: 4 个触发点"
+}
+```
+
 ---
 
 ## 4. 集成点
@@ -121,6 +142,12 @@ AI 可通过内置工具实时设置闹钟:
 
 - 接受 `scheduler` 参数
 - 当 scheduler 可用时注册 `set_alarm`、`list_alarms`、`cancel_alarm`
+
+### 4.5 Adapter 命令 (`adapters/telegram/main.py`)
+
+- 新增 `/regenerate_proactive` 指令
+- 指令透传到 `NoraController.handle_new_message()`
+- 由 controller 调用 `scheduler.regenerate_today_plan()` 执行重建
 
 ### 4.3 Prompts (`brain/templates/schedule.jinja`)
 

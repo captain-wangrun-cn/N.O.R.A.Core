@@ -209,6 +209,39 @@ class NoraController:
             logger.info(f"[{chat_id}] Session已重置 by /start command.")
             return
 
+        # 特殊处理 /regenerate_proactive 指令
+        # 用法:
+        #   /regenerate_proactive
+        #   /regenerate_proactive append
+        #   /regenerate_proactive replace
+        if text.strip().startswith("/regenerate_proactive"):
+            if not self.scheduler:
+                await self.adapter.send_message(chat_id, "❌ Scheduler 未启用，无法重新生成主动消息计划。")
+                return
+
+            mode = "replace"
+            parts = text.strip().split()
+            if len(parts) >= 2 and parts[1].lower() in ("append", "replace"):
+                mode = parts[1].lower()
+            clear_existing = (mode != "append")
+
+            try:
+                result = await self.scheduler.regenerate_today_plan(clear_existing=clear_existing)
+                if result.get("success"):
+                    msg = (
+                        f"✅ 主动消息计划已{'覆盖重建' if clear_existing else '追加生成'}\n"
+                        f"日期: {result.get('date', '-') }\n"
+                        f"本次新增: {result.get('count', 0)}\n"
+                        f"今日总未触发: {result.get('total_today', 0)}"
+                    )
+                else:
+                    msg = f"❌ 重新生成失败: {result.get('message', 'unknown error')}"
+                await self.adapter.send_message(chat_id, msg)
+            except Exception as e:
+                logger.error(f"[{chat_id}] /regenerate_proactive 执行失败: {e}", exc_info=True)
+                await self.adapter.send_message(chat_id, f"❌ 重新生成失败: {e}")
+            return
+
         # --- 前后端分离逻辑 ---
         status = self.worker_status.get(chat_id)
         if status and status.busy:

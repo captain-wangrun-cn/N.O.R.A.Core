@@ -326,34 +326,54 @@ class ProactiveScheduler:
         """获取今日触发计划。"""
         return [e.to_dict() for e in self._daily_events if not e.fired]
 
+    async def regenerate_today_plan(self, clear_existing: bool = True) -> Dict[str, Any]:
+        """
+        手动重新生成今天的主动消息计划。
+
+        Args:
+            clear_existing: 是否先清空现有今日计划再重建。
+
+        Returns:
+            生成结果摘要。
+        """
+        return await self._on_daily_plan_trigger(force=True, clear_existing=clear_existing)
+
     # ----------------------------------------------------------------
     # APScheduler 回调
     # ----------------------------------------------------------------
 
-    async def _on_daily_plan_trigger(self):
-        """CronTrigger 回调：凌晨生成今日计划。"""
+    async def _on_daily_plan_trigger(self, force: bool = False, clear_existing: bool = True) -> Dict[str, Any]:
+        """CronTrigger 回调：凌晨生成今日计划。支持 force 强制重建。"""
         now = datetime.now(self.tz)
         today_str = now.strftime("%Y-%m-%d")
-        if self._last_plan_date == today_str:
+        if not force and self._last_plan_date == today_str:
             logger.debug("今日计划已生成，跳过重复触发")
-            return
+            return {
+                "success": True,
+                "skipped": True,
+                "message": "今日计划已生成，跳过重复触发",
+                "count": len([e for e in self._daily_events if not e.fired]),
+                "date": today_str,
+            }
 
         logger.info("🗓️ 开始生成今日主动消息计划...")
         if not self._generate_plan_callback:
             logger.warning("未设置 generate_plan_callback，跳过")
-            return
+            return {"success": False, "message": "未设置 generate_plan_callback"}
 
         try:
             plan_items = await self._generate_plan_callback()
 
-            # 清除旧的 daily event Jobs
-            for old_ev in self._daily_events:
-                try:
-                    self._scheduler.remove_job(old_ev.event_id)
-                except Exception:
-                    pass
+            if clear_existing:
+                # 清除旧的 daily event Jobs
+                for old_ev in self._daily_events:
+                    try:
+                        self._scheduler.remove_job(old_ev.event_id)
+                    except Exception:
+                        pass
+                self._daily_events = []
 
-            self._daily_events = []
+            generated_count = 0
             for item in plan_items:
                 time_str = item.get("time", "")
                 reason = item.get("reason", "")  # reason 可选
@@ -370,6 +390,7 @@ class ProactiveScheduler:
                         )
                         self._daily_events.append(event)
                         self._add_event_job(event)
+                        generated_count += 1
                 except ValueError:
                     logger.warning(f"跳过无效时间: {time_str}")
 
@@ -380,9 +401,18 @@ class ProactiveScheduler:
                 logger.info(f"  • {ev.trigger_time.strftime('%H:%M')} — {r}")
 
             self._save_daily_plan()
+            return {
+                "success": True,
+                "skipped": False,
+                "date": today_str,
+                "count": generated_count,
+                "total_today": len([e for e in self._daily_events if not e.fired]),
+                "message": f"今日计划已{'重建' if clear_existing else '追加'}: {generated_count} 个触发点",
+            }
 
         except Exception as e:
             logger.error(f"生成今日计划失败: {e}", exc_info=True)
+            return {"success": False, "message": f"生成今日计划失败: {e}"}
 
     async def _on_event_trigger(self, event_id: str):
         """DateTrigger 回调：到达触发时间。"""
