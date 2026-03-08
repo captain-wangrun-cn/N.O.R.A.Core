@@ -7,6 +7,7 @@ import glob
 import subprocess
 import logging
 import inspect
+import uuid
 from typing import List, Dict, Callable, Any, Optional
 from adapters.base import BaseAdapter
 from workspace_config import get_workspace_manager
@@ -84,6 +85,7 @@ class ToolManager:
         self.register(self.get_available_skills)
         self.register(self.exec_command)
         self.register(self.view_image)
+        self.register(self.crop_image_for_llm)
 
     def register(self, func: Callable):
         self._tools[func.__name__] = func
@@ -804,6 +806,152 @@ class ToolManager:
             output_lines.append("")
 
         return "\n".join(output_lines)
+
+    def crop_image_for_llm(
+        self,
+        image_path: str,
+        preset: str = "",
+        left: Optional[int] = None,
+        top: Optional[int] = None,
+        right: Optional[int] = None,
+        bottom: Optional[int] = None,
+        padding: int = 0,
+        output_path: str = "",
+        return_image: bool = True,
+    ) -> str:
+        """
+        Crops an image to highlight important regions for LLM image understanding.
+
+        IMPORTANT: `preset` and pixel range (`left/top/right/bottom`) are mutually exclusive input modes.
+        Prefer using presets!!
+        If both are provided, preset takes priority automatically.
+
+        Built-in presets (ratio-based):
+        - top_half, bottom_half, left_half, right_half
+        - center, top_center, bottom_center
+
+        :param image_path: Path to source image (absolute path or workspace-relative path).
+        :param preset: Optional preset crop area name. If provided, it overrides pixel range.
+        :param left: Left pixel of crop range (used only when preset is empty).
+        :param top: Top pixel of crop range (used only when preset is empty).
+        :param right: Right pixel of crop range (used only when preset is empty).
+        :param bottom: Bottom pixel of crop range (used only when preset is empty).
+        :param padding: Optional padding (pixels) around selected area. Default 0.
+        :param output_path: Optional output path. Default writes to workspace downloads/crops.
+        :param return_image: When true, include `[image: ...]` MediaTag for next-round multimodal use.
+        """
+        try:
+            from PIL import Image
+        except ImportError:
+            return "Error: Pillow is not installed. Please install Pillow to enable image cropping."
+
+        resolved_input = self._resolve_workspace_path(image_path)
+        if not os.path.isfile(resolved_input):
+            return f"Error: image file not found: {image_path}"
+
+        preset_key = str(preset or "").strip().lower()
+        use_preset = bool(preset_key)
+
+        presets: Dict[str, tuple] = {
+            "top_half": (0.0, 0.0, 1.0, 0.5),
+            "bottom_half": (0.0, 0.5, 1.0, 1.0),
+            "left_half": (0.0, 0.0, 0.5, 1.0),
+            "right_half": (0.5, 0.0, 1.0, 1.0),
+            "center": (0.15, 0.15, 0.85, 0.85),
+            "top_center": (0.1, 0.0, 0.9, 0.55),
+            "bottom_center": (0.1, 0.45, 0.9, 1.0),
+        }
+
+        try:
+            padding = max(0, int(padding or 0))
+        except Exception:
+            return "Error: padding must be an integer >= 0."
+
+        try:
+            with Image.open(resolved_input) as img:
+                width, height = img.size
+
+                if use_preset:
+                    if preset_key not in presets:
+                        available = ", ".join(sorted(presets.keys()))
+                        return f"Error: unknown preset '{preset}'. Available presets: {available}"
+                    rx1, ry1, rx2, ry2 = presets[preset_key]
+                    x1 = int(width * rx1)
+                    y1 = int(height * ry1)
+                    x2 = int(width * rx2)
+                    y2 = int(height * ry2)
+                    mode = f"preset:{preset_key}"
+                else:
+                    missing = [
+                        name
+                        for name, value in {
+                            "left": left,
+                            "top": top,
+                            "right": right,
+                            "bottom": bottom,
+                        }.items()
+                        if value is None
+                    ]
+                    if missing:
+                        return (
+                            "Error: pixel crop range is incomplete. "
+                            "Provide all of left/top/right/bottom, or use preset."
+                        )
+
+                    try:
+                        assert left is not None and top is not None and right is not None and bottom is not None
+                        x1, y1, x2, y2 = int(left), int(top), int(right), int(bottom)
+                    except Exception:
+                        return "Error: left/top/right/bottom must be valid integers."
+
+                    mode = "pixel_range"
+
+                x1 = max(0, x1 - padding)
+                y1 = max(0, y1 - padding)
+                x2 = min(width, x2 + padding)
+                y2 = min(height, y2 + padding)
+
+                if x1 >= x2 or y1 >= y2:
+                    return (
+                        f"Error: invalid crop box after clamp: ({x1}, {y1}, {x2}, {y2}). "
+                        f"Image size is {width}x{height}."
+                    )
+
+                cropped = img.crop((x1, y1, x2, y2))
+
+                if output_path:
+                    resolved_output = self._resolve_workspace_path(output_path)
+                    output_dir = os.path.dirname(resolved_output)
+                    if output_dir:
+                        os.makedirs(output_dir, exist_ok=True)
+                else:
+                    crop_dir = os.path.join(str(DOWNLOADS_DIR), "crops")
+                    os.makedirs(crop_dir, exist_ok=True)
+                    src_stem = os.path.splitext(os.path.basename(resolved_input))[0]
+                    resolved_output = os.path.join(
+                        crop_dir,
+                        f"{src_stem}_crop_{uuid.uuid4().hex[:8]}.png",
+                    )
+
+                cropped.save(resolved_output)
+                abs_output = os.path.abspath(resolved_output)
+
+                lines = [
+                    "Image crop completed.",
+                    f"Mode: {mode}",
+                    f"Source: {resolved_input}",
+                    f"Output: {abs_output}",
+                    f"Original size: {width}x{height}",
+                    f"Crop box: ({x1}, {y1}, {x2}, {y2})",
+                    f"Cropped size: {x2 - x1}x{y2 - y1}",
+                ]
+                if use_preset and any(v is not None for v in (left, top, right, bottom)):
+                    lines.append("Note: preset is provided, so pixel range was ignored.")
+                if return_image:
+                    lines.append(f"MediaTag: [image: {abs_output}]")
+                return "\n".join(lines)
+        except Exception as e:
+            return f"Error cropping image: {e}"
 
     def _generate_schema(self, func: Callable) -> Dict[str, Any]:
         """Generates a JSON schema for a function."""

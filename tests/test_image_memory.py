@@ -142,6 +142,7 @@ def test_view_image_tool_schema_registered():
     tm = ToolManager(mock_adapter, image_store=None)
     schema_names = [s["name"] for s in tm.get_tool_schemas()]
     assert "view_image" in schema_names
+    assert "crop_image_for_llm" in schema_names
 
 
 def test_view_image_tool_no_image_store():
@@ -197,3 +198,62 @@ def test_view_image_format_output():
     assert "img_test1234" in result
     assert "猫咪" in result
     assert "Found 1 image" in result
+
+
+def test_crop_image_for_llm_preset_has_priority(tmp_path):
+    """crop_image_for_llm: 同时给 preset 和像素范围时，必须优先使用 preset。"""
+    from unittest.mock import MagicMock
+    from PIL import Image
+    from brain.tools import ToolManager
+
+    src = tmp_path / "src.png"
+    out = tmp_path / "cropped.png"
+    Image.new("RGB", (200, 100), color=(255, 0, 0)).save(src)
+
+    mock_adapter = MagicMock()
+    mock_adapter.platform_features = MagicMock()
+    tm = ToolManager(mock_adapter, image_store=None)
+
+    result = tm.crop_image_for_llm(
+        image_path=str(src),
+        preset="top_half",
+        left=10,
+        top=10,
+        right=20,
+        bottom=20,
+        output_path=str(out),
+        return_image=False,
+    )
+
+    assert "Image crop completed." in result
+    assert "Mode: preset:top_half" in result
+    assert "pixel range was ignored" in result
+    assert out.exists()
+
+    with Image.open(out) as cropped:
+        assert cropped.size == (200, 50)
+
+
+def test_crop_image_for_llm_pixel_range_requires_all_coords(tmp_path):
+    """crop_image_for_llm: 不使用 preset 时，left/top/right/bottom 必须全部提供。"""
+    from unittest.mock import MagicMock
+    from PIL import Image
+    from brain.tools import ToolManager
+
+    src = tmp_path / "src2.png"
+    Image.new("RGB", (120, 80), color=(0, 255, 0)).save(src)
+
+    mock_adapter = MagicMock()
+    mock_adapter.platform_features = MagicMock()
+    tm = ToolManager(mock_adapter, image_store=None)
+
+    result = tm.crop_image_for_llm(
+        image_path=str(src),
+        left=10,
+        top=10,
+        right=90,
+        bottom=None,
+        return_image=False,
+    )
+
+    assert "pixel crop range is incomplete" in result

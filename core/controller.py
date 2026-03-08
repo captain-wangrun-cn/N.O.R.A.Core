@@ -727,9 +727,9 @@ class NoraController:
                         if not str(tool_args.get("user_id", "")).strip():
                             tool_args["user_id"] = storage_id
                     tool_result = await self.tool_manager.execute(tool_name, cast(Dict[str, Any], tool_args))
-                    # 如果 view_image 请求了 return_image，提取返回中的 [image: ...] 作为下一轮多模态输入
+                    # 如果工具请求了 return_image，提取返回中的 [image: ...] 作为下一轮多模态输入
                     if (
-                        tool_name == "view_image"
+                        tool_name in {"view_image", "crop_image_for_llm"}
                         and isinstance(tool_args, dict)
                         and bool(tool_args.get("return_image", False))
                     ):
@@ -737,9 +737,9 @@ class NoraController:
                             _clean, tool_images = extract_image_payloads(tool_result)
                             if tool_images:
                                 pending_tool_multimodal_images = tool_images
-                                logger.info(f"[{chat_id}] view_image 返回 {len(tool_images)} 张图片，下一轮切换 image 模型进行分析。")
+                                logger.info(f"[{chat_id}] {tool_name} 返回 {len(tool_images)} 张图片，下一轮切换 image 模型进行分析。")
                         except Exception:
-                            logger.warning(f"[{chat_id}] 解析 view_image 返回图片失败，已跳过多模态注入。", exc_info=True)
+                            logger.warning(f"[{chat_id}] 解析 {tool_name} 返回图片失败，已跳过多模态注入。", exc_info=True)
                     status.update("处理结果", f"{tool_name} 执行完毕，正在分析结果...")
                     logger.info(f"[{chat_id}] 🔧 Tool Result for {tool_name}: {tool_result[:100]}...")
 
