@@ -204,9 +204,9 @@ class TelegramAdapter(BaseAdapter):
         workspace_manager = get_workspace_manager()
         self.workspace_root = str(workspace_manager.root)
         self.downloads_dir = str(workspace_manager.downloads_dir)
-    self.data_dir = str(workspace_manager.data_dir)
-    self.telegram_data_dir = os.path.join(self.data_dir, "telegram")
-    os.makedirs(self.telegram_data_dir, exist_ok=True)
+        self.data_dir = str(workspace_manager.data_dir)
+        self.telegram_data_dir = os.path.join(self.data_dir, "telegram")
+        os.makedirs(self.telegram_data_dir, exist_ok=True)
         
         self.application = ApplicationBuilder().token(token).build()
         self._aggregator: MessageAggregator | None = None
