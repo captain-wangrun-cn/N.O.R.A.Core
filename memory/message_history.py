@@ -8,6 +8,7 @@ from pathlib import Path
 import logging
 
 from workspace_config import get_workspace_manager
+from brain.prompts import render_template
 
 logger = logging.getLogger(__name__)
 
@@ -358,18 +359,13 @@ class MessageHistory:
             f"{msg['role']}: {msg['content']}" for msg in messages_to_compress
         ])
         
-        prompt = f"""请总结以下对话内容，保留关键信息、重要决策和上下文，删除冗余细节。
-总结应该简洁但完整，让后续对话能理解之前发生了什么。
-
-对话内容：
-{conversation_text}
-
-总结："""
+        prompt = render_template('compression.jinja', 'compress_user',
+                                 conversation_text=conversation_text)
         
         try:
             # 调用LLM总结
             summary = await self._summarizer.chat(
-                system_prompt="你是一个对话总结助手。请简洁地总结对话内容，保留关键信息。",
+                system_prompt=render_template('compression.jinja', 'compress_system'),
                 user_prompt=prompt,
                 history=[]
             )
@@ -430,16 +426,12 @@ class MessageHistory:
             for i, s in enumerate(level1_summaries)
         ])
         
-        prompt = f"""请将以下多段对话总结合并为一个全局总结，保留最重要的主题、决策和背景信息。
-
-分段总结：
-{summaries_text}
-
-全局总结："""
+        prompt = render_template('compression.jinja', 'archive_user',
+                                 summaries_text=summaries_text)
         
         try:
             archive_summary = await self._summarizer.chat(
-                system_prompt="你是一个对话总结助手。请将多段对话总结合并为一个全局总结，保留最重要的主题和背景。",
+                system_prompt=render_template('compression.jinja', 'archive_system'),
                 user_prompt=prompt,
                 history=[]
             )

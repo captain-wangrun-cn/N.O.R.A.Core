@@ -7,7 +7,7 @@ from typing import Dict, Any, Callable, Optional, List, cast
 
 from adapters.base import BaseAdapter
 from brain.llm import llm_client, get_llm_client
-from brain.prompts import get_system_prompt
+from brain.prompts import get_system_prompt, render_template, get_soul_prompt
 from memory.rag import RAGEngine
 from memory.message_history import MessageHistory
 from brain.tools import ToolManager
@@ -222,25 +222,14 @@ class NoraController:
         """
         progress = status.get_summary()
         
-        prompt = (
-            f"你是 Nora，用户发来新消息，但你正忙着处理之前的请求。分析用户意图并给出回复。\n\n"
-            f"【你当前的工作状态】\n{progress}\n\n"
-            f"【用户新消息】\"{text}\"\n\n"
-            f"请判断用户意图并回复：\n"
-            f"1. 如果用户要求**停止**当前工作（如'停'、'取消'、'不用了'、'算了'、'stop'等），\n"
-            f"   输出: ACTION:stop | REPLY:（确认已停止的友好回复，1-2句话）\n\n"
-            f"2. 如果用户要求**切换**到新任务（如'先别...了，帮我...'、'换一个'、'改成'等），\n"
-            f"   输出: ACTION:change | REPLY:（确认切换的回复，如'好，马上切换～'）\n\n"
-            f"3. 如果是**普通追加消息**（如询问进度、补充信息、闲聊等），\n"
-            f"   输出: ACTION:queue | REPLY:（告知正在忙+会稍后处理的友好回复，1-3句话）\n\n"
-            f"格式: ACTION:xxx | REPLY:yyy\n"
-            f"用简短自然的口语回复，不要用 Markdown 格式。"
-        )
+        soul = get_soul_prompt()
+        prompt = render_template('interrupt_detect.jinja', 'user',
+                                 progress=progress, user_text=text)
         
         try:
             response = ""
             stream = self.fast_llm.chat_stream(
-                system_prompt="你是 Nora，友好的 AI 助手。简短自然地回复。",
+                system_prompt=render_template('interrupt_detect.jinja', 'system', soul=soul),
                 user_prompt=prompt,
                 history=[],
                 tools=[]
@@ -422,14 +411,10 @@ class NoraController:
             
             # Inject Workspace Context
             from brain.tools import WORKSPACE_ROOT, SKILLS_DIR
-            workspace_info = (
-                f"【工作区信息 (Workspace Context)】\n"
-                f"当前工作目录 (CWD): {WORKSPACE_ROOT}\n"
-                f"技能目录: {SKILLS_DIR}\n"
-                f"下载目录: {os.path.join(WORKSPACE_ROOT, 'downloads')}/\n"
-                f"⚠️ 禁止读取: config.yml, .env (含 API 密钥)\n"
-                f"💡 使用 list_dir 查看目录内容，不要用 exec_command ls"
-            )
+            workspace_info = render_template('context_injection.jinja', 'workspace',
+                                             workspace_root=WORKSPACE_ROOT,
+                                             skills_dir=SKILLS_DIR,
+                                             downloads_dir=os.path.join(WORKSPACE_ROOT, 'downloads'))
             instructions.append(workspace_info)
             
             # Inject Skills
@@ -437,18 +422,17 @@ class NoraController:
             if skills:
                 skill_desc = "\n".join([f"- {s['name']}: {s['description']} (Path: {s.get('path', 'N/A')})" for s in skills])
                 instructions.append(
-                    f"【可用技能 (Available Skills)】\n{skill_desc}\n\n"
-                    f"⚠️ 执行技能时，**必须**使用 `execute_skill(skill_name, args_json)` 工具。\n"
-                    f"**严禁**使用 `exec_command` 运行技能脚本（如 `python3 skills/xxx/main.py`）。\n"
-                    f"示例: execute_skill(\"pixiv_manager\", '{{\"keyword\": \"碧蓝航线\", \"limit\": \"5\"}}')"
+                    render_template('context_injection.jinja', 'skills', skill_desc=skill_desc)
                 )
 
             if "\n" in text.strip(): 
-                instructions.append("请仔细阅读并依次回答以下所有问题，不要遗漏。")
+                instructions.append(render_template('context_injection.jinja', 'multiline'))
             
             # Inject RAG context into instructions or system prompt
             if rag_context:
-                instructions.append(f"【相关回忆/背景知识】(请参考以下历史记忆来回答):\n{rag_context}")
+                instructions.append(
+                    render_template('context_injection.jinja', 'rag', rag_context=rag_context)
+                )
 
             full_user_prompt = text
             
@@ -459,14 +443,10 @@ class NoraController:
             if pending_text or interrupted_thought:
                 logger.info(f"[{chat_id}] 检测到抢占遗留上下文，正在合并...")
                 # Construct a meta-prompt that includes the lost context
-                full_user_prompt = (
-                    f"（刚才您问了：'{pending_text}'，"
-                    f"我正想回答：'{interrupted_thought}'... "
-                    f"但还没说完就被新的消息打断了。）\n\n"
-                    f"--- 新的消息 ---\n"
-                    f"{text}\n\n"
-                    f"【指令】请将我刚才未说完的思路与現在的新问题结合，给出一个连贯、完整的最终回复。不要让我感觉对话断裂了。"
-                )
+                full_user_prompt = render_template('context_injection.jinja', 'preemption_resume',
+                                                   pending_text=pending_text,
+                                                   interrupted_thought=interrupted_thought,
+                                                   new_text=text)
                 # Clear buffers after consumption
                 session["pending_text"] = ""
                 session["interrupted_thought"] = ""
@@ -619,12 +599,8 @@ class NoraController:
                             logger.warning(f"[{chat_id}] 对文件 {edit_target} 的 edit_file 调用已达 {file_edit_counts[edit_target]} 次，强制引导使用 write_file。")
                             temp_history.append({
                                 "role": "user",
-                                "content": (
-                                    f"【系统提示】你已经对 {edit_target} 进行了 {file_edit_counts[edit_target]} 次 edit_file 操作。"
-                                    f"这太多了！请停止使用 edit_file。如果还需要修改这个文件，请先用 read_file 读取完整内容，"
-                                    f"然后用 write_file 一次性写入所有修改后的完整内容。"
-                                    f"如果修改已经完成，请直接给用户回复结果。"
-                                )
+                                "content": render_template('loop_interventions.jinja', 'edit_file_overuse',
+                                                           file_path=edit_target, count=file_edit_counts[edit_target])
                             })
                             file_edit_counts[edit_target] = 0  # Reset for potential future edits
                             force_no_tools = True
@@ -650,11 +626,7 @@ class NoraController:
                             logger.warning(f"[{chat_id}] 检测到工具调用循环: {loop_key} 已连续调用 {session['tool_call_loop_counter']+1} 次。")
                             temp_history.append({
                                 "role": "user",
-                                "content": (
-                                    "【系统提示】你已经多次读取同一个文件了。文件内容已截断是系统限制，无法通过重复调用获取更多内容。"
-                                    "请基于已读取到的部分来工作。"
-                                    "回复用户时，不要复述文件的代码内容，只需用简短的自然语言总结你的发现或下一步操作。"
-                                )
+                                "content": render_template('loop_interventions.jinja', 'read_file_loop')
                             })
                             session["tool_call_loop_counter"] = 0
                             force_no_tools = True
@@ -663,11 +635,7 @@ class NoraController:
                             logger.warning(f"[{chat_id}] 检测到工具调用循环: {loop_key} 已连续调用 {session['tool_call_loop_counter']+1} 次。")
                             temp_history.append({
                                 "role": "user",
-                                "content": (
-                                    "【系统提示】你已经连续多次对同一个文件使用 edit_file。这是低效的做法。"
-                                    "请停止 edit_file，改用 read_file 读取完整内容后，用 write_file 一次性写入所有修改。"
-                                    "如果不需要继续修改，请直接给用户回复结果。"
-                                )
+                                "content": render_template('loop_interventions.jinja', 'edit_file_loop')
                             })
                             session["tool_call_loop_counter"] = 0
                             force_no_tools = True
@@ -676,12 +644,7 @@ class NoraController:
                             logger.warning(f"[{chat_id}] 检测到 execute_skill 工具调用循环: {loop_key} 已连续调用 {session['tool_call_loop_counter']+1} 次。正在引导自查。")
                             temp_history.append({
                                 "role": "user",
-                                "content": (
-                                    "【系统提示】你已经多次调用同一个 skill 但均未成功。请停止重复调用，"
-                                    "现在请你自己检查 skill 的代码实现，分析失败原因，尝试修复 bug 或给出诊断建议。"
-                                    "可以结合工具输出、报错信息和 skill 代码内容进行自查。"
-                                    "最后用简短自然语言总结你的分析和建议，不要复述原始输出。"
-                                )
+                                "content": render_template('loop_interventions.jinja', 'execute_skill_loop')
                             })
                             session["tool_call_loop_counter"] = 0
                             force_no_tools = True
@@ -691,7 +654,7 @@ class NoraController:
                             logger.warning(f"[{chat_id}] 检测到工具调用循环: {loop_key} 已连续调用 {session['tool_call_loop_counter']+1} 次。正在引导总结。")
                             temp_history.append({
                                 "role": "user",
-                                "content": "【系统提示】你已经多次重复调用同一个工具。请停止重复调用，基于已有的结果用简短的自然语言直接给用户回复。不要复述原始输出内容。"
+                                "content": render_template('loop_interventions.jinja', 'generic_tool_loop')
                             })
                             session["tool_call_loop_counter"] = 0
                             force_no_tools = True
@@ -718,14 +681,11 @@ class NoraController:
                             # 提取文件路径（如果有的话）
                             file_path_match = re.search(r'read_file.*?["\']([^"\']+)["\']', str(tool_args))
                             file_path = file_path_match.group(1) if file_path_match else tool_args.get("path", "该文件")
-                            truncated_result += (
-                                f"\n\n... 【文件已截断】显示了前 {shown_lines}/{total_lines} 行 "
-                                f"({TRUNCATE_LIMIT}/{total_len} 字符)。"
-                                f"\n\n💡 提示：如需查看后续内容，请使用行范围参数："
-                                f"\n   read_file(path=\"{file_path}\", start_line={shown_lines + 1}, end_line={total_lines})"
-                                f"\n或分段读取："
-                                f"\n   read_file(path=\"{file_path}\", start_line={shown_lines + 1}, end_line={shown_lines + 100})"
-                                f"\n\n请不要重复调用 read_file(\"{file_path}\") 而不带行号参数，那只会返回同样的截断内容。"
+                            truncated_result += "\n\n" + render_template(
+                                'context_injection.jinja', 'read_file_truncated',
+                                shown_lines=shown_lines, total_lines=total_lines,
+                                truncate_limit=TRUNCATE_LIMIT, total_len=total_len,
+                                file_path=file_path, next_start=shown_lines + 1
                             )
                         else:
                             truncated_result += f"\n\n... (Output truncated from {total_len} chars. Use write_file to overwrite the full file if needed.)"
@@ -764,11 +724,11 @@ class NoraController:
                 logger.warning(f"[{chat_id}] Tool loop exhausted {MAX_TURNS} turns. Requesting LLM summary.")
                 temp_history.append({
                     "role": "user",
-                    "content": "【系统提示】工具调用轮次已达上限，请立即基于已有的工具结果，给用户一个简洁的最终回复。"
+                    "content": render_template('loop_interventions.jinja', 'turns_exhausted')
                 })
                 stream = self.llm.chat_stream(
                     system_prompt=system_prompt,
-                    user_prompt="请总结以上工具操作的结果，给出最终回答。",
+                    user_prompt=render_template('loop_interventions.jinja', 'summarize_turns_exhausted'),
                     history=temp_history,
                     tools=[]  # No tools for final summary
                 )
@@ -802,11 +762,11 @@ class NoraController:
                 # Fallback: LLM stayed silent; do one final LLM call to summarize the tool output
                 temp_history.append({
                     "role": "user",
-                    "content": "【系统提示】工具已执行完毕，请根据以上工具输出，用自然语言总结执行结果。不要直接输出原始命令行内容。"
+                    "content": render_template('loop_interventions.jinja', 'llm_silent_meaningful')
                 })
                 stream = self.llm.chat_stream(
                     system_prompt=system_prompt,
-                    user_prompt="请总结以上操作的执行结果。",
+                    user_prompt=render_template('loop_interventions.jinja', 'summarize_meaningful'),
                     history=temp_history,
                     tools=[]
                 )
@@ -827,11 +787,12 @@ class NoraController:
                 # Last resort: LLM truly silent, summarize via one more call
                 temp_history.append({
                     "role": "user",
-                    "content": f"【系统提示】工具输出如下，请用自然语言简要告诉用户结果：\n{latest_tool_output[:1000]}"
+                    "content": render_template('loop_interventions.jinja', 'llm_silent_fallback',
+                                               tool_output=latest_tool_output[:1000])
                 })
                 stream = self.llm.chat_stream(
                     system_prompt=system_prompt,
-                    user_prompt="请简要总结操作结果。",
+                    user_prompt=render_template('loop_interventions.jinja', 'summarize_fallback'),
                     history=temp_history,
                     tools=[]
                 )

@@ -1,0 +1,37 @@
+{# 循环检测干预提示 — 当检测到工具调用循环时注入的纠正指令 #}
+
+{# edit_file 累计次数过多 #}
+{% block edit_file_overuse %}【系统提示】你已经对 {{ file_path }} 进行了 {{ count }} 次 edit_file 操作。请停止使用 edit_file。如果还需要修改这个文件，请先用 read_file 读取完整内容，然后用 write_file 一次性写入所有修改后的完整内容。如果修改已经完成，请直接给用户回复结果。{% endblock %}
+
+{# read_file 重复读取同一文件 #}
+{% block read_file_loop %}【系统提示】你已经多次读取同一个文件了。文件内容已截断是系统限制，无法通过重复调用获取更多内容。请基于已读取到的部分来工作。回复用户时，不要复述文件的代码内容，只需用简短的自然语言总结你的发现或下一步操作。{% endblock %}
+
+{# edit_file 连续循环 #}
+{% block edit_file_loop %}【系统提示】你已经连续多次对同一个文件使用 edit_file。这是低效的做法。请停止 edit_file，改用 read_file 读取完整内容后，用 write_file 一次性写入所有修改。如果不需要继续修改，请直接给用户回复结果。{% endblock %}
+
+{# execute_skill 重复失败 #}
+{% block execute_skill_loop %}【系统提示】你已经多次调用同一个 skill 但均未成功。请停止重复调用，现在请你自己检查 skill 的代码实现，分析失败原因，尝试修复 bug 或给出诊断建议。可以结合工具输出、报错信息和 skill 代码内容进行自查。最后用简短自然语言总结你的分析和建议，不要复述原始输出。{% endblock %}
+
+{# 通用工具循环 #}
+{% block generic_tool_loop %}【系统提示】你已经多次重复调用同一个工具。请停止重复调用，基于已有的结果用简短的自然语言直接给用户回复。不要复述原始输出内容。{% endblock %}
+
+{# 工具循环耗尽轮次 #}
+{% block turns_exhausted %}【系统提示】工具调用轮次已达上限，请立即基于已有的工具结果，给用户一个简洁的最终回复。{% endblock %}
+
+{# LLM 沉默 — 工具执行完但无文本输出 #}
+{% block llm_silent_meaningful %}【系统提示】工具已执行完毕，请根据以上工具输出，用自然语言总结执行结果。不要直接输出原始命令行内容。{% endblock %}
+
+{# LLM 沉默 — 最终兜底 #}
+{% block llm_silent_fallback %}【系统提示】工具输出如下，请用自然语言简要告诉用户结果：
+{{ tool_output }}{% endblock %}
+
+{# === LLM 追加调用时的 user_prompt === #}
+
+{# 轮次耗尽后的总结请求 #}
+{% block summarize_turns_exhausted %}请总结以上工具操作的结果，给出最终回答。{% endblock %}
+
+{# 工具执行完但 LLM 无输出 — 请求总结（meaningful output） #}
+{% block summarize_meaningful %}请总结以上操作的执行结果。{% endblock %}
+
+{# 最终兜底 — 请求简要总结 #}
+{% block summarize_fallback %}请简要总结操作结果。{% endblock %}

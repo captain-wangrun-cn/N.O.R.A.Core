@@ -1,0 +1,42 @@
+{# 上下文注入模板 — 构建 system prompt 时注入的结构化上下文块 #}
+
+{# 工作区信息 #}
+{% block workspace %}【工作区信息 (Workspace Context)】
+当前工作目录 (CWD): {{ workspace_root }}
+技能目录: {{ skills_dir }}
+下载目录: {{ downloads_dir }}/
+⚠️ 禁止读取: config.yml, .env (含 API 密钥)
+💡 使用 list_dir 查看目录内容，不要用 exec_command ls{% endblock %}
+
+{# 可用技能列表 #}
+{% block skills %}【可用技能 (Available Skills)】
+{{ skill_desc }}
+
+⚠️ 执行技能时，**必须**使用 `execute_skill(skill_name, args_json)` 工具。
+**严禁**使用 `exec_command` 运行技能脚本（如 `python3 skills/xxx/main.py`）。{% endblock %}
+
+{# RAG 记忆检索结果 #}
+{% block rag %}【相关回忆/背景知识】(请参考以下历史记忆来回答):
+{{ rag_context }}{% endblock %}
+
+{# 多行消息提示 #}
+{% block multiline %}请仔细阅读并依次回答以下所有问题，不要遗漏。{% endblock %}
+
+{# 抢占遗留上下文合并 #}
+{% block preemption_resume %}（刚才您问了：'{{ pending_text }}'，我正想回答：'{{ interrupted_thought }}'... 但还没说完就被新的消息打断了。）
+
+--- 新的消息 ---
+{{ new_text }}
+
+【指令】请将我刚才未说完的思路与现在的新问题结合，给出一个连贯、完整的最终回复。不要让我感觉对话断裂了。{% endblock %}
+
+{# read_file 截断提示 #}
+{% block read_file_truncated %}
+... 【文件已截断】显示了前 {{ shown_lines }}/{{ total_lines }} 行 ({{ truncate_limit }}/{{ total_len }} 字符)。
+
+💡 提示：如需查看后续内容，请使用行范围参数：
+   read_file(path="{{ file_path }}", start_line={{ next_start }}, end_line={{ total_lines }})
+或分段读取：
+   read_file(path="{{ file_path }}", start_line={{ next_start }}, end_line={{ next_start + 99 }})
+
+请不要重复调用 read_file("{{ file_path }}") 而不带行号参数，那只会返回同样的截断内容。{% endblock %}

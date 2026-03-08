@@ -11,7 +11,7 @@ import sys  # Added sys import for path manipulation
 import logging
 import shutil
 from datetime import datetime, timezone
-from typing import Optional
+from typing import Optional, Dict, Any
 
 from workspace_config import get_workspace_manager
 
@@ -20,6 +20,36 @@ logger = logging.getLogger(__name__)
 # 设置 Jinja2 环境
 template_dir = os.path.join(os.path.dirname(__file__), 'templates')
 env = Environment(loader=FileSystemLoader(template_dir))
+
+
+def render_template(template_name: str, block_name: str, **kwargs) -> str:
+    """
+    从指定模板文件中渲染某个 block 的内容。
+    
+    使用 Jinja2 block 机制，每个模板文件可包含多个命名 block，
+    调用时指定 block_name 即可获取对应片段。
+    
+    Args:
+        template_name: 模板文件名 (如 'compression.jinja')
+        block_name: 模板中的 block 名称 (如 'compress_system')
+        **kwargs: 传递给模板的变量
+    
+    Returns:
+        渲染后的字符串
+    """
+    try:
+        template = env.get_template(template_name)
+        # 渲染整个模板以初始化 blocks
+        context = template.new_context(kwargs)
+        # 获取指定 block
+        block_func = template.blocks.get(block_name)
+        if block_func is None:
+            logger.error(f"模板 {template_name} 中未找到 block '{block_name}'")
+            return ""
+        return "".join(block_func(context)).strip()
+    except Exception as e:
+        logger.error(f"渲染模板 {template_name}#{block_name} 失败: {e}")
+        return ""
 
 # 项目根目录（brain/ 的上一级）
 PROJECT_ROOT = os.path.dirname(os.path.dirname(__file__))
@@ -97,6 +127,19 @@ def _resolve_memory_file(filename: str) -> str:
 def _load_daily_memory() -> str:
     """（已禁用）每日记忆不再自动注入，以防上下文膨胀。"""
     return ""
+
+
+def get_soul_prompt() -> str:
+    """
+    读取 SOUL.md 内容，优先 workspace 版本，回退到 persona_nora.jinja。
+    供需要人设上下文的轻量场景（如中断检测）使用。
+    """
+    _ensure_workspace_identity_files()
+    soul = _read_file_safe(WORKSPACE_SOUL_FILE)
+    if soul:
+        return soul
+    persona_template = env.get_template('persona_nora.jinja')
+    return persona_template.render()
 
 
 def load_identity_context() -> str:
