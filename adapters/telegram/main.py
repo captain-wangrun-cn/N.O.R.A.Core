@@ -497,13 +497,13 @@ class TelegramAdapter(BaseAdapter):
         
         # 下载图片
         file = await photo.get_file()
-    abs_file_path = os.path.join(self.telegram_data_dir, f"photo_{photo.file_id}.jpg")
-    await file.download_to_drive(abs_file_path)
-    rel_file_path = os.path.relpath(abs_file_path, self.workspace_root).replace('\\', '/')
+        abs_file_path = os.path.join(self.telegram_data_dir, f"photo_{photo.file_id}.jpg")
+        await file.download_to_drive(abs_file_path)
+        rel_file_path = os.path.relpath(abs_file_path, self.workspace_root).replace('\\', '/')
         
         # 构造消息
         reply_info = await self._extract_reply_info(update.message)
-    text = f"[image: {rel_file_path}]"
+        text = f"[image: {rel_file_path}]"
         if caption:
             text += f"\n{caption}"
         if reply_info:
@@ -539,13 +539,13 @@ class TelegramAdapter(BaseAdapter):
         # 下载文档
         file = await document.get_file()
         file_name = document.file_name or f"document_{document.file_id}"
-    abs_file_path = os.path.join(self.telegram_data_dir, file_name)
-    await file.download_to_drive(abs_file_path)
-    rel_file_path = os.path.relpath(abs_file_path, self.workspace_root).replace('\\', '/')
+        abs_file_path = os.path.join(self.telegram_data_dir, file_name)
+        await file.download_to_drive(abs_file_path)
+        rel_file_path = os.path.relpath(abs_file_path, self.workspace_root).replace('\\', '/')
         
         # 构造消息
         reply_info = await self._extract_reply_info(update.message)
-    text = f"[file: {rel_file_path}]"
+        text = f"[file: {rel_file_path}]"
         if caption:
             text += f"\n{caption}"
         if reply_info:
@@ -582,13 +582,13 @@ class TelegramAdapter(BaseAdapter):
         # 下载贴纸
         file = await sticker.get_file()
         ext = "webm" if sticker.is_video else "webp"
-    abs_file_path = os.path.join(self.telegram_data_dir, f"sticker_{sticker.file_id}.{ext}")
-    await file.download_to_drive(abs_file_path)
-    rel_file_path = os.path.relpath(abs_file_path, self.workspace_root).replace('\\', '/')
+        abs_file_path = os.path.join(self.telegram_data_dir, f"sticker_{sticker.file_id}.{ext}")
+        await file.download_to_drive(abs_file_path)
+        rel_file_path = os.path.relpath(abs_file_path, self.workspace_root).replace('\\', '/')
         
         # 构造消息
         reply_info = await self._extract_reply_info(update.message)
-    text = f"[sticker: {emoji} from {set_name}]\n[file: {rel_file_path}]"
+        text = f"[sticker: {emoji} from {set_name}]\n[file: {rel_file_path}]"
         if reply_info:
             text = f"[回复: {reply_info}]\n{text}"
         
