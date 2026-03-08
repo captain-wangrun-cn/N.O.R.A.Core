@@ -204,6 +204,9 @@ class TelegramAdapter(BaseAdapter):
         workspace_manager = get_workspace_manager()
         self.workspace_root = str(workspace_manager.root)
         self.downloads_dir = str(workspace_manager.downloads_dir)
+    self.data_dir = str(workspace_manager.data_dir)
+    self.telegram_data_dir = os.path.join(self.data_dir, "telegram")
+    os.makedirs(self.telegram_data_dir, exist_ok=True)
         
         self.application = ApplicationBuilder().token(token).build()
         self._aggregator: MessageAggregator | None = None
@@ -494,13 +497,13 @@ class TelegramAdapter(BaseAdapter):
         
         # 下载图片
         file = await photo.get_file()
-        file_path = f"downloads/telegram/photo_{photo.file_id}.jpg"
-        os.makedirs(os.path.dirname(file_path), exist_ok=True)
-        await file.download_to_drive(file_path)
+    abs_file_path = os.path.join(self.telegram_data_dir, f"photo_{photo.file_id}.jpg")
+    await file.download_to_drive(abs_file_path)
+    rel_file_path = os.path.relpath(abs_file_path, self.workspace_root).replace('\\', '/')
         
         # 构造消息
         reply_info = await self._extract_reply_info(update.message)
-        text = f"[image: {file_path}]"
+    text = f"[image: {rel_file_path}]"
         if caption:
             text += f"\n{caption}"
         if reply_info:
@@ -516,7 +519,7 @@ class TelegramAdapter(BaseAdapter):
             }
             await self._aggregator.add_message(chat_id, text, full_context)
         
-        logger.info(f"[{chat_id}] 收到图片: {file_path}")
+        logger.info(f"[{chat_id}] 收到图片: {rel_file_path}")
 
     async def _handle_document(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """处理文档消息"""
@@ -536,13 +539,13 @@ class TelegramAdapter(BaseAdapter):
         # 下载文档
         file = await document.get_file()
         file_name = document.file_name or f"document_{document.file_id}"
-        file_path = f"downloads/telegram/{file_name}"
-        os.makedirs(os.path.dirname(file_path), exist_ok=True)
-        await file.download_to_drive(file_path)
+    abs_file_path = os.path.join(self.telegram_data_dir, file_name)
+    await file.download_to_drive(abs_file_path)
+    rel_file_path = os.path.relpath(abs_file_path, self.workspace_root).replace('\\', '/')
         
         # 构造消息
         reply_info = await self._extract_reply_info(update.message)
-        text = f"[file: {file_path}]"
+    text = f"[file: {rel_file_path}]"
         if caption:
             text += f"\n{caption}"
         if reply_info:
@@ -558,7 +561,7 @@ class TelegramAdapter(BaseAdapter):
             }
             await self._aggregator.add_message(chat_id, text, full_context)
         
-        logger.info(f"[{chat_id}] 收到文档: {file_path}")
+        logger.info(f"[{chat_id}] 收到文档: {rel_file_path}")
 
     async def _handle_sticker(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """处理贴纸消息"""
@@ -579,13 +582,13 @@ class TelegramAdapter(BaseAdapter):
         # 下载贴纸
         file = await sticker.get_file()
         ext = "webm" if sticker.is_video else "webp"
-        file_path = f"downloads/telegram/sticker_{sticker.file_id}.{ext}"
-        os.makedirs(os.path.dirname(file_path), exist_ok=True)
-        await file.download_to_drive(file_path)
+    abs_file_path = os.path.join(self.telegram_data_dir, f"sticker_{sticker.file_id}.{ext}")
+    await file.download_to_drive(abs_file_path)
+    rel_file_path = os.path.relpath(abs_file_path, self.workspace_root).replace('\\', '/')
         
         # 构造消息
         reply_info = await self._extract_reply_info(update.message)
-        text = f"[sticker: {emoji} from {set_name}]\n[file: {file_path}]"
+    text = f"[sticker: {emoji} from {set_name}]\n[file: {rel_file_path}]"
         if reply_info:
             text = f"[回复: {reply_info}]\n{text}"
         
@@ -599,7 +602,7 @@ class TelegramAdapter(BaseAdapter):
             }
             await self._aggregator.add_message(chat_id, text, full_context)
         
-        logger.info(f"[{chat_id}] 收到贴纸: {file_path}")
+        logger.info(f"[{chat_id}] 收到贴纸: {rel_file_path}")
 
     async def _handle_callback(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """处理 inline keyboard 回调"""

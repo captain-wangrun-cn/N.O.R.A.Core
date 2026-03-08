@@ -40,13 +40,21 @@ def _resolve_local_image_path(raw_path: str) -> str:
         os.path.join(os.getcwd(), path),
     ]
 
-    # 尝试映射到 workspace 的 downloads 目录
+    # 尝试映射到 workspace 的 downloads / data 目录
     if path.replace('\\', '/').startswith('downloads/'):
         rel = path.replace('\\', '/')[len('downloads/'):]
         try:
             from workspace_config import get_workspace_manager
             downloads_dir = get_workspace_manager().downloads_dir
             candidates.append(os.path.join(downloads_dir, rel))
+        except Exception:
+            pass
+    if path.replace('\\', '/').startswith('data/'):
+        rel = path.replace('\\', '/')[len('data/'):]
+        try:
+            from workspace_config import get_workspace_manager
+            data_dir = get_workspace_manager().data_dir
+            candidates.append(os.path.join(data_dir, rel))
         except Exception:
             pass
 

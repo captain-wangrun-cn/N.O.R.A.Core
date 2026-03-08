@@ -473,19 +473,10 @@ class NoraController:
                 image_id_lines = []
                 for img in multimodal_images:
                     image_id_lines.append(f"- 图片 ID: {img['image_id']}  文件: {os.path.basename(img['path'])}")
-                image_hint = (
-                    "\n\n📎 本次消息附带了以下图片：\n"
-                    + "\n".join(image_id_lines)
-                    + "\n\n请在回复最末尾，为每张图片附上【关键词标签列表】（用于图片记忆检索），格式如下：\n"
-                    "[IMAGE_TAGS:img_xxxxxxxx]\n"
-                    "标签1, 标签2, 标签3, 标签4 ...（仅关键词，不要写成长句描述）\n"
-                    "[/IMAGE_TAGS]\n"
-                    "要求：\n"
-                    "1) 每个标签 2-8 个字，优先名词/短词组；\n"
-                    "2) 总数 8-20 个；\n"
-                    "3) 覆盖主体、场景、物体、颜色、风格、动作、情绪；\n"
-                    "4) 禁止输出完整句子、解释性文字、编号或 Markdown。\n"
-                    "这些标签只用于后台存储，不会展示给用户。"
+                image_hint = "\n\n" + render_template(
+                    'image_tags.jinja',
+                    'image_tags_prompt',
+                    image_id_lines="\n".join(image_id_lines)
                 )
                 full_user_prompt = full_user_prompt + image_hint
             
