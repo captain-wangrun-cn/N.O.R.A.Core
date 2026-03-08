@@ -520,6 +520,8 @@ class NoraController:
             
             # Typing 状态跟踪（在所有 turns 中保持）
             typing_started = False
+            # 工具回查图片（view_image return_image=true）注入到下一轮多模态输入
+            pending_tool_multimodal_images: List[Dict[str, Any]] = []
             
             status.update("思考中", "正在生成回复...")
 
@@ -530,13 +532,18 @@ class NoraController:
                 if self.tui_callback: self.tui_callback(f"🤔 Thinking... (Turn {current_turn}/{MAX_TURNS})")
                 logger.debug(f"[{chat_id}] Turn {current_turn}/{MAX_TURNS}")
                 
-                stream = active_llm.chat_stream(
+                turn_multimodal_images = multimodal_images if current_turn == 1 else pending_tool_multimodal_images
+                turn_llm = self.image_llm if turn_multimodal_images else active_llm
+                stream = turn_llm.chat_stream(
                     system_prompt=system_prompt,
                     user_prompt=full_user_prompt if current_turn == 1 else " (Continue processing tool outputs...)",
                     history=temp_history,
                     tools=[] if force_no_tools else self.tool_manager.get_tool_schemas(),
-                    multimodal_images=multimodal_images if current_turn == 1 else None
+                    multimodal_images=turn_multimodal_images if turn_multimodal_images else None
                 )
+                # 仅消费一轮，避免重复注入同一批工具图片
+                if current_turn > 1 and pending_tool_multimodal_images:
+                    pending_tool_multimodal_images = []
                 force_no_tools = False  # 重置，仅影响紧跟的一轮
 
                 # 一进入生成阶段即提示 typing，避免 Telegram 输入状态过短
@@ -715,7 +722,24 @@ class NoraController:
                     # Execute Tool
                     status.update("工具调用", f"正在执行 {tool_name}...")
                     status.log_tool(tool_name, tool_args)
+                    if tool_name == "view_image" and isinstance(tool_args, dict):
+                        # 兜底注入当前会话 user_id，避免 LLM 漏传导致查不到图片
+                        if not str(tool_args.get("user_id", "")).strip():
+                            tool_args["user_id"] = storage_id
                     tool_result = await self.tool_manager.execute(tool_name, cast(Dict[str, Any], tool_args))
+                    # 如果 view_image 请求了 return_image，提取返回中的 [image: ...] 作为下一轮多模态输入
+                    if (
+                        tool_name == "view_image"
+                        and isinstance(tool_args, dict)
+                        and bool(tool_args.get("return_image", False))
+                    ):
+                        try:
+                            _clean, tool_images = extract_image_payloads(tool_result)
+                            if tool_images:
+                                pending_tool_multimodal_images = tool_images
+                                logger.info(f"[{chat_id}] view_image 返回 {len(tool_images)} 张图片，下一轮切换 image 模型进行分析。")
+                        except Exception:
+                            logger.warning(f"[{chat_id}] 解析 view_image 返回图片失败，已跳过多模态注入。", exc_info=True)
                     status.update("处理结果", f"{tool_name} 执行完毕，正在分析结果...")
                     logger.info(f"[{chat_id}] 🔧 Tool Result for {tool_name}: {tool_result[:100]}...")
 

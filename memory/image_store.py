@@ -253,7 +253,9 @@ class ImageStore:
         if self.mongo_col is None:
             return []
         try:
-            query: Dict[str, Any] = {"user_id": user_id}
+            query: Dict[str, Any] = {}
+            if user_id:
+                query["user_id"] = user_id
             time_filter: Dict[str, Any] = {}
             if start_time is not None:
                 time_filter["$gte"] = start_time

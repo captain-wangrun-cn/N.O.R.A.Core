@@ -736,6 +736,7 @@ class ToolManager:
         end_time: str = "",
         user_id: str = "",
         limit: int = 10,
+        return_image: bool = False,
     ) -> str:
         """
         Retrieves images from the image memory database. Supports multiple search modes:
@@ -748,7 +749,8 @@ class ToolManager:
         :param start_time: Start of time range as Unix timestamp string (e.g. '1709856000').
         :param end_time: End of time range as Unix timestamp string (e.g. '1709942400').
         :param user_id: Filter by user ID. If empty, searches all users.
-        :param limit: Maximum number of results (1-50, default 10).
+    :param limit: Maximum number of results (1-50, default 10).
+    :param return_image: Whether to include [image: absolute_path] tags in output for direct sending/re-analysis.
         """
         if not self.image_store:
             return "Error: Image memory system is not available (ImageStore not initialized)."
@@ -790,6 +792,11 @@ class ToolManager:
             score = img.get("score")
             if score is not None:
                 output_lines.append(f"  Relevance: {score:.3f}")
+            if return_image:
+                file_path = str(img.get('file_path', '')).strip()
+                if file_path:
+                    abs_path = file_path if os.path.isabs(file_path) else os.path.abspath(file_path)
+                    output_lines.append(f"  MediaTag: [image: {abs_path}]")
             output_lines.append("")
 
         return "\n".join(output_lines)

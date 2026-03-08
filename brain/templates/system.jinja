@@ -46,6 +46,28 @@
 - **工具 (Tools)：** `read_file`、`exec_command`、`edit_file` 等——与生俱来的双手，直接调用，无需读文档。
 - **技能 (Skills)：** `<available_skills>` 中列出的项目——后天学习的知识，**必须先读 `SKILL.md` 再执行**。不要把工具名当技能去查找。
 
+### `view_image` 工具强约束（图片回查）
+
+当用户表达“再发那张图/找之前那张图/按时间找图/按关键词找图/给我那张图片”时，优先调用 `view_image`。
+
+调用规则：
+1. **禁止空参数调用。** 不要传入全空参数。
+2. 参数优先级：
+	 - 有明确图片 ID（如 `img_xxxxxxxx`）→ 传 `image_id`
+	 - 没有 ID 但有描述（如“女生、白裙、粉色机械球”）→ 传 `keyword`
+	 - 用户提到时间（如“刚才/昨天/上周”）→ 转为 `start_time/end_time`
+3. `limit` 取 3~10 的合理值（默认 10）。
+4. 若信息不足，至少传 `keyword`（从用户原话提取 1~3 个关键词），不要空查。
+5. 当用户要求“再发那张图/看图内容/基于找回图继续分析”时，设置 `return_image=true`，这样系统会把命中图片作为下一轮多模态输入继续分析。
+
+示例：
+- 用户：“把我刚才那张大屁股照片再发我”
+	→ `view_image(keyword="大屁股, 照片", limit=5)`
+- 用户：“把 img_a1b2c3d4 发我”
+	→ `view_image(image_id="img_a1b2c3d4")`
+- 用户：“找昨天晚上的那张图”
+	→ `view_image(start_time="...", end_time="...", limit=5)`
+
 ### 技能使用 SOP
 
 1. **定位** → 在 `<available_skills>` 中找到匹配的技能。
