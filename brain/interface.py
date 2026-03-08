@@ -1,5 +1,5 @@
 from abc import ABC, abstractmethod
-from typing import List, Dict, AsyncGenerator, Optional
+from typing import Any, List, Dict, AsyncGenerator, Optional
 
 class BaseLLM(ABC):
     """Abstract Base Class for all LLM providers."""
@@ -9,7 +9,14 @@ class BaseLLM(ABC):
         self.last_usage: Optional[Dict[str, int]] = None  # {"input_tokens": int, "output_tokens": int}
 
     @abstractmethod
-    async def chat(self, system_prompt: str, user_prompt: str, history: List[Dict[str, str]], tools: Optional[List[Dict]] = None) -> str:
+    async def chat(
+        self,
+        system_prompt: str,
+        user_prompt: str,
+        history: List[Dict[str, str]],
+        tools: Optional[List[Dict]] = None,
+        multimodal_images: Optional[List[Dict[str, Any]]] = None,
+    ) -> str:
         """
         Generates a chat response.
 
@@ -18,6 +25,7 @@ class BaseLLM(ABC):
             user_prompt: The latest user message.
             history: A list of previous turns in the conversation.
             tools: (Optional) A list of tool definitions (function declarations).
+            multimodal_images: (Optional) 图片输入列表，每项包含 mime_type / bytes / base64 等字段。
 
         Returns:
             The generated text response from the LLM.
@@ -25,7 +33,14 @@ class BaseLLM(ABC):
         pass
 
     @abstractmethod
-    async def chat_stream(self, system_prompt: str, user_prompt: str, history: List[Dict[str, str]], tools: Optional[List[Dict]] = None) -> AsyncGenerator[Dict, None]:
+    async def chat_stream(
+        self,
+        system_prompt: str,
+        user_prompt: str,
+        history: List[Dict[str, str]],
+        tools: Optional[List[Dict]] = None,
+        multimodal_images: Optional[List[Dict[str, Any]]] = None,
+    ) -> AsyncGenerator[Dict, None]:
         """
         Generates a chat response as an asynchronous stream.
 
@@ -34,6 +49,7 @@ class BaseLLM(ABC):
             user_prompt: The latest user message.
             history: A list of previous turns in the conversation.
             tools: (Optional) A list of tool definitions.
+            multimodal_images: (Optional) 图片输入列表，每项包含 mime_type / bytes / base64 等字段。
 
         Yields:
             Dict objects with "type" key ("text" or "tool_call" or "usage").

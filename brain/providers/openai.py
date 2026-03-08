@@ -1,7 +1,7 @@
 import asyncio
 import openai
 import json
-from typing import List, Dict, Optional
+from typing import Any, List, Dict, Optional
 from openai import APIConnectionError, APITimeoutError, RateLimitError, APIStatusError
 import logging
 
@@ -189,7 +189,40 @@ class OpenAIProvider(BaseLLM):
             })
         
         return converted
-    async def chat(self, system_prompt: str, user_prompt: str, history: List[Dict[str, str]], tools: Optional[List[Dict]] = None) -> str:
+
+    @staticmethod
+    def _build_user_content(user_prompt: str, multimodal_images: Optional[List[Dict[str, Any]]] = None):
+        """构建 OpenAI user content：纯文本或多模态 parts。"""
+        if not multimodal_images:
+            return user_prompt
+
+        parts: List[Dict[str, Any]] = []
+        if user_prompt and user_prompt.strip():
+            parts.append({"type": "text", "text": user_prompt})
+
+        for image in multimodal_images:
+            mime_type = image.get("mime_type") or "image/jpeg"
+            b64 = image.get("base64")
+            if not b64:
+                continue
+            parts.append({
+                "type": "image_url",
+                "image_url": {
+                    "url": f"data:{mime_type};base64,{b64}"
+                }
+            })
+
+        if not parts:
+            return user_prompt
+        return parts
+    async def chat(
+        self,
+        system_prompt: str,
+        user_prompt: str,
+        history: List[Dict[str, str]],
+        tools: Optional[List[Dict]] = None,
+        multimodal_images: Optional[List[Dict[str, Any]]] = None,
+    ) -> str:
         """
         非流式调用 OpenAI API（含 function calling 支持）。
         
@@ -197,10 +230,11 @@ class OpenAIProvider(BaseLLM):
         大部分工具调用走 chat_stream()。但仍完整实现以备需要。
         """
         filtered_history = self._convert_history(history)
+        user_content = self._build_user_content(user_prompt, multimodal_images)
         messages = [
             {"role": "system", "content": system_prompt},
             *filtered_history,
-            {"role": "user", "content": user_prompt}
+            {"role": "user", "content": user_content}
         ]
         
         # 构建 API 请求参数
@@ -229,7 +263,14 @@ class OpenAIProvider(BaseLLM):
             logger.error(f"OpenAI API Error: {e}", exc_info=True)
             return "Sorry, I encountered an issue processing your request with the OpenAI API."
 
-    async def chat_stream(self, system_prompt: str, user_prompt: str, history: List[Dict[str, str]], tools: Optional[List[Dict]] = None):
+    async def chat_stream(
+        self,
+        system_prompt: str,
+        user_prompt: str,
+        history: List[Dict[str, str]],
+        tools: Optional[List[Dict]] = None,
+        multimodal_images: Optional[List[Dict[str, Any]]] = None,
+    ):
         """
         流式调用 OpenAI API，完整支持 function calling。
         
@@ -244,10 +285,11 @@ class OpenAIProvider(BaseLLM):
         - {"type": "usage", "input_tokens": N, "output_tokens": N}
         """
         filtered_history = self._convert_history(history)
+        user_content = self._build_user_content(user_prompt, multimodal_images)
         messages = [
             {"role": "system", "content": system_prompt},
             *filtered_history,
-            {"role": "user", "content": user_prompt}
+            {"role": "user", "content": user_content}
         ]
         
         # 构建 API 请求参数

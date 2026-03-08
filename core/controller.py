@@ -13,6 +13,8 @@ from memory.message_history import MessageHistory
 from brain.tools import ToolManager
 from skills.loader import SkillLoader
 from core.cost_tracker import get_cost_tracker
+from core.routing import has_image_input
+from brain.multimodal import extract_image_payloads
 import config
 import json
 
@@ -103,6 +105,12 @@ class NoraController:
             self.fast_llm = get_llm_client(model_alias="fast")
         except Exception:
             self.fast_llm = self.llm  # fallback 到主模型
+
+        # 图片输入专用模型（若未配置则回退到主模型）
+        try:
+            self.image_llm = get_llm_client(model_alias="image")
+        except Exception:
+            self.image_llm = self.llm
         
         # 消息历史管理
         history_cfg = config.get_message_history_config()
@@ -136,6 +144,11 @@ class NoraController:
         text = context["text"]
         chat_type = context.get("chat_type", "private")
         user_name = context.get("user_name", "User")
+
+        # 解析多模态输入：从 [image: ...] 中提取真实图片内容
+        clean_text, multimodal_images = extract_image_payloads(text)
+        if clean_text:
+            text = clean_text
 
         logger.debug(f"[{chat_id}] 收到新聚合消息: '{text[:50]}...'")
         
@@ -368,6 +381,11 @@ class NoraController:
         chat_type = context.get("chat_type", "private")
         user_name = context.get("user_name", "User")
 
+        # 解析多模态输入：把 [image: ...] 对应的本地图片读取为模型可用内容
+        clean_text, multimodal_images = extract_image_payloads(text)
+        if clean_text:
+            text = clean_text
+
         # 确定用于存储和检索的唯一ID
         storage_id = chat_id if chat_type != "private" else user_id
 
@@ -379,6 +397,10 @@ class NoraController:
         MAX_TURNS = 30
         status = self.worker_status.setdefault(chat_id, WorkerStatus())
         status.start(query=text, max_turns=MAX_TURNS)
+
+        # 根据输入类型选择模型：图片消息优先走 image 模型
+        model_alias_in_use = "image" if has_image_input(text) else "smart"
+        active_llm = self.image_llm if model_alias_in_use == "image" else self.llm
         
         try:
             if self.tui_callback: self.tui_callback(f"🏃 Handling new message...")
@@ -462,6 +484,12 @@ class NoraController:
             
             # 临时历史，从数据库加载持久化上下文
             db_context = self.message_history.get_context_messages("telegram", storage_id)
+            # 避免重复注入：当前轮用户消息已作为 user_prompt 传入，不应再在 history 中重复一遍
+            if db_context:
+                last_msg = db_context[-1]
+                if last_msg.get("role") == "user" and str(last_msg.get("content", "")) == message_content:
+                    db_context = db_context[:-1]
+
             temp_history = [
                 {"role": msg["role"], "content": msg["content"]}
                 for msg in db_context
@@ -480,11 +508,12 @@ class NoraController:
                 if self.tui_callback: self.tui_callback(f"🤔 Thinking... (Turn {current_turn}/{MAX_TURNS})")
                 logger.debug(f"[{chat_id}] Turn {current_turn}/{MAX_TURNS}")
                 
-                stream = self.llm.chat_stream(
+                stream = active_llm.chat_stream(
                     system_prompt=system_prompt,
                     user_prompt=full_user_prompt if current_turn == 1 else " (Continue processing tool outputs...)",
                     history=temp_history,
-                    tools=[] if force_no_tools else self.tool_manager.get_tool_schemas()
+                    tools=[] if force_no_tools else self.tool_manager.get_tool_schemas(),
+                    multimodal_images=multimodal_images if current_turn == 1 else None
                 )
                 force_no_tools = False  # 重置，仅影响紧跟的一轮
 
@@ -549,13 +578,13 @@ class NoraController:
                 # 记录成本（如果启用）
                 if self.cost_tracking_enabled and self.cost_tracker and usage_data:
                     provider = config.get_llm_provider()
-                    model = config.get_model_name("smart")  # 默认使用 smart 模型
+                    model = config.get_model_name(model_alias_in_use)
                     self.cost_tracker.log_usage(
                         provider=provider,
                         model=model,
                         input_tokens=usage_data["input_tokens"],
                         output_tokens=usage_data["output_tokens"],
-                        model_alias="smart",
+                        model_alias=model_alias_in_use,
                         context="chat"
                     )
                 
@@ -726,7 +755,7 @@ class NoraController:
                     "role": "user",
                     "content": render_template('loop_interventions.jinja', 'turns_exhausted')
                 })
-                stream = self.llm.chat_stream(
+                stream = active_llm.chat_stream(
                     system_prompt=system_prompt,
                     user_prompt=render_template('loop_interventions.jinja', 'summarize_turns_exhausted'),
                     history=temp_history,
@@ -764,7 +793,7 @@ class NoraController:
                     "role": "user",
                     "content": render_template('loop_interventions.jinja', 'llm_silent_meaningful')
                 })
-                stream = self.llm.chat_stream(
+                stream = active_llm.chat_stream(
                     system_prompt=system_prompt,
                     user_prompt=render_template('loop_interventions.jinja', 'summarize_meaningful'),
                     history=temp_history,
@@ -790,7 +819,7 @@ class NoraController:
                     "content": render_template('loop_interventions.jinja', 'llm_silent_fallback',
                                                tool_output=latest_tool_output[:1000])
                 })
-                stream = self.llm.chat_stream(
+                stream = active_llm.chat_stream(
                     system_prompt=system_prompt,
                     user_prompt=render_template('loop_interventions.jinja', 'summarize_fallback'),
                     history=temp_history,

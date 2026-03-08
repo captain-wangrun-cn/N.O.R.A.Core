@@ -127,7 +127,14 @@ class GeminiProvider(BaseLLM):
         
         return gemini_history
 
-    async def chat(self, system_prompt: str, user_prompt: str, history: List[Dict[str, str]], tools: Optional[List[Dict]] = None) -> str:
+    async def chat(
+        self,
+        system_prompt: str,
+        user_prompt: str,
+        history: List[Dict[str, str]],
+        tools: Optional[List[Dict]] = None,
+        multimodal_images: Optional[List[Dict]] = None,
+    ) -> str:
         # Convert history to Gemini's format, handling tool_call/tool_response
         gemini_history = self._convert_history(history)
         
@@ -206,7 +213,40 @@ class GeminiProvider(BaseLLM):
             # 对于其他所有错误，返回一个包含具体错误信息的前缀消息
             return f"抱歉，处理您的请求时遇到了问题：{error_msg}"
 
-    async def chat_stream(self, system_prompt: str, user_prompt: str, history: List[Dict[str, str]], tools: Optional[List[Dict]] = None):
+    @staticmethod
+    def _build_user_parts(user_prompt: str, multimodal_images: Optional[List[Dict]] = None) -> List[Dict]:
+        """构建 Gemini message parts（text + inline_data）。"""
+        if not multimodal_images:
+            return [{"text": user_prompt}]
+
+        parts: List[Dict] = []
+        if user_prompt and user_prompt.strip():
+            parts.append({"text": user_prompt})
+
+        for image in multimodal_images:
+            mime_type = image.get("mime_type") or "image/jpeg"
+            data = image.get("bytes")
+            if not data:
+                continue
+            parts.append({
+                "inline_data": {
+                    "mime_type": mime_type,
+                    "data": data
+                }
+            })
+
+        if not parts:
+            parts.append({"text": user_prompt})
+        return parts
+
+    async def chat_stream(
+        self,
+        system_prompt: str,
+        user_prompt: str,
+        history: List[Dict[str, str]],
+        tools: Optional[List[Dict]] = None,
+        multimodal_images: Optional[List[Dict]] = None,
+    ):
         gemini_history = self._convert_history(history)
 
         # 配置安全设置
@@ -233,10 +273,11 @@ class GeminiProvider(BaseLLM):
         else:
             full_prompt = f"{system_prompt}\n\n---\n\n{user_prompt}"
 
+        user_parts = self._build_user_parts(full_prompt, multimodal_images)
         chat_session = current_model.start_chat(history=gemini_history)
         
         try:
-            response_stream = await chat_session.send_message_async(full_prompt, stream=True)
+            response_stream = await chat_session.send_message_async(user_parts, stream=True)
             
             # 收集 usage 数据
             input_tokens = 0
