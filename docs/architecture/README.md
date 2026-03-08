@@ -63,6 +63,8 @@
   - 优化技能的发现与创建流程，避免低效的文件系统遍历。
 - **[工作区隔离 (Workspace Isolation)](./workspace.md)**
   - 限制 AI 的文件访问权限，防止误操作系统关键文件。
+- **[内置工具系统 (Tools)](./tools.md)**
+  - `ToolManager` 全部内置工具的参数、返回格式、安全限制与扩展约定。
 
 ### 💾 记忆与上下文 (Memory & Context)
 
@@ -75,6 +77,8 @@
 
 ### 🛡️ 监控与运维 (Ops & Monitoring)
 
+- **[主动消息调度 (Proactive Scheduler)](./schedule-system.md)**
+  - 每日主动消息计划生成、动态闹钟、在线状态管理。
 - **[日志系统 (Logging)](./logging.md)**
   - 结构化日志设计，区分用户可见与调试信息。
 - **[工具循环控制 (Tool Loop Detection)](./tool-loop.md)**

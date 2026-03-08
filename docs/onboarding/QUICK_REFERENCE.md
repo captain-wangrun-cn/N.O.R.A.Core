@@ -36,6 +36,7 @@ core/controller.py            NoraController.handle_message()
 | 模型别名 | `config.yml` → `llm.models.*` | `smart` / `fast` / `coder` / `summary` |
 | 消息历史 | `config.yml` → `memory.message_history.*` | `raw_window`, `compress_window` 等 |
 | 成本跟踪 | `config.yml` → `cost_tracking.*` | `enabled`, `custom_prices` |
+| 主动消息调度 | `config.yml` → `schedule.*` | `enabled` |
 | 工作区路径 | `config.yml` → `workspace.root_path` | 技能/下载/数据的根目录 |
 
 ---
@@ -54,7 +55,8 @@ core/controller.py            NoraController.handle_message()
 
 ### `brain/tools.py`
 - `ToolManager` — 工具注册、schema 生成、执行
-  - 内置工具：`read_file`, `write_file`, `edit_file`, `exec_command`, `list_dir`, `execute_skill`, `create_new_skill`, `delegate_to_coder`
+  - 内置工具：`create_new_skill`, `execute_skill`, `execute_tool_plan`, `read_file`, `search`, `write_file`, `edit_file`, `list_dir`, `get_available_skills`, `exec_command`, `view_image`, `crop_image_for_llm`, `set_alarm`, `list_alarms`, `cancel_alarm`
+  - 详细说明：`docs/architecture/tools.md`
 
 ### `memory/message_history.py`
 - `MessageHistory` — 消息持久化

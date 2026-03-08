@@ -7,7 +7,7 @@ from typing import Dict, Any, Callable, Optional, List, cast
 
 from adapters.base import BaseAdapter
 from brain.llm import llm_client, get_llm_client
-from brain.prompts import get_system_prompt, render_template, get_soul_prompt
+from brain.prompts import get_system_prompt, render_template, get_soul_prompt, load_identity_context, _read_file_safe, WORKSPACE_SCHEDULE_FILE, WORKSPACE_SOUL_FILE, WORKSPACE_USER_FILE, WORKSPACE_MEMORY_FILE, _resolve_memory_file
 from memory.rag import RAGEngine
 from memory.image_store import ImageStore
 from memory.message_history import MessageHistory
@@ -15,6 +15,7 @@ from brain.tools import ToolManager
 from skills.loader import SkillLoader
 from core.cost_tracker import get_cost_tracker
 from core.routing import has_image_input
+from core.scheduler import ProactiveScheduler, AIPresence, set_ai_presence, set_ai_generating, set_ai_backend_busy
 from brain.multimodal import extract_image_payloads
 import config
 import json
@@ -100,7 +101,6 @@ class NoraController:
         self.llm = llm_client
         self.rag = RAGEngine()
         self.image_store = ImageStore()
-        self.tool_manager = ToolManager(adapter, image_store=self.image_store) # Pass adapter and image_store to ToolManager
         self.skill_loader = SkillLoader()
         self.sessions: Dict[str, Any] = {}
         self.generation_tasks: Dict[str, asyncio.Task] = {}
@@ -145,7 +145,28 @@ class NoraController:
             self.cost_tracker = None
             logger.info("成本跟踪已禁用")
         
-        logger.info(f"NoraController 已初始化。RAG: {'Online' if self.rag.enabled else 'Offline'}, MessageHistory: Online")
+        # --- 主动消息调度器 (Proactive Scheduler) ---
+        from workspace_config import get_workspace_manager
+        workspace_mgr = get_workspace_manager()
+        schedule_cfg = config.get_config().get("schedule", {})
+        schedule_enabled = schedule_cfg.get("enabled", True)
+        scheduler_tz = history_cfg.get("timezone", "Asia/Shanghai")
+        
+        if schedule_enabled:
+            self.scheduler = ProactiveScheduler(
+                cache_dir=workspace_mgr.cache_dir,
+                timezone_str=scheduler_tz,
+                generate_plan_callback=self._generate_daily_plan_via_llm,
+                send_proactive_callback=self._send_proactive_message,
+            )
+            logger.info("主动消息调度器已初始化")
+        else:
+            self.scheduler = None
+            logger.info("主动消息调度器已禁用")
+        
+        self.tool_manager = ToolManager(adapter, image_store=self.image_store, scheduler=self.scheduler)
+        
+        logger.info(f"NoraController 已初始化。RAG: {'Online' if self.rag.enabled else 'Offline'}, MessageHistory: Online, Scheduler: {'Online' if self.scheduler else 'Offline'}")
 
     async def handle_new_message(self, context: Dict[str, Any]):
         """处理来自适配器的新消息/命令。"""
@@ -161,6 +182,15 @@ class NoraController:
             text = clean_text
 
         logger.debug(f"[{chat_id}] 收到新聚合消息: '{text[:50]}...'")
+        
+        # --- 更新 AI 在线状态：收到消息 → AI 进入在线 ---
+        set_ai_presence(AIPresence.ONLINE)
+        if self.scheduler:
+            # 自动设置 default_chat_id（首次消息时）
+            if not self.scheduler.default_chat_id:
+                storage_id_for_scheduler = chat_id if chat_type != "private" else user_id
+                self.scheduler.default_chat_id = storage_id_for_scheduler
+                logger.info(f"Scheduler default_chat_id 已设置: {storage_id_for_scheduler}")
         
         # 特殊处理 /start 命令
         if text.strip().startswith("/start"):
@@ -407,6 +437,9 @@ class NoraController:
         MAX_TURNS = 30
         status = self.worker_status.setdefault(chat_id, WorkerStatus())
         status.start(query=text, max_turns=MAX_TURNS)
+        
+        # 通知 scheduler: 后端开始忙碌
+        self._update_scheduler_state(chat_id, busy=True)
 
         # 根据输入类型选择模型：图片消息优先走 image 模型
         model_alias_in_use = "image" if multimodal_images else "smart"
@@ -974,6 +1007,8 @@ class NoraController:
         finally:
             # 确保后端状态被清理（CancelledError 块可能已经 finish 了，重复调用无害）
             status.finish()
+            # 通知 scheduler: 后端空闲
+            self._mark_scheduler_idle(chat_id)
             if self.tui_callback: self.tui_callback("✅ Idle")
             self.generation_tasks.pop(chat_id, None)
             logger.debug(f"[{chat_id}] 本次生成任务结束。")
@@ -1057,4 +1092,168 @@ class NoraController:
             logger.debug(f"[{chat_id}] 图片元数据已异步保存: {image_id}")
         except Exception as e:
             logger.error(f"保存图片元数据失败: {image_id} - {e}")
+
+    # ------------------------------------------------------------------
+    # 主动消息调度系统 (Proactive Scheduler Integration)
+    # ------------------------------------------------------------------
+
+    def start_scheduler(self, default_chat_id: str = ""):
+        """启动主动消息调度器。应在 adapter 就绪后调用。"""
+        if self.scheduler:
+            if default_chat_id:
+                self.scheduler.default_chat_id = default_chat_id
+            self.scheduler.start()
+            logger.info(f"Scheduler 已启动, default_chat_id={default_chat_id}")
+
+    def stop_scheduler(self):
+        """停止调度器。"""
+        if self.scheduler:
+            self.scheduler.stop()
+
+    def _update_scheduler_state(self, chat_id: str, busy: bool):
+        """同步 controller 的忙碌状态到全局 AI 状态。"""
+        set_ai_backend_busy(busy)
+        if busy:
+            set_ai_presence(AIPresence.ONLINE)
+            set_ai_generating(True)
+
+    def _mark_scheduler_idle(self, chat_id: str):
+        """标记 AI 为空闲状态。"""
+        set_ai_generating(False)
+        set_ai_backend_busy(False)
+        # 简单策略：消息处理完成后改为半在线（AI 仍待命）
+        # 真正的离线状态需要超时检测（未来实现）
+        set_ai_presence(AIPresence.SEMI_ONLINE)
+
+    async def _generate_daily_plan_via_llm(self) -> List[Dict[str, str]]:
+        """
+        LLM 回调：读取 SCHEDULE.md + SOUL.md + USER.md + MEMORY.md，
+        生成今日主动消息触发计划。
+        
+        Returns:
+            [{"time": "08:00", "reason": "早安问候"}, {"time": "12:30"}, ...]
+            reason 字段可选。
+        """
+        from datetime import datetime
+        from zoneinfo import ZoneInfo
+
+        tz_str = config.get_message_history_config().get("timezone", "Asia/Shanghai")
+        now = datetime.now(ZoneInfo(tz_str))
+        
+        schedule_content = _read_file_safe(WORKSPACE_SCHEDULE_FILE)
+        soul_content = _read_file_safe(WORKSPACE_SOUL_FILE, max_chars=2000)
+        user_content = _read_file_safe(WORKSPACE_USER_FILE, max_chars=2000)
+        memory_file = _resolve_memory_file("MEMORY.md")
+        memory_content = _read_file_safe(memory_file, max_chars=2000)
+
+        # 使用 Jinja2 模板渲染 prompt
+        system_prompt = render_template(
+            "schedule.jinja", "daily_plan_system",
+        )
+        user_prompt = render_template(
+            "schedule.jinja", "daily_plan_user",
+            date_display=now.strftime('%Y年%m月%d日 %A'),
+            current_time=now.strftime('%H:%M'),
+            schedule_content=schedule_content,
+            soul_content=soul_content,
+            user_content=user_content,
+            memory_content=memory_content,
+        )
+
+        try:
+            response = ""
+            stream = self.llm.chat_stream(
+                system_prompt=system_prompt,
+                user_prompt=user_prompt,
+                history=[],
+                tools=[]
+            )
+            async for chunk in stream:
+                if isinstance(chunk, dict) and chunk.get("type") == "text":
+                    response += chunk["content"]
+                elif isinstance(chunk, str):
+                    response += chunk
+
+            # 解析 JSON
+            response = response.strip()
+            # 去掉可能的 markdown 代码块
+            if response.startswith("```"):
+                response = response.split("\n", 1)[-1]
+                if response.endswith("```"):
+                    response = response[:-3]
+                response = response.strip()
+            
+            plan = json.loads(response)
+            if isinstance(plan, list):
+                logger.info(f"LLM 生成了 {len(plan)} 个触发计划")
+                return plan
+            else:
+                logger.warning(f"LLM 返回了非数组: {type(plan)}")
+                return []
+
+        except json.JSONDecodeError as e:
+            logger.error(f"解析今日计划 JSON 失败: {e}, response={response[:200]}")
+            return []
+        except Exception as e:
+            logger.error(f"LLM 生成今日计划异常: {e}", exc_info=True)
+            return []
+
+    async def _send_proactive_message(self, chat_id: str, reason: str, event_type: str = "proactive"):
+        """
+        Scheduler 回调：到达触发时间后，用 LLM 生成主动消息并发送。
+        
+        Args:
+            chat_id: 发送目标
+            reason: 触发缘由（可能为空字符串）
+            event_type: "proactive" (每日计划) 或 "alarm" (动态闹钟)
+        """
+        reason_display = reason if reason else "(无缘由)"
+        logger.info(f"[{chat_id}] 触发主动消息: type={event_type}, reason={reason_display}")
+
+        # 获取简短的用户上下文
+        soul = get_soul_prompt()
+
+        if event_type == "alarm":
+            system_prompt = render_template("schedule.jinja", "alarm_system", soul_prompt=soul)
+            user_prompt = render_template("schedule.jinja", "alarm_user", reason=reason)
+        else:
+            from datetime import datetime
+            from zoneinfo import ZoneInfo
+            tz_str = config.get_message_history_config().get("timezone", "Asia/Shanghai")
+            now = datetime.now(ZoneInfo(tz_str))
+            system_prompt = render_template("schedule.jinja", "proactive_system", soul_prompt=soul)
+            user_prompt = render_template("schedule.jinja", "proactive_user", current_time=now.strftime('%H:%M'), reason=reason)
+
+        try:
+            response = ""
+            stream = self.llm.chat_stream(
+                system_prompt=system_prompt,
+                user_prompt=user_prompt,
+                history=[],
+                tools=[]
+            )
+            async for chunk in stream:
+                if isinstance(chunk, dict) and chunk.get("type") == "text":
+                    response += chunk["content"]
+                elif isinstance(chunk, str):
+                    response += chunk
+
+            response = self._strip_thinking_content(response.strip())
+            if response:
+                await self.adapter.send_message(chat_id, response)
+                # 保存到消息历史
+                storage_id = chat_id
+                self.message_history.add_message(
+                    platform="telegram",
+                    chat_id=storage_id,
+                    role="assistant",
+                    content=response,
+                    user_id="assistant"
+                )
+                logger.info(f"[{chat_id}] 主动消息已发送: {response[:50]}...")
+            else:
+                logger.warning(f"[{chat_id}] LLM 未生成主动消息内容")
+
+        except Exception as e:
+            logger.error(f"[{chat_id}] 发送主动消息失败: {e}", exc_info=True)
 

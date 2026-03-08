@@ -66,9 +66,11 @@ os.makedirs(WORKSPACE_MEMORY_DIR, exist_ok=True)
 WORKSPACE_SOUL_FILE = os.path.join(WORKSPACE_ROOT, "SOUL.md")
 WORKSPACE_USER_FILE = os.path.join(WORKSPACE_ROOT, "USER.md")
 WORKSPACE_MEMORY_FILE = os.path.join(WORKSPACE_MEMORY_DIR, "MEMORY.md")
+WORKSPACE_SCHEDULE_FILE = os.path.join(WORKSPACE_ROOT, "SCHEDULE.md")
 LEGACY_SOUL_FILE = os.path.join(PROJECT_ROOT, "SOUL.md")
 LEGACY_USER_FILE = os.path.join(PROJECT_ROOT, "USER.md")
 LEGACY_MEMORY_FILE = os.path.join(PROJECT_ROOT, "MEMORY.md")
+LEGACY_SCHEDULE_FILE = os.path.join(PROJECT_ROOT, "SCHEDULE.md")
 
 # 注入到 system prompt 的最大字符数（防止 token 爆炸）
 BOOTSTRAP_MAX_CHARS = 20000
@@ -96,6 +98,7 @@ def _ensure_workspace_identity_files():
         (WORKSPACE_SOUL_FILE, LEGACY_SOUL_FILE),
         (WORKSPACE_USER_FILE, LEGACY_USER_FILE),
         (WORKSPACE_MEMORY_FILE, LEGACY_MEMORY_FILE),
+        (WORKSPACE_SCHEDULE_FILE, LEGACY_SCHEDULE_FILE),
     ]
     for dst, src in mapping:
         if os.path.exists(dst):
@@ -163,6 +166,10 @@ def load_identity_context() -> str:
     memory = _read_file_safe(memory_file_path)
     if memory:
         sections.append(f"<long_term_memory>\n{memory}\n</long_term_memory>")
+
+    schedule = _read_file_safe(WORKSPACE_SCHEDULE_FILE)
+    if schedule:
+        sections.append(f"<schedule>\n{schedule}\n</schedule>")
 
     if not sections:
         return ""

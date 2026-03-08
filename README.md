@@ -12,6 +12,7 @@
 - **[抢占与打断 (Preemption)](docs/architecture/preemption.md)**: 试图让机器人支持被随时打断。用户可以在它思考或做事时插嘴，它会尽量像真人一样由小模型接管并停下手中的活。
 - **[记忆增强 (Memory & RAG)](docs/architecture/message_history.md)**: 混合了一点 RAG 技术。结合 SiliconFlow Embeddings、Qdrant 向量库和本地 SQLite 存储，希望能让它记得更久一点。
 - **技能系统 (Skills)**: 支持热重载的 Python 工具（位于 `tools/` 目录）。可以在运行时动态生成或修改，虽然还在持续完善中。
+- **[内置工具系统文档 (Tools)](docs/architecture/tools.md)**: 汇总所有内置工具的参数、行为和安全约束，便于维护与扩展。
 - **交互接口**: 目前通过统一的 `BaseAdapter` 接口支持 Telegram Bot API。
 
 ## 🚀 快速开始 (Setup)

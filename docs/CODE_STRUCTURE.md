@@ -22,7 +22,7 @@
   - `logging_config.py`：日志配置。
   - `multimodal.py`：多模态输入处理（图片标签提取、image_id 生成、二进制读取）。
   - `prompts.py`：提示词模板。
-  - `tools.py`：工具注册与调用（含 `view_image` 图片检索工具）。
+  - `tools.py`：工具注册与调用（含 `view_image` 图片检索、`crop_image_for_llm` 图片裁剪工具）。
   - `providers/`：LLM 提供方适配（`gemini.py`、`openai.py`）。
   - `templates/`：Jinja 模板（系统与 persona，含 `image_tags.jinja` 图片标签提示）。
 
@@ -46,7 +46,7 @@
   - `en_US.yml` / `zh_CN.yml`：多语言文案。
 
 - `docs/`
-  - `HANDOVER.md`、`architecture/`（架构文档：message history/compression、timestamp、tool-loop 等）。
+  - `HANDOVER.md`、`architecture/`（架构文档：message history/compression、timestamp、tool-loop、tools 等）。
 
 - `tests/`
   - 各功能单测：`test_cli_price_display.py`、`test_context_pricing.py`、`test_cost_tracker.py`、`test_embedding.py`、`test_message_history.py`、`test_rag.py`、`test_schema_fix.py`、`test_timestamp.py`、`test_timezone.py`、`test_vector.py`。

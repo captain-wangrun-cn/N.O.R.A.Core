@@ -78,3 +78,12 @@ cost_tracking:
   custom_prices:
     # 示例: 自定义模型价格
     # "my-custom-model": {"input": 0.5, "output": 2.0}
+
+# 主动消息调度配置
+schedule:
+  enabled: true  # 是否启用主动消息调度系统
+  # 说明:
+  #   - 每天凌晨 00:00 自动根据 SCHEDULE.md + SOUL/USER/MEMORY 生成当日主动消息触发计划
+  #   - 支持动态闹钟工具 (set_alarm / list_alarms / cancel_alarm)
+  #   - 闹钟数据持久化到 workspace/cache/alarms.json
+  #   - 编辑 SCHEDULE.md (workspace 目录下) 自定义作息和日程

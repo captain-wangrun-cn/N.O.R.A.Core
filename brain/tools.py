@@ -66,11 +66,12 @@ class ToolManager:
     """
     Manages and executes all available tools using a dual-layer system.
     """
-    def __init__(self, adapter: BaseAdapter, image_store=None):
+    def __init__(self, adapter: BaseAdapter, image_store=None, scheduler=None):
         self._tools: Dict[str, Callable] = {}
         self._schemas: List[Dict[str, Any]] = []
         self.adapter = adapter
         self.image_store = image_store  # memory.image_store.ImageStore 实例
+        self.scheduler = scheduler  # core.scheduler.ProactiveScheduler 实例
         self._register_tools()
 
     def _register_tools(self):
@@ -86,6 +87,11 @@ class ToolManager:
         self.register(self.exec_command)
         self.register(self.view_image)
         self.register(self.crop_image_for_llm)
+        # 动态闹钟工具（仅在 scheduler 可用时注册）
+        if self.scheduler is not None:
+            self.register(self.set_alarm)
+            self.register(self.list_alarms)
+            self.register(self.cancel_alarm)
 
     def register(self, func: Callable):
         self._tools[func.__name__] = func
@@ -952,6 +958,64 @@ class ToolManager:
                 return "\n".join(lines)
         except Exception as e:
             return f"Error cropping image: {e}"
+
+    # ------------------------------------------------------------------
+    # 动态闹钟工具 (Alarm Tools)
+    # ------------------------------------------------------------------
+
+    def set_alarm(
+        self,
+        trigger_time: str = "",
+        reason: str = "",
+        countdown_minutes: int = 0,
+    ) -> str:
+        """
+        Set a dynamic alarm/reminder that triggers at a specific time or after a countdown. Supports both absolute time and countdown mode. Reason is optional.
+
+        :param trigger_time: Absolute trigger time. Format: "HH:MM" (today), "YYYY-MM-DD HH:MM", or "MM-DD HH:MM". Leave empty if using countdown mode.
+        :param reason: The reason/purpose for the alarm (optional). E.g. "提醒主人喝水", "下班提醒", "会议开始".
+        :param countdown_minutes: Countdown in minutes from now. Set to > 0 to use countdown mode (trigger_time will be ignored). E.g. 30 means "30 minutes from now".
+        """
+        if not self.scheduler:
+            return "Error: Scheduler not available."
+
+        is_countdown = countdown_minutes > 0
+        result = self.scheduler.add_alarm(
+            trigger_time_str=trigger_time,
+            reason=reason,
+            is_countdown=is_countdown,
+            countdown_minutes=countdown_minutes,
+        )
+        if result["success"]:
+            return json.dumps(result, ensure_ascii=False)
+        else:
+            return f"Error: {result['message']}"
+
+    def list_alarms(self) -> str:
+        """
+        List all active (unfired) alarms and reminders. Returns a JSON array of alarm objects with trigger_time, reason, and alarm_id.
+        """
+        if not self.scheduler:
+            return "Error: Scheduler not available."
+
+        alarms = self.scheduler.list_alarms()
+        if not alarms:
+            return "当前没有活跃的闹钟。"
+        return json.dumps(alarms, ensure_ascii=False, indent=2)
+
+    def cancel_alarm(self, alarm_id: str) -> str:
+        """
+        Cancel an active alarm by its ID. Use list_alarms to get the alarm_id first.
+
+        :param alarm_id: The unique ID of the alarm to cancel.
+        """
+        if not self.scheduler:
+            return "Error: Scheduler not available."
+
+        result = self.scheduler.cancel_alarm(alarm_id)
+        return json.dumps(result, ensure_ascii=False)
+
+    # ------------------------------------------------------------------
 
     def _generate_schema(self, func: Callable) -> Dict[str, Any]:
         """Generates a JSON schema for a function."""

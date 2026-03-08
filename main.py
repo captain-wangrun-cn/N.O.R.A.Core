@@ -52,6 +52,13 @@ def run_bot_logic(tui_app, tui_ready_event):
         adapter = TelegramAdapter()
         controller = NoraController(adapter, tui_callback=lambda text: tui_app.call_from_thread(tui_app.update_status, text))
         
+        # 注册 on_ready 钩子：适配器就绪后启动 scheduler
+        _original_on_ready = adapter.on_ready
+        async def _on_ready_with_scheduler():
+            await _original_on_ready()
+            controller.start_scheduler()
+        adapter.on_ready = _on_ready_with_scheduler
+        
         # Start the bot logic within the existing event loop if necessary, 
         # but run_polling is blocking, so we run it directly here.
         adapter.run(message_handler=controller.handle_new_message)
@@ -115,6 +122,14 @@ def run_headless(console_level=logging.INFO):
     try:
         adapter = TelegramAdapter()
         controller = NoraController(adapter, tui_callback=headless_status_callback)
+        
+        # 注册 on_ready 钩子：适配器就绪后启动 scheduler
+        _original_on_ready = adapter.on_ready
+        async def _on_ready_with_scheduler():
+            await _original_on_ready()
+            controller.start_scheduler()
+        adapter.on_ready = _on_ready_with_scheduler
+        
         adapter.run(message_handler=controller.handle_new_message)
     except Exception as exc:
         logging.critical(f"启动失败: {exc}", exc_info=True)
