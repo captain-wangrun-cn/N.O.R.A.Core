@@ -85,6 +85,9 @@ class WorkerStatus:
 class NoraController:
     """处理机器人的核心业务逻辑。"""
 
+    _THINK_BLOCK_PATTERN = re.compile(r"<think>[\s\S]*?</think>", re.IGNORECASE)
+    _THINK_INLINE_PATTERN = re.compile(r"</?think>", re.IGNORECASE)
+
     def __init__(self, adapter: BaseAdapter, tui_callback: Optional[Callable[[str], None]] = None):
         self.adapter = adapter
         self.tui_callback = tui_callback
@@ -543,7 +546,7 @@ class NoraController:
                                 parts = response_text_buffer.split("[SPLIT]")
                                 # Send and sync all complete parts
                                 for part in parts[:-1]:
-                                    text_to_send = part.strip()
+                                    text_to_send = self._strip_thinking_content(part.strip())
                                     # 过滤掉包含工具调用语法的泄漏内容
                                     if text_to_send and not re.search(
                                         r'(?:execute_skill|execute_tool_plan|write_file|read_file|edit_file|exec_command|list_dir|create_new_skill|search)\s*\(',
@@ -782,6 +785,7 @@ class NoraController:
                 clean_response = re.sub(
                     r'返回结果[：:]\s*```[\s\S]*?```', '', clean_response
                 ).strip()
+                clean_response = self._strip_thinking_content(clean_response)
                 if clean_response:
                     await self.adapter.send_message(chat_id, clean_response)
                 elif latest_meaningful_output:
@@ -806,6 +810,7 @@ class NoraController:
                     elif isinstance(chunk, str):
                         final_response_buffer += chunk
                 
+                final_response_buffer = self._strip_thinking_content(final_response_buffer)
                 if final_response_buffer:
                     await self.adapter.send_message(chat_id, final_response_buffer)
                 else:
@@ -832,6 +837,7 @@ class NoraController:
                     elif isinstance(chunk, str):
                         final_response_buffer += chunk
                 
+                final_response_buffer = self._strip_thinking_content(final_response_buffer)
                 if final_response_buffer:
                     await self.adapter.send_message(chat_id, final_response_buffer)
                 else:
@@ -911,6 +917,16 @@ class NoraController:
         session = self.sessions.get(chat_id, {})
         was = session.pop("_interrupted_by_frontend", False)
         return was
+
+    @classmethod
+    def _strip_thinking_content(cls, text: str) -> str:
+        """移除模型可能泄漏的思维链标签内容（如 <think>...</think>）。"""
+        if not text:
+            return ""
+        cleaned = cls._THINK_BLOCK_PATTERN.sub("", text)
+        cleaned = cls._THINK_INLINE_PATTERN.sub("", cleaned)
+        cleaned = re.sub(r'\n{3,}', '\n\n', cleaned).strip()
+        return cleaned
 
     async def _process_pending_messages(self, chat_id: str):
         """后端完成后，处理队列中积攒的用户消息。"""
