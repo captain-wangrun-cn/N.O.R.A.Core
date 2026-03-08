@@ -1,94 +1,9 @@
 ## 项目概览
 - 仓库：N.O.R.A.Core（branch: main）
 - 目标：多平台智能体内核，包含 LLM 适配、工具/技能体系、成本追踪、记忆/RAG。
-- 当前状态：可运行，自测通过；已完成图片记忆链路（入库/检索/回查再分析）、`view_image` 工具增强、图片裁剪工具 `crop_image_for_llm`、CLI 高危清理保护、**主动消息调度系统**。
+- 当前状态：可运行，自测通过；已完成图片记忆链路（入库/检索/回查再分析）、`view_image` 工具增强、CLI 高危清理保护。
 
 ## 近期关键改动（截至 2026-03-08）
-
-### 🆕 主动消息调度系统 (Schedule System) — 2026-03-08
-
-1) 新增核心模块：`core/scheduler.py`
-- `ProactiveScheduler` 类：后台循环每 30 秒检查触发事件
-- 每天凌晨 00:00 自动调用 LLM，根据 `SCHEDULE.md` + `SOUL.md` + `USER.md` + `MEMORY.md` 生成今日主动消息触发计划
-- 到达触发时间后，将缘由发送给 LLM 生成自然的主动消息
-- 两个状态变量：`ONLINE`（在线）和 `SEMI_ONLINE`（半在线），在线时忽略 proactive 消息
-- `ScheduledEvent` 数据类支持 proactive（每日计划）和 alarm（动态闹钟）两种类型
-- 闹钟和每日计划持久化到 `cache/alarms.json` 和 `cache/daily_plan.json`
-
-2) 新增动态闹钟工具（`brain/tools.py`）
-- `set_alarm`: 设置定时或倒计时闹钟，支持 `HH:MM`、`YYYY-MM-DD HH:MM`、`MM-DD HH:MM` 和倒计时模式
-- `list_alarms`: 列出所有活跃闹钟
-- `cancel_alarm`: 按 ID 取消闹钟
-- 闹钟**必须**附带缘由，持久化到本地缓存防止重启失效
-
-3) 新增 `SCHEDULE.md` 文档模板
-- 包含作息习惯、固定日程、主动消息偏好、特殊日期四个板块
-- 首次运行时从仓库根目录自动复制到 workspace
-
-4) 身份上下文扩展（`brain/prompts.py`）
-- `_ensure_workspace_identity_files()` 新增 `SCHEDULE.md` 复制逻辑
-- `load_identity_context()` 注入 `<schedule>` 块到 system prompt
-
-5) Controller 集成（`core/controller.py`）
-- `__init__` 中初始化 `ProactiveScheduler`，注入 LLM 回调
-- `handle_new_message` 中设置用户在线状态
-- `_generate_response` 中同步忙碌/空闲状态
-- 新增 `_generate_daily_plan_via_llm()` 和 `_send_proactive_message()` 回调
-- `ToolManager` 构造器接受 `scheduler` 参数
-
-6) 启动集成（`main.py`）
-- 在 adapter `on_ready` 钩子中自动启动 scheduler
-
-7) 配置（`config.example.yml`）
-- 新增 `schedule.enabled` 配置项（默认 true）
-
-8) 文档
-- 新增 `docs/architecture/schedule-system.md` 架构文档
-- 更新 `docs/architecture/README.md` 索引
-- 更新 `docs/HANDOVER.md`（本文件）
-
-### 🆕 图片裁剪工具（LLM Focus Crop）— 2026-03-08
-
-1) 新增工具：`crop_image_for_llm`（`brain/tools.py`）
-- 目标：在图像分析前先裁剪重点区域，提高 LLM 读图聚焦能力。
-- 参数模式：`preset` 与像素范围（`left/top/right/bottom`）二选一。
-- 优先级：若两者同时传入，**preset 优先**，并在返回中提示像素范围被忽略。
-- 支持 `padding` 扩展裁剪框，支持 `output_path` 自定义输出。
-- `return_image=true`（默认）时返回 `MediaTag: [image: ...]`，可直接进入下一轮多模态分析。
-
-2) 控制器联动（`core/controller.py`）
-- 原先仅处理 `view_image(return_image=true)` 的图片回注。
-- 现在 `crop_image_for_llm(return_image=true)` 也会被解析并注入 `multimodal_images`。
-- 下一轮自动切换到 `image_llm` 继续分析裁剪结果。
-
-3) 测试覆盖（`tests/test_image_memory.py`）
-- 新增 `crop_image_for_llm` schema 注册断言。
-- 新增“preset 优先于像素范围”用例。
-- 新增“像素范围参数完整性（left/top/right/bottom 必填）”用例。
-
-### 🆕 内置工具技术文档补齐 — 2026-03-08
-
-1) 新增工具总览文档
-- 新增 `docs/architecture/tools.md`。
-- 内容覆盖 `ToolManager` 当前全部内置工具：
-   - `create_new_skill`
-   - `execute_skill`
-   - `execute_tool_plan`
-   - `read_file`
-   - `search`
-   - `write_file`
-   - `edit_file`
-   - `list_dir`
-   - `get_available_skills`
-   - `exec_command`
-   - `view_image`
-   - `crop_image_for_llm`
-
-2) 文档索引同步
-- `docs/architecture/README.md` 已加入 `tools.md` 入口。
-- `docs/onboarding/QUICK_REFERENCE.md` 已同步最新工具列表并链接 `tools.md`。
-- `docs/CODE_STRUCTURE.md` 已补充 `crop_image_for_llm` 与 tools 架构文档说明。
-- `README.md` 已添加 tools 技术文档链接，便于新接手会话快速定位。
 
 ### 🆕 图片记忆系统（Image Memory）全链路落地 — 2026-03-08
 
@@ -269,7 +184,7 @@
 - `core/controller.py`：消息路由、脑口分离、任务队列、打断与状态跟踪。
 - `core/cost_tracker.py`：成本记录、定价表、统计输出。
 - `brain/providers/openai.py` / `brain/providers/gemini.py`：流式输出 + usage chunk。
-- `brain/tools.py`：工具注册与实现（含 `view_image(return_image)`、`crop_image_for_llm`）。
+- `brain/tools.py`：工具注册与实现（含 `view_image(return_image)`）。
 - `brain/multimodal.py`：图片 payload 解析、`image_id` 生成、路径映射。
 - `memory/image_store.py`：图片元数据与向量存储/检索。
 - `skills/web_fetch`：网页抽取（r.jina.ai + fast LLM）。
@@ -295,7 +210,6 @@
 - 聊天记录默认 DB 路径为 `workspace/data/memory/message_history.db`；若配置了 `memory.message_history.db_path` 则按配置优先。
 - Telegram 媒体下载路径为 `workspace/data/telegram/`；多模态解析支持 `data/...` 路径映射。
 - `view_image` 若用于“找回并继续看图”，应传 `return_image=true`；否则只返回元数据。
-- `crop_image_for_llm` 建议优先传 `preset`；只有需要精确坐标时再传 `left/top/right/bottom`。
 - CLI 清理 RAG 数据是高危操作：会删除所有 collections，且必须二次确认（`DELETE ALL`）。
 
 ## 快速检查清单

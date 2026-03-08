@@ -57,8 +57,9 @@ def test_extract_image_payloads_includes_image_id(tmp_path):
 # ---------------------------------------------------------------------------
 
 # 复制 controller 中的正则以避免导入整个 controller（需要 config.yml）
+# 注意：image_id 偶发可能出现非十六进制字符，因此这里不再限制 [a-f0-9]
 _IMAGE_TAGS_PATTERN = re.compile(
-    r'\[IMAGE_TAGS:(img_[a-f0-9]+)\](.*?)\[/IMAGE_TAGS\]',
+    r'\[IMAGE_TAGS:([^\]\s]+)\](.*?)\[/IMAGE_TAGS\]',
     re.IGNORECASE | re.DOTALL,
 )
 _THINK_BLOCK_PATTERN = re.compile(r"<think>[\s\S]*?</think>", re.IGNORECASE)
@@ -108,6 +109,23 @@ def test_image_tags_multiple_images():
     assert "橘猫" in matches[0].group(2)
     assert matches[1].group(1) == "img_22222222"
     assert "金毛" in matches[1].group(2)
+
+
+def test_image_tags_pattern_non_hex_image_id():
+    """image_id 含非十六进制字符时也应被匹配，避免标签泄漏到用户侧。"""
+    response = (
+        "这是你的图片分析。\n\n"
+        "[IMAGE_TAGS:img_1DgqG]\n"
+        "二次元, 夜景, 城市灯光\n"
+        "[/IMAGE_TAGS]"
+    )
+
+    matches = list(_IMAGE_TAGS_PATTERN.finditer(response))
+    assert len(matches) == 1
+    assert matches[0].group(1) == "img_1DgqG"
+
+    cleaned = _strip_thinking_and_tags(response)
+    assert "IMAGE_TAGS" not in cleaned
 
 
 def test_strip_thinking_content_removes_image_tags():

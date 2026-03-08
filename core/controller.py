@@ -89,9 +89,10 @@ class NoraController:
 
     _THINK_BLOCK_PATTERN = re.compile(r"<think>[\s\S]*?</think>", re.IGNORECASE)
     _THINK_INLINE_PATTERN = re.compile(r"</?think>", re.IGNORECASE)
-    # 匹配 LLM 返回的图片标签块: [IMAGE_TAGS:img_xxxx] ... [/IMAGE_TAGS]
+    # 匹配 LLM 返回的图片标签块: [IMAGE_TAGS:img_xxx] ... [/IMAGE_TAGS]
+    # 注意：image_id 偶发会出现非十六进制字符（如 img_1DgqG），这里放宽匹配避免泄漏到用户侧。
     _IMAGE_TAGS_PATTERN = re.compile(
-        r'\[IMAGE_TAGS:(img_[a-f0-9]+)\](.*?)\[/IMAGE_TAGS\]',
+        r'\[IMAGE_TAGS:([^\]\s]+)\](.*?)\[/IMAGE_TAGS\]',
         re.IGNORECASE | re.DOTALL,
     )
 
