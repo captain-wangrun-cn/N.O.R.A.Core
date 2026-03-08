@@ -605,6 +605,11 @@ class StepModels(ConfigStep):
         tracker = CostTracker(db_path=":memory:")
         model_prices = {}
         for model_alias, model_name in models.items():
+            # 同一个模型可能被多个 role 复用（如 smart/fast 选同一模型）
+            # 已经获取过价格就直接复用，避免重复提示手动输入。
+            if model_name in model_prices:
+                continue
+
             price = tracker.get_model_price(provider, model_name)
             if price:
                 model_prices[model_name] = price
