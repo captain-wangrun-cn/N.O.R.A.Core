@@ -92,7 +92,7 @@ class ImageStore:
 
     def _ensure_qdrant_collection(self):
         """确保 Qdrant 中存在图片向量集合。"""
-        if not self.qdrant:
+        if self.qdrant is None:
             return
         try:
             collections = self.qdrant.get_collections()
@@ -123,7 +123,7 @@ class ImageStore:
 
     def _ensure_mongo_indexes(self):
         """确保 MongoDB 索引存在。"""
-        if not self.mongo_col:
+        if self.mongo_col is None:
             return
         try:
             self.mongo_col.create_index("image_id", unique=True)
@@ -233,7 +233,7 @@ class ImageStore:
 
     def get_by_id(self, image_id: str) -> Optional[Dict[str, Any]]:
         """按图片 ID 精确查询。"""
-        if not self.mongo_col:
+        if self.mongo_col is None:
             return None
         try:
             doc = self.mongo_col.find_one({"image_id": image_id}, {"_id": 0})
@@ -250,7 +250,7 @@ class ImageStore:
         limit: int = 20,
     ) -> List[Dict[str, Any]]:
         """按时间范围查询图片（MongoDB）。"""
-        if not self.mongo_col:
+        if self.mongo_col is None:
             return []
         try:
             query: Dict[str, Any] = {"user_id": user_id}
@@ -275,7 +275,7 @@ class ImageStore:
         limit: int = 10,
     ) -> List[Dict[str, Any]]:
         """按关键词在 tags 中做文本搜索（MongoDB $text）。"""
-        if not self.mongo_col:
+        if self.mongo_col is None:
             return []
         try:
             query: Dict[str, Any] = {"$text": {"$search": keyword}}
@@ -298,7 +298,7 @@ class ImageStore:
         top_k: int = 5,
     ) -> List[Dict[str, Any]]:
         """语义向量检索（Qdrant）。"""
-        if not self.qdrant or not self.embed_client.enabled:
+        if self.qdrant is None or not self.embed_client.enabled:
             return []
         try:
             vector = self.embed_client.get_embedding(query_text)
