@@ -44,7 +44,9 @@ def t(key: str, **kwargs) -> str:
         value = value.get(k)
         if value is None:
             return key # fallback
-    return value.format(**kwargs)
+    if isinstance(value, str):
+        return value.format(**kwargs)
+    return str(value)
 
 def load_locale():
     """加载语言文件"""
@@ -63,7 +65,7 @@ def get_gemini_models(api_key: str):
         models = [m.name.replace("models/", "") for m in genai.list_models() if 'generateContent' in m.supported_generation_methods]
         return sorted(models)
     except Exception as e:
-        questionary.print(t('wizard.model_fetch_error', error=e), style="bold red").ask()
+        questionary.print(t('wizard.model_fetch_error', error=e), style="bold red")
         return None
 
 def get_openai_models(api_key: str, base_url: Optional[str] = None):
@@ -310,49 +312,141 @@ class StepWorkspace(ConfigStep):
         return True
 
 class StepProvider(ConfigStep):
-    def run(self):
-        choices = ["gemini", "openai", t('wizard.back_option')]
-        default_val = self.state.get("provider", "gemini")
-        if default_val not in choices: default_val = "gemini"
-        
-        self.state['provider'] = questionary.select(
-            t('wizard.provider_prompt'),
-            choices=choices,
-            default=default_val
+    def _default_provider_name(self, provider_type: str, providers: Dict[str, Any]) -> str:
+        base = provider_type
+        if base not in providers:
+            return base
+        idx = 2
+        while f"{base}_{idx}" in providers:
+            idx += 1
+        return f"{base}_{idx}"
+
+    def _configure_provider(self, existing: Optional[Dict[str, Any]] = None, preset_type: Optional[str] = None):
+        providers = self.state.setdefault("providers", {})
+
+        provider_type = preset_type or (existing or {}).get("type", "gemini")
+        if provider_type not in ["gemini", "openai"]:
+            provider_type = "openai"
+
+        default_name = (existing or {}).get("name") or self._default_provider_name(provider_type, providers)
+        provider_name = questionary.text("提供商名称（唯一标识）:", default=default_name).ask()
+        if provider_name is None:
+            return None
+        provider_name = provider_name.strip()
+        if not provider_name:
+            questionary.print("提供商名称不能为空", style="bold red")
+            return None
+
+        api_key = questionary.password(
+            "请输入 API Key:",
+            default=(existing or {}).get("api_key", "")
         ).ask()
-        return self.state['provider'] is not None
+        if api_key is None:
+            return None
+
+        provider_cfg = {
+            "type": provider_type,
+            "api_key": api_key,
+        }
+
+        if provider_type == "openai":
+            base_url = questionary.text(
+                t('wizard.openai_base_url_prompt'),
+                default=(existing or {}).get("base_url") or "https://api.openai.com/v1"
+            ).ask()
+            if base_url is None:
+                return None
+            provider_cfg["base_url"] = base_url
+
+            use_fake_ua = questionary.confirm(
+                t('wizard.openai_user_agent_prompt'),
+                default=bool((existing or {}).get("user_agent"))
+            ).ask()
+            if use_fake_ua is None:
+                return None
+            provider_cfg["user_agent"] = DEFAULT_FAKE_UA if use_fake_ua else ""
+
+        providers[provider_name] = provider_cfg
+        # 保证至少有一个默认 provider
+        if not self.state.get("provider"):
+            self.state["provider"] = provider_name
+        return provider_name
+
+    def run(self):
+        providers = self.state.setdefault("providers", {})
+
+        while True:
+            default_provider = self.state.get("provider")
+            summary = "\n".join([
+                f"  - {name} ({cfg.get('type', 'unknown')}){' [default]' if name == default_provider else ''}"
+                for name, cfg in providers.items()
+            ]) or "  (暂无)"
+            questionary.print("\n当前已配置提供商:\n" + summary, style="bold")
+
+            choices = [
+                questionary.Choice("➕ 添加 Gemini 提供商", value="add_gemini"),
+                questionary.Choice("➕ 添加 OpenAI 兼容提供商", value="add_openai"),
+            ]
+            if providers:
+                choices.extend([
+                    questionary.Choice("✏️ 编辑已有提供商", value="edit"),
+                    questionary.Choice("🗑️ 删除提供商", value="delete"),
+                    questionary.Choice("⭐ 设置默认提供商", value="set_default"),
+                    questionary.Choice("✅ 完成提供商配置", value="done"),
+                ])
+
+            action = questionary.select("配置 LLM 提供商:", choices=choices).ask()
+            if action is None:
+                return False
+
+            if action == "add_gemini":
+                self._configure_provider(preset_type="gemini")
+            elif action == "add_openai":
+                self._configure_provider(preset_type="openai")
+            elif action == "edit":
+                name = questionary.select("选择要编辑的提供商:", choices=list(providers.keys())).ask()
+                if name is None:
+                    continue
+                existing = dict(providers[name])
+                existing["name"] = name
+                new_name = self._configure_provider(existing=existing, preset_type=existing.get("type"))
+                if not new_name:
+                    continue
+                if new_name != name and name in providers:
+                    providers.pop(name, None)
+                    if self.state.get("provider") == name:
+                        self.state["provider"] = new_name
+            elif action == "delete":
+                if len(providers) <= 1:
+                    questionary.print("至少需要保留一个提供商。", style="bold yellow")
+                    continue
+                name = questionary.select("选择要删除的提供商:", choices=list(providers.keys())).ask()
+                if name is None:
+                    continue
+                providers.pop(name, None)
+                if self.state.get("provider") == name:
+                    self.state["provider"] = next(iter(providers.keys()), None)
+                # 清理模型绑定
+                model_providers = self.state.setdefault("model_providers", {})
+                for role, provider_name in list(model_providers.items()):
+                    if provider_name == name:
+                        model_providers.pop(role, None)
+            elif action == "set_default":
+                name = questionary.select("选择默认提供商:", choices=list(providers.keys())).ask()
+                if name is not None:
+                    self.state["provider"] = name
+            elif action == "done":
+                if not providers:
+                    questionary.print("请至少添加一个提供商。", style="bold red")
+                    continue
+                if not self.state.get("provider"):
+                    self.state["provider"] = next(iter(providers.keys()))
+                return True
 
 class StepAPIKeys(ConfigStep):
     def run(self):
-        provider = self.state.get('provider')
-        if provider == 'gemini':
-            self.state['gemini_key'] = questionary.password(
-                t('wizard.gemini_key_prompt'),
-                default=self.state.get("gemini_key", "")
-            ).ask()
-            return self.state['gemini_key'] is not None
-        elif provider == 'openai':
-            self.state['openai_key'] = questionary.password(
-                t('wizard.openai_key_prompt'),
-                default=self.state.get("openai_key", "")
-            ).ask()
-            if self.state['openai_key'] is None:
-                return False
-
-            base_url_default = self.state.get("openai_base_url") or "https://api.openai.com/v1"
-            self.state['openai_base_url'] = questionary.text(
-                t('wizard.openai_base_url_prompt'),
-                default=base_url_default
-            ).ask()
-            if self.state['openai_base_url'] is None:
-                return False
-            use_fake_ua = questionary.confirm(
-                t('wizard.openai_user_agent_prompt'),
-                default=bool(self.state.get("openai_user_agent"))
-            ).ask()
-            self.state['openai_user_agent'] = DEFAULT_FAKE_UA if use_fake_ua else ""
-            return use_fake_ua is not None
-        return False # Should not happen
+        # 已合并到 StepProvider，保留该步骤以兼容旧流程。
+        return True
 
 class StepDatabase(ConfigStep):
     def run(self):
@@ -549,6 +643,75 @@ class StepModels(ConfigStep):
         except ValueError:
             questionary.print("价格格式错误，已跳过该模型。", style="bold red")
             return None
+    def _resolve_provider_entries(self) -> Dict[str, Dict[str, Any]]:
+        """统一解析 providers（兼容旧状态字段）。"""
+        providers = dict(self.state.get("providers") or {})
+        if providers:
+            return providers
+
+        # 兼容旧版 state: provider + gemini_key/openai_key + openai_base_url/user_agent
+        legacy_provider = self.state.get("provider")
+        if legacy_provider == "gemini" and self.state.get("gemini_key"):
+            providers["gemini"] = {
+                "type": "gemini",
+                "api_key": self.state.get("gemini_key", ""),
+            }
+        elif legacy_provider == "openai" and self.state.get("openai_key"):
+            providers["openai"] = {
+                "type": "openai",
+                "api_key": self.state.get("openai_key", ""),
+                "base_url": self.state.get("openai_base_url") or "https://api.openai.com/v1",
+                "user_agent": self.state.get("openai_user_agent", ""),
+            }
+        return providers
+
+    def _select_provider_for_role(self, role_key: str, provider_entries: Dict[str, Dict[str, Any]]) -> Optional[str]:
+        role_name = t(f'roles.{role_key}')
+        model_providers = self.state.setdefault("model_providers", {})
+
+        if len(provider_entries) == 1:
+            only_one = next(iter(provider_entries.keys()))
+            model_providers[role_key] = only_one
+            return only_one
+
+        default_provider = model_providers.get(role_key) or self.state.get("provider")
+        if default_provider not in provider_entries:
+            default_provider = next(iter(provider_entries.keys()))
+
+        choices = [
+            questionary.Choice(
+                title=f"{name} ({cfg.get('type', 'unknown')})",
+                value=name,
+            )
+            for name, cfg in provider_entries.items()
+        ]
+
+        selected = questionary.select(
+            f"为『{role_name}』选择提供商:",
+            choices=choices,
+            default=default_provider,
+        ).ask()
+        if selected is None:
+            return None
+
+        model_providers[role_key] = selected
+        return selected
+
+    def _fetch_models_for_provider(self, provider_name: str, provider_cfg: Dict[str, Any]):
+        provider_type = provider_cfg.get("type", provider_name)
+        api_key = provider_cfg.get("api_key", "")
+        if not api_key:
+            questionary.print(f"提供商 {provider_name} 缺少 API Key", style="bold red")
+            return None
+
+        if provider_type == "gemini":
+            return get_gemini_models(api_key)
+        if provider_type == "openai":
+            return get_openai_models(api_key, provider_cfg.get("base_url"))
+
+        questionary.print(f"不支持的提供商类型: {provider_type}", style="bold red")
+        return None
+
     def select_model(self, model_list, role_key, provider):
         role_name = t(f'roles.{role_key}')
         current_models = self.state.get('models', {})
@@ -582,23 +745,38 @@ class StepModels(ConfigStep):
         return selection
 
     def run(self):
-        provider = self.state.get('provider')
-        api_key = self.state.get(f"{provider}_key")
-        model_list = []
+        provider_entries = self._resolve_provider_entries()
+        if not provider_entries:
+            questionary.print("未配置任何 LLM 提供商，请先在上一环节添加。", style="bold red")
+            return False
 
-        if provider == 'gemini' and api_key:
-            model_list = get_gemini_models(api_key)
-        elif provider == 'openai' and api_key:
-            model_list = get_openai_models(api_key, self.state.get('openai_base_url'))
-
-        if model_list is None: # API call failed
-            return False 
-
+        provider_type_cache: Dict[str, str] = {}
+        provider_model_cache: Dict[str, List[str]] = {}
         models = self.state.get('models', {})
-        models['smart'] = self.select_model(model_list, 'smart', provider)
-        models['fast'] = self.select_model(model_list, 'fast', provider)
-        models['coder'] = self.select_model(model_list, 'coder', provider)
-        models['summary'] = self.select_model(model_list, 'summary', provider)  # 添加总结模型
+        model_providers = self.state.setdefault('model_providers', {})
+
+        for role_key in ['smart', 'fast', 'coder', 'image', 'summary']:
+            provider_name = self._select_provider_for_role(role_key, provider_entries)
+            if provider_name is None:
+                return False
+
+            provider_cfg = provider_entries.get(provider_name, {})
+            provider_type = provider_cfg.get("type", provider_name)
+            provider_type_cache[provider_name] = provider_type
+
+            if provider_name not in provider_model_cache:
+                model_list = self._fetch_models_for_provider(provider_name, provider_cfg)
+                if model_list is None:
+                    return False
+                provider_model_cache[provider_name] = model_list
+
+            selected_model = self.select_model(provider_model_cache[provider_name], role_key, provider_type)
+            if selected_model is None:
+                return False
+
+            models[role_key] = selected_model
+            model_providers[role_key] = provider_name
+
         self.state['models'] = models
 
         # 记录选定模型的价格用于后续配置写入
@@ -610,7 +788,13 @@ class StepModels(ConfigStep):
             if model_name in model_prices:
                 continue
 
-            price = tracker.get_model_price(provider, model_name)
+            provider_name = model_providers.get(model_alias) or self.state.get('provider')
+            provider_name = str(provider_name) if provider_name else ""
+            provider_type = provider_type_cache.get(provider_name, provider_name)
+            if not provider_type:
+                provider_type = "gemini"
+
+            price = tracker.get_model_price(provider_type, model_name)
             if price:
                 model_prices[model_name] = price
             else:
@@ -703,14 +887,36 @@ def run_wizard():
     if os.path.exists(config_file):
         with open(config_file, 'r', encoding='utf-8') as f:
             cfg = yaml.safe_load(f) or {}
+            llm_cfg = cfg.get("llm", {})
+            providers = llm_cfg.get("providers", {}) or {}
+
+            # 旧配置自动迁移到 providers
+            if not providers:
+                api_keys = llm_cfg.get("api_keys", {}) or {}
+                if api_keys.get("gemini"):
+                    providers["gemini"] = {
+                        "type": "gemini",
+                        "api_key": api_keys.get("gemini", ""),
+                    }
+                if api_keys.get("openai"):
+                    providers["openai"] = {
+                        "type": "openai",
+                        "api_key": api_keys.get("openai", ""),
+                        "base_url": llm_cfg.get("base_url") or "https://api.openai.com/v1",
+                        "user_agent": llm_cfg.get("user_agent", ""),
+                    }
+
+            provider_default = llm_cfg.get("provider")
+            if not provider_default and providers:
+                provider_default = next(iter(providers.keys()))
+
             state = {
                 'telegram_token': cfg.get("telegram", {}).get("bot_token"),
                 'workspace': cfg.get("workspace", {}),
-                'provider': cfg.get("llm", {}).get("provider"),
-                'gemini_key': cfg.get("llm", {}).get("api_keys", {}).get("gemini"),
-                'openai_key': cfg.get("llm", {}).get("api_keys", {}).get("openai"),
-                'openai_base_url': cfg.get("llm", {}).get("base_url"),
-                'models': cfg.get("llm", {}).get("models", {}),
+                'provider': provider_default,
+                'providers': providers,
+                'model_providers': llm_cfg.get("model_providers", {}) or {},
+                'models': llm_cfg.get("models", {}),
                 'memory': cfg.get("memory", {}),
                 'tavily': cfg.get("tavily", {}),
                 'cost_tracking': cfg.get("cost_tracking", {'enabled': True})
@@ -735,26 +941,36 @@ def run_wizard():
         current_step += 1
 
     # --- 确认保存 ---
-    final_config = {
+    final_config: Dict[str, Any] = {
         'workspace': state.get('workspace', {'root_path': '~/.nora/workspace'}),
         'telegram': {'bot_token': state.get('telegram_token')},
         'llm': {
             'provider': state.get('provider'),
-            'api_keys': {
-                'gemini': state.get('gemini_key', ''),
-                'openai': state.get('openai_key', '')
-            },
+            'providers': state.get('providers', {}),
+            'model_providers': state.get('model_providers', {}),
             'models': state.get('models', {})
         },
         'memory': state.get('memory', {}),
         'cost_tracking': state.get('cost_tracking', {'enabled': True})
     }
 
-    # 仅在选择 OpenAI 时保存 base_url（避免污染 Gemini 配置）
-    if state.get('provider') == 'openai' and state.get('openai_base_url'):
-        final_config['llm']['base_url'] = state.get('openai_base_url')
-    if state.get('provider') == 'openai' and state.get('openai_user_agent'):
-        final_config['llm']['user_agent'] = state.get('openai_user_agent')
+    # 兼容旧配置结构：保留 api_keys/base_url/user_agent（取默认 provider 对应值）
+    providers_cfg = final_config['llm'].get('providers', {}) or {}
+    legacy_api_keys = {}
+    for pname, pcfg in providers_cfg.items():
+        ptype = pcfg.get('type')
+        if ptype in ('gemini', 'openai') and ptype not in legacy_api_keys:
+            legacy_api_keys[ptype] = pcfg.get('api_key', '')
+    if legacy_api_keys:
+        final_config['llm']['api_keys'] = legacy_api_keys
+
+    default_provider_name = final_config['llm'].get('provider')
+    default_provider_cfg = providers_cfg.get(default_provider_name, {}) if default_provider_name else {}
+    if default_provider_cfg.get('type') == 'openai':
+        if default_provider_cfg.get('base_url'):
+            final_config['llm']['base_url'] = default_provider_cfg.get('base_url')
+        if default_provider_cfg.get('user_agent'):
+            final_config['llm']['user_agent'] = default_provider_cfg.get('user_agent')
     
     # 添加 Tavily 配置（如果存在）
     if state.get('tavily'):
@@ -763,11 +979,15 @@ def run_wizard():
     # 将模型选择的价格写入配置，便于后续成本计算
     model_prices = state.get('model_prices', {})
     if model_prices:
-        if 'cost_tracking' not in final_config:
-            final_config['cost_tracking'] = {'enabled': True}
-        existing_custom = final_config['cost_tracking'].get('custom_prices', {}) or {}
+        cost_tracking_cfg: Dict[str, Any] = final_config.get('cost_tracking')  # type: ignore[assignment]
+        if not isinstance(cost_tracking_cfg, dict):
+            cost_tracking_cfg = {'enabled': True}
+            final_config['cost_tracking'] = cost_tracking_cfg
+        existing_custom = cost_tracking_cfg.get('custom_prices', {}) or {}
+        if not isinstance(existing_custom, dict):
+            existing_custom = {}
         existing_custom.update(model_prices)
-        final_config['cost_tracking']['custom_prices'] = existing_custom
+        cost_tracking_cfg['custom_prices'] = existing_custom
 
     print(t('wizard.summary_title'))
     print(yaml.dump(final_config, indent=2, allow_unicode=True))

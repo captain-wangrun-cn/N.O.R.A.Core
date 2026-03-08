@@ -15,25 +15,42 @@ telegram:
   bot_token: "YOUR_TELEGRAM_BOT_TOKEN"
 
 llm:
-  # Supported providers: "gemini", "openai"
-  provider: "gemini"
+  # 默认提供商（当某个 alias 未显式绑定 provider 时使用）
+  provider: "gemini_main"
 
-  # Optional: custom User-Agent for LLM HTTP requests (e.g., mimic browser UA)
-  # user_agent: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0 Safari/537.36"
+  # 多提供商配置
+  # type: "gemini" | "openai"
+  providers:
+    gemini_main:
+      type: "gemini"
+      api_key: "YOUR_GEMINI_API_KEY"
+    openai_main:
+      type: "openai"
+      api_key: "YOUR_OPENAI_API_KEY"
+      base_url: "https://api.openai.com/v1"
+      # 可选：用于某些兼容端点伪装浏览器请求
+      # user_agent: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0 Safari/537.36"
 
-  # API keys for the providers
-  api_keys:
-    gemini: "YOUR_GEMINI_API_KEY"
-    openai: "YOUR_OPENAI_API_KEY"
+  # 为每个模型别名绑定提供商（值为 providers 的键）
+  model_providers:
+    smart: "gemini_main"
+    fast: "openai_main"
+    coder: "openai_main"
+    image: "gemini_main"
+    summary: "gemini_main"
 
-  # Optional: custom base URL for OpenAI compatible endpoints
+  # 兼容旧版配置（可选，建议保留）
+  # api_keys:
+  #   gemini: "YOUR_GEMINI_API_KEY"
+  #   openai: "YOUR_OPENAI_API_KEY"
   # base_url: "https://api.openai.com/v1"
+  # user_agent: "..."
 
   # Model aliases used by the application
   models:
     smart: "gemini-1.5-pro-latest"
-    fast: "gemini-1.5-flash-latest"
-    coder: "gemini-1.5-pro-latest"
+    fast: "gpt-4o-mini"
+    coder: "gpt-4o"
     image: "gemini-1.5-pro-latest" # 用于图片输入理解的模型
     summary: "gemini-1.5-flash-latest" # 用于消息历史总结的模型
 

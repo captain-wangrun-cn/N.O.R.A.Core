@@ -42,17 +42,19 @@ def _sanitize_links_for_safety(text: str) -> str:
 class GeminiProvider(BaseLLM):
     """LLM Provider for Google Gemini models."""
 
-    def __init__(self, model_alias: str = "smart"):
+    def __init__(self, model_alias: str = "smart", provider_name: Optional[str] = None):
         super().__init__()  # 初始化 BaseLLM
-        if not config.get_api_key("gemini"):
+        provider_name = provider_name or config.get_model_provider(model_alias)
+        if not config.get_api_key(provider_name):
             raise ValueError("GEMINI_API_KEY is not set in the config.")
         
         self.model_alias = model_alias
+        self.provider_name = provider_name
         model_name = config.get_model_name(model_alias)
         if not model_name:
             raise ValueError(f"Model for alias '{model_alias}' not found in config.")
 
-        genai.configure(api_key=config.get_api_key("gemini"))
+        genai.configure(api_key=config.get_api_key(provider_name))
         
         # 配置安全设置 - 放宽内容过滤以允许链接等内容
         from google.generativeai.types import HarmCategory, HarmBlockThreshold

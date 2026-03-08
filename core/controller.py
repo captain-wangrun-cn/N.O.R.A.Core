@@ -673,7 +673,8 @@ class NoraController:
                 
                 # 记录成本（如果启用）
                 if self.cost_tracking_enabled and self.cost_tracker and usage_data:
-                    provider = config.get_llm_provider()
+                    provider_name = config.get_model_provider(model_alias_in_use)
+                    provider = config.get_provider_type(provider_name)
                     model = config.get_model_name(model_alias_in_use)
                     self.cost_tracker.log_usage(
                         provider=provider,

@@ -5,7 +5,13 @@ def test_step_models_manual_price_prompt_deduplicated(monkeypatch):
     """同一模型被多个角色复用时，只应手动询价一次。"""
     state = {
         "provider": "gemini",
-        "gemini_key": "dummy-key",
+        "providers": {
+            "gemini": {
+                "type": "gemini",
+                "api_key": "dummy-key",
+            }
+        },
+        "model_providers": {},
         "models": {},
     }
 
@@ -17,6 +23,7 @@ def test_step_models_manual_price_prompt_deduplicated(monkeypatch):
         "smart": "dup-model",
         "fast": "dup-model",
         "coder": "dup-model",
+        "image": "dup-model",
         "summary": "dup-model",
     }
 

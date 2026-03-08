@@ -13,19 +13,21 @@ logger = logging.getLogger(__name__)
 class OpenAIProvider(BaseLLM):
     """LLM Provider for OpenAI models."""
 
-    def __init__(self, model_alias: str = "smart"):
+    def __init__(self, model_alias: str = "smart", provider_name: Optional[str] = None):
         super().__init__()  # 初始化 BaseLLM
-        if not config.get_api_key("openai"):
+        provider_name = provider_name or config.get_model_provider(model_alias)
+        if not config.get_api_key(provider_name):
             raise ValueError("OPENAI_API_KEY is not set in the config.")
         
         self.model_alias = model_alias
+        self.provider_name = provider_name
         # Optional custom User-Agent to mimic browser if needed
-        ua = config.get_llm_user_agent()
+        ua = config.get_llm_user_agent(provider_name)
         default_headers = {"User-Agent": ua} if ua else None
 
         self.client = openai.AsyncOpenAI(
-            api_key=config.get_api_key("openai"),
-            base_url=config.get_base_url(),
+            api_key=config.get_api_key(provider_name),
+            base_url=config.get_base_url(provider_name),
             default_headers=default_headers
         )
         self.model = config.get_model_name(model_alias)
