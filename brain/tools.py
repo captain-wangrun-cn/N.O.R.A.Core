@@ -781,7 +781,7 @@ class ToolManager:
         # Format results for LLM consumption
         output_lines = [f"Found {len(results)} image(s):\n"]
         if return_image:
-            output_lines.append("[Mode] return_image=true: output includes image content tags ([image: absolute_path]), not metadata-only.\n")
+            output_lines.append("[Mode] return_image=true: output includes image content tags (MediaTag lines), not metadata-only.\n")
         for i, img in enumerate(results, 1):
             output_lines.append(f"--- Image {i} ---")
             output_lines.append(f"  ID: {img.get('image_id', 'N/A')}")

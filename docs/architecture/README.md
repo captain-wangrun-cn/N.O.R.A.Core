@@ -79,6 +79,8 @@
   - 结构化日志设计，区分用户可见与调试信息。
 - **[工具循环控制 (Tool Loop Detection)](./tool-loop.md)**
   - 防止 AI 陷入死循环的保护机制。
+- **CLI 清理策略更新（RAG 数据）**
+  - `clean_qdrant` / `clean_mongodb` 已改为清空所有 collections，并加入强警告与二次确认（`DELETE ALL`）。
 
 - [工具循环控制](./tool-loop.md) - 防止 LLM 陷入死循环
 - [日志系统](./logging.md) - 分级、轮转、过滤策略

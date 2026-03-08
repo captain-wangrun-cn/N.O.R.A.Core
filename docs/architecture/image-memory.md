@@ -8,9 +8,10 @@
 
 1. **为每张图片分配唯一 ID**（格式: `img_<8位hex>`，如 `img_a1b2c3d4`）
 2. **将图片原图发送给 LLM**（多模态输入，二进制 bytes）
-3. **在文本提示中告知 LLM 图片 ID**，要求 LLM 返回详细的图片描述标签
+3. **在文本提示中告知 LLM 图片 ID**，要求 LLM 返回关键词标签列表（用于检索）
 4. **解析 LLM 回复中的标签**，与图片 ID、路径、时间等一起存入 MongoDB + Qdrant
 5. **提供 `view_image` 工具**，支持多种检索方式
+6. 当 `view_image(return_image=true)` 时，工具会返回图片内容标签，下一轮自动切换 `image` 模型进行图像分析
 
 ## 数据流
 
@@ -19,7 +20,7 @@
      │
      ▼
 Telegram Adapter (_handle_photo)
-     │  下载图片 → downloads/telegram/photo_xxx.jpg
+     │  下载图片 → workspace/data/telegram/photo_xxx.jpg
      │  构造 [image: path] 文本
      ▼
 Controller (handle_new_message → _generate_response)
@@ -47,6 +48,20 @@ Controller (后处理)
 ImageStore.save_image_metadata()
      ├── MongoDB: 结构化元数据 (id, path, tags, user, time)
      └── Qdrant:  标签文本向量 (语义检索)
+
+用户请求找回图片（view_image）
+     │  view_image(keyword/image_id/time, return_image=true)
+     ▼
+Tool 返回元数据 + MediaTag: [image: absolute_path]
+     │
+     ▼
+Controller 检测到 return_image=true
+     │  解析工具输出中的 [image: ...] → 多模态图片 payload
+     ▼
+下一轮强制切换 image_llm + multimodal_images 注入
+     │
+     ▼
+LLM 基于找回图片继续分析并回复
 ```
 
 ## 存储结构
@@ -56,7 +71,7 @@ ImageStore.save_image_metadata()
 ```json
 {
     "image_id": "img_a1b2c3d4",
-    "file_path": "downloads/telegram/photo_xxxx.jpg",
+     "file_path": "data/telegram/photo_xxxx.jpg",
     "tags": "猫咪, 橘猫, 沙发, 室内, 可爱, 蜷缩, 温暖, 阳光, 午后",
     "user_id": "123456789",
     "chat_id": "123456789",
@@ -80,7 +95,7 @@ ImageStore.save_image_metadata()
     "payload": {
         "image_id": "img_a1b2c3d4",
         "text": "猫咪, 橘猫, 沙发, 室内, 可爱...",
-        "file_path": "downloads/telegram/photo_xxxx.jpg",
+          "file_path": "data/telegram/photo_xxxx.jpg",
         "user_id": "123456789",
         "chat_id": "123456789",
         "timestamp": 1709856000.0
@@ -101,9 +116,9 @@ ImageStore.save_image_metadata()
 📎 本次消息附带了以下图片：
 - 图片 ID: img_a1b2c3d4  文件: photo_xxxx.jpg
 
-请在回复最末尾，为每张图片附上详细的描述标签，格式如下：
+请在回复最末尾，为每张图片附上【关键词标签列表】，格式如下：
 [IMAGE_TAGS:img_a1b2c3d4]
-详细的图片描述标签，包括主题、场景、物体、颜色、风格、情绪、人物特征等，用逗号分隔
+标签1, 标签2, 标签3, 标签4 ...（仅关键词，不要长句描述）
 [/IMAGE_TAGS]
 ```
 
@@ -136,6 +151,7 @@ LLM 回复示例：
 | `end_time` | string | 否 | 时间范围终点（Unix 时间戳） |
 | `user_id` | string | 否 | 按用户过滤 |
 | `limit` | int | 否 | 最大结果数（默认 10） |
+| `return_image` | bool | 否 | `true` 时返回图片内容标签（`[image: absolute_path]`）供直接发送或二次图像分析 |
 
 ### 检索策略
 
@@ -143,6 +159,13 @@ LLM 回复示例：
 2. **有 `keyword`** → Qdrant 语义搜索 → 回退 MongoDB 文本搜索
 3. **有时间范围** → MongoDB 时间过滤
 4. **无参数** → 返回最近的图片
+
+### `return_image` 模式说明
+
+- `return_image=false`（默认）：返回元数据（ID、路径、tags、时间、相关度）
+- `return_image=true`：除元数据外，额外返回 `MediaTag: [image: absolute_path]`
+     - 该标签会被后续流程解析为真实多模态输入
+     - Controller 会在下一轮自动切换到 `image` 模型继续分析图片
 
 ### 使用场景
 
@@ -158,7 +181,8 @@ LLM 在对话中可以这样调用：
 | `memory/image_store.py` | 图片元数据的 MongoDB + Qdrant 存储和检索 |
 | `brain/multimodal.py` | 图片标签解析、image_id 生成、二进制读取 |
 | `core/controller.py` | 编排：ID 注入 → LLM 调用 → 标签提取 → 存储 |
-| `brain/tools.py` | `view_image` 工具注册和执行 |
+| `brain/tools.py` | `view_image` 工具注册和执行（含 `return_image`） |
+| `brain/templates/image_tags.jinja` | 图片标签提取提示词模板 |
 | `tests/test_image_memory.py` | 单元测试 |
 
 ## 配置
@@ -186,3 +210,4 @@ memory:
 - MongoDB 或 Qdrant 不可用 → `ImageStore.enabled = False`，图片标签仍会作为普通对话记忆存入 RAG
 - Embedding 服务不可用 → 仅保存 MongoDB 元数据，语义检索不可用
 - LLM 未按格式返回标签 → 使用文件名作为 fallback 标签
+- `view_image(return_image=true)` 但图片文件已丢失/路径失效 → 跳过多模态注入，仅返回检索元数据

@@ -65,6 +65,10 @@ python cli.py test-rag         # 测试 RAG 系统
 python cli.py history          # 聊天记录管理
 ```
 
+> ⚠️ RAG 数据清理说明：
+> 在 CLI 菜单中执行“🧹 清理 RAG 数据”时，`clean_qdrant` / `clean_mongodb` 现已改为**清空所有 collections**（分别针对 Qdrant 与 MongoDB 的 `nora` 库），并包含**强警告 + 二次确认（输入 `DELETE ALL`）**。
+> 该操作不可恢复，请谨慎使用。
+
 详见 [CLI 使用指南](docs/CLI_USAGE.md)。
 
 ## 💰 成本追踪 (Cost Tracking)
