@@ -114,6 +114,17 @@ AI 可通过内置工具实时设置闹钟:
 - `/regenerate_proactive replace`：覆盖重建
 - `/regenerate_proactive append`：保留原计划并追加
 
+### 3.7 查看今日计划指令
+
+通过 adapter 命令查看今天尚未触发的主动消息计划：
+
+- `/schedule_today`
+
+返回内容包含：
+- 触发时间（HH:MM）
+- reason（若为空则显示“无缘由”）
+- 今日未触发计划总数
+
 返回结构示例：
 
 ```json
@@ -146,6 +157,7 @@ AI 可通过内置工具实时设置闹钟:
 ### 4.5 Adapter 命令 (`adapters/telegram/main.py`)
 
 - 新增 `/regenerate_proactive` 指令
+- 新增 `/schedule_today` 指令
 - 指令透传到 `NoraController.handle_new_message()`
 - 由 controller 调用 `scheduler.regenerate_today_plan()` 执行重建
 

@@ -243,6 +243,32 @@ class NoraController:
                 await self.adapter.send_message(chat_id, f"❌ 重新生成失败: {e}")
             return
 
+        # 特殊处理 /schedule_today 指令
+        if text.strip().startswith("/schedule_today"):
+            if not self.scheduler:
+                await self.adapter.send_message(chat_id, "❌ Scheduler 未启用，无法查看今日计划。")
+                return
+
+            try:
+                today_plan = self.scheduler.get_today_plan()
+                if not today_plan:
+                    await self.adapter.send_message(chat_id, "📭 今日没有未触发的主动消息计划。")
+                    return
+
+                sorted_plan = sorted(today_plan, key=lambda x: x.get("trigger_time", ""))
+                lines = ["🗓️ 今日主动消息计划（未触发）:"]
+                for i, item in enumerate(sorted_plan, start=1):
+                    trigger_time = item.get("trigger_time", "")
+                    hhmm = trigger_time[11:16] if len(trigger_time) >= 16 else trigger_time
+                    reason = item.get("reason", "") or "(无缘由)"
+                    lines.append(f"{i}. {hhmm} - {reason}")
+                lines.append(f"\n共 {len(sorted_plan)} 条")
+                await self.adapter.send_message(chat_id, "\n".join(lines))
+            except Exception as e:
+                logger.error(f"[{chat_id}] /schedule_today 执行失败: {e}", exc_info=True)
+                await self.adapter.send_message(chat_id, f"❌ 获取今日计划失败: {e}")
+            return
+
         # --- 前后端分离逻辑 ---
         status = self.worker_status.get(chat_id)
         if status and status.busy:

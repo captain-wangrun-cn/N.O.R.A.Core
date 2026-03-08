@@ -311,6 +311,7 @@ class TelegramAdapter(BaseAdapter):
         clear_handler = CommandHandler('clear', self._clear_command)
         status_handler = CommandHandler('status', self._status_command)
         regenerate_proactive_handler = CommandHandler('regenerate_proactive', self._regenerate_proactive_command)
+        schedule_today_handler = CommandHandler('schedule_today', self._schedule_today_command)
         msg_handler = MessageHandler(filters.TEXT & (~filters.COMMAND), self._handle_incoming_message)
         photo_handler = MessageHandler(filters.PHOTO, self._handle_photo)
         document_handler = MessageHandler(filters.Document.ALL, self._handle_document)
@@ -321,6 +322,7 @@ class TelegramAdapter(BaseAdapter):
         self.application.add_handler(clear_handler)
         self.application.add_handler(status_handler)
         self.application.add_handler(regenerate_proactive_handler)
+        self.application.add_handler(schedule_today_handler)
         self.application.add_handler(msg_handler)
         self.application.add_handler(photo_handler)
         self.application.add_handler(document_handler)
@@ -478,6 +480,25 @@ class TelegramAdapter(BaseAdapter):
             "chat_id": chat_id,
             "user_id": str(update.effective_user.id) if update.effective_user else chat_id,
             "text": f"/regenerate_proactive {mode}",
+            "chat_type": update.effective_chat.type,
+            "user_name": update.effective_user.first_name if update.effective_user else "Unknown"
+        }
+        await self._message_handler(event_context)
+
+    async def _schedule_today_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """查看今日主动消息计划。"""
+        if not update.effective_chat:
+            return
+        chat_id = str(update.effective_chat.id)
+        if not self._message_handler:
+            if update.message:
+                await update.message.reply_text("❌ 指令处理器未就绪。")
+            return
+
+        event_context = {
+            "chat_id": chat_id,
+            "user_id": str(update.effective_user.id) if update.effective_user else chat_id,
+            "text": "/schedule_today",
             "chat_type": update.effective_chat.type,
             "user_name": update.effective_user.first_name if update.effective_user else "Unknown"
         }
