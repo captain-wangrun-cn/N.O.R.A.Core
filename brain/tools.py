@@ -749,8 +749,10 @@ class ToolManager:
         :param start_time: Start of time range as Unix timestamp string (e.g. '1709856000').
         :param end_time: End of time range as Unix timestamp string (e.g. '1709942400').
         :param user_id: Filter by user ID. If empty, searches all users.
-    :param limit: Maximum number of results (1-50, default 10).
-    :param return_image: Whether to include [image: absolute_path] tags in output for direct sending/re-analysis.
+        :param limit: Maximum number of results (1-50, default 10).
+        :param return_image: IMPORTANT. When true, the tool returns image CONTENT references
+            via `[image: absolute_path]` tags (can be directly sent or re-fed to image model),
+            not only metadata. When false, returns metadata only (id/path/tags/time/score).
         """
         if not self.image_store:
             return "Error: Image memory system is not available (ImageStore not initialized)."
@@ -778,6 +780,8 @@ class ToolManager:
 
         # Format results for LLM consumption
         output_lines = [f"Found {len(results)} image(s):\n"]
+        if return_image:
+            output_lines.append("[Mode] return_image=true: output includes image content tags ([image: absolute_path]), not metadata-only.\n")
         for i, img in enumerate(results, 1):
             output_lines.append(f"--- Image {i} ---")
             output_lines.append(f"  ID: {img.get('image_id', 'N/A')}")
