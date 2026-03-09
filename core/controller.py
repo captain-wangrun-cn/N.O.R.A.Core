@@ -1311,6 +1311,14 @@ class NoraController:
                     content=response,
                     user_id="assistant"
                 )
+
+                # 同步到会话上下文（in-memory history），让后续轮次也能感知主动消息内容
+                session = self.sessions.setdefault(chat_id, {"history": [], "interrupted_thought": "", "pending_text": ""})
+                session_history = session.setdefault("history", [])
+                session_history.append({"role": "assistant", "content": response})
+                if len(session_history) > 20:
+                    session["history"] = session_history[-20:]
+
                 logger.info(f"[{chat_id}] 主动消息已发送: {response[:50]}...")
             else:
                 logger.warning(f"[{chat_id}] LLM 未生成主动消息内容")
