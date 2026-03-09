@@ -8,6 +8,7 @@ import warnings
 import logging
 import sys
 import sqlite3
+import requests
 from pathlib import Path
 
 # Suppress warnings
@@ -92,9 +93,35 @@ def get_openai_models(api_key: str, base_url: Optional[str] = None):
                 return None
         questionary.print(t('wizard.model_fetch_error', error=e), style="bold red")
         return None
-    except Exception as e:
-        questionary.print(t('wizard.model_fetch_error', error=e), style="bold red")
+
+
+def detect_embedding_dimensions(base_url: str, api_key: str, model: str) -> Optional[int]:
+    """调用 embeddings 接口自动探测向量维度（OpenAI 兼容协议）。"""
+    if not base_url or not api_key or not model:
         return None
+
+    endpoint = f"{base_url.rstrip('/')}/embeddings"
+    headers = {
+        "Authorization": f"Bearer {api_key}",
+        "Content-Type": "application/json",
+    }
+    payload = {
+        "input": "dimension probe",
+        "model": model,
+        "encoding_format": "float",
+    }
+
+    try:
+        response = requests.post(endpoint, headers=headers, json=payload, timeout=20)
+        response.raise_for_status()
+        data = response.json()
+        embedding = data.get("data", [{}])[0].get("embedding")
+        if isinstance(embedding, list) and embedding:
+            return len(embedding)
+    except Exception as e:
+        logger.warning(f"自动探测 embedding 维度失败，将使用默认值。原因: {e}")
+
+    return None
 
 
 def get_model_price_info(provider: str, model_name: str) -> str:
@@ -512,6 +539,15 @@ class StepEmbedding(ConfigStep):
         model = questionary.text(t('wizard.embed_model_prompt'), default=model_def).ask()
         if model is None: return False
 
+        # 自动探测向量维度；失败则回退到已有配置或 1536
+        existing_dims = embed_cfg.get('dimensions', 1536)
+        detected_dims = detect_embedding_dimensions(base_url, api_key, model)
+        dimensions = detected_dims if detected_dims else existing_dims
+        if detected_dims:
+            questionary.print(f"✅ 已自动探测 embedding 维度: {detected_dims}", style="bold green")
+        else:
+            questionary.print(f"⚠️ 自动探测失败，使用维度: {dimensions}", style="bold yellow")
+
         # Save
         if 'memory' not in self.state: self.state['memory'] = {}
         self.state['memory']['embedding'] = {
@@ -519,7 +555,7 @@ class StepEmbedding(ConfigStep):
             'base_url': base_url,
             'api_key': api_key,
             'model': model,
-            'dimensions': 1536 # default for text-embedding-3-small
+            'dimensions': dimensions
         }
         return True
 
