@@ -260,7 +260,7 @@ class OpenAIProvider(BaseLLM):
                     "input_tokens": response.usage.prompt_tokens,
                     "output_tokens": response.usage.completion_tokens
                 }
-            return response.choices[0].message.content or ""
+            return self.strip_think_content(response.choices[0].message.content or "")
         except Exception as e:
             logger.error(f"OpenAI API Error: {e}", exc_info=True)
             return "Sorry, I encountered an issue processing your request with the OpenAI API."
@@ -340,6 +340,7 @@ class OpenAIProvider(BaseLLM):
             # 累积 tool_calls 的状态
             # key: tool_call index, value: {"id": str, "name": str, "arguments": str}
             pending_tool_calls: Dict[int, Dict[str, str]] = {}
+            in_think_block = False
             
             async for chunk in stream:
                 # 收集 usage（最后一个 chunk 通常包含）
@@ -354,7 +355,9 @@ class OpenAIProvider(BaseLLM):
                 
                 # === 处理文本内容 ===
                 if delta.content:
-                    yield {"type": "text", "content": delta.content}
+                    visible_text, in_think_block = self.strip_stream_think_segment(delta.content, in_think_block)
+                    if visible_text:
+                        yield {"type": "text", "content": visible_text}
                 
                 # === 处理 tool_calls 分片 ===
                 if delta.tool_calls:

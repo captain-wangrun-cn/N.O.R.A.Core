@@ -202,7 +202,7 @@ class GeminiProvider(BaseLLM):
                 # Or simply return the text representation if any.
                 return f"[TOOL_CALL: {fc.name}({fc.args})]" 
             
-            return response.text
+            return self.strip_think_content(response.text)
         except Exception as e:
             # Handle potential content filtering and other API errors
             error_msg = str(e)
@@ -284,6 +284,7 @@ class GeminiProvider(BaseLLM):
             # 收集 usage 数据
             input_tokens = 0
             output_tokens = 0
+            in_think_block = False
             
             async for chunk in response_stream:
                 # 尝试从 chunk 中获取 usage 信息（如果可用）
@@ -306,7 +307,9 @@ class GeminiProvider(BaseLLM):
                 else:
                     try:
                         if chunk.text:
-                            yield {"type": "text", "content": chunk.text}
+                            visible_text, in_think_block = self.strip_stream_think_segment(chunk.text, in_think_block)
+                            if visible_text:
+                                yield {"type": "text", "content": visible_text}
                     except ValueError:
                         pass
             
