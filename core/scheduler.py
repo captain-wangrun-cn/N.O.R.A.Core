@@ -444,23 +444,7 @@ class ProactiveScheduler:
             )
             # 闹钟不受在线状态影响（闹钟必须触发）
             if event.event_type != "alarm":
-                # 主动消息：延迟 5 分钟后重试一次（而不是直接丢弃）
-                try:
-                    from datetime import timedelta
-                    retry_time = event.trigger_time + timedelta(minutes=5)
-                    now = datetime.now(self.tz)
-                    if retry_time > now:
-                        retry_event = ScheduledEvent(
-                            trigger_time=retry_time,
-                            reason=event.reason,
-                            event_type=event.event_type,
-                            chat_id=event.chat_id,
-                        )
-                        self._daily_events.append(retry_event)
-                        self._add_event_job(retry_event)
-                        logger.info(f"主动消息推迟到 {retry_time.strftime('%H:%M')} 重试")
-                except Exception as e:
-                    logger.warning(f"推迟主动消息失败: {e}")
+                # 取消轮询式重试：在线/忙碌时直接跳过本次 proactive 事件
                 event.fired = True
                 self._persist_event_list(event)
                 return
