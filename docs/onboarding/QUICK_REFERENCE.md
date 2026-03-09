@@ -45,9 +45,10 @@ core/controller.py            NoraController.handle_message()
 
 ### `core/controller.py`
 - `NoraController` — 主控制器
-  - `handle_message(chat_id, text, context)` — 消息入口
+  - `handle_new_message(context)` — 消息入口
   - `_generate_response(...)` — 生成循环（流式 + 工具）
   - `WorkerStatus` — 跟踪每个 chat 的工作状态
+  - Scheduler 命令：`/regenerate_proactive`、`/schedule_today`
 
 ### `brain/llm.py`
 - `get_llm_client(model_alias)` — 获取 LLM 客户端实例
@@ -57,6 +58,11 @@ core/controller.py            NoraController.handle_message()
 - `ToolManager` — 工具注册、schema 生成、执行
   - 内置工具：`create_new_skill`, `execute_skill`, `execute_tool_plan`, `read_file`, `search`, `write_file`, `edit_file`, `list_dir`, `get_available_skills`, `exec_command`, `view_image`, `crop_image_for_llm`, `set_alarm`, `list_alarms`, `cancel_alarm`
   - 详细说明：`docs/architecture/tools.md`
+
+### `core/scheduler.py`
+- `ProactiveScheduler` — APScheduler 驱动主动消息调度
+- `AIPresence` — 全局 AI 在线状态（ONLINE / SEMI_ONLINE / OFFLINE）
+- 手动重建接口：`regenerate_today_plan(clear_existing=True)`
 
 ### `memory/message_history.py`
 - `MessageHistory` — 消息持久化
@@ -82,6 +88,10 @@ python cli.py --configure
 
 # 运行主程序
 python main.py
+
+# Telegram 指令（运行后在聊天中）
+# /regenerate_proactive [replace|append]
+# /schedule_today
 
 # 查看聊天记录统计
 python cli.py --show-history

@@ -22,7 +22,7 @@ LLM 生成今日触发计划 [{"time": "08:00", "reason": "早安"}, {"time": "1
 每个触发点注册独立的 DateTrigger Job → 精准到时回调
   ↓
 到达触发时间 → 检查在线状态
-  ├─ 在线/忙碌 → 跳过（proactive）/ 仍触发（alarm）
+  ├─ 在线/忙碌 → proactive 延迟重试一次（+5min）/ alarm 仍触发
   └─ 离线/半在线 → LLM 生成主动消息 → 发送
 ```
 
@@ -39,12 +39,12 @@ LLM 生成今日触发计划 [{"time": "08:00", "reason": "早安"}, {"time": "1
 
 | 状态 | 值 | 含义 | 主动消息行为 |
 |------|---|------|------------|
-| `OFFLINE` | `offline` | 用户离线 | ✅ 正常触发 |
-| `SEMI_ONLINE` | `semi_online` | 半在线（处理完消息后） | ✅ 正常触发 |
-| `ONLINE` | `online` | 用户在线（正在对话） | ❌ 忽略 proactive / ✅ alarm 仍触发 |
+| `OFFLINE` | `offline` | AI 完全空闲 | ✅ 正常触发 |
+| `SEMI_ONLINE` | `semi_online` | AI 半在线（处理完消息后） | ✅ 正常触发 |
+| `ONLINE` | `online` | AI 正在处理消息/工具循环 | ❌ 忽略 proactive / ✅ alarm 仍触发 |
 
 状态转换:
-- 用户发消息 → `ONLINE`
+- 收到用户消息 → `ONLINE`
 - 消息处理完毕 → `SEMI_ONLINE`
 - （暂无超时自动 → `OFFLINE` 的逻辑，预留给未来实现）
 
@@ -92,6 +92,7 @@ AI 可通过内置工具实时设置闹钟:
 - 后端忙碌 (`is_backend_busy`)
 
 **注意**: alarm 类型不受在线状态影响，始终触发。
+**注意**: proactive 在在线/忙碌时会延迟 5 分钟重试一次，而不是直接丢弃。
 
 ### 3.5 Prompt 模板
 
@@ -147,6 +148,7 @@ AI 可通过内置工具实时设置闹钟:
 - `__init__`: 初始化 `ProactiveScheduler`，注入 LLM 回调
 - `handle_new_message`: 用户发消息时设置 `ONLINE`
 - `_generate_response`: 开始时 `busy=True`，结束时 `idle`
+- `_send_proactive_message`: 主动消息生成时会注入最近会话上下文（MessageHistory + session history 兜底）；发送成功后同时写入数据库与 in-memory `session["history"]`
 - `start_scheduler()`: adapter ready 后启动后台循环
 
 ### 4.2 ToolManager (`brain/tools.py`)

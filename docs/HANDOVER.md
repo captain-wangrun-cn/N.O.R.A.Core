@@ -5,6 +5,48 @@
 
 ## 近期关键改动（截至 2026-03-08）
 
+### 🆕 主动消息调度系统与交互链路迭代（Schedule + UX）— 2026-03-09
+
+已完成以下行为对齐：
+
+1) 指令入口迁移到 Adapter（Telegram）
+- 新增 `/regenerate_proactive`：手动重建今日主动消息计划（`replace` / `append`）。
+- 新增 `/schedule_today`：查看今日未触发主动消息计划。
+- 两个命令均由 `adapters/telegram/main.py` 透传到 `NoraController.handle_new_message()` 统一处理。
+
+2) 在线状态语义固定为 **AI 状态**（非用户状态）
+- 使用全局 `AIPresence`：`ONLINE` / `SEMI_ONLINE` / `OFFLINE`。
+- 触发跳过依据：`presence` + `is_generating` + `is_backend_busy`。
+
+3) proactive 跳过后改为“延迟重试一次”
+- proactive 事件在 AI 在线/忙碌时，不再直接丢弃。
+- 当前实现会创建一次 **5分钟后重试** 的延迟事件（alarm 仍然始终触发）。
+
+4) 主动消息写回上下文
+- `_send_proactive_message()` 成功发送后，除了写入 `MessageHistory`，还会同步写入 `self.sessions[chat_id]["history"]`。
+- 保持与普通回复一致的 in-memory 上下文连续性。
+
+5) 主动消息生成会参考当前会话上下文
+- `_send_proactive_message()` 在调用 LLM 生成主动消息前，会注入最近会话历史：
+   - 优先使用 `MessageHistory`（最近若干条）
+   - 若数据库上下文较少，则补充 `session["history"]` 最近内容
+- 使主动消息更贴近当前对话语境。
+
+6) 新增调试命令 `/debug`
+- 通过 Telegram 适配器透传到 Controller。
+- 每个 chat 可独立开关 debug 模式（toggle）。
+- 开启后会实时推送关键链路信息：RAG 检索、推理轮次、工具调用参数、工具结果摘要、token usage、生成完成状态。
+
+7) `/status` 已扩展
+- 可查看前脑/后脑状态、模型配置、scheduler 状态、排队消息、RAG/成本开关。
+
+8) `system.jinja` 清理与收敛
+- 清理重复内容、错乱缩进与多余空行。
+- 删除不必要或有争议的具体示例，保留规则型描述，降低 prompt 污染与 token 开销。
+
+5) SCHEDULE 模板去具体化
+- `SCHEDULE.md` 已改为“节奏/偏好线索”风格，移除固定场景模板（如工作学习等），提高 LLM 动态生成空间。
+
 ### 🆕 图片记忆系统（Image Memory）全链路落地 — 2026-03-08
 
 已实现“用户发图 → 标签入库 → 可检索回查 → 可再次图像分析”的完整流程：
