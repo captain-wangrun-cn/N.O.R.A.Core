@@ -14,7 +14,7 @@ from memory.message_history import MessageHistory
 from brain.tools import ToolManager
 from skills.loader import SkillLoader
 from core.cost_tracker import get_cost_tracker
-from core.routing import has_image_input
+from core.routing import has_image_input, parse_front_brain_response
 from core.scheduler import ProactiveScheduler, AIPresence, set_ai_presence, set_ai_generating, set_ai_backend_busy, record_user_activity, get_user_idle_seconds, record_ai_followup, get_followup_count, clear_conversation_tracking, get_ai_presence, get_ai_state_summary
 from brain.multimodal import extract_image_payloads
 import config
@@ -122,11 +122,17 @@ class NoraController:
         self.FOLLOWUP_RECHECK_INTERVAL = 60  # 此后每 60 秒（1分钟）复查
         self.FOLLOWUP_MAX_COUNT = 3          # 最多连续追话 3 次，之后引导结束对话
         
-        # 快速模型（用于前端即时回复，轻量省 token）
+        # 快速模型（用于后端忙碌时的意图检测，轻量省 token）
         try:
             self.fast_llm = get_llm_client(model_alias="fast")
         except Exception:
             self.fast_llm = self.llm  # fallback 到主模型
+
+        # 后脑模型（用于工具循环 / 深度思考，默认 coder）
+        try:
+            self.coder_llm = get_llm_client(model_alias="coder")
+        except Exception:
+            self.coder_llm = self.llm  # fallback 到 smart 模型
 
         # 图片输入专用模型（若未配置则回退到主模型）
         try:
@@ -429,15 +435,75 @@ class NoraController:
                 self.pending_messages.setdefault(chat_id, []).append(context)
                 return
 
-        # --- 正常流程：后端空闲，启动新任务 ---
+        # --- 正常流程：后端空闲 ---
         # 旧的抢占逻辑保留，以防万一有残留任务
         if chat_id in self.generation_tasks:
             logger.info(f"[{chat_id}] 抢占：取消正在进行的生成任务。")
             self.generation_tasks[chat_id].cancel()
             await asyncio.sleep(0.1)
 
-        task = asyncio.create_task(self._generate_response(context))
-        self.generation_tasks[chat_id] = task
+        # 图片消息直接走后脑（需要 image 模型 + 工具能力）
+        if has_image_input(text):
+            logger.info(f"[{chat_id}] 检测到图片输入，直接启动后脑。")
+            task = asyncio.create_task(self._generate_response(context))
+            self.generation_tasks[chat_id] = task
+            return
+
+        # --- 前脑优先路由 (Front-Brain-First) ---
+        # 1) 保存用户消息到数据库（保证前脑能读到历史）
+        storage_id = chat_id if chat_type != "private" else user_id
+        message_content = f"{user_name}: {text}" if chat_type != "private" else text
+        self.message_history.add_message(
+            platform="telegram",
+            chat_id=storage_id,
+            role="user",
+            content=message_content,
+            user_id=user_id,
+        )
+
+        # 2) 前脑生成即时回复 + 路由判断
+        front_result = await self._generate_front_chat_response(context)
+
+        # 3) 发送前脑回复给用户（如果有的话）
+        user_reply = front_result["user_reply"]
+        if user_reply:
+            # 使用 [SPLIT] 分段发送
+            parts = self._SPLIT_MARKER_PATTERN.split(user_reply)
+            for part in parts:
+                part = part.strip()
+                if part:
+                    await self.adapter.send_message(chat_id, part)
+
+            # 保存前脑回复到数据库
+            self.message_history.add_message(
+                platform="telegram",
+                chat_id=storage_id,
+                role="assistant",
+                content=user_reply,
+                user_id="assistant",
+            )
+
+            # 同步到 session history
+            session = self.sessions.setdefault(chat_id, {"history": [], "interrupted_thought": "", "pending_text": ""})
+            session_history = session.setdefault("history", [])
+            session_history.append({"role": "user", "content": message_content})
+            session_history.append({"role": "assistant", "content": user_reply})
+            if len(session_history) > 20:
+                session["history"] = session_history[-20:]
+
+        # 4) 根据路由信号决定是否启动后脑
+        if front_result["needs_backend"]:
+            logger.info(f"[{chat_id}] 前脑判定需要后脑，启动后脑任务...")
+            # 标记上下文：后脑应跳过用户消息保存（前脑已保存）
+            backend_context = context.copy()
+            backend_context["_front_brain_handled"] = True
+            backend_context["_front_brain_reply"] = user_reply
+            task = asyncio.create_task(self._generate_response(backend_context))
+            self.generation_tasks[chat_id] = task
+        else:
+            logger.info(f"[{chat_id}] 前脑判定纯聊天，无需后脑。")
+            # 纯聊天完成后，也需要标记空闲并启动 followup 计时
+            self._mark_scheduler_idle(chat_id)
 
     async def _detect_interrupt_intent_and_reply(self, chat_id: str, text: str, status: WorkerStatus) -> Dict[str, str]:
         """
@@ -615,6 +681,113 @@ class NoraController:
         except Exception as e:
             logger.debug(f"[{chat_id}] 发送 debug 消息失败: {e}")
 
+    async def _generate_front_chat_response(self, context: Dict[str, Any]) -> dict:
+        """
+        前脑即时回复：使用 smart 模型生成自然对话回复 + 路由判断。
+        
+        不涉及工具调用、RAG 检索等重操作。
+        
+        Returns:
+            {
+                "needs_backend": bool,   # 是否需要后脑接管
+                "user_reply": str,       # 发给用户的清洁回复（已移除路由信号）
+                "raw_response": str,     # LLM 原始输出（含信号，用于日志）
+            }
+        """
+        chat_id = context["chat_id"]
+        user_id = context["user_id"]
+        text = context["text"]
+        chat_type = context.get("chat_type", "private")
+        user_name = context.get("user_name", "User")
+        storage_id = chat_id if chat_type != "private" else user_id
+
+        logger.info(f"[{chat_id}] 前脑处理: '{text[:80]}'")
+
+        # --- 构建前脑 prompt ---
+        soul_prompt = get_soul_prompt()
+        system_prompt = render_template('front_brain.jinja', 'system', soul_prompt=soul_prompt)
+        user_prompt = render_template('front_brain.jinja', 'user', user_message=text)
+
+        # --- 加载对话历史（轻量，仅用于上下文连贯） ---
+        db_context = self.message_history.get_context_messages("telegram", storage_id)
+        # 只取最近的消息，前脑不需要太多历史
+        if len(db_context) > 20:
+            db_context = db_context[-20:]
+        
+        # 去掉最后一条 user 消息（避免和 user_prompt 重复）
+        message_content = f"{user_name}: {text}" if chat_type != "private" else text
+        if db_context:
+            last_msg = db_context[-1]
+            if last_msg.get("role") == "user" and str(last_msg.get("content", "")) == message_content:
+                db_context = db_context[:-1]
+
+        history = [
+            {"role": msg["role"], "content": msg["content"]}
+            for msg in db_context
+            if msg["role"] in ("user", "assistant")
+        ]
+
+        # --- 调用 smart 模型生成回复（流式收集完整文本） ---
+        response_text = ""
+        usage_data = None
+        try:
+            stream = self.llm.chat_stream(
+                system_prompt=system_prompt,
+                user_prompt=user_prompt,
+                history=history,
+                tools=None,  # 前脑不使用工具
+            )
+            async for raw_chunk in stream:
+                chunk = cast(Dict[str, Any], raw_chunk) if isinstance(raw_chunk, dict) else raw_chunk
+                if isinstance(chunk, dict):
+                    if chunk["type"] == "text":
+                        response_text += chunk["content"]
+                    elif chunk["type"] == "usage":
+                        usage_data = {
+                            "input_tokens": chunk.get("input_tokens", 0),
+                            "output_tokens": chunk.get("output_tokens", 0),
+                        }
+                elif isinstance(chunk, str):
+                    response_text += chunk
+        except Exception as e:
+            logger.error(f"[{chat_id}] 前脑生成失败: {e}", exc_info=True)
+            # 前脑失败时回退到后脑
+            return {"needs_backend": True, "user_reply": "", "raw_response": ""}
+
+        # 清理思考标签
+        response_text = self._strip_thinking_content(response_text)
+
+        # 记录成本
+        if self.cost_tracking_enabled and self.cost_tracker and usage_data:
+            provider_name = config.get_model_provider("smart")
+            provider = config.get_provider_type(provider_name)
+            model = config.get_model_name("smart")
+            self.cost_tracker.log_usage(
+                provider=provider,
+                model=model,
+                input_tokens=usage_data["input_tokens"],
+                output_tokens=usage_data["output_tokens"],
+                model_alias="smart",
+                context="front_brain",
+            )
+
+        # 解析路由信号
+        parsed = parse_front_brain_response(response_text)
+        logger.info(
+            f"[{chat_id}] 前脑结果: needs_backend={parsed['needs_backend']}, "
+            f"reply='{parsed['user_reply'][:80]}...'"
+        )
+        await self._send_debug(
+            chat_id,
+            f"⚡ 前脑: needs_backend={parsed['needs_backend']}\n回复: {parsed['user_reply'][:200]}"
+        )
+
+        return {
+            "needs_backend": parsed["needs_backend"],
+            "user_reply": parsed["user_reply"],
+            "raw_response": response_text,
+        }
+
     async def _generate_response(self, context: Dict[str, Any]):
         """内部生成逻辑。"""
         chat_id = context["chat_id"]
@@ -643,23 +816,26 @@ class NoraController:
         # 通知 scheduler: 后端开始忙碌
         self._update_scheduler_state(chat_id, busy=True)
 
-        # 根据输入类型选择模型：图片消息优先走 image 模型
-        model_alias_in_use = "image" if multimodal_images else "smart"
-        active_llm = self.image_llm if model_alias_in_use == "image" else self.llm
+        # 根据输入类型选择模型：图片消息优先走 image 模型，其余走 coder 模型
+        model_alias_in_use = "image" if multimodal_images else "coder"
+        active_llm = self.image_llm if model_alias_in_use == "image" else self.coder_llm
         
         try:
             if self.tui_callback: self.tui_callback(f"🏃 Handling new message...")
             
             # --- 0. 保存用户消息到数据库 ---
+            # 如果前脑已经保存过，跳过重复写入
+            front_brain_handled = context.get("_front_brain_handled", False)
             status.update("保存消息", "正在保存用户消息...")
             message_content = f"{user_name}: {text}" if chat_type != "private" else text
-            self.message_history.add_message(
-                platform="telegram",
-                chat_id=storage_id,
-                role="user",
-                content=message_content,
-                user_id=user_id
-            )
+            if not front_brain_handled:
+                self.message_history.add_message(
+                    platform="telegram",
+                    chat_id=storage_id,
+                    role="user",
+                    content=message_content,
+                    user_id=user_id
+                )
             
             # --- 1. RAG 记忆检索 (Memory Retrieval) ---
             rag_context = ""
@@ -747,6 +923,14 @@ class NoraController:
             if db_context:
                 last_msg = db_context[-1]
                 if last_msg.get("role") == "user" and str(last_msg.get("content", "")) == message_content:
+                    db_context = db_context[:-1]
+            # 如果前脑已处理，历史尾部可能是 [user, assistant(前脑)]，需要都去掉避免重复
+            if front_brain_handled and db_context:
+                # 去掉前脑的 assistant 回复
+                if db_context[-1].get("role") == "assistant":
+                    db_context = db_context[:-1]
+                # 再去掉已作为 user_prompt 传入的用户消息
+                if db_context and db_context[-1].get("role") == "user" and str(db_context[-1].get("content", "")) == message_content:
                     db_context = db_context[:-1]
 
             temp_history = [
