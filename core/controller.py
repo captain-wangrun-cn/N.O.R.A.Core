@@ -15,7 +15,7 @@ from brain.tools import ToolManager
 from skills.loader import SkillLoader
 from core.cost_tracker import get_cost_tracker
 from core.routing import has_image_input
-from core.scheduler import ProactiveScheduler, AIPresence, set_ai_presence, set_ai_generating, set_ai_backend_busy, record_user_activity, get_user_idle_seconds, record_ai_followup, get_followup_count, clear_conversation_tracking, get_ai_presence
+from core.scheduler import ProactiveScheduler, AIPresence, set_ai_presence, set_ai_generating, set_ai_backend_busy, record_user_activity, get_user_idle_seconds, record_ai_followup, get_followup_count, clear_conversation_tracking, get_ai_presence, get_ai_state_summary
 from brain.multimodal import extract_image_payloads
 import config
 import json
@@ -199,6 +199,11 @@ class NoraController:
         set_ai_presence(AIPresence.ONLINE)
         _activity_id = chat_id if chat_type != "private" else user_id
         record_user_activity(_activity_id)
+        ai_state = get_ai_state_summary()
+        logger.info(
+            f"[{chat_id}] 当前在线状态: presence={ai_state['presence']}, "
+            f"generating={ai_state['is_generating']}, backend_busy={ai_state['is_backend_busy']}"
+        )
         # 取消该 chat 已有的对话延续定时器（用户回来了）
         self._cancel_followup_timer(chat_id)
         if self.scheduler:
@@ -311,6 +316,15 @@ class NoraController:
                 # 前脑信息
                 lines.append("")
                 lines.append(f"⚡ 前脑 (Fast Brain): 🟢 就绪")
+
+                # 全局在线状态
+                lines.append("")
+                ai_state = get_ai_state_summary()
+                lines.append("🌐 在线状态:")
+                lines.append(f"  presence: {ai_state['presence']}")
+                lines.append(f"  generating: {ai_state['is_generating']}")
+                lines.append(f"  backend_busy: {ai_state['is_backend_busy']}")
+                lines.append(f"  skip_proactive: {ai_state['should_skip_proactive']}")
                 
                 # 模型信息
                 lines.append("")
@@ -328,8 +342,6 @@ class NoraController:
                 # Scheduler 状态
                 lines.append("")
                 if self.scheduler:
-                    from core.scheduler import get_ai_state_summary
-                    ai_state = get_ai_state_summary()
                     lines.append(f"📅 Scheduler: {'🟢 运行中' if self.scheduler._scheduler.running else '🔴 停止'}")
                     lines.append(f"  AI 状态: {ai_state['presence']}")
                     today_plan = self.scheduler.get_today_plan()
@@ -1378,11 +1390,21 @@ class NoraController:
         if busy:
             set_ai_presence(AIPresence.ONLINE)
             set_ai_generating(True)
+        state = get_ai_state_summary()
+        logger.info(
+            f"[{chat_id}] 同步在线状态: presence={state['presence']}, "
+            f"generating={state['is_generating']}, backend_busy={state['is_backend_busy']}"
+        )
 
     def _mark_scheduler_idle(self, chat_id: str):
         """标记 AI 生成完毕。保持 ONLINE 状态并启动对话延续定时器。"""
         set_ai_generating(False)
         set_ai_backend_busy(False)
+        state = get_ai_state_summary()
+        logger.info(
+            f"[{chat_id}] 进入空闲跟进状态: presence={state['presence']}, "
+            f"generating={state['is_generating']}, backend_busy={state['is_backend_busy']}"
+        )
         # 保持 ONLINE 状态 — 对话延续定时器会在 2 分钟后触发追话检测
         # 只有当对话被判定为结束（END）或追话超限时，才降为 SEMI_ONLINE
         self._start_followup_timer(chat_id)
