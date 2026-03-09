@@ -1413,12 +1413,34 @@ class NoraController:
             system_prompt = render_template("schedule.jinja", "proactive_system", soul_prompt=soul)
             user_prompt = render_template("schedule.jinja", "proactive_user", current_time=now.strftime('%H:%M'), reason=reason)
 
+        # 主动消息也应参考当前会话上下文（近期对话）
+        db_context = self.message_history.get_context_messages("telegram", chat_id)
+        proactive_history = [
+            {"role": msg["role"], "content": msg["content"]}
+            for msg in db_context
+            if msg.get("role") in ("user", "assistant", "system") and msg.get("content")
+        ]
+        if len(proactive_history) > 12:
+            proactive_history = proactive_history[-12:]
+
+        # 若 DB 上下文较少，补充 session 内存中的最近内容
+        if len(proactive_history) < 4:
+            session = self.sessions.get(chat_id, {})
+            session_history = session.get("history", [])
+            session_tail = [
+                {"role": h.get("role"), "content": h.get("content")}
+                for h in session_history[-8:]
+                if h.get("role") in ("user", "assistant", "system") and h.get("content")
+            ]
+            if session_tail:
+                proactive_history = (proactive_history + session_tail)[-12:]
+
         try:
             response = ""
             stream = self.llm.chat_stream(
                 system_prompt=system_prompt,
                 user_prompt=user_prompt,
-                history=[],
+                history=proactive_history,
                 tools=[]
             )
             async for chunk in stream:
@@ -1443,6 +1465,8 @@ class NoraController:
                 # 同步到会话上下文（in-memory history），让后续轮次也能感知主动消息内容
                 session = self.sessions.setdefault(chat_id, {"history": [], "interrupted_thought": "", "pending_text": ""})
                 session_history = session.setdefault("history", [])
+                trigger_note = f"[proactive:{event_type}] {reason}" if reason else f"[proactive:{event_type}]"
+                session_history.append({"role": "system", "content": trigger_note})
                 session_history.append({"role": "assistant", "content": response})
                 if len(session_history) > 20:
                     session["history"] = session_history[-20:]
