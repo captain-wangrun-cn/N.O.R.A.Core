@@ -310,6 +310,7 @@ class TelegramAdapter(BaseAdapter):
         start_handler = CommandHandler('start', self._start_command)
         clear_handler = CommandHandler('clear', self._clear_command)
         status_handler = CommandHandler('status', self._status_command)
+        debug_handler = CommandHandler('debug', self._debug_command)
         regenerate_proactive_handler = CommandHandler('regenerate_proactive', self._regenerate_proactive_command)
         schedule_today_handler = CommandHandler('schedule_today', self._schedule_today_command)
         msg_handler = MessageHandler(filters.TEXT & (~filters.COMMAND), self._handle_incoming_message)
@@ -321,6 +322,7 @@ class TelegramAdapter(BaseAdapter):
         self.application.add_handler(start_handler)
         self.application.add_handler(clear_handler)
         self.application.add_handler(status_handler)
+        self.application.add_handler(debug_handler)
         self.application.add_handler(regenerate_proactive_handler)
         self.application.add_handler(schedule_today_handler)
         self.application.add_handler(msg_handler)
@@ -453,6 +455,25 @@ class TelegramAdapter(BaseAdapter):
             logger.error(f"[{chat_id}] 获取状态时出错: {e}", exc_info=True)
             if update.message:
                 await update.message.reply_text("❌ 获取系统状态时发生错误。")
+
+    async def _debug_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """切换 debug 模式，透传给 controller。"""
+        if not update.effective_chat:
+            return
+        chat_id = str(update.effective_chat.id)
+        if not self._message_handler:
+            if update.message:
+                await update.message.reply_text("❌ 指令处理器未就绪。")
+            return
+
+        event_context = {
+            "chat_id": chat_id,
+            "user_id": str(update.effective_user.id) if update.effective_user else chat_id,
+            "text": "/debug",
+            "chat_type": update.effective_chat.type,
+            "user_name": update.effective_user.first_name if update.effective_user else "Unknown"
+        }
+        await self._message_handler(event_context)
 
     async def _regenerate_proactive_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """
@@ -898,8 +919,11 @@ class TelegramAdapter(BaseAdapter):
                         logger.warning(f"[{chat_id}] 文件路径不存在，跳过: {path}")
 
         # 2. 清理文本中的文件引用（无论文件是否存在都清理，不要把 [image:...] 原样显示）
-        clean_text = self.FILE_PATTERN.sub('', text).strip()
-        clean_text = re.sub(r'\n{3,}', '\n\n', clean_text).strip()
+        clean_text = self.FILE_PATTERN.sub('', text)
+        # 清理媒体标签移除后产生的多余空行和空白行
+        clean_text = re.sub(r'[ \t]*\n', '\n', clean_text)  # 去除行尾空白
+        clean_text = re.sub(r'\n{3,}', '\n\n', clean_text)  # 最多保留一个空行
+        clean_text = clean_text.strip()
         
         # 如果有文件不存在，在文末追加提示
         if missing_files:

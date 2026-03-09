@@ -110,6 +110,8 @@ class NoraController:
         self.worker_status: Dict[str, WorkerStatus] = {}
         # 消息队列：后端忙碌时暂存用户新消息
         self.pending_messages: Dict[str, List[Dict[str, Any]]] = {}
+        # Debug 模式：per-chat 开关，开启后实时推送工具调用、思考等信息
+        self.debug_mode: Dict[str, bool] = {}
         
         # 快速模型（用于前端即时回复，轻量省 token）
         try:
@@ -269,6 +271,86 @@ class NoraController:
                 await self.adapter.send_message(chat_id, f"❌ 获取今日计划失败: {e}")
             return
 
+        # 特殊处理 /status 指令
+        if text.strip().startswith("/status"):
+            try:
+                lines = ["📊 **N.O.R.A. Core 状态报告**\n"]
+                
+                # 后脑状态
+                status = self.worker_status.get(chat_id)
+                if status and status.busy:
+                    elapsed = int(time.time() - status.started_at)
+                    lines.append("🧠 后脑 (Back Brain): 🔴 忙碌")
+                    lines.append(f"  任务: \"{status.original_query[:80]}\"")
+                    lines.append(f"  阶段: {status.phase}")
+                    if status.detail:
+                        lines.append(f"  详情: {status.detail}")
+                    lines.append(f"  进度: 第 {status.current_turn}/{status.max_turns} 轮")
+                    lines.append(f"  耗时: {elapsed}s")
+                    if status.tool_history:
+                        recent = status.tool_history[-3:]
+                        lines.append("  最近工具:")
+                        for step in recent:
+                            lines.append(f"    • {step[:80]}")
+                else:
+                    lines.append("🧠 后脑 (Back Brain): 🟢 空闲")
+                
+                # 前脑信息
+                lines.append("")
+                lines.append(f"⚡ 前脑 (Fast Brain): 🟢 就绪")
+                
+                # 模型信息
+                lines.append("")
+                lines.append("🤖 模型配置:")
+                try:
+                    smart_model = config.get_model_name("smart")
+                    fast_model = config.get_model_name("fast")
+                    image_model = config.get_model_name("image")
+                    lines.append(f"  smart: {smart_model}")
+                    lines.append(f"  fast: {fast_model}")
+                    lines.append(f"  image: {image_model}")
+                except Exception:
+                    lines.append("  (无法获取模型信息)")
+                
+                # Scheduler 状态
+                lines.append("")
+                if self.scheduler:
+                    from core.scheduler import get_ai_state_summary
+                    ai_state = get_ai_state_summary()
+                    lines.append(f"📅 Scheduler: {'🟢 运行中' if self.scheduler._scheduler.running else '🔴 停止'}")
+                    lines.append(f"  AI 状态: {ai_state['presence']}")
+                    today_plan = self.scheduler.get_today_plan()
+                    active_alarms = self.scheduler.list_alarms()
+                    lines.append(f"  今日待触发: {len(today_plan)} 条")
+                    lines.append(f"  活跃闹钟: {len(active_alarms)} 个")
+                else:
+                    lines.append("📅 Scheduler: 🔴 未启用")
+                
+                # 排队消息
+                pending = self.pending_messages.get(chat_id, [])
+                if pending:
+                    lines.append(f"\n📬 排队消息: {len(pending)} 条")
+                
+                # RAG / 消息历史
+                lines.append("")
+                lines.append(f"🗄️ RAG: {'🟢 启用' if self.rag.enabled else '🔴 离线'}")
+                lines.append(f"💰 成本跟踪: {'🟢 启用' if self.cost_tracking_enabled else '🔴 禁用'}")
+                
+                await self.adapter.send_message(chat_id, "\n".join(lines))
+            except Exception as e:
+                logger.error(f"[{chat_id}] /status 执行失败: {e}", exc_info=True)
+                await self.adapter.send_message(chat_id, f"❌ 获取状态失败: {e}")
+            return
+
+        # 特殊处理 /debug 指令
+        if text.strip().startswith("/debug"):
+            current = self.debug_mode.get(chat_id, False)
+            self.debug_mode[chat_id] = not current
+            state_str = "🟢 已开启" if self.debug_mode[chat_id] else "🔴 已关闭"
+            await self.adapter.send_message(chat_id, f"🐛 Debug 模式: {state_str}\n开启后每次工具调用、技能执行、思考阶段都会实时推送详情。")
+            logger.info(f"[{chat_id}] Debug 模式切换为: {self.debug_mode[chat_id]}")
+            return
+
         # --- 前后端分离逻辑 ---
         status = self.worker_status.get(chat_id)
         if status and status.busy:
@@ -300,6 +382,15 @@ class NoraController:
                 content=reply,
                 user_id="assistant"
             )
+            
+            # 同步忙碌期间的对话到 session history（让后脑也能感知这段交互）
+            session = self.sessions.setdefault(chat_id, {"history": [], "interrupted_thought": "", "pending_text": ""})
+            session_history = session.setdefault("history", [])
+            session_history.append({"role": "user", "content": message_content})
+            session_history.append({"role": "assistant", "content": reply})
+            # 保持 session history 不过度膨胀
+            if len(session_history) > 20:
+                session["history"] = session_history[-20:]
             
             # 根据 action 执行操作
             if action == "stop":
@@ -339,12 +430,26 @@ class NoraController:
         prompt = render_template('interrupt_detect.jinja', 'user',
                                  progress=progress, user_text=text)
         
+        # 带入最近几条对话历史，让 fast_llm 理解上下文（而不是只看当前这一句）
+        recent_history = []
+        try:
+            session = self.sessions.get(chat_id, {})
+            session_history = session.get("history", [])
+            # 取最近 6 条（3 轮对话），足够理解上下文
+            recent_history = [
+                {"role": h["role"], "content": h["content"]}
+                for h in session_history[-6:]
+                if h.get("role") in ("user", "assistant") and h.get("content")
+            ]
+        except Exception:
+            recent_history = []
+        
         try:
             response = ""
             stream = self.fast_llm.chat_stream(
                 system_prompt=render_template('interrupt_detect.jinja', 'system', soul=soul),
                 user_prompt=prompt,
-                history=[],
+                history=recent_history,
                 tools=[]
             )
             async for chunk in stream:
@@ -473,6 +578,18 @@ class NoraController:
                 task = asyncio.create_task(self._generate_response(context))
                 self.generation_tasks[chat_id] = task
 
+    async def _send_debug(self, chat_id: str, message: str):
+        """如果 chat_id 开启了 debug 模式，发送调试信息给用户。"""
+        if not self.debug_mode.get(chat_id, False):
+            return
+        try:
+            # 截断过长的 debug 消息
+            if len(message) > 2000:
+                message = message[:2000] + "\n... (truncated)"
+            await self.adapter.send_message(chat_id, f"🐛 {message}")
+        except Exception as e:
+            logger.debug(f"[{chat_id}] 发送 debug 消息失败: {e}")
+
     async def _generate_response(self, context: Dict[str, Any]):
         """内部生成逻辑。"""
         chat_id = context["chat_id"]
@@ -528,8 +645,10 @@ class NoraController:
                 rag_context = self.rag.get_context_string(text, user_id=storage_id, top_k=2)
                 if rag_context:
                     logger.info(f"[{chat_id}] RAG 命中: {len(rag_context.splitlines())} lines.")
+                    await self._send_debug(chat_id, f"🧠 RAG 命中: {len(rag_context.splitlines())} 行记忆")
                 else:
                     logger.debug(f"[{chat_id}] RAG 未检索到强相关记忆。")
+                    await self._send_debug(chat_id, "🧠 RAG: 未检索到强相关记忆")
 
             # --- 2. 构建 Prompt (Context Reconstruction) ---
             instructions = []
@@ -588,7 +707,7 @@ class NoraController:
                 session["pending_text"] = ""
                 session["interrupted_thought"] = ""
             
-            system_prompt = get_system_prompt(instructions)
+            system_prompt = get_system_prompt(instructions, platform=self.adapter.platform_name)
 
             # --- 3. 执行循环 (Tool Execution Loop) ---
             current_turn = 0
@@ -624,6 +743,7 @@ class NoraController:
                 status.update("思考中", f"第 {current_turn}/{MAX_TURNS} 轮推理...")
                 if self.tui_callback: self.tui_callback(f"🤔 Thinking... (Turn {current_turn}/{MAX_TURNS})")
                 logger.debug(f"[{chat_id}] Turn {current_turn}/{MAX_TURNS}")
+                await self._send_debug(chat_id, f"💭 开始第 {current_turn}/{MAX_TURNS} 轮推理...")
                 
                 turn_multimodal_images = multimodal_images if current_turn == 1 else pending_tool_multimodal_images
                 turn_llm = self.image_llm if turn_multimodal_images else active_llm
@@ -692,6 +812,7 @@ class NoraController:
                                 "input_tokens": chunk.get("input_tokens", 0),
                                 "output_tokens": chunk.get("output_tokens", 0)
                             }
+                            await self._send_debug(chat_id, f"📊 Token 用量: input={usage_data['input_tokens']}, output={usage_data['output_tokens']}")
                             
                     elif isinstance(chunk, str):
                         # Fallback for legacy providers
@@ -725,6 +846,9 @@ class NoraController:
                     tool_args = cast(Dict[str, Any], tool_call)["args"]
                     if self.tui_callback: self.tui_callback(f"🔧 Executing Tool: {tool_name}")
                     logger.info(f"[{chat_id}] 🧠 AI Request Tool: {tool_name}({tool_args})")
+                    # Debug: 工具调用详情
+                    args_preview = str(tool_args)[:300] if tool_args else "(无参数)"
+                    await self._send_debug(chat_id, f"🔧 调用工具: {tool_name}\n参数: {args_preview}")
 
                     # --- Loop Detection and Intervention ---
                     # Build a loop key from tool name + target (path/command) for file ops.
@@ -836,6 +960,9 @@ class NoraController:
                             logger.warning(f"[{chat_id}] 解析 {tool_name} 返回图片失败，已跳过多模态注入。", exc_info=True)
                     status.update("处理结果", f"{tool_name} 执行完毕，正在分析结果...")
                     logger.info(f"[{chat_id}] 🔧 Tool Result for {tool_name}: {tool_result[:100]}...")
+                    # Debug: 工具执行结果
+                    result_preview = tool_result[:500] if len(tool_result) > 500 else tool_result
+                    await self._send_debug(chat_id, f"📋 {tool_name} 结果 ({len(tool_result)} 字符):\n{result_preview}")
 
                     # --- TRUNCATION SAFETY VALVE ---
                     # read_file needs higher limit to avoid LLM re-reading in loops
@@ -909,6 +1036,7 @@ class NoraController:
                         final_response_buffer += chunk
             
             logger.debug(f"[{chat_id}] 生成完成。")
+            await self._send_debug(chat_id, f"✅ 生成完成，共 {current_turn} 轮，最终回复 {len(final_response_buffer)} 字符")
             
             # --- 4. 发送响应 ---
             # 先提取图片标签（在任何清理之前），供后续存储

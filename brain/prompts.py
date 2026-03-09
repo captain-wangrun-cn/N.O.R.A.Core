@@ -157,10 +157,14 @@ def load_identity_context() -> str:
     soul = _read_file_safe(WORKSPACE_SOUL_FILE)
     if soul:
         sections.append(f"<soul>\n{soul}\n</soul>")
+    else:
+        logger.warning(f"SOUL.md 未找到或为空: {WORKSPACE_SOUL_FILE}")
 
     user = _read_file_safe(WORKSPACE_USER_FILE)
     if user:
         sections.append(f"<user_profile>\n{user}\n</user_profile>")
+    else:
+        logger.warning(f"USER.md 未找到或为空: {WORKSPACE_USER_FILE}")
 
     memory_file_path = _resolve_memory_file("MEMORY.md")
     memory = _read_file_safe(memory_file_path)
@@ -177,7 +181,8 @@ def load_identity_context() -> str:
     return (
         "【身份与记忆上下文 (Identity & Memory Context)】\n"
         "以下文件在每次会话开始时自动加载。如果 SOUL.md 存在，请体现其人设和语气。\n"
-        "请使用通用文件工具 `read_file`、`write_file`、`edit_file` 来更新这些文件。\n\n"
+        "请使用通用文件工具 `read_file`、`write_file`、`edit_file` 来更新这些文件。\n"
+        "⚠️ 严格遵守各文件边界：SOUL=AI人设 | USER=用户信息 | SCHEDULE=作息日程 | MEMORY=长期记忆\n\n"
         + "\n\n".join(sections)
     )
 

@@ -233,7 +233,12 @@ class ProactiveScheduler:
         # 如果今天还没生成过计划且已经过了凌晨，立即异步触发一次
         today_str = now.strftime("%Y-%m-%d")
         if self._last_plan_date != today_str and not self._daily_events:
-            asyncio.ensure_future(self._on_daily_plan_trigger())
+            async def _safe_initial_plan():
+                try:
+                    await self._on_daily_plan_trigger()
+                except Exception as e:
+                    logger.error(f"初始生成今日计划失败: {e}", exc_info=True)
+            asyncio.ensure_future(_safe_initial_plan())
 
     def stop(self):
         """停止 APScheduler。"""
@@ -358,8 +363,12 @@ class ProactiveScheduler:
 
         logger.info("🗓️ 开始生成今日主动消息计划...")
         if not self._generate_plan_callback:
-            logger.warning("未设置 generate_plan_callback，跳过")
+            logger.warning("未设置 generate_plan_callback，跳过计划生成")
             return {"success": False, "message": "未设置 generate_plan_callback"}
+
+        if not self.default_chat_id:
+            logger.warning("default_chat_id 未设置（尚未收到任何消息），跳过计划生成。用户发送第一条消息后将自动初始化。")
+            return {"success": False, "message": "default_chat_id 未设置，等待用户首条消息"}
 
         try:
             plan_items = await self._generate_plan_callback()
@@ -417,7 +426,11 @@ class ProactiveScheduler:
     async def _on_event_trigger(self, event_id: str):
         """DateTrigger 回调：到达触发时间。"""
         event = self._find_event(event_id)
-        if not event or event.fired:
+        if not event:
+            logger.warning(f"触发事件未找到: {event_id}")
+            return
+        if event.fired:
+            logger.debug(f"事件已触发过，跳过: {event_id}")
             return
 
         # 判断是否跳过
@@ -429,8 +442,25 @@ class ProactiveScheduler:
                 f"presence={state['presence']}, generating={state['is_generating']}, "
                 f"backend_busy={state['is_backend_busy']}"
             )
-            # 闹钟不受在线状态影响
+            # 闹钟不受在线状态影响（闹钟必须触发）
             if event.event_type != "alarm":
+                # 主动消息：延迟 5 分钟后重试一次（而不是直接丢弃）
+                try:
+                    from datetime import timedelta
+                    retry_time = event.trigger_time + timedelta(minutes=5)
+                    now = datetime.now(self.tz)
+                    if retry_time > now:
+                        retry_event = ScheduledEvent(
+                            trigger_time=retry_time,
+                            reason=event.reason,
+                            event_type=event.event_type,
+                            chat_id=event.chat_id,
+                        )
+                        self._daily_events.append(retry_event)
+                        self._add_event_job(retry_event)
+                        logger.info(f"主动消息推迟到 {retry_time.strftime('%H:%M')} 重试")
+                except Exception as e:
+                    logger.warning(f"推迟主动消息失败: {e}")
                 event.fired = True
                 self._persist_event_list(event)
                 return
@@ -445,9 +475,12 @@ class ProactiveScheduler:
                 if target_chat:
                     await self._send_proactive_callback(target_chat, event.reason, event.event_type)
                 else:
-                    logger.warning("无法触发事件：缺少 chat_id")
+                    logger.warning(f"无法触发事件 {event_id}：缺少 chat_id 且 default_chat_id 未设置。"
+                                   "请先向机器人发送一条消息以初始化 default_chat_id。")
             except Exception as e:
-                logger.error(f"触发主动消息失败: {e}", exc_info=True)
+                logger.error(f"触发主动消息失败 ({event_id}): {e}", exc_info=True)
+        else:
+            logger.warning(f"事件 {event_id} 触发但 send_proactive_callback 未设置")
 
         self._persist_event_list(event)
 
