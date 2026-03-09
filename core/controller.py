@@ -677,7 +677,8 @@ class NoraController:
             # 截断过长的 debug 消息
             if len(message) > 2000:
                 message = message[:2000] + "\n... (truncated)"
-            await self.adapter.send_message(chat_id, f"🐛 {message}")
+            safe_debug = f"```\n🐛 {message}\n```"
+            await self.adapter.send_message(chat_id, safe_debug, parse_media=False)
         except Exception as e:
             logger.debug(f"[{chat_id}] 发送 debug 消息失败: {e}")
 
@@ -707,6 +708,20 @@ class NoraController:
         soul_prompt = get_soul_prompt()
         system_prompt = render_template('front_brain.jinja', 'system', soul_prompt=soul_prompt)
         user_prompt = render_template('front_brain.jinja', 'user', user_message=text)
+
+        # --- 前脑也接入 RAG 记忆检索 ---
+        if self.rag.enabled:
+            try:
+                rag_context = self.rag.get_context_string(text, user_id=storage_id, top_k=2)
+                if rag_context:
+                    system_prompt = (
+                        system_prompt
+                        + "\n\n"
+                        + render_template('context_injection.jinja', 'rag', rag_context=rag_context)
+                    )
+                    await self._send_debug(chat_id, f"🧠 前脑RAG命中: {len(rag_context.splitlines())} 行记忆")
+            except Exception:
+                logger.warning(f"[{chat_id}] 前脑 RAG 检索失败，已降级继续。", exc_info=True)
 
         # --- 加载对话历史（轻量，仅用于上下文连贯） ---
         db_context = self.message_history.get_context_messages("telegram", storage_id)

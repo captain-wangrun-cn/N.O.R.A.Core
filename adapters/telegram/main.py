@@ -895,40 +895,45 @@ class TelegramAdapter(BaseAdapter):
           - 音频: mp3, ogg, wav, flac, m4a, opus
           - 文档/代码: pdf, py, js, json, zip, 等等
         """
-        # 1. 提取所有文件路径
+        parse_media = bool(kwargs.pop("parse_media", True))
+
+        # 1. 提取所有文件路径（可通过 parse_media=False 禁用）
         file_entries = []  # [(path, media_type, is_url)]
         missing_files = []
-        for match in self.FILE_PATTERN.finditer(text):
-            # FILE_PATTERN 有5个捕获组: (1)Markdown, (2)HTML img, (3)自定义标记, (4)URL, (5)本地路径
-            path = next((g for g in match.groups() if g), None)
-            if path:
-                path = path.strip()
-                is_url = path.startswith(('http://', 'https://'))
-                if is_url:
-                    media_type = self._classify_file(path)
-                    file_entries.append((path, media_type, True))
-                    logger.info(f"[{chat_id}] 检测到媒体URL: {path} ({media_type})")
-                else:
-                    resolved_path = self._resolve_local_media_path(path)
-                    if resolved_path:
-                        media_type = self._classify_file(resolved_path)
-                        file_entries.append((resolved_path, media_type, False))
-                        logger.info(f"[{chat_id}] 检测到媒体文件: {path} -> {resolved_path} ({media_type})")
+        if parse_media:
+            for match in self.FILE_PATTERN.finditer(text):
+                # FILE_PATTERN 有5个捕获组: (1)Markdown, (2)HTML img, (3)自定义标记, (4)URL, (5)本地路径
+                path = next((g for g in match.groups() if g), None)
+                if path:
+                    path = path.strip()
+                    is_url = path.startswith(('http://', 'https://'))
+                    if is_url:
+                        media_type = self._classify_file(path)
+                        file_entries.append((path, media_type, True))
+                        logger.info(f"[{chat_id}] 检测到媒体URL: {path} ({media_type})")
                     else:
-                        missing_files.append(path)
-                        logger.warning(f"[{chat_id}] 文件路径不存在，跳过: {path}")
+                        resolved_path = self._resolve_local_media_path(path)
+                        if resolved_path:
+                            media_type = self._classify_file(resolved_path)
+                            file_entries.append((resolved_path, media_type, False))
+                            logger.info(f"[{chat_id}] 检测到媒体文件: {path} -> {resolved_path} ({media_type})")
+                        else:
+                            missing_files.append(path)
+                            logger.warning(f"[{chat_id}] 文件路径不存在，跳过: {path}")
 
-        # 2. 清理文本中的文件引用（无论文件是否存在都清理，不要把 [image:...] 原样显示）
-        clean_text = self.FILE_PATTERN.sub('', text)
-        # 清理媒体标签移除后产生的多余空行和空白行
-        clean_text = re.sub(r'[ \t]*\n', '\n', clean_text)  # 去除行尾空白
-        clean_text = re.sub(r'\n{3,}', '\n\n', clean_text)  # 最多保留一个空行
-        clean_text = clean_text.strip()
-        
-        # 如果有文件不存在，在文末追加提示
-        if missing_files:
-            not_found_hint = "\n\n⚠️ 以下文件未找到:\n" + "\n".join(f"  • {p}" for p in missing_files)
-            clean_text += not_found_hint
+            # 2. 清理文本中的文件引用（无论文件是否存在都清理，不要把 [image:...] 原样显示）
+            clean_text = self.FILE_PATTERN.sub('', text)
+            # 清理媒体标签移除后产生的多余空行和空白行
+            clean_text = re.sub(r'[ \t]*\n', '\n', clean_text)  # 去除行尾空白
+            clean_text = re.sub(r'\n{3,}', '\n\n', clean_text)  # 最多保留一个空行
+            clean_text = clean_text.strip()
+
+            # 如果有文件不存在，在文末追加提示
+            if missing_files:
+                not_found_hint = "\n\n⚠️ 以下文件未找到:\n" + "\n".join(f"  • {p}" for p in missing_files)
+                clean_text += not_found_hint
+        else:
+            clean_text = (text or "").strip()
         
         # 2.5. 处理链接以避免 Gemini 安全过滤问题
         # 如果文本中包含链接，在链接中插入零宽空格以绕过过滤
