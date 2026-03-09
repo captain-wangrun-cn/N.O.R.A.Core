@@ -3,7 +3,44 @@
 - 目标：多平台智能体内核，包含 LLM 适配、工具/技能体系、成本追踪、记忆/RAG。
 - 当前状态：可运行，自测通过；已完成图片记忆链路（入库/检索/回查再分析）、`view_image` 工具增强、CLI 高危清理保护。
 
-## 近期关键改动（截至 2026-03-08）
+## 近期关键改动（截至 2026-03-09）
+
+### 🆕 AI 在线状态重构 & 对话延续机制 — 2026-03-09
+
+**核心变更：两态模型 + 对话延续检测**
+
+1) **取消 OFFLINE 状态**，AI 在线状态简化为两态：
+   - `SEMI_ONLINE`：空闲待命 — 允许调度好的主动消息（每日计划/闹钟）
+   - `ONLINE`：活跃对话中 — 忽略调度主动消息，启用对话延续检测
+
+2) **对话延续机制（Conversation Follow-up）**
+   - 当 AI 处于 `ONLINE` 状态且用户超过 **2 分钟** 没有发消息时，用 **fast 模型** 分析上下文判断是否需要主动追话
+   - 判断结果为三种：
+     - `FOLLOWUP`：用正常模型生成追话消息（类似朋友聊天时一方停下来，另一方追一句）
+     - `WAIT`：暂时不追话，1 分钟后再检测
+     - `END`：对话已自然结束，进入 `SEMI_ONLINE`
+   - 每 **1 分钟** 复查一次，最多连续追话 **3 次**
+   - 追话超限或判定 END → 生成友好的结束消息 → 进入 `SEMI_ONLINE`
+   - **所有追话消息和结束消息都会写入 MessageHistory 和 session history**
+
+3) **状态转换流程**：
+   ```
+   SEMI_ONLINE → 收到用户消息 → ONLINE
+   ONLINE → 生成完毕 → 保持 ONLINE + 启动延续定时器
+   ONLINE → 2分钟无回复 → fast_llm 检测 → FOLLOWUP/WAIT/END
+   ONLINE → END 或追话超限 → 结束消息 → SEMI_ONLINE
+   SEMI_ONLINE → 调度主动消息正常触发
+   ```
+
+4) **新增文件/模板**：
+   - `brain/templates/schedule.jinja` 新增 6 个 block：
+     - `followup_detect_system/user`：追话检测 prompt
+     - `followup_message_system/user`：追话内容生成 prompt
+     - `wrapup_message_system/user`：结束对话 prompt
+
+5) **代码改动点**：
+   - `core/scheduler.py`：`AIPresence` 枚举移除 `OFFLINE`；`_AIPresenceState` 新增 per-chat 对话追踪数据
+   - `core/controller.py`：新增 `_followup_loop`、`_detect_followup_intent`、`_send_followup_message`、`_send_wrapup_message`、`_transition_to_semi_online` 等方法
 
 ### 🆕 主动消息调度系统与交互链路迭代（Schedule + UX）— 2026-03-09
 
@@ -15,7 +52,7 @@
 - 两个命令均由 `adapters/telegram/main.py` 透传到 `NoraController.handle_new_message()` 统一处理。
 
 2) 在线状态语义固定为 **AI 状态**（非用户状态）
-- 使用全局 `AIPresence`：`ONLINE` / `SEMI_ONLINE` / `OFFLINE`。
+- 使用全局 `AIPresence`：`ONLINE` / `SEMI_ONLINE`（已取消 `OFFLINE`）。
 - 触发跳过依据：`presence` + `is_generating` + `is_backend_busy`。
 
 3) proactive 跳过后改为“延迟重试一次”

@@ -14,7 +14,7 @@ core/scheduler.py — N.O.R.A. 主动消息调度系统 (Proactive Scheduler)
 基于 APScheduler AsyncIOScheduler 的事件驱动调度，替代旧版 30 秒轮询。
 
 功能:
-1. 全局 AI 在线状态管理 (AIPresence): ONLINE / SEMI_ONLINE / OFFLINE
+1. 全局 AI 在线状态管理 (AIPresence): ONLINE / SEMI_ONLINE（两态模型，已取消 OFFLINE）
 2. 每天凌晨 00:00 (CronTrigger) 根据 SCHEDULE.md + 身份文件生成今日主动消息触发计划
 3. 每个触发点使用 DateTrigger 精准调度，到时直接回调
 4. 动态闹钟: 允许 AI 实时添加定时/倒计时闹钟 (DateTrigger)，持久化到本地缓存
@@ -25,6 +25,7 @@ import asyncio
 import json
 import logging
 import os
+import time
 from datetime import datetime, timedelta
 from enum import Enum
 from typing import Any, Awaitable, Callable, Dict, List, Optional
@@ -42,19 +43,28 @@ logger = logging.getLogger(__name__)
 # ==================================================================
 
 class AIPresence(Enum):
-    """AI 在线状态（全局）。"""
-    OFFLINE = "offline"          # 完全空闲 — 允许主动消息
-    SEMI_ONLINE = "semi_online"  # 空闲但待命 — 允许主动消息
-    ONLINE = "online"            # 正在处理消息/生成/工具 — 忽略主动消息
+    """AI 在线状态（全局）。
+
+    两态模型:
+    - SEMI_ONLINE: 空闲待命 — 允许调度好的主动消息（每日计划/闹钟）
+    - ONLINE: 活跃对话中 — 忽略调度好的主动消息，但会启动对话延续检测
+                （用户停止发言 2 分钟后，AI 可能主动追话）
+    """
+    SEMI_ONLINE = "semi_online"  # 空闲待命 — 允许调度主动消息
+    ONLINE = "online"            # 活跃对话中 — 忽略调度主动消息，启用对话延续检测
 
 
 class _AIPresenceState:
     """全局 AI 在线状态持有者（单例容器）。"""
 
     def __init__(self):
-        self.presence: AIPresence = AIPresence.OFFLINE
+        self.presence: AIPresence = AIPresence.SEMI_ONLINE
         self.is_generating: bool = False
         self.is_backend_busy: bool = False
+        # 对话延续追踪 (per-chat)
+        self._last_user_message_time: Dict[str, float] = {}   # chat_id -> timestamp
+        self._last_ai_followup_time: Dict[str, float] = {}    # chat_id -> timestamp (上次 AI 追话时间)
+        self._followup_count: Dict[str, int] = {}             # chat_id -> 连续追话次数
 
     @property
     def should_skip_proactive(self) -> bool:
@@ -63,6 +73,34 @@ class _AIPresenceState:
         if self.is_generating or self.is_backend_busy:
             return True
         return False
+
+    def record_user_activity(self, chat_id: str):
+        """记录用户最后一次发消息的时间，并重置追话计数器。"""
+        self._last_user_message_time[chat_id] = time.time()
+        self._followup_count[chat_id] = 0
+        self._last_ai_followup_time.pop(chat_id, None)
+
+    def get_user_idle_seconds(self, chat_id: str) -> float:
+        """获取用户距离上次发消息过去了多少秒。无记录返回 -1。"""
+        ts = self._last_user_message_time.get(chat_id)
+        if ts is None:
+            return -1
+        return time.time() - ts
+
+    def record_ai_followup(self, chat_id: str):
+        """记录一次 AI 追话。"""
+        self._last_ai_followup_time[chat_id] = time.time()
+        self._followup_count[chat_id] = self._followup_count.get(chat_id, 0) + 1
+
+    def get_followup_count(self, chat_id: str) -> int:
+        """获取连续追话次数。"""
+        return self._followup_count.get(chat_id, 0)
+
+    def clear_conversation_tracking(self, chat_id: str):
+        """清除对话追踪数据（进入 SEMI_ONLINE 时调用）。"""
+        self._last_user_message_time.pop(chat_id, None)
+        self._last_ai_followup_time.pop(chat_id, None)
+        self._followup_count.pop(chat_id, None)
 
 
 _ai_state = _AIPresenceState()
@@ -98,6 +136,31 @@ def get_ai_state_summary() -> Dict[str, Any]:
         "is_backend_busy": _ai_state.is_backend_busy,
         "should_skip_proactive": _ai_state.should_skip_proactive,
     }
+
+
+def record_user_activity(chat_id: str):
+    """记录用户活动（供 controller 调用）。"""
+    _ai_state.record_user_activity(chat_id)
+
+
+def get_user_idle_seconds(chat_id: str) -> float:
+    """获取用户空闲时间（秒）。"""
+    return _ai_state.get_user_idle_seconds(chat_id)
+
+
+def record_ai_followup(chat_id: str):
+    """记录 AI 追话。"""
+    _ai_state.record_ai_followup(chat_id)
+
+
+def get_followup_count(chat_id: str) -> int:
+    """获取 AI 连续追话次数。"""
+    return _ai_state.get_followup_count(chat_id)
+
+
+def clear_conversation_tracking(chat_id: str):
+    """清除对话追踪数据。"""
+    _ai_state.clear_conversation_tracking(chat_id)
 
 
 # ==================================================================

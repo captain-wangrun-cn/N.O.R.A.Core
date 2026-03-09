@@ -39,14 +39,43 @@ LLM 生成今日触发计划 [{"time": "08:00", "reason": "早安"}, {"time": "1
 
 | 状态 | 值 | 含义 | 主动消息行为 |
 |------|---|------|------------|
-| `OFFLINE` | `offline` | AI 完全空闲 | ✅ 正常触发 |
-| `SEMI_ONLINE` | `semi_online` | AI 半在线（处理完消息后） | ✅ 正常触发 |
-| `ONLINE` | `online` | AI 正在处理消息/工具循环 | ❌ 忽略 proactive / ✅ alarm 仍触发 |
+| `SEMI_ONLINE` | `semi_online` | AI 空闲待命 | ✅ 正常触发 |
+| `ONLINE` | `online` | AI 活跃对话中 / 处理消息 | ❌ 忽略 proactive / ✅ alarm 仍触发 |
+
+> 注: `OFFLINE` 状态已在 2026-03-09 移除。两态模型更简洁：要么在对话中 (ONLINE)，要么空闲等消息 (SEMI_ONLINE)。
 
 状态转换:
 - 收到用户消息 → `ONLINE`
-- 消息处理完毕 → `SEMI_ONLINE`
-- （暂无超时自动 → `OFFLINE` 的逻辑，预留给未来实现）
+- 消息处理完毕 → 保持 `ONLINE`，启动对话延续定时器
+- 对话延续检测判定为 `END` 或追话超限 → `SEMI_ONLINE`
+- 用户回来（发新消息） → 取消延续定时器，回到 `ONLINE`
+
+### 2.1 对话延续机制 (Conversation Follow-up)
+
+当 AI 处于 `ONLINE` 状态时，如果用户超过 2 分钟没有发消息，会启动对话延续检测：
+
+```
+消息处理完毕
+  ↓
+保持 ONLINE + 启动对话延续定时器
+  ↓ (等待 120s)
+fast_llm 分析上下文 → 判断用户为什么停下来
+  ├─ FOLLOWUP → 正常模型生成追话（1-2句自然追问）→ 写入聊天记录 → 60s 后再检测
+  ├─ WAIT → 暂时不追话 → 60s 后再检测
+  └─ END → 生成友好结束消息 → 写入聊天记录 → 进入 SEMI_ONLINE
+```
+
+配置参数（`NoraController` 属性）：
+| 参数 | 默认值 | 说明 |
+|------|--------|------|
+| `FOLLOWUP_INITIAL_DELAY` | 120s | 首次检测等待时间（2分钟） |
+| `FOLLOWUP_RECHECK_INTERVAL` | 60s | 每次复查间隔（1分钟） |
+| `FOLLOWUP_MAX_COUNT` | 3 | 最大连续追话次数 |
+
+关键设计:
+- **所有追话消息和结束消息都会写入 MessageHistory + session history**，保持上下文连续性
+- 用户任何时候发消息都会**立即取消**延续定时器并重置追话计数
+- fast 模型仅用于轻量判断（FOLLOWUP/WAIT/END），生成内容用正常模型
 
 ---
 
@@ -106,6 +135,12 @@ AI 可通过内置工具实时设置闹钟:
 | `alarm_user` | 闹钟触发消息生成 — user prompt |
 | `proactive_system` | 主动消息生成 — system prompt |
 | `proactive_user` | 主动消息生成 — user prompt |
+| `followup_detect_system` | 对话延续检测 — system prompt (fast 模型) |
+| `followup_detect_user` | 对话延续检测 — user prompt |
+| `followup_message_system` | 追话内容生成 — system prompt |
+| `followup_message_user` | 追话内容生成 — user prompt |
+| `wrapup_message_system` | 结束对话消息 — system prompt |
+| `wrapup_message_user` | 结束对话消息 — user prompt |
 
 ### 3.6 手动重新生成指令
 

@@ -61,7 +61,7 @@ core/controller.py            NoraController.handle_message()
 
 ### `core/scheduler.py`
 - `ProactiveScheduler` — APScheduler 驱动主动消息调度
-- `AIPresence` — 全局 AI 在线状态（ONLINE / SEMI_ONLINE / OFFLINE）
+- `AIPresence` — 全局 AI 在线状态（ONLINE / SEMI_ONLINE）
 - 手动重建接口：`regenerate_today_plan(clear_existing=True)`
 
 ### `memory/message_history.py`

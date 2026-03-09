@@ -15,7 +15,7 @@ from brain.tools import ToolManager
 from skills.loader import SkillLoader
 from core.cost_tracker import get_cost_tracker
 from core.routing import has_image_input
-from core.scheduler import ProactiveScheduler, AIPresence, set_ai_presence, set_ai_generating, set_ai_backend_busy
+from core.scheduler import ProactiveScheduler, AIPresence, set_ai_presence, set_ai_generating, set_ai_backend_busy, record_user_activity, get_user_idle_seconds, record_ai_followup, get_followup_count, clear_conversation_tracking, get_ai_presence
 from brain.multimodal import extract_image_payloads
 import config
 import json
@@ -113,6 +113,14 @@ class NoraController:
         # Debug 模式：per-chat 开关，开启后实时推送工具调用、思考等信息
         self.debug_mode: Dict[str, bool] = {}
         
+        # 对话延续定时器：per-chat asyncio.Task
+        self._followup_timers: Dict[str, asyncio.Task] = {}
+        
+        # 对话延续配置
+        self.FOLLOWUP_INITIAL_DELAY = 120    # 用户停止发言后 120 秒（2分钟）首次检测
+        self.FOLLOWUP_RECHECK_INTERVAL = 60  # 此后每 60 秒（1分钟）复查
+        self.FOLLOWUP_MAX_COUNT = 3          # 最多连续追话 3 次，之后引导结束对话
+        
         # 快速模型（用于前端即时回复，轻量省 token）
         try:
             self.fast_llm = get_llm_client(model_alias="fast")
@@ -188,6 +196,10 @@ class NoraController:
         
         # --- 更新 AI 在线状态：收到消息 → AI 进入在线 ---
         set_ai_presence(AIPresence.ONLINE)
+        _activity_id = chat_id if chat_type != "private" else user_id
+        record_user_activity(_activity_id)
+        # 取消该 chat 已有的对话延续定时器（用户回来了）
+        self._cancel_followup_timer(chat_id)
         if self.scheduler:
             # 自动设置 default_chat_id（首次消息时）
             if not self.scheduler.default_chat_id:
@@ -1307,12 +1319,295 @@ class NoraController:
             set_ai_generating(True)
 
     def _mark_scheduler_idle(self, chat_id: str):
-        """标记 AI 为空闲状态。"""
+        """标记 AI 生成完毕。保持 ONLINE 状态并启动对话延续定时器。"""
         set_ai_generating(False)
         set_ai_backend_busy(False)
-        # 简单策略：消息处理完成后改为半在线（AI 仍待命）
-        # 真正的离线状态需要超时检测（未来实现）
+        # 保持 ONLINE 状态 — 对话延续定时器会在 2 分钟后触发追话检测
+        # 只有当对话被判定为结束（END）或追话超限时，才降为 SEMI_ONLINE
+        self._start_followup_timer(chat_id)
+
+    # ------------------------------------------------------------------
+    # 对话延续机制 (Conversation Follow-up)
+    # ------------------------------------------------------------------
+
+    def _start_followup_timer(self, chat_id: str):
+        """启动对话延续定时器。如果已有定时器则先取消。"""
+        self._cancel_followup_timer(chat_id)
+        task = asyncio.create_task(self._followup_loop(chat_id))
+        self._followup_timers[chat_id] = task
+        logger.debug(f"[{chat_id}] 对话延续定时器已启动（{self.FOLLOWUP_INITIAL_DELAY}s 后首次检测）")
+
+    def _cancel_followup_timer(self, chat_id: str):
+        """取消对话延续定时器。"""
+        task = self._followup_timers.pop(chat_id, None)
+        if task and not task.done():
+            task.cancel()
+            logger.debug(f"[{chat_id}] 对话延续定时器已取消")
+
+    async def _followup_loop(self, chat_id: str):
+        """
+        对话延续循环。
+
+        流程:
+        1. 等待 FOLLOWUP_INITIAL_DELAY 秒（2 分钟）
+        2. 用 fast 模型检测是否应该追话
+        3. 若 FOLLOWUP → 用正常模型生成追话内容并发送
+        4. 若 WAIT → 等待 FOLLOWUP_RECHECK_INTERVAL 秒后再次检测
+        5. 若 END 或追话次数超限 → 生成结束消息，进入 SEMI_ONLINE
+        """
+        try:
+            # 首次延迟
+            await asyncio.sleep(self.FOLLOWUP_INITIAL_DELAY)
+
+            while True:
+                # 如果 AI 状态已不是 ONLINE（比如被其他逻辑切走了），退出
+                if get_ai_presence() != AIPresence.ONLINE:
+                    logger.debug(f"[{chat_id}] AI 状态非 ONLINE，对话延续循环退出")
+                    return
+
+                # 如果后端正忙（在处理新消息），退出（新消息会重置此定时器）
+                status = self.worker_status.get(chat_id)
+                if status and status.busy:
+                    logger.debug(f"[{chat_id}] 后端忙碌，对话延续循环退出")
+                    return
+
+                idle_secs = get_user_idle_seconds(chat_id)
+                count = get_followup_count(chat_id)
+
+                # 安全检查: 如果追话次数已超限，直接结束对话
+                if count >= self.FOLLOWUP_MAX_COUNT:
+                    logger.info(f"[{chat_id}] 连续追话已达 {count} 次，引导结束对话")
+                    await self._send_wrapup_message(chat_id)
+                    self._transition_to_semi_online(chat_id)
+                    return
+
+                # 用 fast 模型检测
+                decision = await self._detect_followup_intent(chat_id, idle_secs, count)
+                logger.info(f"[{chat_id}] 对话延续检测结果: {decision} (idle={idle_secs:.0f}s, count={count})")
+
+                if decision == "FOLLOWUP":
+                    await self._send_followup_message(chat_id, idle_secs)
+                    record_ai_followup(chat_id)
+                    # 等待下一次检测间隔
+                    await asyncio.sleep(self.FOLLOWUP_RECHECK_INTERVAL)
+
+                elif decision == "WAIT":
+                    # 等一段时间再次检测
+                    await asyncio.sleep(self.FOLLOWUP_RECHECK_INTERVAL)
+
+                elif decision == "END":
+                    # 如果已经追过话但用户没回，发送结束消息
+                    if count > 0:
+                        await self._send_wrapup_message(chat_id)
+                    self._transition_to_semi_online(chat_id)
+                    return
+
+                else:
+                    # 未知结果，保守处理：等一会再看
+                    logger.warning(f"[{chat_id}] 对话延续检测返回未知结果: {decision}")
+                    await asyncio.sleep(self.FOLLOWUP_RECHECK_INTERVAL)
+
+        except asyncio.CancelledError:
+            logger.debug(f"[{chat_id}] 对话延续循环被取消（用户回来了或新任务开始）")
+        except Exception as e:
+            logger.error(f"[{chat_id}] 对话延续循环异常: {e}", exc_info=True)
+            # 出错时安全降级到 SEMI_ONLINE
+            self._transition_to_semi_online(chat_id)
+
+    def _transition_to_semi_online(self, chat_id: str):
+        """安全地从 ONLINE 过渡到 SEMI_ONLINE。"""
+        clear_conversation_tracking(chat_id)
         set_ai_presence(AIPresence.SEMI_ONLINE)
+        self._followup_timers.pop(chat_id, None)
+        logger.info(f"[{chat_id}] 对话结束，AI 进入 SEMI_ONLINE 状态")
+
+    async def _detect_followup_intent(self, chat_id: str, idle_secs: float, followup_count: int) -> str:
+        """
+        用 fast 模型判断是否应该追话。
+
+        Returns:
+            "FOLLOWUP" | "WAIT" | "END"
+        """
+        from datetime import datetime
+        from zoneinfo import ZoneInfo
+
+        tz_str = config.get_message_history_config().get("timezone", "Asia/Shanghai")
+        now = datetime.now(ZoneInfo(tz_str))
+
+        # 获取最近对话记录
+        storage_id = chat_id  # 对话延续上下文使用 chat_id
+        db_context = self.message_history.get_context_messages("telegram", storage_id)
+        recent_msgs = db_context[-10:] if db_context else []
+        recent_conversation = "\n".join(
+            f"{'用户' if m['role'] == 'user' else 'AI'}: {m['content']}"
+            for m in recent_msgs
+            if m.get("role") in ("user", "assistant") and m.get("content")
+        )
+
+        if not recent_conversation:
+            return "END"  # 没有对话记录，直接结束
+
+        try:
+            system_prompt = render_template('schedule.jinja', 'followup_detect_system')
+            user_prompt = render_template('schedule.jinja', 'followup_detect_user',
+                                          recent_conversation=recent_conversation,
+                                          idle_seconds=int(idle_secs),
+                                          followup_count=followup_count,
+                                          current_time=now.strftime('%H:%M'))
+
+            response = ""
+            stream = self.fast_llm.chat_stream(
+                system_prompt=system_prompt,
+                user_prompt=user_prompt,
+                history=[],
+                tools=[]
+            )
+            async for chunk in stream:
+                if isinstance(chunk, dict) and chunk.get("type") == "text":
+                    response += chunk["content"]
+                elif isinstance(chunk, str):
+                    response += chunk
+
+            response = response.strip().upper()
+            # 提取关键字
+            if "FOLLOWUP" in response:
+                return "FOLLOWUP"
+            elif "END" in response:
+                return "END"
+            elif "WAIT" in response:
+                return "WAIT"
+            else:
+                logger.warning(f"[{chat_id}] fast_llm 对话延续检测返回无法解析: {response[:100]}")
+                return "WAIT"
+
+        except Exception as e:
+            logger.error(f"[{chat_id}] 对话延续检测失败: {e}", exc_info=True)
+            return "WAIT"
+
+    async def _send_followup_message(self, chat_id: str, idle_secs: float):
+        """用正常模型生成追话消息并发送，同时写入聊天记录。"""
+        from datetime import datetime
+        from zoneinfo import ZoneInfo
+
+        tz_str = config.get_message_history_config().get("timezone", "Asia/Shanghai")
+        now = datetime.now(ZoneInfo(tz_str))
+
+        soul = get_soul_prompt()
+
+        # 获取最近对话记录
+        storage_id = chat_id
+        db_context = self.message_history.get_context_messages("telegram", storage_id)
+        recent_msgs = db_context[-10:] if db_context else []
+        recent_conversation = "\n".join(
+            f"{'用户' if m['role'] == 'user' else 'AI'}: {m['content']}"
+            for m in recent_msgs
+            if m.get("role") in ("user", "assistant") and m.get("content")
+        )
+
+        try:
+            system_prompt = render_template('schedule.jinja', 'followup_message_system', soul_prompt=soul)
+            user_prompt = render_template('schedule.jinja', 'followup_message_user',
+                                          recent_conversation=recent_conversation,
+                                          idle_seconds=int(idle_secs))
+
+            # 用正常模型生成追话
+            response = ""
+            stream = self.llm.chat_stream(
+                system_prompt=system_prompt,
+                user_prompt=user_prompt,
+                history=[],
+                tools=[]
+            )
+            async for chunk in stream:
+                if isinstance(chunk, dict) and chunk.get("type") == "text":
+                    response += chunk["content"]
+                elif isinstance(chunk, str):
+                    response += chunk
+
+            response = self._strip_thinking_content(response.strip())
+            if response:
+                await self.adapter.send_message(chat_id, response)
+                # 写入消息历史（主动追话也要保存到上下文）
+                self.message_history.add_message(
+                    platform="telegram",
+                    chat_id=storage_id,
+                    role="assistant",
+                    content=response,
+                    user_id="assistant"
+                )
+                # 同步到 session history
+                session = self.sessions.setdefault(chat_id, {"history": [], "interrupted_thought": "", "pending_text": ""})
+                session_history = session.setdefault("history", [])
+                session_history.append({"role": "assistant", "content": response})
+                if len(session_history) > 20:
+                    session["history"] = session_history[-20:]
+
+                logger.info(f"[{chat_id}] 对话延续追话已发送: {response[:60]}...")
+            else:
+                logger.warning(f"[{chat_id}] LLM 未生成追话内容")
+
+        except Exception as e:
+            logger.error(f"[{chat_id}] 发送追话消息失败: {e}", exc_info=True)
+
+    async def _send_wrapup_message(self, chat_id: str):
+        """生成并发送结束对话的消息，同时写入聊天记录。"""
+        soul = get_soul_prompt()
+        idle_secs = get_user_idle_seconds(chat_id)
+        count = get_followup_count(chat_id)
+
+        storage_id = chat_id
+        db_context = self.message_history.get_context_messages("telegram", storage_id)
+        recent_msgs = db_context[-10:] if db_context else []
+        recent_conversation = "\n".join(
+            f"{'用户' if m['role'] == 'user' else 'AI'}: {m['content']}"
+            for m in recent_msgs
+            if m.get("role") in ("user", "assistant") and m.get("content")
+        )
+
+        try:
+            system_prompt = render_template('schedule.jinja', 'wrapup_message_system', soul_prompt=soul)
+            user_prompt = render_template('schedule.jinja', 'wrapup_message_user',
+                                          recent_conversation=recent_conversation,
+                                          idle_seconds=int(idle_secs) if idle_secs > 0 else 0,
+                                          followup_count=count)
+
+            response = ""
+            stream = self.llm.chat_stream(
+                system_prompt=system_prompt,
+                user_prompt=user_prompt,
+                history=[],
+                tools=[]
+            )
+            async for chunk in stream:
+                if isinstance(chunk, dict) and chunk.get("type") == "text":
+                    response += chunk["content"]
+                elif isinstance(chunk, str):
+                    response += chunk
+
+            response = self._strip_thinking_content(response.strip())
+            if response:
+                await self.adapter.send_message(chat_id, response)
+                # 写入消息历史
+                self.message_history.add_message(
+                    platform="telegram",
+                    chat_id=storage_id,
+                    role="assistant",
+                    content=response,
+                    user_id="assistant"
+                )
+                # 同步到 session history
+                session = self.sessions.setdefault(chat_id, {"history": [], "interrupted_thought": "", "pending_text": ""})
+                session_history = session.setdefault("history", [])
+                session_history.append({"role": "assistant", "content": response})
+                if len(session_history) > 20:
+                    session["history"] = session_history[-20:]
+
+                logger.info(f"[{chat_id}] 对话结束消息已发送: {response[:60]}...")
+            else:
+                logger.warning(f"[{chat_id}] LLM 未生成结束对话消息")
+
+        except Exception as e:
+            logger.error(f"[{chat_id}] 发送结束对话消息失败: {e}", exc_info=True)
 
     async def _generate_daily_plan_via_llm(self) -> List[Dict[str, str]]:
         """
