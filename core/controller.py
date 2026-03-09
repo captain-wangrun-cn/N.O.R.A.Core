@@ -87,6 +87,7 @@ class WorkerStatus:
 class NoraController:
     """处理机器人的核心业务逻辑。"""
 
+    _SPLIT_MARKER_PATTERN = re.compile(r"\[(?:SPLIT)\]", re.IGNORECASE)
     _THINK_BLOCK_PATTERN = re.compile(r"<think>[\s\S]*?</think>", re.IGNORECASE)
     _THINK_INLINE_PATTERN = re.compile(r"</?think>", re.IGNORECASE)
     # 匹配 LLM 返回的图片标签块: [IMAGE_TAGS:img_xxx] ... [/IMAGE_TAGS]
@@ -782,6 +783,7 @@ class NoraController:
                 response_text_buffer = ""
                 tool_call = None
                 usage_data = None  # 用于收集 token 使用数据
+                in_think_block = False
                 
                 async for raw_chunk in stream:
                     chunk = cast(Dict[str, Any], raw_chunk) if isinstance(raw_chunk, dict) else raw_chunk
@@ -793,10 +795,13 @@ class NoraController:
                             response_text_buffer += content
                             
                             # Real-time splitting logic
-                            if "[SPLIT]" in response_text_buffer:
-                                parts = response_text_buffer.split("[SPLIT]")
+                            if self._SPLIT_MARKER_PATTERN.search(response_text_buffer):
+                                ready_parts, response_text_buffer, in_think_block = self._extract_split_ready_parts(
+                                    response_text_buffer,
+                                    in_think_block,
+                                )
                                 # Send and sync all complete parts
-                                for part in parts[:-1]:
+                                for part in ready_parts:
                                     text_to_send = self._strip_thinking_content(part.strip())
                                     # 过滤掉包含工具调用语法的泄漏内容
                                     if text_to_send and not re.search(
@@ -806,8 +811,6 @@ class NoraController:
                                         await self.adapter.send_message(chat_id, text_to_send)
                                         # Important: keep final buffer synchronized
                                         temp_history.append({"role": "assistant", "content": text_to_send})
-                                # Keep the last incomplete part in buffer
-                                response_text_buffer = parts[-1]
                         
                         elif chunk["type"] == "tool_call":
                             tool_call = chunk
@@ -1237,6 +1240,64 @@ class NoraController:
         cleaned = cls._IMAGE_TAGS_PATTERN.sub("", cleaned)
         cleaned = re.sub(r'\n{3,}', '\n\n', cleaned).strip()
         return cleaned
+
+    @classmethod
+    def _strip_stream_think_segment(cls, text: str, in_think_block: bool) -> tuple[str, bool]:
+        """按流式片段清理 <think> 内容，支持跨分段保持状态，避免泄漏到用户侧。"""
+        if not text:
+            return "", in_think_block
+
+        lower_text = text.lower()
+        out: List[str] = []
+        i = 0
+
+        while i < len(text):
+            if in_think_block:
+                close_idx = lower_text.find("</think>", i)
+                if close_idx == -1:
+                    # 整段都处于思考块内，不输出任何内容
+                    return "".join(out), True
+                i = close_idx + len("</think>")
+                in_think_block = False
+                continue
+
+            open_idx = lower_text.find("<think>", i)
+            close_idx = lower_text.find("</think>", i)
+
+            if open_idx == -1 and close_idx == -1:
+                out.append(text[i:])
+                break
+
+            if close_idx != -1 and (open_idx == -1 or close_idx < open_idx):
+                # 孤立闭合标签，跳过标签本身
+                out.append(text[i:close_idx])
+                i = close_idx + len("</think>")
+                continue
+
+            if open_idx != -1:
+                out.append(text[i:open_idx])
+                i = open_idx + len("<think>")
+                in_think_block = True
+                continue
+
+        cleaned = "".join(out)
+        return cleaned, in_think_block
+
+    @classmethod
+    def _extract_split_ready_parts(cls, buffer: str, in_think_block: bool) -> tuple[List[str], str, bool]:
+        """从流式缓冲中提取被 [SPLIT] 完整分隔的片段，并做状态化思考内容清洗。"""
+        ready_parts: List[str] = []
+        last_idx = 0
+
+        for marker in cls._SPLIT_MARKER_PATTERN.finditer(buffer):
+            raw_part = buffer[last_idx:marker.start()]
+            visible_part, in_think_block = cls._strip_stream_think_segment(raw_part, in_think_block)
+            if visible_part.strip():
+                ready_parts.append(visible_part)
+            last_idx = marker.end()
+
+        remaining = buffer[last_idx:]
+        return ready_parts, remaining, in_think_block
 
     async def _process_pending_messages(self, chat_id: str):
         """后端完成后，处理队列中积攒的用户消息。"""

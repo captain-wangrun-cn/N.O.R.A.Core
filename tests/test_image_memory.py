@@ -64,6 +64,7 @@ _IMAGE_TAGS_PATTERN = re.compile(
 )
 _THINK_BLOCK_PATTERN = re.compile(r"<think>[\s\S]*?</think>", re.IGNORECASE)
 _THINK_INLINE_PATTERN = re.compile(r"</?think>", re.IGNORECASE)
+_SPLIT_MARKER_PATTERN = re.compile(r"\[(?:SPLIT|SPILIT)\]", re.IGNORECASE)
 
 
 def _strip_thinking_and_tags(text: str) -> str:
@@ -73,6 +74,61 @@ def _strip_thinking_and_tags(text: str) -> str:
     cleaned = _IMAGE_TAGS_PATTERN.sub("", cleaned)
     cleaned = re.sub(r'\n{3,}', '\n\n', cleaned).strip()
     return cleaned
+
+
+def _strip_stream_think_segment(text: str, in_think_block: bool) -> tuple[str, bool]:
+    """模拟 controller 中流式片段级别的 think 清洗逻辑。"""
+    if not text:
+        return "", in_think_block
+
+    lower_text = text.lower()
+    out = []
+    i = 0
+
+    while i < len(text):
+        if in_think_block:
+            close_idx = lower_text.find("</think>", i)
+            if close_idx == -1:
+                return "".join(out), True
+            i = close_idx + len("</think>")
+            in_think_block = False
+            continue
+
+        open_idx = lower_text.find("<think>", i)
+        close_idx = lower_text.find("</think>", i)
+
+        if open_idx == -1 and close_idx == -1:
+            out.append(text[i:])
+            break
+
+        if close_idx != -1 and (open_idx == -1 or close_idx < open_idx):
+            out.append(text[i:close_idx])
+            i = close_idx + len("</think>")
+            continue
+
+        if open_idx != -1:
+            out.append(text[i:open_idx])
+            i = open_idx + len("<think>")
+            in_think_block = True
+            continue
+
+    return "".join(out), in_think_block
+
+
+def _extract_split_ready_parts(buffer: str, in_think_block: bool) -> tuple[list[str], str, bool]:
+    """模拟 controller 中 [SPLIT]/[SPILIT] 片段提取。"""
+    ready_parts = []
+    last_idx = 0
+
+    for marker in _SPLIT_MARKER_PATTERN.finditer(buffer):
+        raw_part = buffer[last_idx:marker.start()]
+        visible_part, in_think_block = _strip_stream_think_segment(raw_part, in_think_block)
+        if visible_part.strip():
+            ready_parts.append(visible_part)
+        last_idx = marker.end()
+
+    remaining = buffer[last_idx:]
+    return ready_parts, remaining, in_think_block
 
 
 def test_image_tags_pattern_parsing():
@@ -143,6 +199,35 @@ def test_strip_thinking_content_removes_image_tags():
     assert "IMAGE_TAGS" not in cleaned
     assert "标签内容" not in cleaned
     assert "这是回复正文" in cleaned
+
+
+def test_split_marker_supports_spilit_typo():
+    """应兼容常见拼写错误 [SPILIT]，避免整段不分发。"""
+    buf = "第一段[SPILIT]第二段[SPLIT]第三段"
+    ready, remaining, in_think = _extract_split_ready_parts(buf, False)
+
+    assert ready == ["第一段", "第二段"]
+    assert remaining == "第三段"
+    assert in_think is False
+
+
+def test_stream_split_does_not_leak_fragmented_think_content():
+    """当 <think> 在流式输出中被拆碎时，分段发送不应泄漏思考内容。"""
+    in_think = False
+
+    # 第 1 批：只到 <think> 开头，且遇到 [SPLIT]
+    buf = "给你结论：<think>先想一想[SPILIT]"
+    ready, remaining, in_think = _extract_split_ready_parts(buf, in_think)
+    assert ready == ["给你结论："]
+    assert remaining == ""
+    assert in_think is True
+
+    # 第 2 批：think 继续，直到闭合后再遇到 [SPLIT]
+    buf = remaining + "这是内部推理</think>最终答案是 42[SPLIT]尾巴"
+    ready, remaining, in_think = _extract_split_ready_parts(buf, in_think)
+    assert ready == ["最终答案是 42"]
+    assert remaining == "尾巴"
+    assert in_think is False
 
 
 # ---------------------------------------------------------------------------
