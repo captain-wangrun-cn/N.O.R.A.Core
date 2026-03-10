@@ -550,3 +550,19 @@ class MessageHistory:
         conn.commit()
         conn.close()
         logger.info(f"[{platform}/{chat_id}] 聊天历史已清除 (保留标记: {keep_pinned})")
+
+    def clear_all_history(self, include_pinned: bool = False):
+        """清除所有聊天历史"""
+        conn = sqlite3.connect(str(self.db_path))
+        cursor = conn.cursor()
+
+        if include_pinned:
+            cursor.execute("DELETE FROM messages")
+        else:
+            cursor.execute("DELETE FROM messages WHERE is_pinned = 0")
+
+        cursor.execute("DELETE FROM summaries")
+
+        conn.commit()
+        conn.close()
+        logger.info("已清除全部聊天历史 (包含标记: %s)", include_pinned)

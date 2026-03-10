@@ -8,6 +8,7 @@ import re
 import logging
 import io
 import asyncio
+import time
 
 from adapters.base import BaseAdapter, PlatformFeatures
 from adapters.aggregator import MessageAggregator
@@ -137,6 +138,10 @@ def _split_long_text(text: str, max_length: int = TG_MSG_MAX_LENGTH) -> List[str
 
 class TelegramAdapter(BaseAdapter):
     """Telegram 平台适配器。"""
+
+    DEBUG_CLEANUP_COMMAND = "/debug_cleanup"
+    _cleanup_confirm_tokens: Dict[str, float] = {}
+    _cleanup_lock = asyncio.Lock()
 
     # ------------------------------------------------------------------
     # 平台元信息
@@ -317,6 +322,7 @@ class TelegramAdapter(BaseAdapter):
         debug_handler = CommandHandler('debug', self._debug_command)
         regenerate_proactive_handler = CommandHandler('regenerate_proactive', self._regenerate_proactive_command)
         schedule_today_handler = CommandHandler('schedule_today', self._schedule_today_command)
+        debug_cleanup_handler = CommandHandler('debug_cleanup', self._debug_cleanup_command)
         msg_handler = MessageHandler(filters.TEXT & (~filters.COMMAND), self._handle_incoming_message)
         photo_handler = MessageHandler(filters.PHOTO, self._handle_photo)
         document_handler = MessageHandler(filters.Document.ALL, self._handle_document)
@@ -330,6 +336,7 @@ class TelegramAdapter(BaseAdapter):
         self.application.add_handler(debug_handler)
         self.application.add_handler(regenerate_proactive_handler)
         self.application.add_handler(schedule_today_handler)
+        self.application.add_handler(debug_cleanup_handler)
         self.application.add_handler(msg_handler)
         self.application.add_handler(photo_handler)
         self.application.add_handler(document_handler)
@@ -512,6 +519,26 @@ class TelegramAdapter(BaseAdapter):
             "user_name": update.effective_user.first_name if update.effective_user else "Unknown"
         }
         await self._message_handler(event_context)
+
+    async def _debug_cleanup_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """调试清空入口：弹出危险操作按钮（需二次确认）。"""
+        if not update.effective_chat or not update.message:
+            return
+
+        keyboard = InlineKeyboardMarkup([
+            [InlineKeyboardButton("🧹 清空 Qdrant 记忆", callback_data="debug_cleanup:qdrant")],
+            [InlineKeyboardButton("🧹 清空 Mongo 图片库", callback_data="debug_cleanup:mongo")],
+            [InlineKeyboardButton("🧹 清空聊天记录", callback_data="debug_cleanup:chat")],
+            [InlineKeyboardButton("💥 全部清空", callback_data="debug_cleanup:all")],
+            [InlineKeyboardButton("取消", callback_data="debug_cleanup:cancel")],
+        ])
+
+        warning_text = (
+            "⚠️ <b>危险操作</b>\n"
+            "以下清空操作均为不可恢复的永久删除。\n"
+            "请选择要执行的清理范围。"
+        )
+        await update.message.reply_text(warning_text, reply_markup=keyboard, parse_mode=ParseMode.HTML)
 
     async def _regenerate_proactive_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """
@@ -786,6 +813,15 @@ class TelegramAdapter(BaseAdapter):
         
         # 确认回调
         await query.answer()
+
+        if callback_data and callback_data.startswith("debug_cleanup_confirm:"):
+            action = callback_data.split(":", 1)[1]
+            await self._handle_debug_cleanup_confirm(query, action)
+            return
+
+        if callback_data and callback_data.startswith("debug_cleanup:"):
+            await self._handle_debug_cleanup_callback(query, callback_data)
+            return
         
         # 构造消息
         text = f"[按钮点击: {callback_data}]"
@@ -801,6 +837,111 @@ class TelegramAdapter(BaseAdapter):
             await self._aggregator.add_message(chat_id, text, full_context)
         
         logger.info(f"[{chat_id}] 收到回调: {callback_data}")
+
+    async def _handle_debug_cleanup_callback(self, query, callback_data: str):
+        """处理调试清空按钮回调（带二次确认）。"""
+        if not query or not query.message:
+            return
+        chat_id = str(query.message.chat.id)
+
+        action = callback_data.split(":", 1)[1]
+        if action == "cancel":
+            await query.edit_message_text("已取消清空操作。")
+            return
+
+        token_key = f"{chat_id}:{action}"
+        now_ts = time.time()
+
+        async with self._cleanup_lock:
+            if token_key not in self._cleanup_confirm_tokens:
+                self._cleanup_confirm_tokens[token_key] = now_ts
+                confirm_keyboard = InlineKeyboardMarkup([
+                    [InlineKeyboardButton("❗确认删除", callback_data=f"debug_cleanup_confirm:{action}")],
+                    [InlineKeyboardButton("取消", callback_data="debug_cleanup:cancel")],
+                ])
+                await query.edit_message_text(
+                    "⚠️ <b>二次确认</b>\n"
+                    "该操作将永久删除数据，且不可恢复。\n"
+                    "若确认，请点击下方按钮。",
+                    reply_markup=confirm_keyboard,
+                    parse_mode=ParseMode.HTML,
+                )
+                return
+
+        await query.edit_message_text("⚠️ 确认信息已过期，请重新发起 /debug_cleanup。")
+
+    async def _handle_debug_cleanup_confirm(self, query, action: str):
+        """执行清空操作。"""
+        chat_id = str(query.message.chat.id)
+        token_key = f"{chat_id}:{action}"
+        now_ts = time.time()
+
+        async with self._cleanup_lock:
+            created_at = self._cleanup_confirm_tokens.get(token_key)
+            if not created_at or now_ts - created_at > 60:
+                if token_key in self._cleanup_confirm_tokens:
+                    self._cleanup_confirm_tokens.pop(token_key, None)
+                await query.edit_message_text("⚠️ 确认已超时，请重新发起 /debug_cleanup。")
+                return
+            self._cleanup_confirm_tokens.pop(token_key, None)
+
+        result_lines = ["✅ 清空完成"]
+
+        if action in ("qdrant", "all"):
+            result_lines.append(self._purge_qdrant())
+        if action in ("mongo", "all"):
+            result_lines.append(self._purge_mongo())
+        if action in ("chat", "all"):
+            result_lines.append(self._purge_chat_history())
+
+        await query.edit_message_text("\n".join(result_lines))
+
+    def _purge_qdrant(self) -> str:
+        """清空所有 Qdrant 相关集合。"""
+        messages = []
+        try:
+            from memory.vector import VectorStore
+            vs = VectorStore()
+            if not vs.client:
+                return "⚠️ Qdrant 未连接，未执行。"
+            vs.client.delete_collection(collection_name=vs.collection_name)
+            vs._ensure_collection()
+            messages.append(f"- Qdrant 记忆集合已清空: {vs.collection_name}")
+        except Exception as e:
+            messages.append(f"- Qdrant 记忆集合清空失败: {e}")
+
+        try:
+            from memory.image_store import ImageStore, IMAGE_COLLECTION
+            img_store = ImageStore()
+            if not img_store.qdrant:
+                return "⚠️ Qdrant 未连接（图片库），未执行。"
+            img_store.qdrant.delete_collection(collection_name=IMAGE_COLLECTION)
+            img_store._ensure_qdrant_collection()
+            messages.append(f"- Qdrant 图片集合已清空: {IMAGE_COLLECTION}")
+        except Exception as e:
+            messages.append(f"- Qdrant 图片集合清空失败: {e}")
+
+        return "\n".join(messages) if messages else "⚠️ Qdrant 未执行。"
+
+    def _purge_mongo(self) -> str:
+        """清空 MongoDB 图片库集合。"""
+        try:
+            from memory.image_store import ImageStore, MONGO_COLLECTION
+            img_store = ImageStore()
+            if img_store.mongo_col is None:
+                return "⚠️ MongoDB 未连接，未执行。"
+            img_store.mongo_col.delete_many({})
+            return f"- MongoDB 图片集合已清空: {MONGO_COLLECTION}"
+        except Exception as e:
+            return f"- MongoDB 清空失败: {e}"
+
+    def _purge_chat_history(self) -> str:
+        """清空全部聊天记录。"""
+        try:
+            self.message_history.clear_all_history(include_pinned=True)
+            return "- 聊天记录已全部清空（含 pinned）"
+        except Exception as e:
+            return f"- 聊天记录清空失败: {e}"
 
     async def _extract_reply_info(self, message: Message) -> Optional[str]:
         """提取回复消息的信息"""
