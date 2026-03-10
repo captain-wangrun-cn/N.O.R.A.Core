@@ -91,6 +91,7 @@ class ToolManager:
         self.register(self.exec_command)
         self.register(self.view_image)
         self.register(self.crop_image_for_llm)
+        self.register(self.report_progress)
         # 动态闹钟工具（仅在 scheduler 可用时注册）
         if self.scheduler is not None:
             self.register(self.set_alarm)
@@ -468,6 +469,15 @@ class ToolManager:
             return "\n".join(result_lines)
         except Exception as e:
             return f"Error listing directory: {e}"
+
+    async def report_progress(self, message: str) -> str:
+        """
+        Send a progress message to the user during long-running tasks. Use this to keep the user informed about what you're doing. The message will be sent immediately. Do NOT overuse — only call when there's meaningful progress to share (e.g. major step completed, important finding, or task taking longer than expected).
+
+        :param message: A short, natural-language progress update to send to the user. Keep it concise and informative.
+        """
+        # 实际发送逻辑由 controller 拦截处理，此处仅作为 fallback
+        return f"Progress reported: {message}"
 
     def read_file(self, path: str, start_line: Optional[int] = None, end_line: Optional[int] = None) -> str:
         """

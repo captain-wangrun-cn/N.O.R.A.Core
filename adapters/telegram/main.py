@@ -945,35 +945,49 @@ class TelegramAdapter(BaseAdapter):
     def _sanitize_links_if_needed(self, text: str) -> str:
         """
         处理文本中的链接以避免内容安全过滤。
-        使用零宽空格 (U+200B) 而不是普通空格，对用户不可见。
+        
+        只对纯文本中的裸 URL 做处理（在域名的点号前加零宽空格），
+        不影响 Markdown 链接 [text](url) 的解析（因为它们会被 _markdown_to_html 转为 <a> 标签）。
         """
         import re
         
-        # 匹配 http:// 或 https:// 开头的链接
+        # 先保护 Markdown 链接 [text](url)，不做处理
+        protected = []
+        def _protect_md_link(m):
+            idx = len(protected)
+            protected.append(m.group(0))
+            return f'\x01MDLINK{idx}\x01'
+        
+        text = re.sub(r'\[([^\]]+?)\]\((https?://[^\)]+?)\)', _protect_md_link, text)
+        
+        # 对剩余的裸 URL，在域名的点号前插入零宽空格（不破坏 URL 结构）
         url_pattern = r'(https?://[^\s<>]+)'
         
-        def insert_zero_width_space(match):
+        def insert_zwsp_at_dots(match):
             url = match.group(1)
-            # 如果链接太短，不处理
             if len(url) < 15:
                 return url
-            
-            # 在域名部分插入零宽空格
-            # 例如: https://example.com -> https://exam\u200Bple.com
+            # 只在域名部分的点号前插入零宽空格，不改变 URL 本身
+            # 例如: https://example.com -> https://example\u200B.com
             protocol_end = url.find('://') + 3
             domain_end = url.find('/', protocol_end)
             if domain_end == -1:
                 domain_end = len(url)
-            
-            # 如果域名太短，不处理
-            if domain_end - protocol_end < 8:
+            domain = url[protocol_end:domain_end]
+            if '.' not in domain or len(domain) < 8:
                 return url
-            
-            # 在域名中间插入零宽空格
-            insert_pos = protocol_end + (domain_end - protocol_end) // 2
-            return url[:insert_pos] + '\u200B' + url[insert_pos:]
+            # 在第一个点号前加零宽空格
+            dot_pos = domain.find('.')
+            sanitized_domain = domain[:dot_pos] + '\u200B' + domain[dot_pos:]
+            return url[:protocol_end] + sanitized_domain + url[domain_end:]
         
-        return re.sub(url_pattern, insert_zero_width_space, text)
+        text = re.sub(url_pattern, insert_zwsp_at_dots, text)
+        
+        # 还原 Markdown 链接
+        for idx, link in enumerate(protected):
+            text = text.replace(f'\x01MDLINK{idx}\x01', link)
+        
+        return text
 
     async def send_message(self, chat_id: str, text: str, **kwargs) -> str:
         """

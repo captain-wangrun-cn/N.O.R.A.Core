@@ -145,6 +145,74 @@ class WorkerStatus:
         lines.append(f"🔄 进度: 第 {self.current_turn}/{self.max_turns} 轮")
         return "\n".join(lines)
 
+class BackendTaskQueue:
+    """后脑任务队列 — 支持任务排队、依次执行、状态查询。"""
+
+    def __init__(self):
+        self._queue: asyncio.Queue[Dict[str, Any]] = asyncio.Queue()
+        self._items: List[Dict[str, Any]] = []  # 有序列表，用于状态查询
+        self._lock = asyncio.Lock()
+
+    async def enqueue(self, context: Dict[str, Any]):
+        """入队一个后脑任务。"""
+        item = {
+            "context": context,
+            "text": context.get("text", ""),
+            "enqueued_at": time.time(),
+        }
+        async with self._lock:
+            self._items.append(item)
+        await self._queue.put(item)
+
+    async def dequeue(self) -> Optional[Dict[str, Any]]:
+        """出队一个任务（如果队列为空则返回 None）。"""
+        try:
+            item = self._queue.get_nowait()
+            async with self._lock:
+                if item in self._items:
+                    self._items.remove(item)
+            return item
+        except asyncio.QueueEmpty:
+            return None
+
+    async def dequeue_all(self) -> List[Dict[str, Any]]:
+        """取出所有排队任务并清空队列。"""
+        items = []
+        while not self._queue.empty():
+            try:
+                item = self._queue.get_nowait()
+                items.append(item)
+            except asyncio.QueueEmpty:
+                break
+        async with self._lock:
+            self._items.clear()
+        return items
+
+    def size(self) -> int:
+        return self._queue.qsize()
+
+    def get_queue_summary(self) -> str:
+        """获取队列概况，供用户/前脑查看。"""
+        if not self._items:
+            return ""
+        lines = [f"📬 排队任务 ({len(self._items)} 个):"]
+        for i, item in enumerate(self._items, 1):
+            text_preview = item["text"][:60]
+            wait_secs = int(time.time() - item["enqueued_at"])
+            lines.append(f"  {i}. \"{text_preview}\" (等待 {wait_secs}s)")
+        return "\n".join(lines)
+
+    async def clear(self):
+        """清空队列。"""
+        while not self._queue.empty():
+            try:
+                self._queue.get_nowait()
+            except asyncio.QueueEmpty:
+                break
+        async with self._lock:
+            self._items.clear()
+
+
 class NoraController:
     """处理机器人的核心业务逻辑。"""
 
@@ -170,8 +238,8 @@ class NoraController:
         
         # 前后端分离：每个 chat_id 一个 WorkerStatus
         self.worker_status: Dict[str, WorkerStatus] = {}
-        # 消息队列：后端忙碌时暂存用户新消息
-        self.pending_messages: Dict[str, List[Dict[str, Any]]] = {}
+        # 后脑任务队列：后端忙碌时暂存用户新消息（per-chat）
+        self.task_queues: Dict[str, BackendTaskQueue] = {}
         # Debug 模式：per-chat 开关，开启后实时推送工具调用、思考等信息
         self.debug_mode: Dict[str, bool] = {}
         
@@ -292,7 +360,9 @@ class NoraController:
             status = self.worker_status.get(chat_id)
             if status:
                 status.finish()
-            self.pending_messages.pop(chat_id, None)
+            queue = self.task_queues.get(chat_id)
+            if queue:
+                await queue.clear()
             await self.adapter.send_message(chat_id, "N.O.R.A. Core 已启动。")
             logger.info(f"[{chat_id}] Session已重置 by /start command.")
             return
@@ -307,7 +377,9 @@ class NoraController:
 
                 # 清理内存上下文
                 self.sessions.pop(chat_id, None)
-                self.pending_messages.pop(chat_id, None)
+                queue = self.task_queues.get(chat_id)
+                if queue:
+                    await queue.clear()
                 status = self.worker_status.get(chat_id)
                 if status:
                     status.finish()
@@ -333,7 +405,9 @@ class NoraController:
 
                 # 清理内存上下文与排队消息
                 self.sessions.pop(chat_id, None)
-                self.pending_messages.pop(chat_id, None)
+                queue = self.task_queues.get(chat_id)
+                if queue:
+                    await queue.clear()
                 status = self.worker_status.get(chat_id)
                 if status:
                     status.finish()
@@ -470,9 +544,9 @@ class NoraController:
                     lines.append("📅 Scheduler: 🔴 未启用")
                 
                 # 排队消息
-                pending = self.pending_messages.get(chat_id, [])
-                if pending:
-                    lines.append(f"\n📬 排队消息: {len(pending)} 条")
+                queue = self.task_queues.get(chat_id)
+                if queue and queue.size() > 0:
+                    lines.append(f"\n{queue.get_queue_summary()}")
                 
                 # RAG / 消息历史
                 lines.append("")
@@ -544,7 +618,9 @@ class NoraController:
                 return
             else:  # action == "queue"
                 # 入队列，等后端完成后处理
-                self.pending_messages.setdefault(chat_id, []).append(context)
+                queue = self.task_queues.setdefault(chat_id, BackendTaskQueue())
+                await queue.enqueue(context)
+                logger.info(f"[{chat_id}] 消息已入队，当前队列长度: {queue.size()}")
                 return
 
         # --- 正常流程：后端空闲 ---
@@ -740,7 +816,9 @@ class NoraController:
             status.finish()
         
         # 3. 清空排队消息（用户已改变意图，旧队列失效）
-        self.pending_messages.pop(chat_id, None)
+        queue = self.task_queues.get(chat_id)
+        if queue:
+            await queue.clear()
         
         # 4. 根据 reason 决定下一步（如果调用方已回复，则跳过）
         if skip_reply:
@@ -1085,9 +1163,13 @@ class NoraController:
                 
                 turn_multimodal_images = multimodal_images if current_turn == 1 else pending_tool_multimodal_images
                 turn_llm = self.image_llm if turn_multimodal_images else active_llm
+                # 构造本轮 user_prompt：工具返回图片时追加提示（这些是回查的旧图，不要生成 IMAGE_TAGS）
+                turn_user_prompt = full_user_prompt if current_turn == 1 else " (Continue processing tool outputs...)"
+                if current_turn > 1 and turn_multimodal_images and any(ti.get("from_tool") for ti in turn_multimodal_images):
+                    turn_user_prompt += "\n\n（注意：以下图片是通过 view_image 工具回查的已有图片，**不要**生成 [IMAGE_TAGS] 标签，直接分析图片内容即可。）"
                 stream = turn_llm.chat_stream(
                     system_prompt=system_prompt,
-                    user_prompt=full_user_prompt if current_turn == 1 else " (Continue processing tool outputs...)",
+                    user_prompt=turn_user_prompt,
                     history=temp_history,
                     tools=[] if force_no_tools else self.tool_manager.get_tool_schemas(),
                     multimodal_images=turn_multimodal_images if turn_multimodal_images else None
@@ -1288,7 +1370,18 @@ class NoraController:
                         # 兜底注入当前会话 user_id，避免 LLM 漏传导致查不到图片
                         if not str(tool_args.get("user_id", "")).strip():
                             tool_args["user_id"] = storage_id
-                    tool_result = await self.tool_manager.execute(tool_name, cast(Dict[str, Any], tool_args))
+                    # --- report_progress 拦截：直接发送消息给用户，不走 tool_manager ---
+                    if tool_name == "report_progress" and isinstance(tool_args, dict):
+                        progress_msg = str(tool_args.get("message", "")).strip()
+                        if progress_msg:
+                            try:
+                                await self.adapter.send_message(chat_id, f"⏳ {progress_msg}", parse_media=False)
+                            except Exception as e:
+                                logger.debug(f"[{chat_id}] 发送进度消息失败: {e}")
+                        tool_result = "Progress message sent to user."
+                        # 跳过下面的 tool_manager.execute，直接继续工具结果处理
+                    else:
+                        tool_result = await self.tool_manager.execute(tool_name, cast(Dict[str, Any], tool_args))
                     # 如果工具请求了 return_image，提取返回中的 [image: ...] 作为下一轮多模态输入
                     if (
                         tool_name in {"view_image", "crop_image_for_llm"}
@@ -1298,6 +1391,9 @@ class NoraController:
                         try:
                             _clean, tool_images = extract_image_payloads(tool_result)
                             if tool_images:
+                                # 标记为工具返回的图片，避免在 4.6 步重复入库
+                                for ti in tool_images:
+                                    ti["from_tool"] = True
                                 pending_tool_multimodal_images = tool_images
                                 logger.info(f"[{chat_id}] {tool_name} 返回 {len(tool_images)} 张图片，下一轮切换 image 模型进行分析。")
                         except Exception:
@@ -1636,26 +1732,33 @@ class NoraController:
         return ready_parts, remaining, in_think_block
 
     async def _process_pending_messages(self, chat_id: str):
-        """后端完成后，处理队列中积攒的用户消息。"""
-        pending = self.pending_messages.pop(chat_id, [])
-        if not pending:
+        """后端完成后，从任务队列中取出下一个任务执行。逐个处理，不合并。"""
+        queue = self.task_queues.get(chat_id)
+        if not queue or queue.size() == 0:
             return
         
-        # 合并所有排队消息为一条（避免逐条触发完整的工具循环）
-        if len(pending) == 1:
-            combined_context = pending[0]
-        else:
-            # 合并文本，保留第一个消息的上下文
-            combined_text = "（以下是我之前排队的多条消息，请一起处理）\n" + "\n".join(
-                f"- {p['text']}" for p in pending
-            )
-            combined_context = pending[0].copy()
-            combined_context["text"] = combined_text
+        # 取出下一个任务
+        item = await queue.dequeue()
+        if not item:
+            return
         
-        logger.info(f"[{chat_id}] 开始处理 {len(pending)} 条排队消息。")
+        context = item["context"]
+        remaining = queue.size()
+        logger.info(f"[{chat_id}] 开始处理队列中的下一个任务 (剩余 {remaining} 个): '{context.get('text', '')[:50]}'")
         
-        # 递归调用，走正常流程
-        task = asyncio.create_task(self._generate_response(combined_context))
+        # 如果还有排队任务，通知用户
+        if remaining > 0:
+            try:
+                await self.adapter.send_message(
+                    chat_id,
+                    f"📋 开始处理排队任务... (还有 {remaining} 个任务在等待)",
+                    parse_media=False
+                )
+            except Exception:
+                pass
+        
+        # 启动新任务处理（走完整的生成流程，finally 块会继续处理下一个）
+        task = asyncio.create_task(self._generate_response(context))
         self.generation_tasks[chat_id] = task
 
     async def _async_save_memory(self, text: str, user_id: str, metadata: Dict[str, Any]):
