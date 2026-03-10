@@ -297,6 +297,32 @@ class NoraController:
             logger.info(f"[{chat_id}] Session已重置 by /start command.")
             return
 
+        # 特殊处理 /clear 命令
+        if text.strip().startswith("/clear"):
+            try:
+                # 取消正在进行的任务
+                if chat_id in self.generation_tasks:
+                    self.generation_tasks[chat_id].cancel()
+                    await asyncio.sleep(0.1)
+
+                # 清理内存上下文
+                self.sessions.pop(chat_id, None)
+                self.pending_messages.pop(chat_id, None)
+                status = self.worker_status.get(chat_id)
+                if status:
+                    status.finish()
+
+                # 清理数据库记录（私聊按 user_id）
+                storage_id = chat_id if chat_type != "private" else user_id
+                self.message_history.clear_chat_history("telegram", storage_id, keep_pinned=False)
+
+                await self.adapter.send_message(chat_id, "✅ 当前聊天的历史记录已清空。")
+                logger.info(f"[{chat_id}] 聊天历史已通过 /clear 命令清空。")
+            except Exception as e:
+                logger.error(f"[{chat_id}] 清空历史记录时出错: {e}")
+                await self.adapter.send_message(chat_id, "❌ 清空历史记录时发生错误。")
+            return
+
         # 特殊处理 /regenerate_proactive 指令
         # 用法:
         #   /regenerate_proactive

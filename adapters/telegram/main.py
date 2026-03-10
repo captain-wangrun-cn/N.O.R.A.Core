@@ -401,8 +401,22 @@ class TelegramAdapter(BaseAdapter):
         if not update.effective_chat:
             return
         chat_id = str(update.effective_chat.id)
+        # 优先交由 controller 统一清理（包含内存上下文）
+        if self._message_handler:
+            event_context = {
+                "chat_id": chat_id,
+                "user_id": str(update.effective_user.id) if update.effective_user else chat_id,
+                "text": "/clear",
+                "chat_type": update.effective_chat.type,
+                "user_name": update.effective_user.first_name if update.effective_user else "Unknown"
+            }
+            await self._message_handler(event_context)
+            return
+
+        # fallback: 直接清数据库（清理所有，不保留 pinned）
         try:
-            self.message_history.clear_chat_history("telegram", chat_id)
+            storage_id = chat_id if update.effective_chat.type != "private" else (str(update.effective_user.id) if update.effective_user else chat_id)
+            self.message_history.clear_chat_history("telegram", storage_id, keep_pinned=False)
             if update.message:
                 await update.message.reply_text("✅ 当前聊天的历史记录已清空。")
             logger.info(f"[{chat_id}] 聊天历史已通过 /clear 命令清空。")
