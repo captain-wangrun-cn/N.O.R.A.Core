@@ -282,7 +282,7 @@ class NoraController:
         )
         
         # 成本跟踪
-        cost_cfg = config.get_config().get("cost_tracking", {})
+        cost_cfg = (config.get_config() or {}).get("cost_tracking", {})
         self.cost_tracking_enabled = cost_cfg.get("enabled", True)
         if self.cost_tracking_enabled:
             custom_prices = cost_cfg.get("custom_prices", {})
@@ -295,7 +295,7 @@ class NoraController:
         # --- 主动消息调度器 (Proactive Scheduler) ---
         from workspace_config import get_workspace_manager
         workspace_mgr = get_workspace_manager()
-        schedule_cfg = config.get_config().get("schedule", {})
+        schedule_cfg = (config.get_config() or {}).get("schedule", {})
         schedule_enabled = schedule_cfg.get("enabled", True)
         scheduler_tz = history_cfg.get("timezone", "Asia/Shanghai")
         
@@ -314,6 +314,23 @@ class NoraController:
         self.tool_manager = ToolManager(adapter, image_store=self.image_store, scheduler=self.scheduler)
         
         logger.info(f"NoraController 已初始化。RAG: {'Online' if self.rag.enabled else 'Offline'}, MessageHistory: Online, Scheduler: {'Online' if self.scheduler else 'Offline'}")
+
+    def _reload_llm_clients(self):
+        """重新加载模型配置并刷新 LLM 客户端。"""
+        config.load_config()
+        self.llm = get_llm_client(model_alias="smart")
+        try:
+            self.fast_llm = get_llm_client(model_alias="fast")
+        except Exception:
+            self.fast_llm = self.llm
+        try:
+            self.coder_llm = get_llm_client(model_alias="coder")
+        except Exception:
+            self.coder_llm = self.llm
+        try:
+            self.image_llm = get_llm_client(model_alias="image")
+        except Exception:
+            self.image_llm = self.llm
 
     async def handle_new_message(self, context: Dict[str, Any]):
         """处理来自适配器的新消息/命令。"""
@@ -365,6 +382,17 @@ class NoraController:
                 await queue.clear()
             await self.adapter.send_message(chat_id, "N.O.R.A. Core 已启动。")
             logger.info(f"[{chat_id}] Session已重置 by /start command.")
+            return
+
+        # 特殊处理 /reload_models 命令
+        if text.strip().startswith("/reload_models"):
+            try:
+                self._reload_llm_clients()
+                await self.adapter.send_message(chat_id, "✅ 模型配置已重新加载。")
+                logger.info(f"[{chat_id}] 模型配置已通过 /reload_models 刷新。")
+            except Exception as e:
+                logger.error(f"[{chat_id}] /reload_models 执行失败: {e}", exc_info=True)
+                await self.adapter.send_message(chat_id, f"❌ 模型刷新失败: {e}")
             return
 
         # 特殊处理 /clear 命令
