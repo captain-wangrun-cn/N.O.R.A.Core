@@ -140,6 +140,7 @@ class TelegramAdapter(BaseAdapter):
     """Telegram 平台适配器。"""
 
     DEBUG_CLEANUP_COMMAND = "/debug_cleanup"
+    MODEL_COMMAND = "/model"
     _cleanup_confirm_tokens: Dict[str, float] = {}
     _cleanup_lock = asyncio.Lock()
 
@@ -221,6 +222,7 @@ class TelegramAdapter(BaseAdapter):
         # 媒体组（相册）缓冲：media_group_id -> {"photos": [...], "caption": str, "chat_id": str, ...}
         self._media_group_buffers: Dict[str, Dict[str, Any]] = {}
         self._media_group_timers: Dict[str, asyncio.Task] = {}
+        self._model_option_tokens: Dict[str, tuple[str, str]] = {}
 
     def _resolve_local_media_path(self, raw_path: str) -> Optional[str]:
         """
@@ -323,6 +325,7 @@ class TelegramAdapter(BaseAdapter):
         regenerate_proactive_handler = CommandHandler('regenerate_proactive', self._regenerate_proactive_command)
         schedule_today_handler = CommandHandler('schedule_today', self._schedule_today_command)
         debug_cleanup_handler = CommandHandler('debug_cleanup', self._debug_cleanup_command)
+        model_handler = CommandHandler('model', self._model_command)
         msg_handler = MessageHandler(filters.TEXT & (~filters.COMMAND), self._handle_incoming_message)
         photo_handler = MessageHandler(filters.PHOTO, self._handle_photo)
         document_handler = MessageHandler(filters.Document.ALL, self._handle_document)
@@ -337,6 +340,7 @@ class TelegramAdapter(BaseAdapter):
         self.application.add_handler(regenerate_proactive_handler)
         self.application.add_handler(schedule_today_handler)
         self.application.add_handler(debug_cleanup_handler)
+        self.application.add_handler(model_handler)
         self.application.add_handler(msg_handler)
         self.application.add_handler(photo_handler)
         self.application.add_handler(document_handler)
@@ -540,6 +544,29 @@ class TelegramAdapter(BaseAdapter):
         )
         await update.message.reply_text(warning_text, reply_markup=keyboard, parse_mode=ParseMode.HTML)
 
+    async def _model_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """展示模型切换按钮并允许保存配置。"""
+        if not update.effective_chat or not update.message:
+            return
+
+        cfg = config.get_config() or {}
+        llm_cfg = cfg.get("llm", {}) or {}
+        models_cfg = llm_cfg.get("models", {}) or {}
+
+        buttons = []
+        for alias in ["smart", "fast", "coder", "image", "summary"]:
+            current = models_cfg.get(alias, "")
+            label = f"{alias}: {current or '未设置'}"
+            buttons.append([InlineKeyboardButton(label, callback_data=f"model_pick:{alias}")])
+        buttons.append([InlineKeyboardButton("关闭", callback_data="model_pick:cancel")])
+
+        text = (
+            "🧠 <b>模型切换</b>\n"
+            "点击要修改的模型别名，然后输入新的模型名称。\n"
+            "将立即保存到 config.yml。"
+        )
+        await update.message.reply_text(text, reply_markup=InlineKeyboardMarkup(buttons), parse_mode=ParseMode.HTML)
+
     async def _regenerate_proactive_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """
         手动触发“重新生成主动消息计划”。
@@ -599,6 +626,7 @@ class TelegramAdapter(BaseAdapter):
         chat_id = str(update.effective_chat.id)
         self.current_chat_id = chat_id # Set current chat_id
         text = update.message.text if update.message else ""
+
         
         # 如果是空消息（例如，只有一张图片），也需要继续处理
         if not text and not (update.message and (update.message.photo or update.message.document or update.message.sticker)):
@@ -819,6 +847,14 @@ class TelegramAdapter(BaseAdapter):
             await self._handle_debug_cleanup_confirm(query, action)
             return
 
+        if callback_data and callback_data.startswith("model_pick:"):
+            await self._handle_model_pick_callback(query, callback_data)
+            return
+
+        if callback_data and callback_data.startswith("model_set:"):
+            await self._handle_model_set_callback(query, callback_data)
+            return
+
         if callback_data and callback_data.startswith("debug_cleanup:"):
             await self._handle_debug_cleanup_callback(query, callback_data)
             return
@@ -895,6 +931,88 @@ class TelegramAdapter(BaseAdapter):
             result_lines.append(self._purge_chat_history())
 
         await query.edit_message_text("\n".join(result_lines))
+
+    async def _handle_model_pick_callback(self, query, callback_data: str):
+        if not query or not query.message:
+            return
+        chat_id = str(query.message.chat.id)
+        alias = callback_data.split(":", 1)[1]
+
+        if alias == "cancel":
+            await query.edit_message_text("已关闭模型切换。")
+            return
+
+        cfg = config.get_config() or {}
+        llm_cfg = cfg.get("llm", {}) or {}
+        models_cfg = llm_cfg.get("models", {}) or {}
+        current_model = models_cfg.get(alias, "")
+
+        model_options = [m for m in models_cfg.values() if m]
+        if current_model and current_model not in model_options:
+            model_options.append(current_model)
+
+        if not model_options:
+            await query.edit_message_text("⚠️ 未找到可选模型，请先在 config.yml 配置 models。")
+            return
+
+        model_options = list(dict.fromkeys(model_options))
+
+        buttons = []
+        for model_name in model_options:
+            token = f"m{len(self._model_option_tokens) + 1}"[-10:]
+            self._model_option_tokens[token] = (chat_id, model_name)
+            label = f"{model_name}"
+            if model_name == current_model:
+                label = f"✅ {label}"
+            buttons.append([InlineKeyboardButton(label, callback_data=f"model_set:{alias}:{token}")])
+
+        buttons.append([InlineKeyboardButton("取消", callback_data="model_pick:cancel")])
+
+        await query.edit_message_text(
+            f"选择 {alias} 的模型：",
+            reply_markup=InlineKeyboardMarkup(buttons),
+        )
+
+    async def _apply_model_update(self, update: Update, alias: str, model_name: str):
+        if not update.effective_chat or not update.message:
+            return
+
+        try:
+            cfg = config.get_config() or {}
+            llm_cfg = cfg.setdefault("llm", {})
+            models_cfg = llm_cfg.setdefault("models", {})
+            models_cfg[alias] = model_name
+            config.save_config(cfg)
+            await update.message.reply_text(f"✅ 已更新 {alias} 模型为: {model_name}")
+        except Exception as e:
+            await update.message.reply_text(f"❌ 更新失败: {e}")
+
+    async def _handle_model_set_callback(self, query, callback_data: str):
+        if not query or not query.message:
+            return
+        parts = callback_data.split(":", 2)
+        if len(parts) != 3:
+            await query.edit_message_text("⚠️ 回调参数错误。")
+            return
+        _, alias, token = parts
+        token_entry = self._model_option_tokens.pop(token, None)
+        if not token_entry:
+            await query.edit_message_text("⚠️ 选项已过期，请重新发起 /model。")
+            return
+        chat_id, model_name = token_entry
+        if str(query.message.chat.id) != str(chat_id):
+            await query.edit_message_text("⚠️ 当前会话无法使用该选项。")
+            return
+
+        try:
+            cfg = config.get_config() or {}
+            llm_cfg = cfg.setdefault("llm", {})
+            models_cfg = llm_cfg.setdefault("models", {})
+            models_cfg[alias] = model_name
+            config.save_config(cfg)
+            await query.edit_message_text(f"✅ 已更新 {alias} 模型为: {model_name}")
+        except Exception as e:
+            await query.edit_message_text(f"❌ 更新失败: {e}")
 
     def _purge_qdrant(self) -> str:
         """清空所有 Qdrant 相关集合。"""

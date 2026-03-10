@@ -22,6 +22,13 @@ def load_config():
     with open(CONFIG_FILE, 'r') as f:
         _config = yaml.safe_load(f)
 
+def save_config(config_data: dict):
+    """Save config dict to CONFIG_FILE and update cache."""
+    global _config
+    with open(CONFIG_FILE, 'w', encoding='utf-8') as f:
+        yaml.safe_dump(config_data, f, allow_unicode=True, sort_keys=False)
+    _config = config_data
+
 def get_config():
     """Returns the loaded configuration dictionary."""
     if _config is None:
