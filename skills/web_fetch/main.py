@@ -136,27 +136,36 @@ def call_llm_openai(api_key: str, model: str, system_prompt: str, user_prompt: s
 def extract_with_llm(config: dict, markdown: str, query: str) -> str:
     """使用配置中的 fast 模型提取信息"""
     llm_config = config.get("llm", {})
-    provider = llm_config.get("provider", "gemini")
-    api_keys = llm_config.get("api_keys", {})
     models = llm_config.get("models", {})
+    model_providers = llm_config.get("model_providers", {}) or {}
+    providers_cfg = llm_config.get("providers", {}) or {}
+    legacy_api_keys = llm_config.get("api_keys", {}) or {}
 
-    api_key = api_keys.get(provider)
+    default_provider_alias = llm_config.get("provider", "gemini")
+    provider_alias = model_providers.get("fast", default_provider_alias)
+    provider_cfg = providers_cfg.get(provider_alias, {}) or {}
+    provider_type = provider_cfg.get("type", provider_alias)
+
+    api_key = provider_cfg.get("api_key") or legacy_api_keys.get(provider_type) or legacy_api_keys.get(provider_alias)
     model_name = models.get("fast")
 
     if not api_key:
-        raise RuntimeError(f"No API key for provider '{provider}'. Check config.yml -> llm.api_keys.{provider}")
+        raise RuntimeError(
+            f"No API key for provider '{provider_alias}'. Check config.yml -> llm.providers.{provider_alias}.api_key "
+            f"(or llm.api_keys.{provider_type})"
+        )
     if not model_name:
         raise RuntimeError("No 'fast' model configured. Check config.yml -> llm.models.fast")
 
     user_prompt = f"## Query\n{query}\n\n## Webpage Content\n{markdown}"
 
-    if provider == "gemini":
+    if provider_type == "gemini":
         return call_llm_gemini(api_key, model_name, EXTRACTION_SYSTEM_PROMPT, user_prompt)
-    elif provider == "openai":
-        base_url = llm_config.get("base_url")
+    elif provider_type == "openai":
+        base_url = provider_cfg.get("base_url") or llm_config.get("base_url")
         return call_llm_openai(api_key, model_name, EXTRACTION_SYSTEM_PROMPT, user_prompt, base_url)
     else:
-        raise RuntimeError(f"Unsupported LLM provider: '{provider}'")
+        raise RuntimeError(f"Unsupported LLM provider: '{provider_type}'")
 
 
 def run(url: str, query: str, raw: bool = False, **kwargs) -> int:
