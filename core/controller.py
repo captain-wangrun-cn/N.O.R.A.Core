@@ -323,6 +323,31 @@ class NoraController:
                 await self.adapter.send_message(chat_id, "❌ 清空历史记录时发生错误。")
             return
 
+        # 特殊处理 /stop 命令
+        if text.strip().startswith("/stop"):
+            try:
+                # 取消后脑任务
+                if chat_id in self.generation_tasks:
+                    self.generation_tasks[chat_id].cancel()
+                    await asyncio.sleep(0.1)
+
+                # 清理内存上下文与排队消息
+                self.sessions.pop(chat_id, None)
+                self.pending_messages.pop(chat_id, None)
+                status = self.worker_status.get(chat_id)
+                if status:
+                    status.finish()
+
+                # 停止后续跟进定时器
+                self._cancel_followup_timer(chat_id)
+
+                await self.adapter.send_message(chat_id, "✅ 已停止当前所有任务。")
+                logger.info(f"[{chat_id}] 已通过 /stop 命令停止所有任务。")
+            except Exception as e:
+                logger.error(f"[{chat_id}] 停止任务时出错: {e}")
+                await self.adapter.send_message(chat_id, "❌ 停止任务时发生错误。")
+            return
+
         # 特殊处理 /regenerate_proactive 指令
         # 用法:
         #   /regenerate_proactive

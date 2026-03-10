@@ -311,6 +311,7 @@ class TelegramAdapter(BaseAdapter):
         )
 
         start_handler = CommandHandler('start', self._start_command)
+        stop_handler = CommandHandler('stop', self._stop_command)
         clear_handler = CommandHandler('clear', self._clear_command)
         status_handler = CommandHandler('status', self._status_command)
         debug_handler = CommandHandler('debug', self._debug_command)
@@ -323,6 +324,7 @@ class TelegramAdapter(BaseAdapter):
         callback_handler = CallbackQueryHandler(self._handle_callback)
         
         self.application.add_handler(start_handler)
+        self.application.add_handler(stop_handler)
         self.application.add_handler(clear_handler)
         self.application.add_handler(status_handler)
         self.application.add_handler(debug_handler)
@@ -424,6 +426,25 @@ class TelegramAdapter(BaseAdapter):
             logger.error(f"[{chat_id}] 清空历史记录时出错: {e}")
             if update.message:
                 await update.message.reply_text("❌ 清空历史记录时发生错误。")
+
+    async def _stop_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        if not update.effective_chat:
+            return
+        chat_id = str(update.effective_chat.id)
+        # 交由 controller 统一停止前/后脑任务
+        if self._message_handler:
+            event_context = {
+                "chat_id": chat_id,
+                "user_id": str(update.effective_user.id) if update.effective_user else chat_id,
+                "text": "/stop",
+                "chat_type": update.effective_chat.type,
+                "user_name": update.effective_user.first_name if update.effective_user else "Unknown"
+            }
+            await self._message_handler(event_context)
+            return
+        # fallback: 没有 controller 时提示
+        if update.message:
+            await update.message.reply_text("⚠️ 当前无法停止任务。")
 
     async def _status_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not update.effective_chat:
