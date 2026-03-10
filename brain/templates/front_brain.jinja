@@ -3,6 +3,12 @@
 {# system prompt — 包含完整人设，让前脑保持角色一致性 #}
 {% block system %}{{ soul_prompt }}
 
+{% if identity_context %}
+
+---
+{{ identity_context }}
+{% endif %}
+
 ---
 
 你正在以上述身份，通过即时聊天软件与用户实时对话。

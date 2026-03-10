@@ -896,7 +896,13 @@ class NoraController:
 
         # --- 构建前脑 prompt ---
         soul_prompt = get_soul_prompt()
-        system_prompt = render_template('front_brain.jinja', 'system', soul_prompt=soul_prompt)
+        identity_context = load_identity_context()
+        system_prompt = render_template(
+            'front_brain.jinja',
+            'system',
+            soul_prompt=soul_prompt,
+            identity_context=identity_context,
+        )
         user_prompt = render_template('front_brain.jinja', 'user', user_message=text)
 
         # --- 前脑也接入 RAG 记忆检索 ---
