@@ -26,29 +26,74 @@ logger = logging.getLogger(__name__)
 class WorkerStatus:
     """后端工作状态追踪器 —— 记录当前正在做什么，供前端查询。"""
 
+    # 工具名 → 用户可读的描述
+    _TOOL_DESCRIPTIONS = {
+        "execute_skill": "执行技能",
+        "read_file": "读取文件",
+        "write_file": "写入文件",
+        "edit_file": "编辑文件",
+        "search": "搜索代码",
+        "list_dir": "浏览目录",
+        "exec_command": "执行命令",
+        "create_new_skill": "创建新技能",
+        "execute_tool_plan": "执行多步骤计划",
+        "view_image": "检索图片",
+        "crop_image_for_llm": "裁剪图片",
+        "set_alarm": "设置闹钟",
+        "get_available_skills": "查看可用技能",
+    }
+
     def __init__(self):
         self.busy: bool = False
         self.phase: str = ""          # 当前阶段名 (e.g. "RAG检索", "工具调用")
         self.detail: str = ""         # 更详细描述 (e.g. "正在执行 execute_skill(web_search)")
         self.tool_history: List[str] = []  # 本次任务执行过的工具步骤摘要
+        self.tool_history_readable: List[str] = []  # 用户可读的步骤描述
         self.current_turn: int = 0
         self.max_turns: int = 0
         self.started_at: float = 0.0
         self.original_query: str = ""  # 用户最初问的问题
+        self.next_action: str = ""     # 预告：下一步准备做什么
 
     def start(self, query: str, max_turns: int = 30):
         self.busy = True
         self.phase = "初始化"
         self.detail = "正在准备处理请求..."
         self.tool_history = []
+        self.tool_history_readable = []
         self.current_turn = 0
         self.max_turns = max_turns
         self.started_at = time.time()
         self.original_query = query
+        self.next_action = ""
 
     def update(self, phase: str, detail: str = ""):
         self.phase = phase
         self.detail = detail
+
+    def preview_next(self, tool_name: str, tool_args: Any):
+        """预告下一步要做什么（在工具执行前调用）。"""
+        readable = self._TOOL_DESCRIPTIONS.get(tool_name, tool_name)
+        if isinstance(tool_args, dict):
+            # 提取关键参数增加可读性
+            if tool_name == "execute_skill":
+                skill = tool_args.get("skill_name", "")
+                self.next_action = f"准备{readable}: {skill}"
+            elif tool_name in ("read_file", "write_file", "edit_file"):
+                path = tool_args.get("path", "")
+                self.next_action = f"准备{readable}: {os.path.basename(path) if path else '...'}"
+            elif tool_name == "exec_command":
+                cmd = str(tool_args.get("command", ""))[:40]
+                self.next_action = f"准备{readable}: {cmd}"
+            elif tool_name == "search":
+                query = tool_args.get("query", "")
+                self.next_action = f"准备{readable}: {query[:40]}"
+            else:
+                self.next_action = f"准备{readable}"
+        else:
+            self.next_action = f"准备{readable}"
+        self.phase = "工具调用"
+        self.detail = self.next_action
 
     def log_tool(self, tool_name: str, tool_args: Any):
         """记录一次工具调用的简略描述。"""
@@ -59,11 +104,25 @@ class WorkerStatus:
             self.tool_history.append(f"{tool_name}({short_args})")
         else:
             self.tool_history.append(f"{tool_name}(...)")
+        
+        # 用户可读版本
+        readable = self._TOOL_DESCRIPTIONS.get(tool_name, tool_name)
+        if isinstance(tool_args, dict):
+            if tool_name == "execute_skill":
+                self.tool_history_readable.append(f"{readable}: {tool_args.get('skill_name', '...')}")
+            elif tool_name in ("read_file", "write_file", "edit_file"):
+                path = tool_args.get("path", "")
+                self.tool_history_readable.append(f"{readable}: {os.path.basename(path) if path else '...'}")
+            else:
+                self.tool_history_readable.append(readable)
+        else:
+            self.tool_history_readable.append(readable)
 
     def finish(self):
         self.busy = False
         self.phase = "完成"
         self.detail = ""
+        self.next_action = ""
 
     def get_summary(self) -> str:
         """生成一段给用户看的进度概括。"""
@@ -76,8 +135,10 @@ class WorkerStatus:
         ]
         if self.detail:
             lines.append(f"🔧 {self.detail}")
-        if self.tool_history:
-            recent = self.tool_history[-3:]  # 最近3步
+        if self.next_action:
+            lines.append(f"⏳ 下一步: {self.next_action}")
+        if self.tool_history_readable:
+            recent = self.tool_history_readable[-3:]  # 最近3步
             lines.append("📝 最近步骤:")
             for step in recent:
                 lines.append(f"  • {step}")
@@ -616,9 +677,9 @@ class NoraController:
         task = self.generation_tasks.get(chat_id)
         if task and not task.done():
             task.cancel()
-            # 等待任务真正结束
+            # 等待任务真正结束（短超时，避免阻塞前端过久）
             try:
-                await asyncio.wait_for(asyncio.shield(task), timeout=2.0)
+                await asyncio.wait_for(asyncio.shield(task), timeout=1.0)
             except (asyncio.CancelledError, asyncio.TimeoutError, Exception):
                 pass
         
@@ -870,10 +931,10 @@ class NoraController:
             instructions = []
             
             # Inject Workspace Context
-            from brain.tools import WORKSPACE_ROOT, SKILLS_DIR
+            from brain.tools import WORKSPACE_ROOT, SKILLS_DIR, CODE_SKILLS_DIR
             workspace_info = render_template('context_injection.jinja', 'workspace',
                                              workspace_root=WORKSPACE_ROOT,
-                                             skills_dir=SKILLS_DIR,
+                                             skills_dir=CODE_SKILLS_DIR,
                                              downloads_dir=os.path.join(WORKSPACE_ROOT, 'downloads'))
             instructions.append(workspace_info)
             
@@ -962,6 +1023,8 @@ class NoraController:
             status.update("思考中", "正在生成回复...")
 
             while current_turn < MAX_TURNS:
+                # --- 抢占检查点：每轮开始前检查是否被取消 ---
+                await asyncio.sleep(0)  # 让出控制权，允许 CancelledError 传播
                 current_turn += 1
                 status.current_turn = current_turn
                 status.update("思考中", f"第 {current_turn}/{MAX_TURNS} 轮推理...")
@@ -1163,7 +1226,11 @@ class NoraController:
                             continue  # 不 break，让 LLM 生成总结
                     
                     
+                    # --- 抢占检查点：工具执行前检查取消 ---
+                    await asyncio.sleep(0)
+                    
                     # Execute Tool
+                    status.preview_next(tool_name, tool_args)  # 预告下一步
                     status.update("工具调用", f"正在执行 {tool_name}...")
                     status.log_tool(tool_name, tool_args)
                     if tool_name == "view_image" and isinstance(tool_args, dict):
@@ -1185,6 +1252,8 @@ class NoraController:
                         except Exception:
                             logger.warning(f"[{chat_id}] 解析 {tool_name} 返回图片失败，已跳过多模态注入。", exc_info=True)
                     status.update("处理结果", f"{tool_name} 执行完毕，正在分析结果...")
+                    # --- 抢占检查点：工具执行后检查取消 ---
+                    await asyncio.sleep(0)
                     logger.info(f"[{chat_id}] 🔧 Tool Result for {tool_name}: {tool_result[:100]}...")
                     # Debug: 工具执行结果
                     result_preview = tool_result[:500] if len(tool_result) > 500 else tool_result
@@ -1388,7 +1457,12 @@ class NoraController:
                      asyncio.create_task(self._async_save_memory(full_assistant_turn.strip(), storage_id, {"role": "assistant", "chat_id": chat_id}))
 
             # Update session history (in-memory cache, DB is source of truth)
-            session["history"] = temp_history
+            # 过滤掉工具调用的中间内容，只保留 user/assistant 对话
+            session["history"] = [
+                h for h in temp_history
+                if h.get("role") in ("user", "assistant", "system")
+                and not str(h.get("content", "")).startswith("【Tool Output for ")
+            ]
             if final_response_buffer:
                  if not any(final_response_buffer in str(h.get('content', '')) for h in session["history"]):
                     session["history"].append({"role": "assistant", "content": final_response_buffer})

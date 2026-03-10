@@ -21,6 +21,10 @@ WORKSPACE_ROOT = workspace_manager.root
 SKILLS_DIR = workspace_manager.skills_dir
 DOWNLOADS_DIR = workspace_manager.downloads_dir
 
+# 代码仓库根目录（brain/ 的上一级），技能脚本位于此目录下的 skills/
+CODE_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+CODE_SKILLS_DIR = os.path.join(CODE_ROOT, "skills")
+
 # Files that LLM should NEVER read (contain secrets)
 SENSITIVE_FILES = {"config.yml", "config.yaml", ".env", ".env.local"}
 # Dangerous command patterns
@@ -277,7 +281,7 @@ class ToolManager:
         :param description: A one-sentence description of what the new skill does.
         """
         logger.info(f"Request to create new skill: {skill_name}")
-        skill_dir = os.path.join("skills", skill_name)
+        skill_dir = os.path.join(CODE_SKILLS_DIR, skill_name)
         if os.path.exists(skill_dir):
             return f"Error: Skill '{skill_name}' already exists. Please choose a different name."
         try:
@@ -306,13 +310,13 @@ class ToolManager:
             return feedback
         except Exception as e: return f"An unexpected error occurred: {e}"
 
-    def execute_skill(self, skill_name: str, args_json: str = "{}") -> str:
+    async def execute_skill(self, skill_name: str, args_json: str = "{}") -> str:
         """
         Executes a specific, pre-existing skill. This is the ONLY safe way to run skill scripts.
         :param skill_name: The name of the skill directory (e.g., 'pixiv_manager').
         :param args_json: A JSON string of arguments for the skill (e.g., '{"keyword": "blue archive"}').
         """
-        skill_script_path = os.path.join("skills", skill_name, "main.py")
+        skill_script_path = os.path.join(CODE_SKILLS_DIR, skill_name, "main.py")
         if not os.path.exists(skill_script_path):
             return f"Error: Skill '{skill_name}' not found. Use get_available_skills to see what's available."
         
@@ -335,7 +339,8 @@ class ToolManager:
         env["WORKSPACE_ROOT"] = str(WORKSPACE_ROOT)
         env["DOWNLOADS_DIR"] = str(DOWNLOADS_DIR)
         env["SKILLS_DIR"] = str(SKILLS_DIR)
-        config_path = os.path.join("skills", skill_name, "config.json")
+        env["CODE_ROOT"] = str(CODE_ROOT)
+        config_path = os.path.join(CODE_SKILLS_DIR, skill_name, "config.json")
         if os.path.exists(config_path):
             try:
                 with open(config_path, 'r', encoding='utf-8') as f:
@@ -357,18 +362,32 @@ class ToolManager:
             for key, value in args_dict.items():
                 command.extend([f"--{key}", str(value)])
             
-            result = subprocess.run(command, capture_output=True, text=True, timeout=120, env=env)
-            output = result.stdout.strip()
-            stderr = result.stderr.strip()
+            # 使用 asyncio subprocess 避免阻塞事件循环
+            import asyncio
+            proc = await asyncio.create_subprocess_exec(
+                *command,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+                env=env,
+            )
+            try:
+                stdout_bytes, stderr_bytes = await asyncio.wait_for(proc.communicate(), timeout=120)
+            except asyncio.TimeoutError:
+                proc.kill()
+                await proc.wait()
+                return f"Error: Skill '{skill_name}' timed out after 120 seconds."
+            
+            output = (stdout_bytes or b"").decode("utf-8", errors="replace").strip()
+            stderr = (stderr_bytes or b"").decode("utf-8", errors="replace").strip()
             
             if stderr:
                 output += f"\n[STDERR]\n{stderr}"
             
-            if result.returncode != 0:
-                return f"Skill '{skill_name}' failed (exit code {result.returncode}).\n{output}" if output else f"Skill '{skill_name}' failed with no output."
+            if proc.returncode != 0:
+                return f"Skill '{skill_name}' failed (exit code {proc.returncode}).\n{output}" if output else f"Skill '{skill_name}' failed with no output."
             
             return output if output else f"Skill '{skill_name}' ran OK but produced no output. Check if it prints results."
-        except subprocess.TimeoutExpired:
+        except asyncio.TimeoutError:
             return f"Error: Skill '{skill_name}' timed out after 120 seconds."
         except json.JSONDecodeError as e:
             return f"Error: Invalid args_json: {e}. Format: '{{\"key\": \"value\"}}'."
@@ -377,10 +396,9 @@ class ToolManager:
 
     def get_available_skills(self) -> str:
         """Lists all available skills that N.O.R.A. Core can use."""
-        skills_dir = "skills/"
-        if not os.path.exists(skills_dir): return "Error: Skills directory not found."
+        if not os.path.exists(CODE_SKILLS_DIR): return f"Error: Skills directory not found at {CODE_SKILLS_DIR}."
         try:
-            skill_folders = [d for d in os.listdir(skills_dir) if os.path.isdir(os.path.join(skills_dir, d)) and not d.startswith('__')]
+            skill_folders = [d for d in os.listdir(CODE_SKILLS_DIR) if os.path.isdir(os.path.join(CODE_SKILLS_DIR, d)) and not d.startswith('__')]
             if not skill_folders: return "No skills are currently available."
             return "Available skills:\\n" + "\\n".join([f"- {s}" for s in skill_folders])
         except Exception as e: return f"Error listing skills: {e}"
@@ -684,7 +702,7 @@ class ToolManager:
         except Exception as e:
             return f"Error editing file: {e}"
 
-    def exec_command(self, command: str, timeout: int = 60) -> str:
+    async def exec_command(self, command: str, timeout: int = 60) -> str:
         """
         (DANGEROUS) Executes a general-purpose shell command.
         WARNING: Do NOT use this for tasks that a high-level tool can do.
@@ -718,21 +736,36 @@ class ToolManager:
                 f"The execute_skill tool handles argument parsing, timeout, and error reporting automatically."
             )
         try:
-            result = subprocess.run(command, shell=True, capture_output=True, text=True, timeout=timeout)
+            # 使用 asyncio subprocess 避免阻塞事件循环
+            import asyncio
+            proc = await asyncio.create_subprocess_shell(
+                command,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            try:
+                stdout_bytes, stderr_bytes = await asyncio.wait_for(proc.communicate(), timeout=timeout)
+            except asyncio.TimeoutError:
+                proc.kill()
+                await proc.wait()
+                return f"Error: Command timed out after {timeout} seconds. For long-running commands (apt install, pip install, etc.), use a higher timeout value, e.g. exec_command(command, timeout=300)."
+            
+            output_str = (stdout_bytes or b"").decode("utf-8", errors="replace").strip()
+            stderr_str = (stderr_bytes or b"").decode("utf-8", errors="replace").strip()
             
             # Build structured output with exit code
             parts = []
-            if result.stdout.strip():
-                parts.append(result.stdout.strip())
-            if result.stderr.strip():
-                parts.append(f"[STDERR]\n{result.stderr.strip()}")
+            if output_str:
+                parts.append(output_str)
+            if stderr_str:
+                parts.append(f"[STDERR]\n{stderr_str}")
             
             output = "\n".join(parts) if parts else "(no output)"
             
             # Always include exit code for LLM decision-making
-            status = "✅ SUCCESS" if result.returncode == 0 else f"❌ FAILED"
-            return f"[Exit Code: {result.returncode}] {status}\n{output}"
-        except subprocess.TimeoutExpired:
+            status = "✅ SUCCESS" if proc.returncode == 0 else f"❌ FAILED"
+            return f"[Exit Code: {proc.returncode}] {status}\n{output}"
+        except asyncio.TimeoutError:
             return f"Error: Command timed out after {timeout} seconds. For long-running commands (apt install, pip install, etc.), use a higher timeout value, e.g. exec_command(command, timeout=300)."
         except Exception as e: return f"Error executing command: {e}"
 

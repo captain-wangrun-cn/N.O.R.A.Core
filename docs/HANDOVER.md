@@ -3,7 +3,54 @@
 - 目标：多平台智能体内核，包含 LLM 适配、工具/技能体系、成本追踪、记忆/RAG。
 - 当前状态：可运行，自测通过；已完成图片记忆链路（入库/检索/回查再分析）、`view_image` 工具增强、CLI 高危清理保护。
 
-## 近期关键改动（截至 2026-03-09）
+## 近期关键改动（截至 2026-03-10）
+
+### 🔧 七项架构修复 — 2026-03-10
+
+**1. 抢占机制响应优化**
+- 在后脑工具循环的关键节点（工具执行前/后）插入 `await asyncio.sleep(0)` 抢占检查点
+- 缩短 `_interrupt_backend` 中的 cancel 等待超时从 2s → 1s
+- **效果**：前脑发送 stop/change 指令后，后脑能更快响应取消
+
+**2. 后脑工具调用内容不污染聊天记录**
+- session history 保存时过滤 `【Tool Output for xxx】` 格式的工具中间输出
+- 数据库（message_history）只保存最终 `final_response_buffer`，不含工具调用细节
+- **效果**：避免 fast_llm 在忙碌分支处理时看到大量工具输出占用 token
+
+**3. Telegram 多图片（相册）+ caption 支持**
+- `_handle_photo` 重写：通过 `media_group_id` 检测 Telegram 相册
+- 新增 `_media_group_buffers` + `_media_group_timers` 缓冲机制，等待 1s 后合并同组图片
+- 多张图片合并为一条消息（多个 `[image: ...]` 标签 + caption）发给聚合器
+- 单张图片仍走原有直接处理路径
+
+**4. Skill 路径统一为代码仓库路径**
+- 新增 `CODE_ROOT` / `CODE_SKILLS_DIR` 常量（`brain/tools.py`），指向项目根目录的 `skills/`
+- `create_new_skill`、`execute_skill`、`get_available_skills` 全部改用 `CODE_SKILLS_DIR`
+- 注入到 LLM 的工作区提示也更新为代码仓库的 skills 路径
+- **效果**：AI 不会把技能脚本错误地创建/查找到 workspace 目录下
+
+**5. 前脑纯聊天路由简化**
+- `front_brain.jinja` 明确：纯聊天时不需要输出任何标记（不需要 `needs_backend=False`）
+- 代码逻辑本已正确：不包含 `[NEED_BACKEND]` 即视为纯聊天
+
+**6. 异步化工具执行，解除事件循环阻塞**
+- `execute_skill` 改为 `async def`，内部使用 `asyncio.create_subprocess_exec` 替代同步 `subprocess.run`
+- `exec_command` 同样改为 `async def`，使用 `asyncio.create_subprocess_shell`
+- **效果**：工具执行期间不再阻塞事件循环，前脑可正常接收和处理用户消息
+
+**7. WorkerStatus 进度系统增强**
+- 新增 `preview_next(tool_name, tool_args)` 方法：工具执行前预告"准备做什么"
+- 新增 `tool_history_readable` 列表：用户可读的步骤描述（"执行技能: web_search" 而非原始参数）
+- 新增 `_TOOL_DESCRIPTIONS` 映射表：工具名 → 中文可读描述
+- `get_summary()` 输出增加"下一步"预告信息
+- **效果**：前脑在忙碌回复中能告诉用户后脑"正在做什么"和"准备做什么"
+
+**涉及文件**：
+- `core/controller.py`：WorkerStatus 增强、抢占检查点、session history 过滤
+- `brain/tools.py`：CODE_ROOT/CODE_SKILLS_DIR、async 化 execute_skill/exec_command
+- `adapters/telegram/main.py`：多图相册支持
+- `brain/templates/front_brain.jinja`：纯聊天路由提示优化
+- `brain/templates/context_injection.jinja`：skills 路径提示更新
 
 ### 🆕 AI 在线状态重构 & 对话延续机制 — 2026-03-09
 
@@ -127,6 +174,26 @@
 - 相关回归：`tests/test_image_memory.py`、`tests/test_multimodal_input.py`、`tests/test_routing.py`、`tests/test_openai_tools.py` 均通过（最近一次 32 passed）。
 
 ## 历史改动（截至 2026-03-07）
+
+### 🆕 前脑/后脑模型与RAG调整 + Debug媒体禁用 — 2026-03-10
+
+**背景：** 普通对话已迁移到前脑（Front-Brain-First），需要进一步优化模型分工与调试输出。
+
+**改动要点：**
+
+1) **模型分工调整**
+- 前脑改为使用 `smart` 模型（`self.llm`）
+- 后脑改为使用 `coder` 模型（`self.coder_llm`）
+- 后端忙碌时意图检测仍使用 `fast` 模型
+
+2) **前脑接入 RAG**
+- `_generate_front_chat_response` 增加 RAG 检索（`top_k=2`）
+- 命中后通过 `context_injection.jinja` 的 `rag` block 注入前脑 `system_prompt`
+
+3) **Debug 消息禁用媒体解析**
+- `core/controller.py::_send_debug` 发送时使用 `parse_media=False`
+- `adapters/telegram/main.py::send_message` 新增 `parse_media` 参数，关闭时不解析 `[image:...]` 等媒体标签
+- Debug 消息包裹为代码块，避免富媒体误解析
 
 ### 🆕 路由改造：前脑优先（Front-Brain-First）— 2026-03-07
 

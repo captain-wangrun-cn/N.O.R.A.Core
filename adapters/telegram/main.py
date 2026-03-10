@@ -213,6 +213,9 @@ class TelegramAdapter(BaseAdapter):
         self.message_history = MessageHistory()
         self._reply_contexts: Dict[str, Dict] = {}  # 存储回复上下文 {chat_id: {msg_id: context}}
         self.bot_username: Optional[str] = None
+        # 媒体组（相册）缓冲：media_group_id -> {"photos": [...], "caption": str, "chat_id": str, ...}
+        self._media_group_buffers: Dict[str, Dict[str, Any]] = {}
+        self._media_group_timers: Dict[str, asyncio.Task] = {}
 
     def _resolve_local_media_path(self, raw_path: str) -> Optional[str]:
         """
@@ -556,7 +559,7 @@ class TelegramAdapter(BaseAdapter):
             await self._aggregator.add_message(chat_id, text or "", full_context)
 
     async def _handle_photo(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """处理图片消息"""
+        """处理图片消息（支持单图和多图相册 media_group）"""
         if not await self._should_process_message(update):
             return
 
@@ -569,6 +572,7 @@ class TelegramAdapter(BaseAdapter):
             return
         photo = update.message.photo[-1]  # 获取最高质量版本
         caption = update.message.caption or ""
+        media_group_id = update.message.media_group_id
         
         # 下载图片
         file = await photo.get_file()
@@ -576,25 +580,83 @@ class TelegramAdapter(BaseAdapter):
         await file.download_to_drive(abs_file_path)
         rel_file_path = os.path.relpath(abs_file_path, self.workspace_root).replace('\\', '/')
         
-        # 构造消息
         reply_info = await self._extract_reply_info(update.message)
-        text = f"[image: {rel_file_path}]"
-        if caption:
-            text += f"\n{caption}"
-        if reply_info:
-            text = f"[回复: {reply_info}]\n{text}"
         
+        if media_group_id:
+            # --- 媒体组（相册）：缓冲后统一处理 ---
+            if media_group_id not in self._media_group_buffers:
+                self._media_group_buffers[media_group_id] = {
+                    "photos": [],
+                    "caption": "",
+                    "chat_id": chat_id,
+                    "user_id": str(update.effective_user.id) if update.effective_user else chat_id,
+                    "chat_type": update.effective_chat.type,
+                    "user_name": update.effective_user.first_name if update.effective_user else "Unknown",
+                    "reply_info": reply_info,
+                }
+            
+            self._media_group_buffers[media_group_id]["photos"].append(rel_file_path)
+            # caption 只取第一张非空的（Telegram 相册只允许第一张图有 caption）
+            if caption and not self._media_group_buffers[media_group_id]["caption"]:
+                self._media_group_buffers[media_group_id]["caption"] = caption
+            
+            # 取消旧定时器，重新设置（等待所有图片到齐）
+            old_timer = self._media_group_timers.pop(media_group_id, None)
+            if old_timer and not old_timer.done():
+                old_timer.cancel()
+            self._media_group_timers[media_group_id] = asyncio.create_task(
+                self._flush_media_group(media_group_id)
+            )
+            logger.info(f"[{chat_id}] 收到相册图片: {rel_file_path} (group={media_group_id})")
+        else:
+            # --- 单张图片：直接处理 ---
+            text = f"[image: {rel_file_path}]"
+            if caption:
+                text += f"\n{caption}"
+            if reply_info:
+                text = f"[回复: {reply_info}]\n{text}"
+            
+            if self._aggregator:
+                full_context = {
+                    "chat_id": chat_id,
+                    "user_id": str(update.effective_user.id) if update.effective_user else chat_id,
+                    "text": text,
+                    "chat_type": update.effective_chat.type,
+                    "user_name": update.effective_user.first_name if update.effective_user else "Unknown"
+                }
+                await self._aggregator.add_message(chat_id, text, full_context)
+            
+            logger.info(f"[{chat_id}] 收到图片: {rel_file_path}")
+
+    async def _flush_media_group(self, media_group_id: str):
+        """等待短暂时间后，将同一相册的所有图片合并为一条消息发送给聚合器。"""
+        await asyncio.sleep(1.0)  # 等待 1 秒让 Telegram 发完所有图片
+        
+        buf = self._media_group_buffers.pop(media_group_id, None)
+        self._media_group_timers.pop(media_group_id, None)
+        if not buf or not buf["photos"]:
+            return
+        
+        # 构造包含所有图片的消息文本
+        image_tags = "\n".join(f"[image: {p}]" for p in buf["photos"])
+        text = image_tags
+        if buf["caption"]:
+            text += f"\n{buf['caption']}"
+        if buf.get("reply_info"):
+            text = f"[回复: {buf['reply_info']}]\n{text}"
+        
+        chat_id = buf["chat_id"]
         if self._aggregator:
             full_context = {
                 "chat_id": chat_id,
-                "user_id": str(update.effective_user.id) if update.effective_user else chat_id,
+                "user_id": buf["user_id"],
                 "text": text,
-                "chat_type": update.effective_chat.type,
-                "user_name": update.effective_user.first_name if update.effective_user else "Unknown"
+                "chat_type": buf["chat_type"],
+                "user_name": buf["user_name"],
             }
             await self._aggregator.add_message(chat_id, text, full_context)
         
-        logger.info(f"[{chat_id}] 收到图片: {rel_file_path}")
+        logger.info(f"[{chat_id}] 相册合并完成: {len(buf['photos'])} 张图片 (group={media_group_id})")
 
     async def _handle_document(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """处理文档消息"""
