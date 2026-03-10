@@ -224,7 +224,7 @@ class TelegramAdapter(BaseAdapter):
         # 媒体组（相册）缓冲：media_group_id -> {"photos": [...], "caption": str, "chat_id": str, ...}
         self._media_group_buffers: Dict[str, Dict[str, Any]] = {}
         self._media_group_timers: Dict[str, asyncio.Task] = {}
-        self._model_option_tokens: Dict[str, Tuple[str, str]] = {}
+        self._model_option_tokens: Dict[str, Dict[str, Any]] = {}
 
     def _resolve_local_media_path(self, raw_path: str) -> Optional[str]:
         """
@@ -913,6 +913,10 @@ class TelegramAdapter(BaseAdapter):
             await self._handle_model_page_callback(query, callback_data)
             return
 
+        if callback_data and callback_data.startswith("model_provider:"):
+            await self._handle_model_provider_callback(query, callback_data)
+            return
+
         if callback_data and callback_data.startswith("debug_cleanup:"):
             await self._handle_debug_cleanup_callback(query, callback_data)
             return
@@ -993,7 +997,6 @@ class TelegramAdapter(BaseAdapter):
     async def _handle_model_pick_callback(self, query, callback_data: str):
         if not query or not query.message:
             return
-        chat_id = str(query.message.chat.id)
         alias = callback_data.split(":", 1)[1]
 
         if alias == "cancel":
@@ -1002,41 +1005,22 @@ class TelegramAdapter(BaseAdapter):
 
         cfg = config.get_config() or {}
         llm_cfg = cfg.get("llm", {}) or {}
-        models_cfg = llm_cfg.get("models", {}) or {}
-        current_model = models_cfg.get(alias, "")
+        providers_cfg = llm_cfg.get("providers", {}) or {}
+        provider_names = list(providers_cfg.keys())
 
-        provider_name = self._get_provider_for_alias(cfg, alias)
-        provider_cfg = self._get_provider_config(cfg, provider_name)
-        provider_models = self._fetch_provider_models(provider_name, provider_cfg)
+        if not provider_names:
+            default_provider = llm_cfg.get("provider", "gemini")
+            provider_names = [default_provider]
 
-        model_options = list(dict.fromkeys(m for m in provider_models if m))
-        if current_model and current_model not in model_options:
-            model_options.insert(0, current_model)
-
-        if not model_options:
-            await query.edit_message_text("⚠️ 未找到可选模型，请检查 provider API Key 或网络。")
-            return
-
-        page_size = 12
-        page_models = model_options[:page_size]
         buttons = []
-        for model_name in page_models:
-            token = uuid.uuid4().hex[:10]
-            self._model_option_tokens[token] = (chat_id, model_name)
-            label = f"{model_name}"
-            if model_name == current_model:
-                label = f"✅ {label}"
-            buttons.append([InlineKeyboardButton(label, callback_data=f"model_set:{alias}:{token}")])
-
-        if len(model_options) > page_size:
-            next_token = uuid.uuid4().hex[:10]
-            self._model_option_tokens[next_token] = (chat_id, ",".join(model_options[page_size:]))
-            buttons.append([InlineKeyboardButton("下一页 ▶", callback_data=f"model_page:{alias}:{next_token}")])
-
+        for provider_name in provider_names:
+            provider_type = (providers_cfg.get(provider_name, {}) or {}).get("type", provider_name)
+            label = f"{provider_name} ({provider_type})"
+            buttons.append([InlineKeyboardButton(label, callback_data=f"model_provider:{alias}:{provider_name}")])
         buttons.append([InlineKeyboardButton("取消", callback_data="model_pick:cancel")])
 
         await query.edit_message_text(
-            f"选择 {alias} 的模型（来源: {provider_name}）：",
+            f"请选择 {alias} 的 Provider：",
             reply_markup=InlineKeyboardMarkup(buttons),
         )
 
@@ -1063,10 +1047,11 @@ class TelegramAdapter(BaseAdapter):
             return
         _, alias, token = parts
         token_entry = self._model_option_tokens.pop(token, None)
-        if not token_entry:
+        if not token_entry or token_entry.get("kind") != "model_set":
             await query.edit_message_text("⚠️ 选项已过期，请重新发起 /model。")
             return
-        chat_id, model_name = token_entry
+        chat_id = token_entry.get("chat_id")
+        model_name = token_entry.get("model")
         if str(query.message.chat.id) != str(chat_id):
             await query.edit_message_text("⚠️ 当前会话无法使用该选项。")
             return
@@ -1100,15 +1085,17 @@ class TelegramAdapter(BaseAdapter):
             return
         _, alias, token = parts
         token_entry = self._model_option_tokens.pop(token, None)
-        if not token_entry:
+        if not token_entry or token_entry.get("kind") != "model_page":
             await query.edit_message_text("⚠️ 选项已过期，请重新发起 /model。")
             return
-        chat_id, models_payload = token_entry
+        chat_id = token_entry.get("chat_id")
+        model_options = token_entry.get("models") or []
+        offset = int(token_entry.get("offset") or 0)
+        provider_name = token_entry.get("provider") or ""
         if str(query.message.chat.id) != str(chat_id):
             await query.edit_message_text("⚠️ 当前会话无法使用该选项。")
             return
 
-        model_options = [m for m in str(models_payload).split(",") if m]
         if not model_options:
             await query.edit_message_text("⚠️ 未找到更多模型。")
             return
@@ -1118,26 +1105,106 @@ class TelegramAdapter(BaseAdapter):
         models_cfg = llm_cfg.get("models", {}) or {}
         current_model = models_cfg.get(alias, "")
 
-        page_size = 12
-        page_models = model_options[:page_size]
+        await self._render_model_page(
+            query,
+            alias=alias,
+            provider_name=provider_name,
+            model_options=model_options,
+            offset=offset,
+        )
+
+    async def _handle_model_provider_callback(self, query, callback_data: str):
+        if not query or not query.message:
+            return
+        parts = callback_data.split(":", 2)
+        if len(parts) != 3:
+            await query.edit_message_text("⚠️ 回调参数错误。")
+            return
+        _, alias, provider_name = parts
+
+        cfg = config.get_config() or {}
+        llm_cfg = cfg.get("llm", {}) or {}
+        models_cfg = llm_cfg.get("models", {}) or {}
+        current_model = models_cfg.get(alias, "")
+
+        provider_cfg = self._get_provider_config(cfg, provider_name)
+        provider_models = self._fetch_provider_models(provider_name, provider_cfg)
+        model_options = list(dict.fromkeys(m for m in provider_models if m))
+        if current_model and current_model not in model_options:
+            model_options.insert(0, current_model)
+
+        if not model_options:
+            await query.edit_message_text("⚠️ 未找到可选模型，请检查 provider API Key 或网络。")
+            return
+
+        await self._render_model_page(
+            query,
+            alias=alias,
+            provider_name=provider_name,
+            model_options=model_options,
+            offset=0,
+        )
+
+    async def _render_model_page(
+        self,
+        query,
+        alias: str,
+        provider_name: str,
+        model_options: List[str],
+        offset: int,
+        page_size: int = 12,
+    ):
+        if not query or not query.message:
+            return
+
+        cfg = config.get_config() or {}
+        llm_cfg = cfg.get("llm", {}) or {}
+        current_model = (llm_cfg.get("models", {}) or {}).get(alias, "")
+
+        start = max(offset, 0)
+        end = min(start + page_size, len(model_options))
+        page_models = model_options[start:end]
         buttons = []
         for model_name in page_models:
             token = uuid.uuid4().hex[:10]
-            self._model_option_tokens[token] = (chat_id, model_name)
+            self._model_option_tokens[token] = {
+                "kind": "model_set",
+                "chat_id": str(query.message.chat.id),
+                "model": model_name,
+            }
             label = f"{model_name}"
             if model_name == current_model:
                 label = f"✅ {label}"
             buttons.append([InlineKeyboardButton(label, callback_data=f"model_set:{alias}:{token}")])
 
-        if len(model_options) > page_size:
+        nav_buttons = []
+        if start > 0:
+            prev_token = uuid.uuid4().hex[:10]
+            self._model_option_tokens[prev_token] = {
+                "kind": "model_page",
+                "chat_id": str(query.message.chat.id),
+                "models": model_options,
+                "offset": max(start - page_size, 0),
+                "provider": provider_name,
+            }
+            nav_buttons.append(InlineKeyboardButton("◀ 上一页", callback_data=f"model_page:{alias}:{prev_token}"))
+        if end < len(model_options):
             next_token = uuid.uuid4().hex[:10]
-            self._model_option_tokens[next_token] = (chat_id, ",".join(model_options[page_size:]))
-            buttons.append([InlineKeyboardButton("下一页 ▶", callback_data=f"model_page:{alias}:{next_token}")])
+            self._model_option_tokens[next_token] = {
+                "kind": "model_page",
+                "chat_id": str(query.message.chat.id),
+                "models": model_options,
+                "offset": end,
+                "provider": provider_name,
+            }
+            nav_buttons.append(InlineKeyboardButton("下一页 ▶", callback_data=f"model_page:{alias}:{next_token}"))
 
+        if nav_buttons:
+            buttons.append(nav_buttons)
         buttons.append([InlineKeyboardButton("取消", callback_data="model_pick:cancel")])
 
         await query.edit_message_text(
-            f"选择 {alias} 的模型（下一页）：",
+            f"选择 {alias} 的模型（来源: {provider_name}）：",
             reply_markup=InlineKeyboardMarkup(buttons),
         )
 
