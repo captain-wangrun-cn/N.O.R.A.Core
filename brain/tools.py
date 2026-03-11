@@ -14,6 +14,26 @@ from workspace_config import get_workspace_manager
 
 logger = logging.getLogger(__name__)
 
+# 工具一句话简介（用于注入前脑/后脑提示词）
+TOOL_INTROS = {
+    "create_new_skill": "创建新的技能脚手架目录与基础文件。",
+    "execute_skill": "运行指定技能并返回输出结果。",
+    "execute_tool_plan": "按计划顺序批量执行多个工具步骤。",
+    "read_file": "读取文件内容，支持按行范围读取。",
+    "search": "在代码库中搜索关键词或模式。",
+    "write_file": "创建或覆盖写入文件内容。",
+    "edit_file": "基于旧内容对文件做精确修改。",
+    "list_dir": "列出目录内容，查看文件和子目录。",
+    "get_available_skills": "列出当前可用技能清单。",
+    "exec_command": "执行受限的系统命令。",
+    "view_image": "检索已保存的图片并按条件返回。",
+    "crop_image_for_llm": "裁剪图片以便模型分析。",
+    "report_progress": "向用户发送阶段性进度汇报。",
+    "set_alarm": "设置提醒或倒计时闹钟。",
+    "list_alarms": "查看所有未触发的闹钟。",
+    "cancel_alarm": "取消指定闹钟。",
+}
+
 # --- Workspace & Security Constants ---
 # 获取工作区管理器，会自动初始化工作区
 workspace_manager = get_workspace_manager()

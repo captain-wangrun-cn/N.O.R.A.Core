@@ -925,11 +925,21 @@ class NoraController:
         # --- 构建前脑 prompt ---
         soul_prompt = get_soul_prompt()
         identity_context = load_identity_context()
+        tool_intro_block = ""
+        try:
+            from brain.tools import TOOL_INTROS
+            if TOOL_INTROS:
+                tool_desc = "\n".join([f"- {name}: {intro}" for name, intro in TOOL_INTROS.items()])
+                tool_intro_block = render_template('context_injection.jinja', 'tools', tool_desc=tool_desc)
+        except Exception:
+            logger.warning("前脑工具简介注入失败，已忽略。", exc_info=True)
+
         system_prompt = render_template(
             'front_brain.jinja',
             'system',
             soul_prompt=soul_prompt,
             identity_context=identity_context,
+            tool_intro_block=tool_intro_block,
         )
         user_prompt = render_template('front_brain.jinja', 'user', user_message=text)
 
@@ -1108,6 +1118,17 @@ class NoraController:
                 instructions.append(
                     render_template('context_injection.jinja', 'skills', skill_desc=skill_desc)
                 )
+
+            # Inject Tools
+            try:
+                from brain.tools import TOOL_INTROS
+                if TOOL_INTROS:
+                    tool_desc = "\n".join([f"- {name}: {intro}" for name, intro in TOOL_INTROS.items()])
+                    instructions.append(
+                        render_template('context_injection.jinja', 'tools', tool_desc=tool_desc)
+                    )
+            except Exception:
+                logger.warning("工具简介注入失败，已忽略。", exc_info=True)
 
             if "\n" in text.strip(): 
                 instructions.append(render_template('context_injection.jinja', 'multiline'))

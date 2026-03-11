@@ -3,6 +3,21 @@
 - 目标：多平台智能体内核，包含 LLM 适配、工具/技能体系、成本追踪、记忆/RAG。
 - 当前状态：可运行，自测通过；已完成图片记忆链路（入库/检索/回查再分析）、`view_image` 工具增强、CLI 高危清理保护。
 
+## 近期关键改动（截至 2026-03-11）
+
+### 🧭 工具/技能简介注入与前后脑职责收敛 — 2026-03-11
+
+- 在 `brain/tools.py` 新增 `TOOL_INTROS`（工具一句话简介）。
+- 在前脑/后脑 prompt 注入工具与技能简介，仅用于**前脑路由判断**；前脑禁止调用工具/技能，所有执行由后脑完成。
+- `system.jinja` / `front_brain.jinja` 明确：简介只作为“需要后脑”的判断提示，前脑仅标记 `[NEED_BACKEND]` 触发后脑。
+- 语气要求具体化：前脑/后脑回复必须使用第一人称。
+
+**涉及文件：**
+- `brain/tools.py`（TOOL_INTROS）
+- `core/controller.py`（注入工具简介到 instructions/front brain）
+- `brain/templates/context_injection.jinja`（工具简介块，强调前脑仅路由）
+- `brain/templates/front_brain.jinja`、`brain/templates/system.jinja`（前脑禁用工具执行、第一人称约束）
+
 ## 近期关键改动（截至 2026-03-10）
 
 ### 🔧 七项架构修复 — 2026-03-10

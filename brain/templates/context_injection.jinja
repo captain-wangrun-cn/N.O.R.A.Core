@@ -16,6 +16,13 @@
 ⚠️ 执行技能时，**必须**使用 `execute_skill(skill_name, args_json)` 工具。
 **严禁**使用 `exec_command` 运行技能脚本（如 `python3 skills/xxx/main.py`）。{% endblock %}
 
+{# 可用工具简介 #}
+{% block tools %}【可用工具 (Available Tools)】
+{{ tool_desc }}
+
+⚠️ 本简介用于**前脑判断是否需要后脑**，前脑禁止调用工具。
+所有工具调用一律由后脑执行。{% endblock %}
+
 {# RAG 记忆检索结果 #}
 {% block rag %}【相关回忆/背景知识】(请参考以下历史记忆来回答):
 {{ rag_context }}{% endblock %}
