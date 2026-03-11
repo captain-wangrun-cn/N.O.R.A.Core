@@ -14,7 +14,7 @@ from memory.message_history import MessageHistory
 from brain.tools import ToolManager
 from skills.loader import SkillLoader
 from core.cost_tracker import get_cost_tracker
-from core.routing import has_image_input, parse_front_brain_response
+from core.routing import has_image_input, parse_front_brain_response, parse_front_brain_review
 from core.scheduler import ProactiveScheduler, AIPresence, set_ai_presence, set_ai_generating, set_ai_backend_busy, record_user_activity, get_user_idle_seconds, record_ai_followup, get_followup_count, clear_conversation_tracking, get_ai_presence, get_ai_state_summary
 from brain.multimodal import extract_image_payloads
 import config
@@ -727,12 +727,12 @@ class NoraController:
 
         # 4) 根据路由信号决定是否启动后脑
         if front_result["needs_backend"]:
-            logger.info(f"[{chat_id}] 前脑判定需要后脑，启动后脑任务...")
+            logger.info(f"[{chat_id}] 前脑判定需要后脑，启动轮询循环...")
             # 标记上下文：后脑应跳过用户消息保存（前脑已保存）
             backend_context = context.copy()
             backend_context["_front_brain_handled"] = True
             backend_context["_front_brain_reply"] = user_reply
-            task = asyncio.create_task(self._generate_response(backend_context))
+            task = asyncio.create_task(self._run_polling_loop(backend_context))
             self.generation_tasks[chat_id] = task
         else:
             logger.info(f"[{chat_id}] 前脑判定纯聊天，无需后脑。")
@@ -882,7 +882,7 @@ class NoraController:
                     "text": user_text,
                     "chat_type": "private" # Fallback
                 }
-                task = asyncio.create_task(self._generate_response(context))
+                task = asyncio.create_task(self._run_polling_loop(context))
                 self.generation_tasks[chat_id] = task
         else:
             # 需要生成并发送回复（兼容旧调用方式）
@@ -907,7 +907,7 @@ class NoraController:
                     "text": user_text,
                     "chat_type": "private" # Fallback
                 }
-                task = asyncio.create_task(self._generate_response(context))
+                task = asyncio.create_task(self._run_polling_loop(context))
                 self.generation_tasks[chat_id] = task
 
     async def _send_debug(self, chat_id: str, message: str):
@@ -1781,10 +1781,11 @@ class NoraController:
             self.generation_tasks.pop(chat_id, None)
             logger.debug(f"[{chat_id}] 本次生成任务结束。")
             
-            # --- 处理排队消息（仅在非取消情况下） ---
+            # --- 处理排队消息（仅在非取消 且 非轮询模式下） ---
+            # 轮询模式下由 _run_polling_loop 统一管理后续流程
             # 如果任务是被打断的（CancelledError），排队消息由 _interrupt_backend 负责处理
-            # 只在正常完成或异常完成时处理队列
-            if not self._was_interrupted(chat_id):
+            in_polling = context.get("_in_polling_loop", False)
+            if not in_polling and not self._was_interrupted(chat_id):
                 await self._process_pending_messages(chat_id)
 
     def _was_interrupted(self, chat_id: str) -> bool:
@@ -1892,8 +1893,282 @@ class NoraController:
                 pass
         
         # 启动新任务处理（走完整的生成流程，finally 块会继续处理下一个）
-        task = asyncio.create_task(self._generate_response(context))
+        task = asyncio.create_task(self._run_polling_loop(context))
         self.generation_tasks[chat_id] = task
+
+    # ------------------------------------------------------------------
+    # 前后脑轮询机制 (Front-Backend Polling Loop)
+    # ------------------------------------------------------------------
+
+    MAX_POLLING_ROUNDS = 5  # 最大轮询轮数，防止无限循环
+
+    async def _run_polling_loop(self, context: Dict[str, Any]):
+        """
+        前后脑轮询主循环。
+        
+        流程：
+        1. 后脑执行任务（_generate_response）
+        2. 后脑完成后，前脑审查结果 + 收集期间用户新消息
+        3. 前脑判断：
+           - [TASK_DONE] → 结束轮询
+           - [NEED_BACKEND] → 构建新 context 继续后脑
+           - 纯聊天 → 结束轮询
+        4. 重复 1-3 直到结束或达到最大轮数
+        
+        用户新消息处理策略：
+        - 后脑执行期间：用户消息由 busy handler 保存到 DB + queue
+        - 前脑审查时：从 DB 获取后脑启动后的新用户消息注入审查上下文
+        - 前脑生成期间到达的新消息：等前脑完成后在下一轮审查中处理
+        """
+        chat_id = context["chat_id"]
+        
+        # 标记轮询模式，让 _generate_response 的 finally 不自动处理队列
+        context = context.copy()
+        context["_in_polling_loop"] = True
+        
+        try:
+            for polling_round in range(1, self.MAX_POLLING_ROUNDS + 1):
+                logger.info(f"[{chat_id}] 轮询第 {polling_round}/{self.MAX_POLLING_ROUNDS} 轮: 启动后脑")
+                await self._send_debug(chat_id, f"🔄 轮询第 {polling_round}/{self.MAX_POLLING_ROUNDS} 轮")
+                
+                # 记录后脑启动时间戳，用于后续获取期间的新用户消息
+                backend_start_ts = time.time()
+                
+                # --- 后脑执行 ---
+                await self._generate_response(context)
+                
+                # 后脑执行完毕，检查是否被打断
+                if self._was_interrupted(chat_id):
+                    logger.info(f"[{chat_id}] 轮询第 {polling_round} 轮: 后脑被打断，终止轮询")
+                    return  # 被打断时不进入审查
+                
+                # --- 前脑审查 ---
+                chat_type = context.get("chat_type", "private")
+                user_id = context["user_id"]
+                storage_id = chat_id if chat_type != "private" else user_id
+                
+                # 获取后脑执行期间用户发送的新消息
+                new_user_msgs = self.message_history.get_messages_since(
+                    "telegram", storage_id, backend_start_ts, role="user"
+                )
+                new_user_texts = [msg["content"] for msg in new_user_msgs]
+                
+                # 获取后脑的最终回复（从 session history 中取最后一条 assistant 消息）
+                session = self.sessions.get(chat_id, {})
+                session_history = session.get("history", [])
+                backend_result = ""
+                for h in reversed(session_history):
+                    if h.get("role") == "assistant":
+                        backend_result = h["content"]
+                        break
+                
+                if not backend_result:
+                    logger.info(f"[{chat_id}] 轮询第 {polling_round} 轮: 后脑无输出，结束轮询")
+                    break
+                
+                # 如果没有用户新消息且后脑正常完成，默认结束轮询（无需前脑审查）
+                if not new_user_texts and polling_round < self.MAX_POLLING_ROUNDS:
+                    # 仍然做一次轻量审查，但可以简化判断
+                    pass  # 继续执行下面的审查逻辑
+                
+                # 前脑审查
+                review_result = await self._front_brain_review(
+                    context, backend_result, new_user_texts
+                )
+                
+                action = review_result["action"]
+                review_reply = review_result["user_reply"]
+                
+                # 发送前脑审查回复给用户（如果有实质内容）
+                if review_reply:
+                    parts = self._SPLIT_MARKER_PATTERN.split(review_reply)
+                    for part in parts:
+                        part = part.strip()
+                        if part:
+                            await self.adapter.send_message(chat_id, part)
+                    
+                    # 保存到数据库
+                    self.message_history.add_message(
+                        platform="telegram",
+                        chat_id=storage_id,
+                        role="assistant",
+                        content=review_reply,
+                        user_id="assistant",
+                    )
+                    # 同步到 session history
+                    session_history = session.setdefault("history", [])
+                    session_history.append({"role": "assistant", "content": review_reply})
+                    if len(session_history) > 20:
+                        session["history"] = session_history[-20:]
+                
+                logger.info(f"[{chat_id}] 轮询第 {polling_round} 轮审查结果: action={action}")
+                await self._send_debug(chat_id, f"🔍 审查结果: action={action}")
+                
+                if action == "continue":
+                    # 需要后脑继续 — 构建新 context
+                    # 将前脑的审查回复作为新的指示传入后脑
+                    new_instruction = review_reply if review_reply else "请继续处理。"
+                    # 合并用户新消息
+                    if new_user_texts:
+                        new_instruction += "\n\n用户新消息:\n" + "\n".join(new_user_texts)
+                    
+                    context = context.copy()
+                    context["text"] = new_instruction
+                    context["_front_brain_handled"] = True
+                    context["_front_brain_reply"] = review_reply
+                    # 消费掉队列中对应的消息（如果有的话），因为已经通过轮询处理了
+                    queue = self.task_queues.get(chat_id)
+                    if queue and new_user_texts:
+                        # 清空已被审查合并的排队消息
+                        consumed = 0
+                        while consumed < len(new_user_texts) and queue.size() > 0:
+                            await queue.dequeue()
+                            consumed += 1
+                    
+                    logger.info(f"[{chat_id}] 轮询继续: 新指示='{new_instruction[:60]}...'")
+                    continue  # 下一轮后脑
+                else:
+                    # action == "done" or "chat" → 结束轮询
+                    logger.info(f"[{chat_id}] 轮询结束: action={action}")
+                    break
+            
+            else:
+                # for-else: 达到最大轮数（循环自然结束，没有 break）
+                logger.warning(f"[{chat_id}] 轮询达到最大轮数 {self.MAX_POLLING_ROUNDS}，强制结束")
+                await self._send_debug(chat_id, f"⚠️ 轮询达到最大轮数 {self.MAX_POLLING_ROUNDS}")
+        
+        except asyncio.CancelledError:
+            logger.info(f"[{chat_id}] 轮询循环被取消")
+            raise  # 重新抛出，让外部 task 感知取消
+        
+        except Exception as e:
+            logger.error(f"[{chat_id}] 轮询循环异常: {e}", exc_info=True)
+        
+        finally:
+            # --- 轮询结束后处理剩余排队消息 ---
+            if not self._was_interrupted(chat_id):
+                await self._process_pending_messages(chat_id)
+
+    async def _front_brain_review(
+        self,
+        context: Dict[str, Any],
+        backend_result: str,
+        new_user_messages: List[str],
+    ) -> dict:
+        """
+        前脑审查后脑结果，判断是否需要继续轮询。
+        
+        Args:
+            context: 原始消息上下文
+            backend_result: 后脑的最终回复文本
+            new_user_messages: 后脑执行期间用户发送的新消息
+        
+        Returns:
+            {
+                "action": "done" | "continue" | "chat",
+                "user_reply": str,
+            }
+        """
+        chat_id = context["chat_id"]
+        user_id = context["user_id"]
+        chat_type = context.get("chat_type", "private")
+        storage_id = chat_id if chat_type != "private" else user_id
+
+        logger.info(f"[{chat_id}] 前脑审查: 后脑结果 {len(backend_result)} 字, 新用户消息 {len(new_user_messages)} 条")
+
+        # --- 构建审查 prompt ---
+        soul_prompt = get_soul_prompt()
+        identity_context = load_identity_context()
+        tool_intro_block = ""
+        try:
+            from brain.tools import TOOL_INTROS
+            if TOOL_INTROS:
+                tool_desc = "\n".join([f"- {name}: {intro}" for name, intro in TOOL_INTROS.items()])
+                tool_intro_block = render_template('context_injection.jinja', 'tools', tool_desc=tool_desc)
+        except Exception:
+            pass
+
+        system_prompt = render_template(
+            'front_brain_review.jinja',
+            'system',
+            soul_prompt=soul_prompt,
+            identity_context=identity_context,
+            tool_intro_block=tool_intro_block,
+        )
+        
+        user_prompt = render_template(
+            'front_brain_review.jinja',
+            'user',
+            backend_result=backend_result[:2000],  # 截断过长的后脑输出
+            new_user_messages=new_user_messages,
+        )
+
+        # 加载最近对话历史
+        db_context = self.message_history.get_context_messages("telegram", storage_id)
+        if len(db_context) > 15:
+            db_context = db_context[-15:]
+        
+        history = [
+            {"role": msg["role"], "content": msg["content"]}
+            for msg in db_context
+            if msg["role"] in ("user", "assistant")
+        ]
+
+        # 调用 smart 模型审查
+        response_text = ""
+        usage_data = None
+        try:
+            stream = self.llm.chat_stream(
+                system_prompt=system_prompt,
+                user_prompt=user_prompt,
+                history=history,
+                tools=None,
+            )
+            async for raw_chunk in stream:
+                chunk = cast(Dict[str, Any], raw_chunk) if isinstance(raw_chunk, dict) else raw_chunk
+                if isinstance(chunk, dict):
+                    if chunk["type"] == "text":
+                        response_text += chunk["content"]
+                    elif chunk["type"] == "usage":
+                        usage_data = {
+                            "input_tokens": chunk.get("input_tokens", 0),
+                            "output_tokens": chunk.get("output_tokens", 0),
+                        }
+                elif isinstance(chunk, str):
+                    response_text += chunk
+        except Exception as e:
+            logger.error(f"[{chat_id}] 前脑审查失败: {e}", exc_info=True)
+            return {"action": "done", "user_reply": ""}
+
+        # 清理思考标签
+        response_text = self._strip_thinking_content(response_text)
+
+        # 记录成本
+        if self.cost_tracking_enabled and self.cost_tracker and usage_data:
+            provider_name = config.get_model_provider("smart")
+            provider = config.get_provider_type(provider_name)
+            model = config.get_model_name("smart")
+            self.cost_tracker.log_usage(
+                provider=provider,
+                model=model,
+                input_tokens=usage_data["input_tokens"],
+                output_tokens=usage_data["output_tokens"],
+                model_alias="smart",
+                context="front_brain_review",
+            )
+
+        # 解析审查结果
+        parsed = parse_front_brain_review(response_text)
+        logger.info(
+            f"[{chat_id}] 前脑审查结果: action={parsed['action']}, "
+            f"reply='{parsed['user_reply'][:80]}...'"
+        )
+        await self._send_debug(
+            chat_id,
+            f"🔍 审查: action={parsed['action']}\n回复: {parsed['user_reply'][:200]}"
+        )
+
+        return parsed
 
     async def _async_save_memory(self, text: str, user_id: str, metadata: Dict[str, Any]):
         """异步保存记忆，避免阻塞主线程。"""

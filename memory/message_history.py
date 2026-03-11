@@ -727,6 +727,43 @@ class MessageHistory:
         conn.close()
         return messages
 
+    def get_messages_since(
+        self,
+        platform: str,
+        chat_id: str,
+        since_timestamp: float,
+        role: Optional[str] = None,
+    ) -> List[Dict]:
+        """
+        获取指定时间戳之后的消息。
+        
+        Args:
+            platform: 平台标识
+            chat_id: 聊天 ID
+            since_timestamp: 时间戳（获取此时间之后的消息）
+            role: 可选，只获取指定角色的消息（如 'user'）
+        """
+        conn = sqlite3.connect(str(self.db_path))
+        conn.row_factory = sqlite3.Row
+        cursor = conn.cursor()
+
+        if role:
+            cursor.execute("""
+                SELECT * FROM messages
+                WHERE platform = ? AND chat_id = ? AND timestamp > ? AND role = ?
+                ORDER BY timestamp ASC
+            """, (platform, chat_id, since_timestamp, role))
+        else:
+            cursor.execute("""
+                SELECT * FROM messages
+                WHERE platform = ? AND chat_id = ? AND timestamp > ?
+                ORDER BY timestamp ASC
+            """, (platform, chat_id, since_timestamp))
+
+        messages = [dict(row) for row in cursor.fetchall()]
+        conn.close()
+        return messages
+
     def get_recent_sessions(
         self,
         platform: str,

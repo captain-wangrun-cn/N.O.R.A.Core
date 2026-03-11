@@ -52,6 +52,9 @@ def has_image_input(text: str) -> bool:
 # 前脑回复中触发后脑的标记
 _BACKEND_SIGNAL = "[NEED_BACKEND]"
 
+# 前脑审查中任务完成的标记
+_TASK_DONE_SIGNAL = "[TASK_DONE]"
+
 
 def parse_front_brain_response(response_text: str) -> dict:
     """
@@ -80,3 +83,37 @@ def parse_front_brain_response(response_text: str) -> dict:
         "needs_backend": needs_backend,
         "user_reply": user_reply,
     }
+
+
+def parse_front_brain_review(response_text: str) -> dict:
+    """
+    解析前脑轮询审查的回复，提取路由信号和用户可见文本。
+
+    前脑审查回复可能包含:
+    - [TASK_DONE] 标记: 任务完成，结束轮询
+    - [NEED_BACKEND] 标记: 需要后脑继续工作
+    - 无标记: 纯聊天回应，结束轮询
+
+    Returns:
+        {
+            "action": "done" | "continue" | "chat",
+            "user_reply": str,  # 给用户看的清理后文本
+        }
+    """
+    if not response_text:
+        return {"action": "done", "user_reply": ""}
+
+    has_done = _TASK_DONE_SIGNAL in response_text
+    has_backend = _BACKEND_SIGNAL in response_text
+
+    # 清理标记，生成用户可见文本
+    user_reply = response_text.replace(_TASK_DONE_SIGNAL, "").replace(_BACKEND_SIGNAL, "").strip()
+    user_reply = re.sub(r'\n{3,}', '\n\n', user_reply)
+
+    if has_backend:
+        return {"action": "continue", "user_reply": user_reply}
+    elif has_done:
+        return {"action": "done", "user_reply": user_reply}
+    else:
+        # 无标记 = 纯聊天，也结束轮询
+        return {"action": "chat", "user_reply": user_reply}
