@@ -751,9 +751,14 @@ class NoraController:
         """
         progress = status.get_summary()
         
+        # 获取当前队列摘要，让 AI 看到已排队的任务
+        queue = self.task_queues.get(chat_id)
+        queue_summary = queue.get_queue_summary() if queue else ""
+        
         soul = get_soul_prompt()
         prompt = render_template('interrupt_detect.jinja', 'user',
-                                 progress=progress, user_text=text)
+                                 progress=progress, user_text=text,
+                                 queue_summary=queue_summary)
         
         # 带入最近几条对话历史，让 fast_llm 理解上下文（而不是只看当前这一句）
         recent_history = []
@@ -1186,6 +1191,52 @@ class NoraController:
                 session["pending_text"] = ""
                 session["interrupted_thought"] = ""
             
+            # --- 前脑上下文注入（让后脑知道当前对话段落和前脑的回复） ---
+            if front_brain_handled:
+                # 获取当前活跃对话段落（session_id IS NULL 的消息）
+                segment_messages = self.message_history.get_current_segment_messages(
+                    "telegram", storage_id
+                )
+                if segment_messages:
+                    # 格式化段落内容（排除当前轮次的用户消息，因为已作为 user_prompt 传入）
+                    segment_lines = []
+                    for msg in segment_messages:
+                        if msg["role"] in ("user", "assistant"):
+                            # 跳过当前轮已作为 user_prompt 的消息
+                            if msg["content"] == message_content and msg == segment_messages[-1]:
+                                continue
+                            segment_lines.append(f"{msg['role']}: {msg['content']}")
+                    
+                    if segment_lines:
+                        segment_text = "\n".join(segment_lines)
+                        instructions.append(
+                            f"【当前对话段落 (Current Conversation Segment)】\n"
+                            f"以下是本轮对话段落中的完整交互记录（包含前脑的即时回复），"
+                            f"请基于此上下文继续工作：\n\n{segment_text}\n\n"
+                            f"⚠️ 前脑已经给用户发送了即时回复，不要重复前脑已说过的内容。"
+                            f"直接执行任务，完成后汇报结果即可。"
+                        )
+                    else:
+                        # 段落为空但前脑有回复，至少告知后脑前脑说了什么
+                        front_reply = context.get("_front_brain_reply", "")
+                        if front_reply:
+                            instructions.append(
+                                f"【前脑已回复 (Front-Brain Reply)】\n"
+                                f"在你接手之前，前脑已经给用户发送了以下即时回复：\n"
+                                f"「{front_reply}」\n"
+                                f"请基于此继续工作，不要重复前脑已经说过的内容。直接执行任务，完成后汇报结果即可。"
+                            )
+                else:
+                    # 没有段落消息时，回退到简单的前脑回复注入
+                    front_reply = context.get("_front_brain_reply", "")
+                    if front_reply:
+                        instructions.append(
+                            f"【前脑已回复 (Front-Brain Reply)】\n"
+                            f"在你接手之前，前脑已经给用户发送了以下即时回复：\n"
+                            f"「{front_reply}」\n"
+                            f"请基于此继续工作，不要重复前脑已经说过的内容。直接执行任务，完成后汇报结果即可。"
+                        )
+
             system_prompt = get_system_prompt(instructions, platform=self.adapter.platform_name)
 
             # --- 3. 执行循环 (Tool Execution Loop) ---

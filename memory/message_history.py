@@ -703,6 +703,30 @@ class MessageHistory:
         conn.close()
         return messages
 
+    def get_current_segment_messages(
+        self,
+        platform: str,
+        chat_id: str,
+    ) -> List[Dict]:
+        """
+        获取当前活跃对话段落的所有消息（session_id IS NULL）。
+        
+        这些是尚未被 close_session 封闭的消息，代表正在进行中的对话段落。
+        """
+        conn = sqlite3.connect(str(self.db_path))
+        conn.row_factory = sqlite3.Row
+        cursor = conn.cursor()
+
+        cursor.execute("""
+            SELECT * FROM messages
+            WHERE platform = ? AND chat_id = ? AND session_id IS NULL
+            ORDER BY timestamp ASC
+        """, (platform, chat_id))
+
+        messages = [dict(row) for row in cursor.fetchall()]
+        conn.close()
+        return messages
+
     def get_recent_sessions(
         self,
         platform: str,

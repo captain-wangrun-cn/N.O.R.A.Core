@@ -11,6 +11,11 @@
 
 【你当前的工作状态】
 {{ progress }}
+{% if queue_summary %}
+
+【当前排队任务】
+{{ queue_summary }}
+{% endif %}
 
 【用户新消息】"{{ user_text }}"
 
@@ -22,7 +27,7 @@
    输出: ACTION:change | REPLY:（确认切换的回复，如'好，马上切换～'）
 
 3. 如果是**普通追加消息**（如询问进度、补充信息、闲聊等），
-   输出: ACTION:queue | REPLY:（告知正在忙+会稍后处理的友好回复，1-3句话）
+   输出: ACTION:queue | REPLY:（告知正在忙+会稍后处理的友好回复，1-3句话。如果队列中已有任务，在回复中告知用户前面还有几个任务在排队）
 
 格式: ACTION:xxx | REPLY:yyy
 用简短自然的口语回复，不要用 Markdown 格式。{% endblock %}
