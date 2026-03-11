@@ -342,6 +342,7 @@ class NoraController:
 
         # 解析多模态输入：从 [image: ...] 中提取真实图片内容
         clean_text, multimodal_images = extract_image_payloads(text)
+        image_input_detected = bool(multimodal_images) or has_image_input(text)
         if clean_text:
             text = clean_text
 
@@ -659,7 +660,7 @@ class NoraController:
             await asyncio.sleep(0.1)
 
         # 图片消息直接走后脑（需要 image 模型 + 工具能力）
-        if has_image_input(text):
+        if image_input_detected:
             logger.info(f"[{chat_id}] 检测到图片输入，直接启动后脑。")
             task = asyncio.create_task(self._generate_response(context))
             self.generation_tasks[chat_id] = task
