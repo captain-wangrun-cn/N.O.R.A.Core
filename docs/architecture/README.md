@@ -70,6 +70,8 @@
 
 - **[消息历史管理 (Message History)](./message_history.md)**
   - 四层存储策略 (Raw, Compressed, Vector, Archive) + 对话分段 (Conversation Session Segmentation)。
+- **[对话分段系统 (Conversation Segmentation)](./conversation-segmentation.md)**
+  - ONLINE → SEMI_ONLINE 时封闭对话段落，生成段落摘要，分段插入上下文，配合前后脑轮询闭环。
 - **[消息压缩 (Message Compression)](./message-compression.md)**
   - 针对长对话的 Token 优化策略。
 - **[图片记忆系统 (Image Memory)](./image-memory.md)**
