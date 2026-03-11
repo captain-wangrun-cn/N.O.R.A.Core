@@ -309,6 +309,8 @@ class ProactiveScheduler:
             self._scheduler.shutdown(wait=False)
             logger.info("ProactiveScheduler 已停止")
 
+    ALARM_CONFLICT_WINDOW_MINUTES = 5
+
     def add_alarm(
         self,
         trigger_time_str: str,
@@ -316,6 +318,7 @@ class ProactiveScheduler:
         chat_id: str = "",
         is_countdown: bool = False,
         countdown_minutes: int = 0,
+        allow_conflict: bool = False,
     ) -> Dict[str, Any]:
         """
         添加动态闹钟。reason 为可选字段。
@@ -327,6 +330,7 @@ class ProactiveScheduler:
             chat_id: 触发时发送到的 chat_id
             is_countdown: 是否为倒计时模式
             countdown_minutes: 倒计时分钟数
+            allow_conflict: 是否允许与既有闹钟时间在冲突窗口内（默认 False，冲突窗口=5 分钟）
 
         Returns:
             {"success": True/False, "alarm_id": ..., "trigger_time": ..., "message": ...}
@@ -346,6 +350,23 @@ class ProactiveScheduler:
 
         if trigger_dt <= now:
             return {"success": False, "message": f"触发时间 {trigger_dt.strftime('%Y-%m-%d %H:%M')} 已过，请设置未来的时间"}
+
+        # 冲突检测：同一 chat 近 ALARM_CONFLICT_WINDOW_MINUTES 内已有闹钟
+        conflict_window = timedelta(minutes=self.ALARM_CONFLICT_WINDOW_MINUTES)
+        now_active = [a for a in self._alarms if not a.fired]
+        conflicts = [
+            a for a in now_active
+            if abs(a.trigger_time - trigger_dt) <= conflict_window and (not target_chat or a.chat_id == target_chat)
+        ]
+        if conflicts and not allow_conflict:
+            conflict_list = ", ".join(sorted({a.trigger_time.strftime('%Y-%m-%d %H:%M') for a in conflicts}))
+            return {
+                "success": False,
+                "message": (
+                    f"在 {self.ALARM_CONFLICT_WINDOW_MINUTES} 分钟内已有闹钟：{conflict_list}。"
+                    "若仍需设置，请重试并确认。"
+                ),
+            }
 
         alarm = ScheduledEvent(
             trigger_time=trigger_dt,

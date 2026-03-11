@@ -250,6 +250,35 @@
 
 ---
 
+## `set_alarm`
+
+**作用**：设置绝对时间或倒计时闹钟。
+
+**参数**：
+- `trigger_time` (string, optional): 触发时间（与 `countdown_minutes` 二选一）
+- `reason` (string, optional): 闹钟缘由
+- `countdown_minutes` (integer, optional): 倒计时分钟数
+- `allow_conflict` (boolean, optional, default=false): 是否允许与已有闹钟时间在 5 分钟内冲突
+
+**返回**：
+- 成功：闹钟 ID 与触发时间
+- 失败：提示存在时间冲突或参数错误
+
+**注意**：
+- 当 5 分钟内已有闹钟时，默认返回提示，需确认后再设置（`allow_conflict=true`）。
+
+---
+
+## `list_alarms`
+
+**作用**：列出所有未触发闹钟。
+
+---
+
+## `cancel_alarm`
+
+**作用**：取消指定闹钟。
+
 ## 3. 路径与安全说明
 
 - 所有文件路径会通过 `_resolve_workspace_path` 标准化：支持绝对路径、`workspace/...`、相对路径。

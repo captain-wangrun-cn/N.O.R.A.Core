@@ -16,22 +16,22 @@ logger = logging.getLogger(__name__)
 
 # 工具一句话简介（用于注入前脑/后脑提示词）
 TOOL_INTROS = {
-    "create_new_skill": "创建新的技能脚手架目录与基础文件。",
-    "execute_skill": "运行指定技能并返回输出结果。",
-    "execute_tool_plan": "按计划顺序批量执行多个工具步骤。",
-    "read_file": "读取文件内容，支持按行范围读取。",
-    "search": "在代码库中搜索关键词或模式。",
-    "write_file": "创建或覆盖写入文件内容。",
-    "edit_file": "基于旧内容对文件做精确修改。",
-    "list_dir": "列出目录内容，查看文件和子目录。",
-    "get_available_skills": "列出当前可用技能清单。",
-    "exec_command": "执行受限的系统命令。",
-    "view_image": "检索已保存的图片并按条件返回。",
-    "crop_image_for_llm": "裁剪图片以便模型分析。",
-    "report_progress": "向用户发送阶段性进度汇报。",
-    "set_alarm": "设置提醒或倒计时闹钟。",
-    "list_alarms": "查看所有未触发的闹钟。",
-    "cancel_alarm": "取消指定闹钟。",
+    "create_new_skill": "创建新的技能脚手架目录与基础文件，用于新增能力。",
+    "execute_skill": "运行指定技能并返回输出结果，适合调用已实现能力。",
+    "execute_tool_plan": "按计划顺序批量执行多个工具步骤，适合多步流水线。",
+    "read_file": "读取文件内容，支持按行范围读取，适合查看源码/文档。",
+    "search": "在代码库中搜索关键词或模式，定位实现或配置。",
+    "write_file": "创建或覆盖写入文件内容，适合新增文件或重写。",
+    "edit_file": "基于旧内容对文件做精确修改，适合小范围替换。",
+    "list_dir": "列出目录内容，查看文件和子目录，适合确认路径。",
+    "get_available_skills": "列出当前可用技能清单，便于选择技能。",
+    "exec_command": "执行受限的系统命令，作为无法用高层工具时的兜底。",
+    "view_image": "检索已保存的图片并按条件返回，适合找回历史图片。",
+    "crop_image_for_llm": "裁剪图片以便模型分析，用户要求仔细观察图片某个部分时可调用。",
+    "report_progress": "向用户发送阶段性进度汇报，适合长任务中途更新。",
+    "set_alarm": "设置提醒或倒计时闹钟，适合提醒/日程。",
+    "list_alarms": "查看所有未触发的闹钟，适合确认已有提醒。",
+    "cancel_alarm": "取消指定闹钟，适合调整已设置提醒。",
 }
 
 # --- Workspace & Security Constants ---
