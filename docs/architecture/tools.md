@@ -5,6 +5,10 @@
 
 本文档说明 N.O.R.A. Core 当前全部内置工具的用途、参数、返回格式和使用建议。
 
+> 2026-03-11 更新：
+> - `brain/tools.py` 新增 `TOOL_INTROS`，为每个工具提供一句话简介，用于注入到前脑/后脑提示词。
+> - 工具简介仅用于**前脑路由判断**是否需要后脑；前脑禁止直接调用工具，所有执行在后脑完成。
+
 ---
 
 ## 1. 总览
@@ -23,6 +27,10 @@
 10. `exec_command`
 11. `view_image`
 12. `crop_image_for_llm`
+13. `report_progress`
+14. `set_alarm`
+15. `list_alarms`
+16. `cancel_alarm`
 
 ---
 
