@@ -2,7 +2,7 @@
 
 ## 📋 概述
 
-N.O.R.A.Core 的消息历史管理系统采用**混合存储策略**，通过智能压缩和分层总结，在保持对话连续性的同时，有效控制存储空间和上下文长度。
+N.O.R.A.Core 的消息历史管理系统采用**混合存储策略**，通过智能压缩、分层总结和**对话分段**，在保持对话连续性的同时，有效控制存储空间和上下文长度。
 
 ## 🎯 设计目标
 
@@ -11,6 +11,7 @@ N.O.R.A.Core 的消息历史管理系统采用**混合存储策略**，通过智
 3. **保留重要信息** - 关键决策和信息不会丢失
 4. **节省存储空间** - 自动清理冗余历史
 5. **性能优化** - 快速检索和智能压缩
+6. **对话分段** - 按 AI 在线/离线状态自动切割对话段落，便于回溯和上下文理解
 
 ## 🏗️ 架构设计
 
@@ -69,7 +70,51 @@ N.O.R.A.Core 的消息历史管理系统采用**混合存储策略**，通过智
             原始消息归档      一级总结删除
 ```
 
-## 📊 数据库设计
+## � 对话分段系统 (Conversation Session Segmentation)
+
+### 概念
+
+对话分段是基于 AI 在线状态自动切割对话段落的机制。当 AI 从 `ONLINE`（活跃对话中）转为 `SEMI_ONLINE`（空闲待命）时，系统自动将这次在线期间的所有对话封装为一个**对话段落 (Session)**。
+
+### 触发时机
+
+```
+用户发消息 → AI 进入 ONLINE 状态
+    ↓
+对话进行中（消息的 session_id = NULL，表示未分配）
+    ↓
+用户停止发言 2 分钟
+    ↓
+AI 追话 / 等待 / 判定结束
+    ↓
+对话延续循环判定 END 或追话超限
+    ↓
+_transition_to_semi_online() 触发
+    ↓
+close_session() — 将所有 session_id=NULL 的消息归入新 session
+    ↓
+异步生成段落摘要
+    ↓
+AI 进入 SEMI_ONLINE 状态
+```
+
+### 存储结构
+
+- 每条消息新增 `session_id` 字段，指向 `conversation_sessions` 表
+- `session_id = NULL` 表示消息属于当前活跃对话（尚未封闭）
+- 对话封闭时批量更新 `session_id`
+
+### 上下文构建增强
+
+在构建 LLM 上下文时，如果原始消息跨越不同的对话段落，系统会自动插入段落分隔标记：
+
+```
+[📋 对话段落分隔 — 以上为之前的对话段落 上段对话摘要: xxx，以下为新的对话段落]
+```
+
+这帮助 LLM 理解对话的时间结构和主题切换。
+
+## �📊 数据库设计
 
 ### messages 表 (原始消息)
 
@@ -85,6 +130,7 @@ N.O.R.A.Core 的消息历史管理系统采用**混合存储策略**，通过智
 | metadata    | TEXT                | JSON 格式额外信息               |
 | is_pinned   | INTEGER             | 是否永久标记 (0/1)              |
 | is_archived | INTEGER             | 是否已归档 (0/1)                |
+| session_id  | INTEGER             | 所属对话段落 ID (NULL=当前活跃) |
 
 ### summaries 表 (压缩总结)
 
@@ -99,6 +145,20 @@ N.O.R.A.Core 的消息历史管理系统采用**混合存储策略**，通过智
 | summary_text     | TEXT                | 总结内容               |
 | message_count    | INTEGER             | 总结了多少条消息       |
 | timestamp        | REAL                | 时间戳                 |
+
+### conversation_sessions 表 (对话段落)
+
+| 字段          | 类型                | 说明                                           |
+| ------------- | ------------------- | ---------------------------------------------- |
+| id            | INTEGER PRIMARY KEY | 自增主键 (即 session_id)                       |
+| platform      | TEXT                | 平台标识                                       |
+| chat_id       | TEXT                | 聊天 ID                                        |
+| started_at    | REAL                | 本段对话起始时间戳                             |
+| ended_at      | REAL                | 本段对话结束时间戳                             |
+| message_count | INTEGER             | 本段消息总数                                   |
+| summary       | TEXT                | 本段对话摘要 (异步生成，可能为 NULL)           |
+| trigger_type  | TEXT                | 触发来源: 'user', 'proactive', 'alarm'         |
+| metadata      | TEXT                | JSON 格式额外信息                              |
 
 ## 🔄 压缩算法
 

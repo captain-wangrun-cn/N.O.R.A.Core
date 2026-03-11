@@ -69,7 +69,7 @@
 ### 💾 记忆与上下文 (Memory & Context)
 
 - **[消息历史管理 (Message History)](./message_history.md)**
-  - 四层存储策略 (Raw, Compressed, Vector, Archive)。
+  - 四层存储策略 (Raw, Compressed, Vector, Archive) + 对话分段 (Conversation Session Segmentation)。
 - **[消息压缩 (Message Compression)](./message-compression.md)**
   - 针对长对话的 Token 优化策略。
 - **[图片记忆系统 (Image Memory)](./image-memory.md)**

@@ -67,9 +67,13 @@ core/controller.py            NoraController.handle_message()
 ### `memory/message_history.py`
 - `MessageHistory` — 消息持久化
   - `add_message(platform, chat_id, role, content, ...)` — 添加消息（自动插入时间戳、触发压缩）
-  - `get_context_messages(platform, chat_id, ...)` — 获取上下文（Pinned → 归档总结 → 压缩总结 → 原始消息）
+  - `get_context_messages(platform, chat_id, ...)` — 获取上下文（Pinned → 归档总结 → 压缩总结 → 原始消息，跨段落自动插入分隔标记）
+  - `close_session(platform, chat_id, ...)` — 关闭当前对话段落（AI 进入 SEMI_ONLINE 时由 controller 调用）
+  - `get_recent_sessions(platform, chat_id, ...)` — 获取最近的对话段落列表
+  - `get_session_messages(platform, chat_id, session_id)` — 获取指定段落的所有消息
   - `_perform_compression(...)` — 一级压缩（N 条 → 1 条总结）
   - `_create_archive_summary(...)` — 归档（合并所有一级总结）
+  - `_generate_session_summary(...)` — 异步为已关闭段落生成摘要
 
 ### `adapters/base.py`
 - `BaseAdapter` — 平台适配器基类
@@ -117,7 +121,7 @@ python tui.py
 
 | 文件 | 说明 |
 |------|------|
-| `data/memory/message_history.db` | 聊天记录 + 压缩总结（`messages` + `summaries` 表） |
+| `data/memory/message_history.db` | 聊天记录 + 压缩总结 + 对话段落（`messages` + `summaries` + `conversation_sessions` 表） |
 | `memory/cost_tracking.db` | 成本记录 |
 | `memory/vector.db` | 向量数据库（Qdrant） |
 

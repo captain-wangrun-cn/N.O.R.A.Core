@@ -225,6 +225,11 @@ class NoraController:
         r'\[IMAGE_TAGS:([^\]\s]+)\](.*?)\[/IMAGE_TAGS\]',
         re.IGNORECASE | re.DOTALL,
     )
+    # 匹配 LLM 返回的图片 OCR 文字块: [IMAGE_OCR:img_xxx] ... [/IMAGE_OCR]
+    _IMAGE_OCR_PATTERN = re.compile(
+        r'\[IMAGE_OCR:([^\]\s]+)\](.*?)\[/IMAGE_OCR\]',
+        re.IGNORECASE | re.DOTALL,
+    )
 
     def __init__(self, adapter: BaseAdapter, tui_callback: Optional[Callable[[str], None]] = None):
         self.adapter = adapter
@@ -581,6 +586,18 @@ class NoraController:
                 lines.append("")
                 lines.append(f"🗄️ RAG: {'🟢 启用' if self.rag.enabled else '🔴 离线'}")
                 lines.append(f"💰 成本跟踪: {'🟢 启用' if self.cost_tracking_enabled else '🔴 禁用'}")
+                
+                # 对话分段统计
+                try:
+                    _stat_storage_id = chat_id if chat_type != "private" else user_id
+                    stats = self.message_history.get_statistics("telegram", _stat_storage_id)
+                    lines.append("")
+                    lines.append(f"📋 对话段落: {stats.get('total_sessions', 0)} 个已封闭")
+                    active_msgs = stats.get('active_messages', 0)
+                    if active_msgs > 0:
+                        lines.append(f"  当前活跃对话: {active_msgs} 条消息")
+                except Exception:
+                    pass
                 
                 await self.adapter.send_message(chat_id, "\n".join(lines))
             except Exception as e:
@@ -1539,13 +1556,19 @@ class NoraController:
             # --- 4. 发送响应 ---
             # 先提取图片标签（在任何清理之前），供后续存储
             image_tags_extracted: Dict[str, str] = {}  # image_id -> tags
+            image_ocr_extracted: Dict[str, str] = {}   # image_id -> ocr_text
             if multimodal_images and final_response_buffer:
                 for m in self._IMAGE_TAGS_PATTERN.finditer(final_response_buffer):
                     img_id = m.group(1).strip()
                     tags_text = m.group(2).strip()
                     if img_id and tags_text:
                         image_tags_extracted[img_id] = tags_text
-                logger.debug(f"[{chat_id}] 已提取 {len(image_tags_extracted)} 个图片标签块。")
+                for m in self._IMAGE_OCR_PATTERN.finditer(final_response_buffer):
+                    img_id = m.group(1).strip()
+                    ocr_text = m.group(2).strip()
+                    if img_id and ocr_text and ocr_text != "（无文字）":
+                        image_ocr_extracted[img_id] = ocr_text
+                logger.debug(f"[{chat_id}] 已提取 {len(image_tags_extracted)} 个图片标签块，{len(image_ocr_extracted)} 个 OCR 文字块。")
 
             # If the loop completes and there's still text in the buffer, it's the final message.
             if final_response_buffer:
@@ -1635,6 +1658,7 @@ class NoraController:
                     if not tags:
                         # LLM 没有按格式返回标签，用简单的文件名作为 fallback
                         tags = f"用户发送的图片: {os.path.basename(img['path'])}"
+                    ocr_text = image_ocr_extracted.get(img_id, "")
                     asyncio.create_task(
                         self._async_save_image_metadata(
                             image_id=img_id,
@@ -1642,10 +1666,11 @@ class NoraController:
                             tags=tags,
                             user_id=storage_id,
                             chat_id=chat_id,
+                            ocr_text=ocr_text,
                         )
                     )
-                    logger.info(f"[{chat_id}] 图片 {img_id} 标签已提取并入库: '{tags[:60]}...'")
-            
+                    ocr_info = f", ocr_text='{ocr_text[:40]}...'" if ocr_text else ""
+                    logger.info(f"[{chat_id}] 图片 {img_id} 标签已提取并入库: '{tags[:60]}...'{ocr_info}")            
             # --- 5. RAG 记忆存储 (Memory Storage) ---
             if self.rag.enabled:
                 # Store the initial user prompt
@@ -1726,6 +1751,8 @@ class NoraController:
         cleaned = cls._THINK_INLINE_PATTERN.sub("", cleaned)
         # 移除 IMAGE_TAGS 块（不应展示给用户，仅后台存储用）
         cleaned = cls._IMAGE_TAGS_PATTERN.sub("", cleaned)
+        # 移除 IMAGE_OCR 块（不应展示给用户，仅后台存储用）
+        cleaned = cls._IMAGE_OCR_PATTERN.sub("", cleaned)
         cleaned = re.sub(r'\n{3,}', '\n\n', cleaned).strip()
         return cleaned
 
@@ -1835,9 +1862,13 @@ class NoraController:
         tags: str,
         user_id: str,
         chat_id: str,
+        ocr_text: str = "",
     ):
         """异步保存图片元数据到 MongoDB + Qdrant。"""
         try:
+            extra = {}
+            if ocr_text:
+                extra["ocr_text"] = ocr_text
             await asyncio.to_thread(
                 self.image_store.save_image_metadata,
                 image_id=image_id,
@@ -1845,8 +1876,9 @@ class NoraController:
                 tags=tags,
                 user_id=user_id,
                 chat_id=chat_id,
+                extra=extra,
             )
-            logger.debug(f"[{chat_id}] 图片元数据已异步保存: {image_id}")
+            logger.debug(f"[{chat_id}] 图片元数据已异步保存: {image_id}" + (f" (含 OCR {len(ocr_text)} 字)" if ocr_text else ""))
         except Exception as e:
             logger.error(f"保存图片元数据失败: {image_id} - {e}")
 
@@ -1981,10 +2013,27 @@ class NoraController:
             self._transition_to_semi_online(chat_id)
 
     def _transition_to_semi_online(self, chat_id: str):
-        """安全地从 ONLINE 过渡到 SEMI_ONLINE。"""
+        """安全地从 ONLINE 过渡到 SEMI_ONLINE，同时关闭当前对话段落。"""
         clear_conversation_tracking(chat_id)
         set_ai_presence(AIPresence.SEMI_ONLINE)
         self._followup_timers.pop(chat_id, None)
+        
+        # --- 关闭对话段落：将本次 ONLINE 期间的所有消息封装为一个 session ---
+        try:
+            # chat_id 在 followup/proactive 回调中直接用作 storage_id
+            # 对于私聊场景，在 handle_new_message 时 storage_id = user_id，
+            # 但 followup 回调中 storage_id = chat_id。
+            # 这里使用 chat_id 作为 storage_id，与 followup 消息保存逻辑一致。
+            session_id = self.message_history.close_session(
+                platform="telegram",
+                chat_id=chat_id,
+                trigger_type="user",
+            )
+            if session_id:
+                logger.info(f"[{chat_id}] 对话段落 #{session_id} 已封闭")
+        except Exception as e:
+            logger.error(f"[{chat_id}] 关闭对话段落失败: {e}", exc_info=True)
+        
         logger.info(f"[{chat_id}] 对话结束，AI 进入 SEMI_ONLINE 状态")
 
     async def _detect_followup_intent(self, chat_id: str, idle_secs: float, followup_count: int) -> str:

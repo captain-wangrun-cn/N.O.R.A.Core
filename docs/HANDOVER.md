@@ -5,6 +5,26 @@
 
 ## 近期关键改动（截至 2026-03-11）
 
+### 📋 对话分段系统 (Conversation Session Segmentation) — 2026-03-11
+
+- 当 AI 从 `ONLINE` 进入 `SEMI_ONLINE` 时，自动将本次在线期间的所有对话封装为一个**对话段落 (Session)**。
+- 数据库变更：
+  - `messages` 表新增 `session_id` 列（旧数据库自动迁移）
+  - 新建 `conversation_sessions` 表，记录每个段落的起止时间、消息数、摘要、触发来源
+- 段落封闭后异步生成摘要（使用 `summary` 模型）
+- `get_context_messages()` 增强：跨段落消息之间自动插入 `[📋 对话段落分隔]` 标记，帮助 LLM 理解时间结构
+- `get_statistics()` 新增 `total_sessions` 和 `active_messages` 字段
+- `/status` 指令新增对话段落统计显示
+- `clear_chat_history` / `clear_all_history` 同步清理 `conversation_sessions` 表
+
+**涉及文件：**
+- `memory/message_history.py`（新增 `close_session`、`_generate_session_summary`、`get_session_messages`、`get_recent_sessions`、`get_current_session_id`、`_migrate_db`；修改 `_init_db`、`get_context_messages`、`get_statistics`、`clear_chat_history`、`clear_all_history`）
+- `core/controller.py`（修改 `_transition_to_semi_online`、`/status` 指令）
+- `docs/architecture/message_history.md`（新增对话分段章节、`conversation_sessions` 表文档）
+- `docs/architecture/README.md`（更新索引）
+- `docs/onboarding/QUICK_REFERENCE.md`（更新 MessageHistory 方法列表、数据库文件说明）
+- `docs/onboarding/COMMON_PITFALLS.md`（新增对话分段注意事项）
+
 ### 🧭 工具/技能简介注入与前后脑职责收敛 — 2026-03-11
 
 - 在 `brain/tools.py` 新增 `TOOL_INTROS`（工具一句话简介）。

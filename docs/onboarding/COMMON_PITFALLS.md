@@ -44,6 +44,14 @@
 - 压缩/归档需要可用的 `summary` 模型（`config.yml` → `llm.models.summary`）。
 - 如果模型不可用或 API Key 无效，压缩会静默失败（`except` 捕获后仅打日志）。
 
+### ⚠️ 对话分段 (Session Segmentation)
+- 对话段落在 AI 从 `ONLINE` 进入 `SEMI_ONLINE` 时自动创建。
+- `messages` 表的 `session_id` 为 `NULL` 表示消息属于当前活跃对话。
+- 段落摘要异步生成，短对话可能在摘要完成前 AI 已进入下一轮对话。
+- 旧数据库会自动迁移（`ALTER TABLE` 添加 `session_id` 列），无需手动操作。
+- `get_context_messages()` 在跨段落消息之间自动插入分隔标记，帮助 LLM 理解时间结构。
+- `clear_chat_history` / `clear_all_history` 会同时清理 `conversation_sessions` 表。
+
 ---
 
 ## 4. 流式输出 / [SPLIT]

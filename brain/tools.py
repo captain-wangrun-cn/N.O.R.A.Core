@@ -26,7 +26,7 @@ TOOL_INTROS = {
     "list_dir": "列出目录内容，查看文件和子目录，适合确认路径。",
     "get_available_skills": "列出当前可用技能清单，便于选择技能。",
     "exec_command": "执行受限的系统命令，作为无法用高层工具时的兜底。",
-    "view_image": "检索已保存的图片并按条件返回，适合找回历史图片。",
+    "view_image": "检索已保存的图片并按条件返回，支持标签语义搜索和图片内文字(OCR)模糊搜索，适合找回历史图片。",
     "crop_image_for_llm": "裁剪图片以便模型分析，用户要求仔细观察图片某个部分时可调用。",
     "report_progress": "向用户发送阶段性进度汇报，适合长任务中途更新。",
     "set_alarm": "设置提醒或倒计时闹钟，适合提醒/日程。",
@@ -803,6 +803,7 @@ class ToolManager:
         self,
         image_id: str = "",
         keyword: str = "",
+        text_query: str = "",
         start_time: str = "",
         end_time: str = "",
         user_id: str = "",
@@ -813,10 +814,13 @@ class ToolManager:
         Retrieves images from the image memory database. Supports multiple search modes:
         1. By image_id: exact lookup (e.g. 'img_a1b2c3d4')
         2. By keyword: semantic/text search on image tags (e.g. '猫咪', 'sunset beach')
-        3. By time range: filter by Unix timestamp (start_time/end_time)
-        4. If no parameters given: returns the most recent images.
+        3. By text_query: fuzzy search on OCR text extracted from images (e.g. 'Hello World', '购物清单'). Supports search-engine-like fuzzy matching — partial matches, case-insensitive, multi-keyword AND logic.
+        4. By time range: filter by Unix timestamp (start_time/end_time)
+        5. If no parameters given: returns the most recent images.
+        text_query and keyword can be used together for combined results.
         :param image_id: Exact image ID to look up (e.g. 'img_a1b2c3d4').
         :param keyword: Keyword or description for semantic/text search on image tags.
+        :param text_query: Search text content (OCR) extracted from images. Supports fuzzy matching, case-insensitive, multi-keyword AND logic (space-separated). E.g. 'error message', '购物 清单'.
         :param start_time: Start of time range as Unix timestamp string (e.g. '1709856000').
         :param end_time: End of time range as Unix timestamp string (e.g. '1709942400').
         :param user_id: Filter by user ID. If empty, searches all users.
@@ -840,6 +844,7 @@ class ToolManager:
         results = self.image_store.search_images(
             image_id=image_id,
             keyword=keyword,
+            text_query=text_query,
             start_time=s_time,
             end_time=e_time,
             user_id=user_id,
@@ -858,6 +863,11 @@ class ToolManager:
             output_lines.append(f"  ID: {img.get('image_id', 'N/A')}")
             output_lines.append(f"  File: {img.get('file_path', 'N/A')}")
             output_lines.append(f"  Tags: {img.get('tags', img.get('text', 'N/A'))}")
+            ocr_text = img.get('ocr_text', '')
+            if ocr_text:
+                # 截断过长的 OCR 文字，避免输出过大
+                preview = ocr_text[:200] + ('...' if len(ocr_text) > 200 else '')
+                output_lines.append(f"  OCR Text: {preview}")
             ts = img.get("timestamp")
             if ts:
                 from datetime import datetime, timezone

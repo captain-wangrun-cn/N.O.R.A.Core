@@ -50,7 +50,7 @@ ImageStore.save_image_metadata()
      └── Qdrant:  标签文本向量 (语义检索)
 
 用户请求找回图片（view_image）
-     │  view_image(keyword/image_id/time, return_image=true)
+     │  view_image(keyword/image_id/time/text_query, return_image=true)
      ▼
 Tool 返回元数据 + MediaTag: [image: absolute_path]
      │
@@ -71,8 +71,9 @@ LLM 基于找回图片继续分析并回复
 ```json
 {
     "image_id": "img_a1b2c3d4",
-     "file_path": "data/telegram/photo_xxxx.jpg",
+    "file_path": "data/telegram/photo_xxxx.jpg",
     "tags": "猫咪, 橘猫, 沙发, 室内, 可爱, 蜷缩, 温暖, 阳光, 午后",
+    "ocr_text": "（图片中提取的文字内容，如有）",
     "user_id": "123456789",
     "chat_id": "123456789",
     "timestamp": 1709856000.0,
@@ -84,7 +85,7 @@ LLM 基于找回图片继续分析并回复
 - `image_id` (唯一)
 - `user_id`
 - `timestamp`
-- `tags` (文本索引, 支持关键词搜索)
+- `tags + ocr_text` (复合文本索引, 支持全文搜索，ocr_text 权重更高)
 
 ### Qdrant (`nora_images`)
 
@@ -95,7 +96,7 @@ LLM 基于找回图片继续分析并回复
     "payload": {
         "image_id": "img_a1b2c3d4",
         "text": "猫咪, 橘猫, 沙发, 室内, 可爱...",
-          "file_path": "data/telegram/photo_xxxx.jpg",
+        "file_path": "data/telegram/photo_xxxx.jpg",
         "user_id": "123456789",
         "chat_id": "123456789",
         "timestamp": 1709856000.0
@@ -108,34 +109,43 @@ LLM 基于找回图片继续分析并回复
 - `user_id` (KEYWORD)
 - `timestamp` (FLOAT)
 
-## LLM 标签协议
+## LLM 标签 & OCR 协议
 
-在用户发送图片时，系统会在 user prompt 末尾追加指令：
+在用户发送图片时，系统会在 user prompt 末尾追加指令，要求 LLM 同时返回标签和 OCR 文字：
 
 ```
 📎 本次消息附带了以下图片：
 - 图片 ID: img_a1b2c3d4  文件: photo_xxxx.jpg
 
-请在回复最末尾，为每张图片附上【关键词标签列表】，格式如下：
+请在回复最末尾，为每张图片附上【关键词标签列表】和【图片中的文字】：
 [IMAGE_TAGS:img_a1b2c3d4]
-标签1, 标签2, 标签3, 标签4 ...（仅关键词，不要长句描述）
+标签1, 标签2, 标签3, 标签4 ...
 [/IMAGE_TAGS]
+[IMAGE_OCR:img_a1b2c3d4]
+图片中出现的所有可见文字内容，原样输出
+[/IMAGE_OCR]
 ```
 
 LLM 回复示例：
 
 ```
-哇，好可爱的猫猫！橘猫蜷在沙发上晒太阳呢～
+这是一张代码截图！
 
 [IMAGE_TAGS:img_a1b2c3d4]
-猫咪, 橘猫, 沙发, 室内, 蜷缩, 午后, 阳光, 温暖, 可爱, 宠物, 毛茸茸, 慵懒
+代码, Python, IDE, 截图, 编程, 函数, 深色主题
 [/IMAGE_TAGS]
+[IMAGE_OCR:img_a1b2c3d4]
+def hello_world():
+    print("Hello, World!")
+[/IMAGE_OCR]
 ```
 
 系统会：
 1. 提取 `[IMAGE_TAGS:xxx]...[/IMAGE_TAGS]` 中的标签文本
-2. 从发送给用户的文本中移除这些标签块
-3. 将标签文本向量化并存入 Qdrant
+2. 提取 `[IMAGE_OCR:xxx]...[/IMAGE_OCR]` 中的 OCR 文字
+3. 从发送给用户的文本中移除这些标签块和 OCR 块
+4. 将标签文本向量化并存入 Qdrant
+5. 将 OCR 文字存入 MongoDB 的 `ocr_text` 字段
 
 ## `view_image` 工具
 
@@ -147,6 +157,7 @@ LLM 回复示例：
 |------|------|------|------|
 | `image_id` | string | 否 | 按图片 ID 精确查找 |
 | `keyword` | string | 否 | 关键词/语义搜索（优先语义检索） |
+| `text_query` | string | 否 | 在图片 OCR 文字中模糊搜索（支持多关键词 AND、忽略大小写、部分匹配） |
 | `start_time` | string | 否 | 时间范围起点（Unix 时间戳） |
 | `end_time` | string | 否 | 时间范围终点（Unix 时间戳） |
 | `user_id` | string | 否 | 按用户过滤 |
@@ -156,13 +167,23 @@ LLM 回复示例：
 ### 检索策略
 
 1. **有 `image_id`** → MongoDB 精确查询
-2. **有 `keyword`** → Qdrant 语义搜索 → 回退 MongoDB 文本搜索
-3. **有时间范围** → MongoDB 时间过滤
-4. **无参数** → 返回最近的图片
+2. **有 `text_query` + `keyword`** → OCR 文字搜索 + 语义搜索，合并去重
+3. **仅有 `text_query`** → MongoDB `$regex` 模糊搜索 OCR 文字
+4. **仅有 `keyword`** → Qdrant 语义搜索 → 回退 MongoDB 文本搜索
+5. **有时间范围** → MongoDB 时间过滤
+6. **无参数** → 返回最近的图片
+
+### `text_query` 搜索规则
+
+`text_query` 使用较强的模糊搜索规则，类似搜索引擎：
+- **多词 AND 逻辑**：空格分隔的关键词全部需要匹配
+- **忽略大小写**：`hello` 匹配 `Hello`、`HELLO`
+- **部分匹配**：`购物` 匹配 `购物清单`
+- **忽略空白差异**：字符之间允许有不同的空白和标点
 
 ### `return_image` 模式说明
 
-- `return_image=false`（默认）：返回元数据（ID、路径、tags、时间、相关度）
+- `return_image=false`（默认）：返回元数据（ID、路径、tags、OCR 文字、时间、相关度）
 - `return_image=true`：除元数据外，额外返回 `MediaTag: [image: absolute_path]`
      - 该标签会被后续流程解析为真实多模态输入
      - Controller 会在下一轮自动切换到 `image` 模型继续分析图片
@@ -173,6 +194,9 @@ LLM 在对话中可以这样调用：
 - "找一下我之前发的那张猫的照片" → `view_image(keyword="猫")`
 - "看看 img_a1b2c3d4 那张图" → `view_image(image_id="img_a1b2c3d4")`
 - "上周发的照片有哪些" → `view_image(start_time="...", end_time="...")`
+- "找一下包含 Hello World 的截图" → `view_image(text_query="Hello World")`
+- "找那张有购物清单的图片" → `view_image(text_query="购物清单")`
+- "找有 error 字样的代码截图" → `view_image(keyword="代码截图", text_query="error")`
 
 ## 涉及的文件
 

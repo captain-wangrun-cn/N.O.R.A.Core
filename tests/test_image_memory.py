@@ -360,3 +360,313 @@ def test_crop_image_for_llm_pixel_range_requires_all_coords(tmp_path):
     )
 
     assert "pixel crop range is incomplete" in result
+
+
+# ---------------------------------------------------------------------------
+# 4. IMAGE_OCR pattern parsing
+# ---------------------------------------------------------------------------
+
+_IMAGE_OCR_PATTERN = re.compile(
+    r'\[IMAGE_OCR:([^\]\s]+)\](.*?)\[/IMAGE_OCR\]',
+    re.IGNORECASE | re.DOTALL,
+)
+
+
+def test_image_ocr_pattern_parsing():
+    """_IMAGE_OCR_PATTERN 应正确提取 OCR 文字"""
+    response = (
+        "这是一张截图！\n\n"
+        "[IMAGE_TAGS:img_a1b2c3d4]\n"
+        "截图, 代码, IDE, Python\n"
+        "[/IMAGE_TAGS]\n"
+        "[IMAGE_OCR:img_a1b2c3d4]\n"
+        "def hello_world():\n"
+        "    print('Hello, World!')\n"
+        "[/IMAGE_OCR]"
+    )
+
+    matches = list(_IMAGE_OCR_PATTERN.finditer(response))
+    assert len(matches) == 1
+    assert matches[0].group(1) == "img_a1b2c3d4"
+    assert "hello_world" in matches[0].group(2)
+    assert "Hello, World!" in matches[0].group(2)
+
+
+def test_image_ocr_no_text():
+    """图片无文字时应匹配到 '（无文字）'"""
+    response = (
+        "好看的风景照\n\n"
+        "[IMAGE_TAGS:img_11111111]\n"
+        "风景, 山, 云\n"
+        "[/IMAGE_TAGS]\n"
+        "[IMAGE_OCR:img_11111111]（无文字）[/IMAGE_OCR]"
+    )
+
+    matches = list(_IMAGE_OCR_PATTERN.finditer(response))
+    assert len(matches) == 1
+    assert "无文字" in matches[0].group(2)
+
+
+def test_image_ocr_multiple_images():
+    """多张图片各自有 OCR 块"""
+    response = (
+        "[IMAGE_OCR:img_aaaa1111]\n"
+        "购物清单\n苹果 3个\n牛奶 1盒\n"
+        "[/IMAGE_OCR]\n"
+        "[IMAGE_OCR:img_bbbb2222]\n"
+        "Error 404: Not Found\n"
+        "[/IMAGE_OCR]"
+    )
+
+    matches = list(_IMAGE_OCR_PATTERN.finditer(response))
+    assert len(matches) == 2
+    assert "购物清单" in matches[0].group(2)
+    assert "Error 404" in matches[1].group(2)
+
+
+def test_strip_thinking_content_removes_image_ocr():
+    """_strip_thinking_and_tags 应同时移除 IMAGE_OCR 块"""
+    def _strip_all(text: str) -> str:
+        cleaned = _THINK_BLOCK_PATTERN.sub("", text)
+        cleaned = _THINK_INLINE_PATTERN.sub("", cleaned)
+        cleaned = _IMAGE_TAGS_PATTERN.sub("", cleaned)
+        cleaned = _IMAGE_OCR_PATTERN.sub("", cleaned)
+        cleaned = re.sub(r'\n{3,}', '\n\n', cleaned).strip()
+        return cleaned
+
+    text = (
+        "这是回复正文\n\n"
+        "[IMAGE_TAGS:img_abc12345]\n标签\n[/IMAGE_TAGS]\n"
+        "[IMAGE_OCR:img_abc12345]\nHello World\n[/IMAGE_OCR]"
+    )
+
+    cleaned = _strip_all(text)
+    assert "IMAGE_OCR" not in cleaned
+    assert "Hello World" not in cleaned
+    assert "这是回复正文" in cleaned
+
+
+# ---------------------------------------------------------------------------
+# 5. view_image text_query parameter
+# ---------------------------------------------------------------------------
+
+def test_view_image_text_query_parameter():
+    """view_image 应支持 text_query 参数搜索 OCR 文字"""
+    from unittest.mock import MagicMock
+    from brain.tools import ToolManager
+
+    mock_adapter = MagicMock()
+    mock_adapter.platform_features = MagicMock()
+    mock_store = MagicMock()
+    mock_store.enabled = True
+    mock_store.search_images.return_value = [
+        {
+            "image_id": "img_ocr_test",
+            "file_path": "/tmp/screenshot.png",
+            "tags": "截图, 代码, Python",
+            "ocr_text": "def hello():\n    print('Hello World')",
+            "timestamp": 1709856000.0,
+            "user_id": "user123",
+        }
+    ]
+
+    tm = ToolManager(mock_adapter, image_store=mock_store)
+    result = tm.view_image(text_query="hello")
+
+    # 验证 search_images 被正确调用
+    mock_store.search_images.assert_called_once()
+    call_kwargs = mock_store.search_images.call_args[1]
+    assert call_kwargs["text_query"] == "hello"
+
+    # 验证输出包含 OCR 文字
+    assert "img_ocr_test" in result
+    assert "OCR Text:" in result
+    assert "hello()" in result
+    assert "Found 1 image" in result
+
+
+def test_view_image_text_query_and_keyword_combined():
+    """view_image 应支持 text_query 与 keyword 同时使用"""
+    from unittest.mock import MagicMock
+    from brain.tools import ToolManager
+
+    mock_adapter = MagicMock()
+    mock_adapter.platform_features = MagicMock()
+    mock_store = MagicMock()
+    mock_store.enabled = True
+    mock_store.search_images.return_value = [
+        {
+            "image_id": "img_combined",
+            "file_path": "/tmp/combined.png",
+            "tags": "文档, 表格",
+            "ocr_text": "销售报表 2024年",
+            "timestamp": 1709856000.0,
+            "user_id": "user123",
+        }
+    ]
+
+    tm = ToolManager(mock_adapter, image_store=mock_store)
+    result = tm.view_image(keyword="文档", text_query="销售报表")
+
+    call_kwargs = mock_store.search_images.call_args[1]
+    assert call_kwargs["keyword"] == "文档"
+    assert call_kwargs["text_query"] == "销售报表"
+
+
+def test_view_image_tool_schema_has_text_query():
+    """view_image schema 应包含 text_query 参数"""
+    from unittest.mock import MagicMock
+    from brain.tools import ToolManager
+
+    mock_adapter = MagicMock()
+    mock_adapter.platform_features = MagicMock()
+    tm = ToolManager(mock_adapter, image_store=None)
+
+    schemas = tm.get_tool_schemas()
+    view_image_schema = next(s for s in schemas if s["name"] == "view_image")
+    assert "text_query" in view_image_schema["parameters"]["properties"]
+
+
+# ---------------------------------------------------------------------------
+# 6. ImageStore search_by_ocr_text (unit test with mock MongoDB)
+# ---------------------------------------------------------------------------
+
+def test_search_by_ocr_text_builds_regex_query():
+    """search_by_ocr_text 应为每个关键词构建 $regex 条件"""
+    from unittest.mock import MagicMock
+
+    from memory.image_store import ImageStore
+
+    store = ImageStore.__new__(ImageStore)
+    store.mongo_col = MagicMock()
+    store.qdrant = None
+    store.embed_client = MagicMock()
+    store.enabled = True
+
+    # Mock cursor
+    mock_cursor = MagicMock()
+    mock_cursor.sort.return_value = mock_cursor
+    mock_cursor.limit.return_value = iter([
+        {"image_id": "img_test1", "ocr_text": "Hello World", "tags": "test"}
+    ])
+    store.mongo_col.find.return_value = mock_cursor
+
+    results = store.search_by_ocr_text("Hello World")
+
+    # 验证 find 被调用并且查询包含 $and + $regex
+    assert store.mongo_col.find.called
+    query_arg = store.mongo_col.find.call_args[0][0]
+    assert "$and" in query_arg
+    # 应有两个 regex 条件 (Hello 和 World)
+    assert len(query_arg["$and"]) == 2
+    for cond in query_arg["$and"]:
+        assert "ocr_text" in cond
+        assert "$regex" in cond["ocr_text"]
+
+
+def test_search_by_ocr_text_single_keyword():
+    """单个关键词时不应使用 $and"""
+    from unittest.mock import MagicMock
+
+    from memory.image_store import ImageStore
+
+    store = ImageStore.__new__(ImageStore)
+    store.mongo_col = MagicMock()
+    store.qdrant = None
+    store.embed_client = MagicMock()
+    store.enabled = True
+
+    mock_cursor = MagicMock()
+    mock_cursor.sort.return_value = mock_cursor
+    mock_cursor.limit.return_value = iter([])
+    store.mongo_col.find.return_value = mock_cursor
+
+    store.search_by_ocr_text("购物清单")
+
+    query_arg = store.mongo_col.find.call_args[0][0]
+    # 单个关键词不用 $and
+    assert "$and" not in query_arg
+    assert "ocr_text" in query_arg
+    assert "$regex" in query_arg["ocr_text"]
+
+
+def test_search_by_ocr_text_with_user_id():
+    """带 user_id 时应将其加入查询条件"""
+    from unittest.mock import MagicMock
+
+    from memory.image_store import ImageStore
+
+    store = ImageStore.__new__(ImageStore)
+    store.mongo_col = MagicMock()
+    store.qdrant = None
+    store.embed_client = MagicMock()
+    store.enabled = True
+
+    mock_cursor = MagicMock()
+    mock_cursor.sort.return_value = mock_cursor
+    mock_cursor.limit.return_value = iter([])
+    store.mongo_col.find.return_value = mock_cursor
+
+    store.search_by_ocr_text("Hello World", user_id="user123")
+
+    query_arg = store.mongo_col.find.call_args[0][0]
+    assert "$and" in query_arg
+    # 应有 Hello, World 两个 regex + user_id 条件
+    has_user_id = any("user_id" in cond for cond in query_arg["$and"])
+    assert has_user_id
+
+
+# ---------------------------------------------------------------------------
+# 7. search_images unified entry supports text_query
+# ---------------------------------------------------------------------------
+
+def test_search_images_text_query_only():
+    """search_images 仅有 text_query 时应调用 search_by_ocr_text"""
+    from unittest.mock import MagicMock
+
+    from memory.image_store import ImageStore
+
+    store = ImageStore.__new__(ImageStore)
+    store.mongo_col = MagicMock()
+    store.qdrant = MagicMock()
+    store.embed_client = MagicMock()
+    store.embed_client.enabled = True
+    store.enabled = True
+
+    store.search_by_ocr_text = MagicMock(return_value=[{"image_id": "img_ocr1"}])
+
+    results = store.search_images(text_query="测试文字")
+
+    store.search_by_ocr_text.assert_called_once_with("测试文字", user_id="", limit=10)
+    assert len(results) == 1
+    assert results[0]["image_id"] == "img_ocr1"
+
+
+def test_search_images_text_query_and_keyword():
+    """text_query + keyword 同时使用时应合并结果"""
+    from unittest.mock import MagicMock
+
+    from memory.image_store import ImageStore
+
+    store = ImageStore.__new__(ImageStore)
+    store.mongo_col = MagicMock()
+    store.qdrant = MagicMock()
+    store.embed_client = MagicMock()
+    store.embed_client.enabled = True
+    store.enabled = True
+
+    store.search_by_ocr_text = MagicMock(return_value=[
+        {"image_id": "img_ocr1"},
+    ])
+    store.search_by_semantic = MagicMock(return_value=[
+        {"image_id": "img_sem1"},
+        {"image_id": "img_ocr1"},  # 重复项
+    ])
+
+    results = store.search_images(text_query="文字", keyword="标签")
+
+    # 应该去重，OCR 结果优先
+    assert len(results) == 2
+    ids = [r["image_id"] for r in results]
+    assert ids[0] == "img_ocr1"  # OCR 优先
+    assert "img_sem1" in ids

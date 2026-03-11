@@ -129,7 +129,17 @@ class ImageStore:
             self.mongo_col.create_index("image_id", unique=True)
             self.mongo_col.create_index("user_id")
             self.mongo_col.create_index("timestamp")
-            self.mongo_col.create_index([("tags", pymongo.TEXT)])
+            # 复合文本索引：同时覆盖 tags 和 ocr_text，支持全文搜索
+            # 注意：MongoDB 每个 collection 只能有一个文本索引，需要先尝试删除旧的
+            try:
+                self.mongo_col.drop_index("tags_text")
+            except Exception:
+                pass  # 旧索引不存在时忽略
+            self.mongo_col.create_index(
+                [("tags", pymongo.TEXT), ("ocr_text", pymongo.TEXT)],
+                weights={"tags": 2, "ocr_text": 3},  # OCR 文字权重更高
+                name="tags_ocr_text_index",
+            )
         except Exception as e:
             logger.error(f"创建 MongoDB 索引失败: {e}")
 
@@ -293,6 +303,62 @@ class ImageStore:
             logger.error(f"关键词搜索图片失败: {e}")
             return []
 
+    def search_by_ocr_text(
+        self,
+        text_query: str,
+        user_id: str = "",
+        limit: int = 10,
+    ) -> List[Dict[str, Any]]:
+        """
+        在图片 OCR 文字中做模糊搜索（支持类搜索引擎的模糊匹配）。
+
+        搜索规则（较强的模糊搜索）：
+        1. 使用 MongoDB $regex 进行正则匹配
+        2. 支持多词搜索：将查询拆分为关键词，每个词独立匹配（AND 逻辑）
+        3. 忽略大小写
+        4. 支持部分匹配（子串匹配）
+        5. 忽略空格和标点差异
+        """
+        if self.mongo_col is None:
+            return []
+        if not text_query.strip():
+            return []
+        try:
+            # 将查询拆分为关键词（按空格和常见标点分割）
+            import re as _re
+            keywords = _re.split(r'[\s,，、;；|]+', text_query.strip())
+            keywords = [kw.strip() for kw in keywords if kw.strip()]
+
+            if not keywords:
+                return []
+
+            # 构建 $and 条件：每个关键词都必须出现在 ocr_text 中（模糊匹配）
+            regex_conditions = []
+            for kw in keywords:
+                # 转义正则特殊字符，允许每个字符之间有可选空白/标点
+                escaped = _re.escape(kw)
+                # 在字符之间插入可选空白匹配，增强模糊度
+                flexible_pattern = r'[\s\S]*?'.join(escaped)
+                regex_conditions.append({
+                    "ocr_text": {
+                        "$regex": flexible_pattern,
+                        "$options": "is",  # i=忽略大小写, s=.匹配换行
+                    }
+                })
+
+            query: Dict[str, Any] = {"$and": regex_conditions} if len(regex_conditions) > 1 else regex_conditions[0]
+            if user_id:
+                if "$and" in query:
+                    query["$and"].append({"user_id": user_id})
+                else:
+                    query["user_id"] = user_id
+
+            cursor = self.mongo_col.find(query, {"_id": 0}).sort("timestamp", -1).limit(limit)
+            return list(cursor)
+        except Exception as e:
+            logger.error(f"OCR 文字搜索图片失败: {e}")
+            return []
+
     def search_by_semantic(
         self,
         query_text: str,
@@ -338,6 +404,7 @@ class ImageStore:
         self,
         image_id: str = "",
         keyword: str = "",
+        text_query: str = "",
         start_time: Optional[float] = None,
         end_time: Optional[float] = None,
         user_id: str = "",
@@ -345,21 +412,48 @@ class ImageStore:
     ) -> List[Dict[str, Any]]:
         """
         统一检索入口 —— 自动选择最佳策略：
-        1. 有 image_id → 精确查询
-        2. 有 keyword  → 先尝试语义搜索，再回退关键词搜索
-        3. 有时间范围  → 时间过滤
-        4. 什么都没有  → 返回最近的图片
+        1. 有 image_id   → 精确查询
+        2. 有 text_query  → 在图片 OCR 文字中做模糊搜索
+        3. 有 keyword     → 先尝试语义搜索，再回退关键词搜索
+        4. 有时间范围     → 时间过滤
+        5. 什么都没有     → 返回最近的图片
+
+        当 text_query 和 keyword 同时存在时，text_query 结果优先，
+        keyword 结果作为补充（去重合并）。
         """
         # 精确查询
         if image_id:
             doc = self.get_by_id(image_id)
             return [doc] if doc else []
 
+        # OCR 文字搜索 + 关键词搜索组合
+        if text_query and keyword:
+            ocr_results = self.search_by_ocr_text(text_query, user_id=user_id, limit=limit)
+            keyword_results = self.search_by_semantic(keyword, user_id=user_id, top_k=limit)
+            if not keyword_results:
+                keyword_results = self.search_by_keyword(keyword, user_id=user_id, limit=limit)
+            # Qdrant 语义搜索结果需要从 MongoDB 补全 ocr_text 等字段
+            keyword_results = self._enrich_with_mongo(keyword_results)
+            # 合并去重（以 image_id 去重，OCR 结果优先）
+            seen_ids = set()
+            merged = []
+            for r in ocr_results + keyword_results:
+                rid = r.get("image_id", "")
+                if rid and rid not in seen_ids:
+                    seen_ids.add(rid)
+                    merged.append(r)
+            return merged[:limit]
+
+        # 纯 OCR 文字搜索
+        if text_query:
+            return self.search_by_ocr_text(text_query, user_id=user_id, limit=limit)
+
         # 语义 + 关键词
         if keyword:
             semantic_results = self.search_by_semantic(keyword, user_id=user_id, top_k=limit)
             if semantic_results:
-                return semantic_results
+                # Qdrant 语义搜索结果需要从 MongoDB 补全 ocr_text 等字段
+                return self._enrich_with_mongo(semantic_results)
             return self.search_by_keyword(keyword, user_id=user_id, limit=limit)
 
         # 时间范围
@@ -368,3 +462,29 @@ class ImageStore:
 
         # 默认：最近的图片
         return self.search_by_time_range(user_id, limit=limit)
+
+    def _enrich_with_mongo(self, results: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """
+        用 MongoDB 的完整元数据补全 Qdrant 返回的结果。
+        Qdrant payload 中缺少 ocr_text、tags 等字段，需要从 MongoDB 获取。
+        """
+        if not results or self.mongo_col is None:
+            return results
+        enriched = []
+        for r in results:
+            img_id = r.get("image_id", "")
+            if img_id:
+                try:
+                    mongo_doc = self.mongo_col.find_one({"image_id": img_id}, {"_id": 0})
+                    if mongo_doc:
+                        # 保留 Qdrant 的 score，用 MongoDB 数据补全其他字段
+                        score = r.get("score")
+                        merged = {**mongo_doc, **{k: v for k, v in r.items() if v}}
+                        if score is not None:
+                            merged["score"] = score
+                        enriched.append(merged)
+                        continue
+                except Exception:
+                    pass
+            enriched.append(r)
+        return enriched
