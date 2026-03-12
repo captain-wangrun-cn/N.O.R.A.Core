@@ -74,14 +74,26 @@ class InterruptHandlerMixin:
                 action_part = parts[0].strip()
                 reply_part = parts[1].strip() if len(parts) > 1 else ""
                 
-                # 提取 ACTION
+                # 提取 ACTION（支持带参数格式如 cancel_queue:2）
                 action = "queue"  # 默认
+                action_param = None
                 if "ACTION:" in action_part.upper():
                     action_text = action_part.split(":", 1)[1].strip().lower()
                     if "stop" in action_text:
                         action = "stop"
                     elif "change" in action_text:
                         action = "change"
+                    elif "clear_queue" in action_text:
+                        action = "clear_queue"
+                    elif "cancel_queue" in action_text:
+                        action = "cancel_queue"
+                        # 提取序号：cancel_queue:N
+                        import re
+                        num_match = re.search(r'(\d+)', action_text)
+                        if num_match:
+                            action_param = int(num_match.group(1))
+                    elif "list_queue" in action_text:
+                        action = "list_queue"
                 
                 # 提取 REPLY
                 reply = reply_part
@@ -94,11 +106,20 @@ class InterruptHandlerMixin:
                         reply = "好的，已经停下来了～"
                     elif action == "change":
                         reply = "好，马上切换～"
+                    elif action == "list_queue":
+                        reply = "让我看看当前的情况～"
+                    elif action == "cancel_queue":
+                        reply = "好的，帮你取消了～"
+                    elif action == "clear_queue":
+                        reply = "好的，排队的任务都清掉了～"
                     else:
                         reply = f"收到～ 我正在处理之前的请求（{status.phase}），完成后马上看你的新消息！"
                 
-                logger.info(f"[{chat_id}] LLM判断意图: action={action}, reply='{reply[:50]}'")
-                return {"action": action, "reply": reply}
+                result = {"action": action, "reply": reply}
+                if action_param is not None:
+                    result["param"] = action_param
+                logger.info(f"[{chat_id}] LLM判断意图: action={action}, param={action_param}, reply='{reply[:50]}'")
+                return result
             
             else:
                 # 解析失败，fallback 到 queue

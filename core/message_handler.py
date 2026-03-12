@@ -144,6 +144,27 @@ class MessageHandlerMixin:
             elif action == "change":
                 await self._interrupt_backend(chat_id, reason="change", user_text=text, skip_reply=True)
                 return
+            elif action == "list_queue":
+                # 查看队列：AI 已在 reply 中汇报了状态，无需额外操作
+                return
+            elif action == "cancel_queue":
+                # 取消特定排队任务
+                queue = self.task_queues.get(chat_id)
+                param = decision.get("param")
+                if queue and param:
+                    removed_text = await queue.remove_by_index(param)
+                    if removed_text:
+                        logger.info(f"[{chat_id}] 已取消排队任务 #{param}: '{removed_text}'")
+                    else:
+                        logger.warning(f"[{chat_id}] 取消排队任务 #{param} 失败（序号无效或队列已空）")
+                return
+            elif action == "clear_queue":
+                # 清空所有排队任务
+                queue = self.task_queues.get(chat_id)
+                if queue:
+                    await queue.clear()
+                    logger.info(f"[{chat_id}] 已清空所有排队任务")
+                return
             else:  # action == "queue"
                 # 入队列，等后端完成后处理
                 queue = self.task_queues.setdefault(chat_id, BackendTaskQueue())

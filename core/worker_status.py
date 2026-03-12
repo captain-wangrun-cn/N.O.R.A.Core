@@ -194,6 +194,32 @@ class BackendTaskQueue:
             lines.append(f"  {i}. \"{text_preview}\" (等待 {wait_secs}s)")
         return "\n".join(lines)
 
+    async def remove_by_index(self, index: int) -> Optional[str]:
+        """
+        按序号（1-based）删除特定排队任务。
+        返回被删除任务的文本摘要，失败返回 None。
+        """
+        async with self._lock:
+            if index < 1 or index > len(self._items):
+                return None
+            removed = self._items.pop(index - 1)
+        # 重建 asyncio.Queue 以保持同步
+        await self._rebuild_queue()
+        return removed["text"][:60]
+
+    async def _rebuild_queue(self):
+        """根据 _items 列表重建内部 asyncio.Queue。"""
+        # 清空旧队列
+        while not self._queue.empty():
+            try:
+                self._queue.get_nowait()
+            except asyncio.QueueEmpty:
+                break
+        # 按顺序重新入队
+        async with self._lock:
+            for item in self._items:
+                await self._queue.put(item)
+
     async def clear(self):
         """清空队列。"""
         while not self._queue.empty():
