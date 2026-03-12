@@ -429,76 +429,83 @@ class SchedulerMixin:
         reason_display = reason if reason else "(无缘由)"
         logger.info(f"[{chat_id}] 触发主动消息: type={event_type}, reason={reason_display}")
 
-        soul = get_soul_prompt()
+        from datetime import datetime
+        from zoneinfo import ZoneInfo
 
-        if event_type == "alarm":
-            system_prompt = render_template("schedule.jinja", "alarm_system", soul_prompt=soul)
-            user_prompt = render_template("schedule.jinja", "alarm_user", reason=reason)
-        else:
-            from datetime import datetime
-            from zoneinfo import ZoneInfo
-            tz_str = config.get_message_history_config().get("timezone", "Asia/Shanghai")
-            now = datetime.now(ZoneInfo(tz_str))
-            system_prompt = render_template("schedule.jinja", "proactive_system", soul_prompt=soul)
-            user_prompt = render_template("schedule.jinja", "proactive_user", current_time=now.strftime('%H:%M'), reason=reason)
+        tz_str = config.get_message_history_config().get("timezone", "Asia/Shanghai")
+        now = datetime.now(ZoneInfo(tz_str))
+        current_time = now.strftime('%H:%M')
 
-        db_context = self.message_history.get_context_messages("telegram", chat_id)
-        proactive_history = [
-            {"role": msg["role"], "content": msg["content"]}
-            for msg in db_context
-            if msg.get("role") in ("user", "assistant", "system") and msg.get("content")
-        ]
-        if len(proactive_history) > 12:
-            proactive_history = proactive_history[-12:]
+        # 构造前脑上下文与元数据
+        proactive_meta = {
+            "event_type": event_type,
+            "reason": reason,
+            "current_time": current_time,
+            "trigger_from": "scheduler",
+        }
+        front_context = {
+            "chat_id": chat_id,
+            "user_id": chat_id,
+            "chat_type": "private",
+            "user_name": "User",
+            "text": f"[proactive:{event_type}] {reason_display}",
+        }
 
-        if len(proactive_history) < 4:
-            session = self.sessions.get(chat_id, {})
-            session_history = session.get("history", [])
-            session_tail = [
-                {"role": h.get("role"), "content": h.get("content")}
-                for h in session_history[-8:]
-                if h.get("role") in ("user", "assistant", "system") and h.get("content")
-            ]
-            if session_tail:
-                proactive_history = (proactive_history + session_tail)[-12:]
+        front_result = await self._generate_front_chat_response(front_context, proactive_meta=proactive_meta)
+        user_reply = front_result.get("user_reply", "")
+        raw_front_reply = front_result.get("raw_response", "")
 
-        try:
-            response = ""
-            stream = self.llm.chat_stream(
-                system_prompt=system_prompt,
-                user_prompt=user_prompt,
-                history=proactive_history,
-                tools=[]
+        # 发送前脑回复
+        if user_reply:
+            parts = self._SPLIT_MARKER_PATTERN.split(user_reply)
+            for part in parts:
+                part = part.strip()
+                if part:
+                    await self.adapter.send_message(chat_id, part)
+
+            storage_id = chat_id
+            self.message_history.add_message(
+                platform="telegram",
+                chat_id=storage_id,
+                role="assistant",
+                content=user_reply,
+                user_id="assistant",
             )
-            async for chunk in stream:
-                if isinstance(chunk, dict) and chunk.get("type") == "text":
-                    response += chunk["content"]
-                elif isinstance(chunk, str):
-                    response += chunk
 
-            response = self._strip_thinking_content(response.strip())
-            if response:
-                await self.adapter.send_message(chat_id, response)
-                storage_id = chat_id
-                self.message_history.add_message(
-                    platform="telegram",
-                    chat_id=storage_id,
-                    role="assistant",
-                    content=response,
-                    user_id="assistant"
-                )
+        # 记录到 session 历史（含触发标记）
+        session = self.sessions.setdefault(chat_id, {"history": [], "interrupted_thought": "", "pending_text": ""})
+        session_history = session.setdefault("history", [])
+        trigger_note = f"[proactive:{event_type}] {reason}" if reason else f"[proactive:{event_type}]"
+        session_history.append({"role": "system", "content": trigger_note})
+        if user_reply:
+            session_history.append({"role": "assistant", "content": user_reply})
+        if len(session_history) > 20:
+            session["history"] = session_history[-20:]
 
-                session = self.sessions.setdefault(chat_id, {"history": [], "interrupted_thought": "", "pending_text": ""})
-                session_history = session.setdefault("history", [])
-                trigger_note = f"[proactive:{event_type}] {reason}" if reason else f"[proactive:{event_type}]"
-                session_history.append({"role": "system", "content": trigger_note})
-                session_history.append({"role": "assistant", "content": response})
-                if len(session_history) > 20:
-                    session["history"] = session_history[-20:]
+        # 如需后脑则启动轮询，否则标记空闲
+        if front_result.get("needs_backend"):
+            backend_instruction = (
+                f"主动消息触发（类型: {event_type}, 时间: {current_time}, 缘由: {reason_display}）。"
+                "请完成前脑提到的需要后台处理的任务，生成最终要发送给用户的结果。"
+            )
+            if user_reply:
+                backend_instruction += f"\n\n前脑已对用户说: {user_reply}"
+            elif raw_front_reply:
+                backend_instruction += f"\n\n前脑原始回复: {raw_front_reply}"
 
-                logger.info(f"[{chat_id}] 主动消息已发送: {response[:50]}...")
-            else:
-                logger.warning(f"[{chat_id}] LLM 未生成主动消息内容")
+            backend_context = {
+                "chat_id": chat_id,
+                "chat_type": "private",
+                "user_id": chat_id,
+                "user_name": "User",
+                "text": backend_instruction,
+                "_front_brain_handled": True,
+                "_front_brain_reply": user_reply,
+            }
 
-        except Exception as e:
-            logger.error(f"[{chat_id}] 发送主动消息失败: {e}", exc_info=True)
+            logger.info(f"[{chat_id}] 前脑标记需要后脑，启动轮询处理主动消息")
+            task = asyncio.create_task(self._run_polling_loop(backend_context))
+            self.generation_tasks[chat_id] = task
+        else:
+            logger.info(f"[{chat_id}] 主动消息前脑已完成，无需后脑")
+            self._mark_scheduler_idle(chat_id)

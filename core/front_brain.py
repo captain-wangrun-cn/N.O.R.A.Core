@@ -6,7 +6,7 @@ Copyright © WR（captain-wangrun-cn） All rights reserved
 """前脑 Mixin — 即时回复 + 审查后脑结果。"""
 
 import logging
-from typing import Dict, Any, List, cast
+from typing import Dict, Any, List, Optional, cast
 
 from brain.prompts import (
     get_soul_prompt,
@@ -25,7 +25,11 @@ logger = logging.getLogger(__name__)
 class FrontBrainMixin:
     """前脑即时回复 + 后脑结果审查。"""
 
-    async def _generate_front_chat_response(self, context: Dict[str, Any]) -> dict:
+    async def _generate_front_chat_response(
+        self,
+        context: Dict[str, Any],
+        proactive_meta: Optional[Dict[str, Any]] = None,
+    ) -> dict:
         """
         前脑即时回复：使用 smart 模型生成自然对话回复 + 路由判断。
         
@@ -45,7 +49,10 @@ class FrontBrainMixin:
         user_name = context.get("user_name", "User")
         storage_id = chat_id if chat_type != "private" else user_id
 
-        logger.info(f"[{chat_id}] 前脑处理: '{text[:80]}'")
+        proactive_meta = proactive_meta or {}
+        proactive_mode = bool(proactive_meta)
+
+        logger.info(f"[{chat_id}] 前脑处理: '{text[:80]}' (proactive={proactive_mode})")
 
         # --- 构建前脑 prompt ---
         soul_prompt = get_soul_prompt()
@@ -84,6 +91,36 @@ class FrontBrainMixin:
         except Exception:
             logger.warning("前脑工具简介注入失败，已忽略。", exc_info=True)
 
+        # 主动触发上下文
+        proactive_context = ""
+        proactive_user_message = ""
+        if proactive_mode:
+            event_type = proactive_meta.get("event_type", "proactive")
+            reason = proactive_meta.get("reason", "")
+            current_time = proactive_meta.get("current_time", "")
+            trigger_from = proactive_meta.get("trigger_from", "")
+            recent_hint = proactive_meta.get("recent_hint", "")
+
+            meta_lines = [f"类型: {event_type}（主动触发）"]
+            if current_time:
+                meta_lines.append(f"当前时间: {current_time}")
+            if reason:
+                meta_lines.append(f"触发缘由: {reason}")
+            if trigger_from:
+                meta_lines.append(f"来源: {trigger_from}")
+            if recent_hint:
+                meta_lines.append(f"最近对话线索: {recent_hint}")
+            proactive_context = "\n".join(meta_lines)
+
+            base_reason = reason or "无特定缘由（定时关怀）"
+            proactive_user_message = proactive_meta.get("user_prompt") or (
+                "这是一次主动消息触发（不是用户发起）。\n"
+                f"类型: {event_type}\n"
+                f"当前时间: {current_time or '未知'}\n"
+                f"触发缘由: {base_reason}\n"
+                "请生成一条自然的主动消息，必要时说明你要去执行的后台任务或查询。"
+            )
+
         system_prompt = render_template(
             'front_brain.jinja',
             'system',
@@ -92,8 +129,12 @@ class FrontBrainMixin:
             schedule_block=schedule_block,
             custom_block=custom_block,
             tool_intro_block=tool_intro_block,
+            proactive_context=proactive_context,
         )
-        user_prompt = render_template('front_brain.jinja', 'user', user_message=text)
+        if proactive_mode:
+            user_prompt = render_template('front_brain.jinja', 'proactive_user', proactive_user_message=proactive_user_message)
+        else:
+            user_prompt = render_template('front_brain.jinja', 'user', user_message=text)
 
         # --- 前脑也接入 RAG 记忆检索 ---
         if self.rag.enabled:
