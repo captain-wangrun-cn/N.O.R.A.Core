@@ -26,6 +26,13 @@ description: Create/Update agent skills. Use when user asks for new capabilities
 3.  **安全审计:** 编写完成后，**必须** 先进行自我代码审查，然后向主人报告："脚本已完成，经AI初步审计无明显风险。是否批准运行？"
 4.  **测试:** 在获得批准后，才能执行脚本进行测试。
 
+### 运行约束
+- 运行入口：只能通过 `execute_skill("<skill_name>", '{"arg": "value"}')` 调用；不要用 `exec_command` 直接跑脚本。
+- 路径使用框架注入的环境变量，禁止硬编码绝对路径：`WORKSPACE_ROOT`、`SKILLS_DIR`、`DOWNLOADS_DIR`、`CODE_ROOT`。
+- 配置注入：若存在 `skills/<skill_name>/config.json`，会以环境变量形式注入；不要去读根目录的 `config.yml` / `.env`。
+- 输出契约：成功写 `stdout`，错误/调试写 `stderr`，必要时退出码非 0。
+- 敏感文件：不要读取/修改 `CUSTOM.md`、`SECRET.md` 等敏感文件；遵守系统提示的文件访问限制。
+
 ---
 
 ## SKILL.md 最佳实践模板
