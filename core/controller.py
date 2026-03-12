@@ -1237,6 +1237,24 @@ class NoraController:
                             f"请基于此继续工作，不要重复前脑已经说过的内容。直接执行任务，完成后汇报结果即可。"
                         )
 
+            # --- 轮询模式指令注入 ---
+            # 在轮询模式下，后脑不直接与用户沟通，而是产出详细专业的工作报告
+            # 由前脑审查后决定如何回复用户
+            if context.get("_in_polling_loop", False):
+                instructions.append(
+                    "【轮询模式 (Polling Mode)】\n"
+                    "你当前处于**轮询模式**，你的输出将由前脑审查后再转达给用户。\n"
+                    "⚠️ 重要规则：\n"
+                    "1. **禁止调用 report_progress** — 进度由前脑管理。\n"
+                    '2. **不要写用户向的寒暄/过渡语** — 不要说"好的我来帮你"、"搜到了哦~"之类的话。\n'
+                    "3. **你的最终回复应是详细、专业的工作报告**，包含：\n"
+                    "   - 执行了什么操作（哪些工具/技能）\n"
+                    "   - 得到了什么结果（关键数据/文件路径/搜索结果）\n"
+                    "   - 是否完全完成了用户请求\n"
+                    "   - 如有异常或部分失败，说明原因\n"
+                    "4. 保持客观、简洁、信息密度高。前脑会将你的报告转化为自然对话回复用户。"
+                )
+
             system_prompt = get_system_prompt(instructions, platform=self.adapter.platform_name)
 
             # --- 3. 执行循环 (Tool Execution Loop) ---
@@ -1497,12 +1515,20 @@ class NoraController:
                     # --- report_progress 拦截：直接发送消息给用户，不走 tool_manager ---
                     if tool_name == "report_progress" and isinstance(tool_args, dict):
                         progress_msg = str(tool_args.get("message", "")).strip()
-                        if progress_msg:
+                        in_polling = context.get("_in_polling_loop", False)
+                        if progress_msg and not in_polling:
+                            # 非轮询模式：直接发送给用户
                             try:
                                 await self.adapter.send_message(chat_id, f"⏳ {progress_msg}", parse_media=False)
                             except Exception as e:
                                 logger.debug(f"[{chat_id}] 发送进度消息失败: {e}")
-                        tool_result = "Progress message sent to user."
+                            tool_result = "Progress message sent to user."
+                        elif progress_msg and in_polling:
+                            # 轮询模式：不直接发送，记录到日志，前脑审查时可见
+                            logger.info(f"[{chat_id}] [轮询模式] 后脑进度: {progress_msg}")
+                            tool_result = "Progress noted. (Polling mode: message will be reviewed by front-brain, not sent directly.)"
+                        else:
+                            tool_result = "No message provided."
                         # 跳过下面的 tool_manager.execute，直接继续工具结果处理
                     else:
                         tool_result = await self.tool_manager.execute(tool_name, cast(Dict[str, Any], tool_args))
@@ -1605,6 +1631,9 @@ class NoraController:
             await self._send_debug(chat_id, f"✅ 生成完成，共 {current_turn} 轮，最终回复 {len(final_response_buffer)} 字符")
             
             # --- 4. 发送响应 ---
+            # 轮询模式下，后脑不直接发送给用户，由前脑审查后统一回复
+            in_polling = context.get("_in_polling_loop", False)
+            
             # 先提取图片标签（在任何清理之前），供后续存储
             image_tags_extracted: Dict[str, str] = {}  # image_id -> tags
             image_ocr_extracted: Dict[str, str] = {}   # image_id -> ocr_text
@@ -1634,7 +1663,10 @@ class NoraController:
                 ).strip()
                 clean_response = self._strip_thinking_content(clean_response)
                 if clean_response:
-                    await self.adapter.send_message(chat_id, clean_response)
+                    if not in_polling:
+                        await self.adapter.send_message(chat_id, clean_response)
+                    else:
+                        logger.info(f"[{chat_id}] [轮询模式] 后脑回复已缓存，等待前脑审查 ({len(clean_response)} 字符)")
                 elif latest_meaningful_output:
                     # 整条消息都是工具语法泄漏，用工具结果做 fallback
                     pass  # 由下面的 elif 分支处理
@@ -1659,11 +1691,13 @@ class NoraController:
                 
                 final_response_buffer = self._strip_thinking_content(final_response_buffer)
                 if final_response_buffer:
-                    await self.adapter.send_message(chat_id, final_response_buffer)
+                    if not in_polling:
+                        await self.adapter.send_message(chat_id, final_response_buffer)
                 else:
                     # 真的没生成内容，发简短提示
                     final_response_buffer = "任务已完成。"
-                    await self.adapter.send_message(chat_id, final_response_buffer)
+                    if not in_polling:
+                        await self.adapter.send_message(chat_id, final_response_buffer)
             elif latest_tool_output:
                 # Last resort: LLM truly silent, summarize via one more call
                 temp_history.append({
@@ -1686,10 +1720,12 @@ class NoraController:
                 
                 final_response_buffer = self._strip_thinking_content(final_response_buffer)
                 if final_response_buffer:
-                    await self.adapter.send_message(chat_id, final_response_buffer)
+                    if not in_polling:
+                        await self.adapter.send_message(chat_id, final_response_buffer)
                 else:
                     final_response_buffer = "任务已完成。"
-                    await self.adapter.send_message(chat_id, final_response_buffer)
+                    if not in_polling:
+                        await self.adapter.send_message(chat_id, final_response_buffer)
             
             # --- 4.5 保存助手回复到数据库 ---
             if final_response_buffer:
