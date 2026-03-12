@@ -13,3 +13,4 @@ textual
 tavily-python  # Web search API (optional: will fallback to HTTP if not installed)
 Pillow
 APScheduler>=3.10,<4  # Async job scheduler for proactive messages
+cryptography>=42.0.0

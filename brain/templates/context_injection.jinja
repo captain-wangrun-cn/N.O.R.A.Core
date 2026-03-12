@@ -23,6 +23,14 @@
 ⚠️ 本简介用于**前脑判断是否需要后脑**，前脑禁止调用工具。
 所有工具调用一律由后脑执行。{% endblock %}
 
+{# 作息/日程注入 #}
+{% block schedule %}【作息与日程 (SCHEDULE.md)】
+{{ schedule_content }}{% endblock %}
+
+{# 用户自定义全局指令 #}
+{% block custom %}【用户自定义全局指令 (CUSTOM.md)】
+{{ custom_content }}{% endblock %}
+
 {# RAG 记忆检索结果 #}
 {% block rag %}【相关回忆/背景知识】(请参考以下历史记忆来回答):
 {{ rag_context }}{% endblock %}

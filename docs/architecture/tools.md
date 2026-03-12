@@ -31,6 +31,8 @@
 14. `set_alarm`
 15. `list_alarms`
 16. `cancel_alarm`
+17. `read_secret_vault`
+18. `write_secret_vault`
 
 ---
 
@@ -126,7 +128,7 @@
 
 ## `write_file`
 
-**作用**：覆写写入文件（不存在则创建）。
+**作用**：覆写写入文件（不存在则创建）。对敏感文件有防护。
 
 **参数**：
 - `path` (string, required)
@@ -135,6 +137,8 @@
 **返回**：
 - 成功：`Successfully wrote to ...`
 - 失败：`Error writing file: ...`
+
+**安全限制**：拒绝写入敏感文件（`config.yml` / `.env` / `SECRET.md` / `CUSTOM.md` / `secret.key`）。SECRET/CUSTOM 需要用专用通道，见文末。
 
 ---
 
@@ -196,6 +200,8 @@
 - 阻断通过 shell 读取敏感文件。
 - 阻断直接 `python skills/...`，并引导改用 `execute_skill`。
 
+**额外限制**：阻止借助 shell 读取 `SECRET.md` / `CUSTOM.md` / `secret.key`。SECRET 使用专用工具；CUSTOM 仅用户手动编辑。
+
 ---
 
 ## `view_image`
@@ -216,6 +222,54 @@
 - 当 `return_image=true` 时，额外返回 `MediaTag: [image: abs_path]`
 
 **联动**：控制器会解析 `MediaTag`，并在下一轮切到 image 模型分析。
+
+---
+
+## `read_secret_vault`
+
+**作用**：解密读取 `SECRET.md`（AI 私人加密记事本）。
+
+**参数**：无。
+
+**返回**：
+- 解密后的纯文本；空内容返回 `(secret vault is empty)`
+- 失败：`Error reading SECRET.md: ...` 或解密错误提示
+
+**实现要点**：
+- 首次写入时生成密钥 `workspace/data/secret.key`，使用 Fernet 对称加密。
+- 文件/密钥均列为敏感，通用文件/命令工具禁止访问。
+
+**使用场景**：AI 自我反思/偏见/想法，不向用户展示。
+
+---
+
+## `write_secret_vault`
+
+**作用**：写入/追加到 `SECRET.md`（加密存储）。
+
+**参数**：
+- `content` (string, required): 纯文本内容
+- `append` (boolean, optional, default=true): 是否追加；false 时覆盖
+- `add_timestamp` (boolean, optional, default=true): 是否自动加 UTC 时间戳前缀
+
+**返回**：
+- 成功：`Secret note saved (append=..., length=...)`
+- 失败：`Error writing SECRET.md: ...`
+
+**实现要点**：
+- 自动生成并复用 `workspace/data/secret.key`。
+- 旧内容解密失败时会重置为新内容并记录警告。
+
+**安全约束**：
+- SECRET 仅供 AI 内部记事，回复中不得泄露内容。
+- 禁止用 `read_file`/`write_file`/`exec_command` 操作 SECRET/CUSTOM/secret.key。
+
+---
+
+## 关于 CUSTOM.md 与敏感文件
+
+- `CUSTOM.md`：用户自定义全局指令，系统自动注入提示，AI 不得通过文件工具读取/修改。
+- 敏感名单：`config.yml`、`.env`、`SECRET.md`、`CUSTOM.md`、`secret.key` 等，所有通用文件/命令工具会拒绝访问。
 
 ---
 

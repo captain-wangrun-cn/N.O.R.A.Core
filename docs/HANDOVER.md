@@ -3,7 +3,26 @@
 - 目标：多平台智能体内核，包含 LLM 适配、工具/技能体系、成本追踪、记忆/RAG。
 - 当前状态：可运行，自测通过；已完成图片记忆链路（入库/检索/回查再分析）、`view_image` 工具增强、CLI 高危清理保护。
 
-## 近期关键改动（截至 2026-03-11）
+## 近期关键改动（截至 2026-03-12）
+
+### 🗝️ CUSTOM/SECRET 文件与加密私密本 — 2026-03-12
+
+- 新增 `CUSTOM.md`：用户维护的全局指令，自动注入提示，AI 禁止用文件工具读取/修改。
+- 新增 `SECRET.md`：AI 私人加密记事本，使用专用工具 `read_secret_vault` / `write_secret_vault`，首次写入生成 `workspace/data/secret.key`（Fernet）。通用文件/命令工具禁止访问。
+- 前脑 prompt 增加 CUSTOM/SECRET 路由说明：
+   - 发现隐含偏好/习惯/日程 → `[NEED_BACKEND]` 写入 USER/SCHEDULE/MEMORY；
+   - AI 自己的想法/偏见/反思 → `[NEED_BACKEND]` 触发写入 SECRET（回复中不得泄露内容）；
+   - CUSTOM 由用户编辑，AI 仅遵守。
+- 系统 prompt 更新文件边界表，SENSITIVE 列表扩充（`SECRET.md`/`CUSTOM.md`/`secret.key`），`write_file`/`exec_command` 增加阻拦。
+- 工具列表新增 `read_secret_vault` / `write_secret_vault`，TOOL_INTROS 说明用途。
+
+**涉及文件：**
+- `brain/prompts.py`（CUSTOM 注入、路径常量）
+- `brain/templates/system.jinja`、`front_brain.jinja`、`front_brain_review.jinja`、`context_injection.jinja`（CUSTOM/SECRET 块与路由规则）
+- `brain/tools.py`（加密读写、敏感防护、工具注册、TOOL_INTROS）
+- `CUSTOM.md`、`SECRET.md`（新增占位）
+- `requirements.txt`（新增 `cryptography`）
+- `docs/architecture/tools.md`（工具文档新增 SECRET 章节）
 
 ### 📋 对话分段系统 (Conversation Session Segmentation) — 2026-03-11
 

@@ -8,6 +8,7 @@ import subprocess
 import logging
 import inspect
 import uuid
+from cryptography.fernet import Fernet
 from typing import List, Dict, Callable, Any, Optional
 from adapters.base import BaseAdapter
 from workspace_config import get_workspace_manager
@@ -32,6 +33,8 @@ TOOL_INTROS = {
     "set_alarm": "设置提醒或倒计时闹钟，适合提醒/日程。",
     "list_alarms": "查看所有未触发的闹钟，适合确认已有提醒。",
     "cancel_alarm": "取消指定闹钟，适合调整已设置提醒。",
+    "read_secret_vault": "读取加密的 SECRET.md 私人记事本（仅 AI 自用，不向用户披露）。",
+    "write_secret_vault": "写入/追加加密的 SECRET.md 私人记事本，首次调用自动生成密钥并创建文件。",
 }
 
 # --- Workspace & Security Constants ---
@@ -40,13 +43,18 @@ workspace_manager = get_workspace_manager()
 WORKSPACE_ROOT = workspace_manager.root
 SKILLS_DIR = workspace_manager.skills_dir
 DOWNLOADS_DIR = workspace_manager.downloads_dir
+DATA_DIR = workspace_manager.data_dir
 
 # 代码仓库根目录（brain/ 的上一级），技能脚本位于此目录下的 skills/
 CODE_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 CODE_SKILLS_DIR = os.path.join(CODE_ROOT, "skills")
 
+SECRET_FILE = os.path.join(WORKSPACE_ROOT, "SECRET.md")
+SECRET_KEY_FILE = os.path.join(DATA_DIR, "secret.key")
+CUSTOM_FILE = os.path.join(WORKSPACE_ROOT, "CUSTOM.md")
+
 # Files that LLM should NEVER read (contain secrets)
-SENSITIVE_FILES = {"config.yml", "config.yaml", ".env", ".env.local"}
+SENSITIVE_FILES = {"config.yml", "config.yaml", ".env", ".env.local", "SECRET.md", "CUSTOM.md", "secret.key"}
 # Dangerous command patterns
 BLOCKED_COMMANDS = ["rm -rf /", "mkfs", "dd if=", "> /dev/", "shutdown", "reboot", "passwd"]
 
@@ -112,6 +120,8 @@ class ToolManager:
         self.register(self.view_image)
         self.register(self.crop_image_for_llm)
         self.register(self.report_progress)
+        self.register(self.read_secret_vault)
+        self.register(self.write_secret_vault)
         # 动态闹钟工具（仅在 scheduler 可用时注册）
         if self.scheduler is not None:
             self.register(self.set_alarm)
@@ -428,6 +438,10 @@ class ToolManager:
         """Check if a path is safe to access. Returns (is_safe, reason)."""
         abs_path = os.path.abspath(path)
         basename = os.path.basename(abs_path)
+        if basename in {"SECRET.md", "secret.key"}:
+            return False, "Access denied: SECRET vault is encrypted. Use read_secret_vault/write_secret_vault instead."
+        if basename == "CUSTOM.md":
+            return False, "Access denied: CUSTOM.md 由用户管理，禁止通过文件工具读取/修改。"
         if basename in SENSITIVE_FILES:
             return False, f"Access denied: '{basename}' contains sensitive data (API keys, tokens). You should not read this file."
         return True, ""
@@ -461,6 +475,33 @@ class ToolManager:
 
         # Default relative path behavior: resolve from WORKSPACE_ROOT
         return os.path.abspath(os.path.join(str(WORKSPACE_ROOT), normalized))
+
+    def _get_secret_key(self) -> bytes:
+        """Load or generate the symmetric key for SECRET.md encryption."""
+        os.makedirs(DATA_DIR, exist_ok=True)
+        if os.path.exists(SECRET_KEY_FILE):
+            try:
+                with open(SECRET_KEY_FILE, 'rb') as f:
+                    key = f.read().strip()
+                if key:
+                    return key
+            except Exception:
+                logger.warning("读取 secret.key 失败，将生成新密钥", exc_info=True)
+
+        key = Fernet.generate_key()
+        with open(SECRET_KEY_FILE, 'wb') as f:
+            f.write(key)
+        return key
+
+    def _ensure_secret_file(self, key: bytes):
+        """Ensure SECRET.md exists as encrypted content (even if empty)."""
+        os.makedirs(os.path.dirname(SECRET_FILE), exist_ok=True)
+        if not os.path.exists(SECRET_FILE):
+            token = Fernet(key).encrypt(b"")
+            with open(SECRET_FILE, 'wb') as f:
+                f.write(token)
+        elif os.path.isdir(SECRET_FILE):
+            raise ValueError("SECRET.md 路径是目录，请删除后重试。")
 
     def list_dir(self, path: str = ".") -> str:
         """
@@ -498,6 +539,58 @@ class ToolManager:
         """
         # 实际发送逻辑由 controller 拦截处理，此处仅作为 fallback
         return f"Progress reported: {message}"
+
+    def read_secret_vault(self) -> str:
+        """Decrypt and read SECRET.md (private to AI)."""
+        try:
+            key = self._get_secret_key()
+            self._ensure_secret_file(key)
+            cipher = Fernet(key)
+            with open(SECRET_FILE, 'rb') as f:
+                token = f.read().strip()
+            if not token:
+                return "(secret vault is empty)"
+            try:
+                plaintext = cipher.decrypt(token).decode('utf-8')
+            except Exception:
+                return "Error: SECRET.md 无法解密（密钥不匹配或文件损坏）。"
+            return plaintext if plaintext else "(secret vault is empty)"
+        except Exception as e:
+            return f"Error reading SECRET.md: {e}"
+
+    def write_secret_vault(self, content: str, append: bool = True, add_timestamp: bool = True) -> str:
+        """Encrypt and write notes into SECRET.md (AI-only)."""
+        if not isinstance(content, str) or not content.strip():
+            return "Error: content is required."
+        try:
+            key = self._get_secret_key()
+            self._ensure_secret_file(key)
+            cipher = Fernet(key)
+
+            existing = ""
+            if append:
+                try:
+                    with open(SECRET_FILE, 'rb') as f:
+                        token = f.read().strip()
+                    if token:
+                        existing = cipher.decrypt(token).decode('utf-8')
+                except Exception:
+                    logger.warning("SECRET.md 解密失败，将重置为新内容。", exc_info=True)
+                    existing = ""
+
+            entry = content.strip()
+            if add_timestamp:
+                from datetime import datetime, timezone
+
+                entry = f"[{datetime.now(timezone.utc).isoformat()}] {entry}"
+
+            new_plain = entry if not existing or not append else existing + "\n\n" + entry
+            encrypted = cipher.encrypt(new_plain.encode('utf-8'))
+            with open(SECRET_FILE, 'wb') as f:
+                f.write(encrypted)
+            return f"Secret note saved (append={append}, length={len(entry)})."
+        except Exception as e:
+            return f"Error writing SECRET.md: {e}"
 
     def read_file(self, path: str, start_line: Optional[int] = None, end_line: Optional[int] = None) -> str:
         """
@@ -674,6 +767,9 @@ class ToolManager:
         """Writes content to a file, overwriting it."""
         try:
             resolved_path = self._resolve_workspace_path(path)
+            safe, reason = self._is_path_safe(resolved_path)
+            if not safe:
+                return reason
             os.makedirs(os.path.dirname(resolved_path), exist_ok=True)
             with open(resolved_path, 'w', encoding='utf-8') as f: f.write(content)
             return f"Successfully wrote to {resolved_path}"

@@ -8,7 +8,14 @@ Copyright © WR（captain-wangrun-cn） All rights reserved
 import logging
 from typing import Dict, Any, List, cast
 
-from brain.prompts import get_soul_prompt, render_template, load_identity_context
+from brain.prompts import (
+    get_soul_prompt,
+    render_template,
+    load_identity_context,
+    load_custom_prompt,
+    _read_file_safe,
+    WORKSPACE_SCHEDULE_FILE,
+)
 from core.routing import parse_front_brain_response, parse_front_brain_review
 import config
 
@@ -42,8 +49,33 @@ class FrontBrainMixin:
 
         # --- 构建前脑 prompt ---
         soul_prompt = get_soul_prompt()
-        identity_context = load_identity_context()
+        identity_context = load_identity_context(include_schedule=False)
+        schedule_block = ""
+        custom_block = ""
         tool_intro_block = ""
+
+        try:
+            schedule_content = _read_file_safe(WORKSPACE_SCHEDULE_FILE)
+            if schedule_content:
+                schedule_block = render_template(
+                    'context_injection.jinja',
+                    'schedule',
+                    schedule_content=schedule_content,
+                )
+        except Exception:
+            logger.warning("前脑 SCHEDULE 注入失败，已忽略。", exc_info=True)
+
+        try:
+            custom_prompt = load_custom_prompt()
+            if custom_prompt:
+                custom_block = render_template(
+                    'context_injection.jinja',
+                    'custom',
+                    custom_content=custom_prompt,
+                )
+        except Exception:
+            logger.warning("前脑 CUSTOM 注入失败，已忽略。", exc_info=True)
+
         try:
             from brain.tools import TOOL_INTROS
             if TOOL_INTROS:
@@ -57,6 +89,8 @@ class FrontBrainMixin:
             'system',
             soul_prompt=soul_prompt,
             identity_context=identity_context,
+            schedule_block=schedule_block,
+            custom_block=custom_block,
             tool_intro_block=tool_intro_block,
         )
         user_prompt = render_template('front_brain.jinja', 'user', user_message=text)
@@ -184,8 +218,30 @@ class FrontBrainMixin:
 
         # --- 构建审查 prompt ---
         soul_prompt = get_soul_prompt()
-        identity_context = load_identity_context()
+        identity_context = load_identity_context(include_schedule=False)
+        schedule_block = ""
+        custom_block = ""
         tool_intro_block = ""
+        try:
+            schedule_content = _read_file_safe(WORKSPACE_SCHEDULE_FILE)
+            if schedule_content:
+                schedule_block = render_template(
+                    'context_injection.jinja',
+                    'schedule',
+                    schedule_content=schedule_content,
+                )
+        except Exception:
+            logger.warning("前脑审查 SCHEDULE 注入失败，已忽略。", exc_info=True)
+        try:
+            custom_prompt = load_custom_prompt()
+            if custom_prompt:
+                custom_block = render_template(
+                    'context_injection.jinja',
+                    'custom',
+                    custom_content=custom_prompt,
+                )
+        except Exception:
+            logger.warning("前脑审查 CUSTOM 注入失败，已忽略。", exc_info=True)
         try:
             from brain.tools import TOOL_INTROS
             if TOOL_INTROS:
@@ -199,6 +255,8 @@ class FrontBrainMixin:
             'system',
             soul_prompt=soul_prompt,
             identity_context=identity_context,
+            schedule_block=schedule_block,
+            custom_block=custom_block,
             tool_intro_block=tool_intro_block,
         )
         

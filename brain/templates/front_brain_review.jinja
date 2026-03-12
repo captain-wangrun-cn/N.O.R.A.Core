@@ -9,6 +9,18 @@
 {{ identity_context }}
 {% endif %}
 
+{% if schedule_block %}
+
+---
+{{ schedule_block }}
+{% endif %}
+
+{% if custom_block %}
+
+---
+{{ custom_block }}
+{% endif %}
+
 {% if tool_intro_block %}
 
 ---

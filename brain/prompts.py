@@ -67,10 +67,14 @@ WORKSPACE_SOUL_FILE = os.path.join(WORKSPACE_ROOT, "SOUL.md")
 WORKSPACE_USER_FILE = os.path.join(WORKSPACE_ROOT, "USER.md")
 WORKSPACE_MEMORY_FILE = os.path.join(WORKSPACE_MEMORY_DIR, "MEMORY.md")
 WORKSPACE_SCHEDULE_FILE = os.path.join(WORKSPACE_ROOT, "SCHEDULE.md")
+WORKSPACE_CUSTOM_FILE = os.path.join(WORKSPACE_ROOT, "CUSTOM.md")
+WORKSPACE_SECRET_FILE = os.path.join(WORKSPACE_ROOT, "SECRET.md")
 LEGACY_SOUL_FILE = os.path.join(PROJECT_ROOT, "SOUL.md")
 LEGACY_USER_FILE = os.path.join(PROJECT_ROOT, "USER.md")
 LEGACY_MEMORY_FILE = os.path.join(PROJECT_ROOT, "MEMORY.md")
 LEGACY_SCHEDULE_FILE = os.path.join(PROJECT_ROOT, "SCHEDULE.md")
+LEGACY_CUSTOM_FILE = os.path.join(PROJECT_ROOT, "CUSTOM.md")
+LEGACY_SECRET_FILE = os.path.join(PROJECT_ROOT, "SECRET.md")
 
 # 注入到 system prompt 的最大字符数（防止 token 爆炸）
 BOOTSTRAP_MAX_CHARS = 20000
@@ -99,6 +103,7 @@ def _ensure_workspace_identity_files():
         (WORKSPACE_USER_FILE, LEGACY_USER_FILE),
         (WORKSPACE_MEMORY_FILE, LEGACY_MEMORY_FILE),
         (WORKSPACE_SCHEDULE_FILE, LEGACY_SCHEDULE_FILE),
+        (WORKSPACE_CUSTOM_FILE, LEGACY_CUSTOM_FILE),
     ]
     for dst, src in mapping:
         if os.path.exists(dst):
@@ -145,10 +150,12 @@ def get_soul_prompt() -> str:
     return persona_template.render()
 
 
-def load_identity_context() -> str:
+def load_identity_context(*, include_schedule: bool = True) -> str:
     """
-    加载 SOUL.md + USER.md + MEMORY.md + 每日记忆，拼接为身份上下文注入块。
-    在每次会话开始时调用，注入到 system prompt。
+    加载 SOUL.md + USER.md + MEMORY.md (+ SCHEDULE.md) 组成身份上下文。
+
+    Args:
+        include_schedule: 是否在身份上下文中包含 SCHEDULE.md（默认包含）。
     """
     _ensure_workspace_identity_files()
 
@@ -171,9 +178,10 @@ def load_identity_context() -> str:
     if memory:
         sections.append(f"<long_term_memory>\n{memory}\n</long_term_memory>")
 
-    schedule = _read_file_safe(WORKSPACE_SCHEDULE_FILE)
-    if schedule:
-        sections.append(f"<schedule>\n{schedule}\n</schedule>")
+    if include_schedule:
+        schedule = _read_file_safe(WORKSPACE_SCHEDULE_FILE)
+        if schedule:
+            sections.append(f"<schedule>\n{schedule}\n</schedule>")
 
     if not sections:
         return ""
@@ -185,6 +193,12 @@ def load_identity_context() -> str:
         "⚠️ 严格遵守各文件边界：SOUL=AI人设 | USER=用户信息 | SCHEDULE=作息日程 | MEMORY=长期记忆\n\n"
         + "\n\n".join(sections)
     )
+
+
+def load_custom_prompt() -> str:
+    """读取 CUSTOM.md 作为用户自定义全局指令（只读注入，不应被通用文件工具修改）。"""
+    _ensure_workspace_identity_files()
+    return _read_file_safe(WORKSPACE_CUSTOM_FILE)
 
 
 from typing import List
@@ -220,9 +234,12 @@ def get_system_prompt(instructions: Optional[List[str]] = None, platform: Option
         except Exception as e:
             print(f"Warning: Failed to load {platform} prompt: {e}")
 
-    # 加载身份与记忆上下文，注入到 instructions
+    # 加载身份与记忆上下文与自定义指令，注入到 instructions
     identity_context = load_identity_context()
+    custom_prompt = load_custom_prompt()
     all_instructions = list(instructions or [])
+    if custom_prompt:
+        all_instructions.insert(0, f"【用户自定义全局指令 CUSTOM.md】\n{custom_prompt}")
     if identity_context:
         # 身份上下文放在 instructions 最前面
         all_instructions.insert(0, identity_context)
