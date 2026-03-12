@@ -1,0 +1,277 @@
+'''
+author:        captain-wangrun-cn <wangrun114514@foxmail.com>
+date:          2026-03-12 13:30:17
+Copyright © WR（captain-wangrun-cn） All rights reserved
+'''
+"""前脑 Mixin — 即时回复 + 审查后脑结果。"""
+
+import logging
+from typing import Dict, Any, List, cast
+
+from brain.prompts import get_soul_prompt, render_template, load_identity_context
+from core.routing import parse_front_brain_response, parse_front_brain_review
+import config
+
+logger = logging.getLogger(__name__)
+
+
+class FrontBrainMixin:
+    """前脑即时回复 + 后脑结果审查。"""
+
+    async def _generate_front_chat_response(self, context: Dict[str, Any]) -> dict:
+        """
+        前脑即时回复：使用 smart 模型生成自然对话回复 + 路由判断。
+        
+        不涉及工具调用、RAG 检索等重操作。
+        
+        Returns:
+            {
+                "needs_backend": bool,   # 是否需要后脑接管
+                "user_reply": str,       # 发给用户的清洁回复（已移除路由信号）
+                "raw_response": str,     # LLM 原始输出（含信号，用于日志）
+            }
+        """
+        chat_id = context["chat_id"]
+        user_id = context["user_id"]
+        text = context["text"]
+        chat_type = context.get("chat_type", "private")
+        user_name = context.get("user_name", "User")
+        storage_id = chat_id if chat_type != "private" else user_id
+
+        logger.info(f"[{chat_id}] 前脑处理: '{text[:80]}'")
+
+        # --- 构建前脑 prompt ---
+        soul_prompt = get_soul_prompt()
+        identity_context = load_identity_context()
+        tool_intro_block = ""
+        try:
+            from brain.tools import TOOL_INTROS
+            if TOOL_INTROS:
+                tool_desc = "\n".join([f"- {name}: {intro}" for name, intro in TOOL_INTROS.items()])
+                tool_intro_block = render_template('context_injection.jinja', 'tools', tool_desc=tool_desc)
+        except Exception:
+            logger.warning("前脑工具简介注入失败，已忽略。", exc_info=True)
+
+        system_prompt = render_template(
+            'front_brain.jinja',
+            'system',
+            soul_prompt=soul_prompt,
+            identity_context=identity_context,
+            tool_intro_block=tool_intro_block,
+        )
+        user_prompt = render_template('front_brain.jinja', 'user', user_message=text)
+
+        # --- 前脑也接入 RAG 记忆检索 ---
+        if self.rag.enabled:
+            try:
+                rag_context = self.rag.get_context_string(text, user_id=storage_id, top_k=2)
+                if rag_context:
+                    system_prompt = (
+                        system_prompt
+                        + "\n\n"
+                        + render_template('context_injection.jinja', 'rag', rag_context=rag_context)
+                    )
+                    await self._send_debug(chat_id, f"🧠 前脑RAG命中: {len(rag_context.splitlines())} 行记忆")
+            except Exception:
+                logger.warning(f"[{chat_id}] 前脑 RAG 检索失败，已降级继续。", exc_info=True)
+
+        # --- 加载对话历史（轻量，仅用于上下文连贯） ---
+        db_context = self.message_history.get_context_messages("telegram", storage_id)
+        # 只取最近的消息，前脑不需要太多历史
+        if len(db_context) > 20:
+            db_context = db_context[-20:]
+        
+        # 去掉最后一条 user 消息（避免和 user_prompt 重复）
+        message_content = f"{user_name}: {text}" if chat_type != "private" else text
+        if db_context:
+            last_msg = db_context[-1]
+            if last_msg.get("role") == "user" and str(last_msg.get("content", "")) == message_content:
+                db_context = db_context[:-1]
+
+        history = [
+            {"role": msg["role"], "content": msg["content"]}
+            for msg in db_context
+            if msg["role"] in ("user", "assistant")
+        ]
+
+        # --- 调用 smart 模型生成回复（流式收集完整文本） ---
+        response_text = ""
+        usage_data = None
+        try:
+            stream = self.llm.chat_stream(
+                system_prompt=system_prompt,
+                user_prompt=user_prompt,
+                history=history,
+                tools=None,  # 前脑不使用工具
+            )
+            async for raw_chunk in stream:
+                chunk = cast(Dict[str, Any], raw_chunk) if isinstance(raw_chunk, dict) else raw_chunk
+                if isinstance(chunk, dict):
+                    if chunk["type"] == "text":
+                        response_text += chunk["content"]
+                    elif chunk["type"] == "usage":
+                        usage_data = {
+                            "input_tokens": chunk.get("input_tokens", 0),
+                            "output_tokens": chunk.get("output_tokens", 0),
+                        }
+                elif isinstance(chunk, str):
+                    response_text += chunk
+        except Exception as e:
+            logger.error(f"[{chat_id}] 前脑生成失败: {e}", exc_info=True)
+            # 前脑失败时回退到后脑
+            return {"needs_backend": True, "user_reply": "", "raw_response": ""}
+
+        # 清理思考标签
+        response_text = self._strip_thinking_content(response_text)
+
+        # 记录成本
+        if self.cost_tracking_enabled and self.cost_tracker and usage_data:
+            provider_name = config.get_model_provider("smart")
+            provider = config.get_provider_type(provider_name)
+            model = config.get_model_name("smart")
+            self.cost_tracker.log_usage(
+                provider=provider,
+                model=model,
+                input_tokens=usage_data["input_tokens"],
+                output_tokens=usage_data["output_tokens"],
+                model_alias="smart",
+                context="front_brain",
+            )
+
+        # 解析路由信号
+        parsed = parse_front_brain_response(response_text)
+        logger.info(
+            f"[{chat_id}] 前脑结果: needs_backend={parsed['needs_backend']}, "
+            f"reply='{parsed['user_reply'][:80]}...'"
+        )
+        await self._send_debug(
+            chat_id,
+            f"⚡ 前脑: needs_backend={parsed['needs_backend']}\n回复: {parsed['user_reply'][:200]}"
+        )
+
+        return {
+            "needs_backend": parsed["needs_backend"],
+            "user_reply": parsed["user_reply"],
+            "raw_response": response_text,
+        }
+
+    async def _front_brain_review(
+        self,
+        context: Dict[str, Any],
+        backend_result: str,
+        new_user_messages: List[str],
+    ) -> dict:
+        """
+        前脑审查后脑结果，判断是否需要继续轮询。
+        
+        Args:
+            context: 原始消息上下文
+            backend_result: 后脑的最终回复文本
+            new_user_messages: 后脑执行期间用户发送的新消息
+        
+        Returns:
+            {
+                "action": "done" | "continue" | "chat",
+                "user_reply": str,
+            }
+        """
+        chat_id = context["chat_id"]
+        user_id = context["user_id"]
+        chat_type = context.get("chat_type", "private")
+        storage_id = chat_id if chat_type != "private" else user_id
+
+        logger.info(f"[{chat_id}] 前脑审查: 后脑结果 {len(backend_result)} 字, 新用户消息 {len(new_user_messages)} 条")
+
+        # --- 构建审查 prompt ---
+        soul_prompt = get_soul_prompt()
+        identity_context = load_identity_context()
+        tool_intro_block = ""
+        try:
+            from brain.tools import TOOL_INTROS
+            if TOOL_INTROS:
+                tool_desc = "\n".join([f"- {name}: {intro}" for name, intro in TOOL_INTROS.items()])
+                tool_intro_block = render_template('context_injection.jinja', 'tools', tool_desc=tool_desc)
+        except Exception:
+            pass
+
+        system_prompt = render_template(
+            'front_brain_review.jinja',
+            'system',
+            soul_prompt=soul_prompt,
+            identity_context=identity_context,
+            tool_intro_block=tool_intro_block,
+        )
+        
+        user_prompt = render_template(
+            'front_brain_review.jinja',
+            'user',
+            backend_result=backend_result[:2000],  # 截断过长的后脑输出
+            new_user_messages=new_user_messages,
+        )
+
+        # 加载最近对话历史
+        db_context = self.message_history.get_context_messages("telegram", storage_id)
+        if len(db_context) > 15:
+            db_context = db_context[-15:]
+        
+        history = [
+            {"role": msg["role"], "content": msg["content"]}
+            for msg in db_context
+            if msg["role"] in ("user", "assistant")
+        ]
+
+        # 调用 smart 模型审查
+        response_text = ""
+        usage_data = None
+        try:
+            stream = self.llm.chat_stream(
+                system_prompt=system_prompt,
+                user_prompt=user_prompt,
+                history=history,
+                tools=None,
+            )
+            async for raw_chunk in stream:
+                chunk = cast(Dict[str, Any], raw_chunk) if isinstance(raw_chunk, dict) else raw_chunk
+                if isinstance(chunk, dict):
+                    if chunk["type"] == "text":
+                        response_text += chunk["content"]
+                    elif chunk["type"] == "usage":
+                        usage_data = {
+                            "input_tokens": chunk.get("input_tokens", 0),
+                            "output_tokens": chunk.get("output_tokens", 0),
+                        }
+                elif isinstance(chunk, str):
+                    response_text += chunk
+        except Exception as e:
+            logger.error(f"[{chat_id}] 前脑审查失败: {e}", exc_info=True)
+            return {"action": "done", "user_reply": ""}
+
+        # 清理思考标签
+        response_text = self._strip_thinking_content(response_text)
+
+        # 记录成本
+        if self.cost_tracking_enabled and self.cost_tracker and usage_data:
+            provider_name = config.get_model_provider("smart")
+            provider = config.get_provider_type(provider_name)
+            model = config.get_model_name("smart")
+            self.cost_tracker.log_usage(
+                provider=provider,
+                model=model,
+                input_tokens=usage_data["input_tokens"],
+                output_tokens=usage_data["output_tokens"],
+                model_alias="smart",
+                context="front_brain_review",
+            )
+
+        # 解析审查结果
+        parsed = parse_front_brain_review(response_text)
+        logger.info(
+            f"[{chat_id}] 前脑审查结果: action={parsed['action']}, "
+            f"reply='{parsed['user_reply'][:80]}...'"
+        )
+        await self._send_debug(
+            chat_id,
+            f"🔍 审查: action={parsed['action']}\n回复: {parsed['user_reply'][:200]}"
+        )
+
+        return parsed
