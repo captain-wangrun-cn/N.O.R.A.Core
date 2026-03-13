@@ -77,6 +77,37 @@ class PollingMixin:
                     if h.get("role") == "assistant":
                         backend_result = h["content"]
                         break
+xi
+                # 追加后脑执行过的工具操作记录，供前脑审查与转述
+                status = self.worker_status.get(chat_id)
+                if status and status.tool_history_readable:
+                    compact_steps = []
+                    for step in status.tool_history_readable:
+                        step = str(step).strip()
+                        if not step:
+                            continue
+                        if len(step) > 40:
+                            if "(" in step and ")" in step:
+                                prefix, rest = step.split("(", 1)
+                                args, suffix = rest.rsplit(")", 1)
+                                if len(args) > 20:
+                                    args = args[:17] + "..."
+                                step = f"{prefix}({args}){suffix}"
+                            elif ":" in step:
+                                head, tail = step.split(":", 1)
+                                tail = tail.strip()
+                                if len(tail) > 20:
+                                    tail = tail[:17] + "..."
+                                step = f"{head}: {tail}"
+                            if len(step) > 60:
+                                step = step[:57] + "..."
+                        compact_steps.append(step)
+                    tool_lines = "\n".join([f"- {step}" for step in compact_steps])
+                    backend_result = (
+                        f"{backend_result}\n\n【后脑执行的操作】\n{tool_lines}"
+                        if backend_result
+                        else f"【后脑执行的操作】\n{tool_lines}"
+                    )
                 
                 if not backend_result:
                     logger.info(f"[{chat_id}] 轮询第 {polling_round} 轮: 后脑无输出，结束轮询")

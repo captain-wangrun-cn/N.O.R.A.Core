@@ -16,6 +16,7 @@ from brain.prompts import (
     _read_file_safe,
     WORKSPACE_SCHEDULE_FILE,
 )
+from skills.loader import SkillLoader
 from core.routing import parse_front_brain_response, parse_front_brain_review
 import config
 
@@ -60,6 +61,7 @@ class FrontBrainMixin:
         schedule_block = ""
         custom_block = ""
         tool_intro_block = ""
+        skill_intro_block = ""
 
         try:
             schedule_content = _read_file_safe(WORKSPACE_SCHEDULE_FILE)
@@ -90,6 +92,16 @@ class FrontBrainMixin:
                 tool_intro_block = render_template('context_injection.jinja', 'tools', tool_desc=tool_desc)
         except Exception:
             logger.warning("前脑工具简介注入失败，已忽略。", exc_info=True)
+
+        try:
+            skills = SkillLoader().scan_skills()
+            if skills:
+                skill_desc = "\n".join(
+                    [f"- {s['name']}: {s.get('description', '').strip()}" for s in skills]
+                )
+                skill_intro_block = render_template('context_injection.jinja', 'skills', skill_desc=skill_desc)
+        except Exception:
+            logger.warning("前脑技能简介注入失败，已忽略。", exc_info=True)
 
         # 主动触发上下文
         proactive_context = ""
@@ -129,6 +141,7 @@ class FrontBrainMixin:
             schedule_block=schedule_block,
             custom_block=custom_block,
             tool_intro_block=tool_intro_block,
+            skill_intro_block=skill_intro_block,
             proactive_context=proactive_context,
         )
         if proactive_mode:
