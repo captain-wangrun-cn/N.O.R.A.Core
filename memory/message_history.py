@@ -172,9 +172,8 @@ class MessageHistory:
         """
         添加一条消息
         
-        自动在适当时机插入时间戳:
-        - 当距离上一条带时间戳的消息超过15分钟时
-        - 时间戳格式: [YYYY-MM-DD HH:MM]
+    自动插入时间戳（每条消息都会插入）:
+    - 时间戳格式: [YYYY-MM-DD HH:MM]
         
         :return: 消息ID
         """
@@ -183,30 +182,8 @@ class MessageHistory:
         
         timestamp = datetime.now().timestamp()
         
-        # 检查是否需要插入时间戳
-        should_add_timestamp = False
-        if role == "user":  # 仅在用户消息中插入时间
-            # 首先查找最后一条有时间戳标记的消息
-            cursor.execute("""
-                SELECT timestamp FROM messages
-                WHERE platform = ? AND chat_id = ? 
-                AND json_extract(metadata, '$.has_timestamp') = 1
-                ORDER BY timestamp DESC
-                LIMIT 1
-            """, (platform, chat_id))
-            
-            last_timestamped_msg = cursor.fetchone()
-            
-            TIME_THRESHOLD = 15 * 60  # 15分钟
-            
-            if last_timestamped_msg:
-                # 有带时间戳的消息，检查距离现在是否超过15分钟
-                time_since_last_timestamp = timestamp - last_timestamped_msg[0]
-                if time_since_last_timestamp >= TIME_THRESHOLD:
-                    should_add_timestamp = True
-            else:
-                # 没有任何带时间戳的消息，这是第一条或清空后的第一条
-                should_add_timestamp = True
+        # 每条消息都插入时间戳
+        should_add_timestamp = True
         
         # 如果需要，在内容前添加时间戳
         original_content = content

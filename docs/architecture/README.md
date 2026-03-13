@@ -52,8 +52,6 @@
   - _Current State_: 实现了"脑口分离"，前端负责快响应/打断，后端负责深度思考。
 - **[消息抢占机制 (Preemption)](./preemption.md)**
   - _Legacy Context_: 早期打断逻辑的设计思路，现已整合进双进程架构中。
-- **[时间感知 (Timestamp Insertion)](./timestamp-insertion.md)**
-  - 让 AI 理解 "上午"、"刚才" 等时间概念，解决跨时段对话的上下文断层。
 
 ### 🧩 技能与执行 (Skills & Execution)
 

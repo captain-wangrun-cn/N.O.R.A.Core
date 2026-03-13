@@ -66,7 +66,7 @@ core/controller.py            NoraController.handle_message()
 
 ### `memory/message_history.py`
 - `MessageHistory` — 消息持久化
-  - `add_message(platform, chat_id, role, content, ...)` — 添加消息（自动插入时间戳、触发压缩）
+  - `add_message(platform, chat_id, role, content, ...)` — 添加消息（写入时间戳、触发压缩）
   - `get_context_messages(platform, chat_id, ...)` — 获取上下文（Pinned → 归档总结 → 压缩总结 → 原始消息，跨段落自动插入分隔标记）
   - `close_session(platform, chat_id, ...)` — 关闭当前对话段落（AI 进入 SEMI_ONLINE 时由 controller 调用）
   - `get_recent_sessions(platform, chat_id, ...)` — 获取最近的对话段落列表
