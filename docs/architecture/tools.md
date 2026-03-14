@@ -206,11 +206,12 @@
 
 ## `view_image`
 
-**作用**：从图片记忆系统检索图片（按 ID / 关键词 / 时间 / 最近）。
+**作用**：仅从图片记忆系统回查**用户曾发送给 AI 的历史图片**（按 ID / 标签语义 / OCR 文本 / 时间 / 最近）。不用于搜索或生成新图。支持关键词与 OCR 文本联合检索。
 
 **参数**：
 - `image_id` (string, optional)
 - `keyword` (string, optional)
+- `text_query` (string, optional): OCR 文字模糊搜索（大小写不敏感、空格分词 AND 逻辑）
 - `start_time` (string, optional, Unix 时间戳)
 - `end_time` (string, optional, Unix 时间戳)
 - `user_id` (string, optional)
@@ -218,10 +219,12 @@
 - `return_image` (boolean, optional, default=false)
 
 **返回**：
-- 元数据列表
+- 元数据列表（含 OCR 文字预览，若存在）
 - 当 `return_image=true` 时，额外返回 `MediaTag: [image: abs_path]`
 
-**联动**：控制器会解析 `MediaTag`，并在下一轮切到 image 模型分析。
+OCR文本为模型回复，并非外置OCR
+
+**联动**：控制器会解析 `MediaTag`，并在下一轮切到 image 模型分析；此时为“工具回查图片”，不再要求生成 `[IMAGE_TAGS]`。
 
 ---
 
