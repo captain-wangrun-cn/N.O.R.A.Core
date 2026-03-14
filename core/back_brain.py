@@ -23,6 +23,8 @@ logger = logging.getLogger(__name__)
 class BackBrainMixin:
     """后脑工具循环执行 + 文本清洗工具方法。"""
 
+    _TIMESTAMP_PATTERN = re.compile(r"\[\d{4}-\d{2}-\d{2} \d{2}:\d{2}\]\s*")
+
     # ------------------------------------------------------------------
     # 文本清洗 class methods
     # ------------------------------------------------------------------
@@ -40,6 +42,13 @@ class BackBrainMixin:
         cleaned = cls._IMAGE_OCR_PATTERN.sub("", cleaned)
         cleaned = re.sub(r'\n{3,}', '\n\n', cleaned).strip()
         return cleaned
+
+    @classmethod
+    def _strip_timestamp_markers(cls, text: str) -> str:
+        """移除消息中的自动时间戳标记，避免泄漏到用户侧。"""
+        if not text:
+            return ""
+        return cls._TIMESTAMP_PATTERN.sub("", text).strip()
 
     @classmethod
     def _strip_stream_think_segment(cls, text: str, in_think_block: bool) -> tuple[str, bool]:
@@ -141,9 +150,10 @@ class BackBrainMixin:
             # --- 0. 保存用户消息到数据库 ---
             # 如果前脑已经保存过，跳过重复写入
             front_brain_handled = context.get("_front_brain_handled", False)
+            message_saved = context.get("_message_saved", False)
             status.update("保存消息", "正在保存用户消息...")
             message_content = f"{user_name}: {text}" if chat_type != "private" else text
-            if not front_brain_handled:
+            if not front_brain_handled and not message_saved:
                 self.message_history.add_message(
                     platform="telegram",
                     chat_id=storage_id,
@@ -675,6 +685,7 @@ class BackBrainMixin:
                     r'返回结果[：:]\s*```[\s\S]*?```', '', clean_response
                 ).strip()
                 clean_response = self._strip_thinking_content(clean_response)
+                clean_response = self._strip_timestamp_markers(clean_response)
                 if clean_response:
                     if not in_polling:
                         await self.adapter.send_message(chat_id, clean_response)
@@ -701,6 +712,7 @@ class BackBrainMixin:
                         final_response_buffer += chunk
                 
                 final_response_buffer = self._strip_thinking_content(final_response_buffer)
+                final_response_buffer = self._strip_timestamp_markers(final_response_buffer)
                 if final_response_buffer:
                     if not in_polling:
                         await self.adapter.send_message(chat_id, final_response_buffer)
@@ -728,6 +740,7 @@ class BackBrainMixin:
                         final_response_buffer += chunk
                 
                 final_response_buffer = self._strip_thinking_content(final_response_buffer)
+                final_response_buffer = self._strip_timestamp_markers(final_response_buffer)
                 if final_response_buffer:
                     if not in_polling:
                         await self.adapter.send_message(chat_id, final_response_buffer)

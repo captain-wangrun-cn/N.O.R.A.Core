@@ -55,6 +55,15 @@ _BACKEND_SIGNAL = "[NEED_BACKEND]"
 # 前脑审查中任务完成的标记
 _TASK_DONE_SIGNAL = "[TASK_DONE]"
 
+_TIMESTAMP_PATTERN = re.compile(r"\[\d{4}-\d{2}-\d{2} \d{2}:\d{2}\]\s*")
+
+
+def _strip_timestamp_markers(text: str) -> str:
+    """移除消息中的自动时间戳标记，避免泄漏到用户侧。"""
+    if not text:
+        return ""
+    return _TIMESTAMP_PATTERN.sub("", text).strip()
+
 
 def parse_front_brain_response(response_text: str) -> dict:
     """
@@ -76,6 +85,7 @@ def parse_front_brain_response(response_text: str) -> dict:
 
     # 清理标记，生成用户可见文本
     user_reply = response_text.replace(_BACKEND_SIGNAL, "").strip()
+    user_reply = _strip_timestamp_markers(user_reply)
     # 清理多余空行
     user_reply = re.sub(r'\n{3,}', '\n\n', user_reply)
 
@@ -108,6 +118,7 @@ def parse_front_brain_review(response_text: str) -> dict:
 
     # 清理标记，生成用户可见文本
     user_reply = response_text.replace(_TASK_DONE_SIGNAL, "").replace(_BACKEND_SIGNAL, "").strip()
+    user_reply = _strip_timestamp_markers(user_reply)
     user_reply = re.sub(r'\n{3,}', '\n\n', user_reply)
 
     if has_backend:

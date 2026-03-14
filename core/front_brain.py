@@ -6,6 +6,7 @@ Copyright © WR（captain-wangrun-cn） All rights reserved
 """前脑 Mixin — 即时回复 + 审查后脑结果。"""
 
 import logging
+import re
 from typing import Dict, Any, List, Optional, cast
 
 from brain.prompts import (
@@ -25,6 +26,14 @@ logger = logging.getLogger(__name__)
 
 class FrontBrainMixin:
     """前脑即时回复 + 后脑结果审查。"""
+
+    _TIMESTAMP_PATTERN = re.compile(r"\[\d{4}-\d{2}-\d{2} \d{2}:\d{2}\]\s*")
+
+    @classmethod
+    def _strip_timestamp_markers(cls, text: str) -> str:
+        if not text:
+            return ""
+        return cls._TIMESTAMP_PATTERN.sub("", text).strip()
 
     async def _generate_front_chat_response(
         self,
@@ -173,7 +182,8 @@ class FrontBrainMixin:
         message_content = f"{user_name}: {text}" if chat_type != "private" else text
         if db_context:
             last_msg = db_context[-1]
-            if last_msg.get("role") == "user" and str(last_msg.get("content", "")) == message_content:
+            last_content = self._strip_timestamp_markers(str(last_msg.get("content", "")))
+            if last_msg.get("role") == "user" and last_content == message_content:
                 db_context = db_context[:-1]
 
         history = [

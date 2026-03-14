@@ -197,6 +197,7 @@ class MessageHandlerMixin:
             content=message_content,
             user_id=user_id,
         )
+        context["_message_saved"] = True
 
         # 2) 前脑生成即时回复 + 路由判断
         front_result = await self._generate_front_chat_response(context)
@@ -235,6 +236,7 @@ class MessageHandlerMixin:
             backend_context = context.copy()
             backend_context["_front_brain_handled"] = True
             backend_context["_front_brain_reply"] = user_reply
+            backend_context["_message_saved"] = True
             task = asyncio.create_task(self._run_polling_loop(backend_context))
             self.generation_tasks[chat_id] = task
         else:
