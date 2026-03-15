@@ -207,6 +207,10 @@ class SchedulerMixin:
                         + "\n\n"
                         + render_template('context_injection.jinja', 'custom', custom_content=custom_prompt)
                     )
+            system_prompt += (
+                "\n\n【强制输出】你必须且只能输出 FOLLOWUP / WAIT / END 之一。"
+                "不要输出其他任何内容。"
+            )
             user_prompt = render_template('schedule.jinja', 'followup_detect_user',
                                           recent_conversation=recent_conversation,
                                           idle_seconds=int(idle_secs),
