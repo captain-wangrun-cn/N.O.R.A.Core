@@ -107,6 +107,8 @@ class SchedulerMixin:
         try:
             await asyncio.sleep(self.FOLLOWUP_INITIAL_DELAY)
 
+            wait_loops = 0  # 连续 WAIT 轮数（用于超时收尾）
+
             while True:
                 if get_ai_presence() != AIPresence.ONLINE:
                     logger.debug(f"[{chat_id}] AI 状态非 ONLINE，对话延续循环退出")
@@ -118,6 +120,8 @@ class SchedulerMixin:
                     return
 
                 idle_secs = get_user_idle_seconds(chat_id)
+                if idle_secs < 0:
+                    idle_secs = 0
                 count = get_followup_count(chat_id)
 
                 if count >= self.FOLLOWUP_MAX_COUNT:
@@ -130,11 +134,21 @@ class SchedulerMixin:
                 logger.info(f"[{chat_id}] 对话延续检测结果: {decision} (idle={idle_secs:.0f}s, count={count})")
 
                 if decision == "FOLLOWUP":
+                    wait_loops = 0  # 重置 WAIT 计数
                     await self._send_followup_message(chat_id, idle_secs)
                     record_ai_followup(chat_id)
                     await asyncio.sleep(self.FOLLOWUP_RECHECK_INTERVAL)
 
                 elif decision == "WAIT":
+                    wait_loops += 1
+                    # 用户长时间未回或 WAIT 次数过多，直接收尾，避免无限 WAIT
+                    if idle_secs >= self.FOLLOWUP_END_IDLE_SECONDS or wait_loops >= self.FOLLOWUP_MAX_WAIT_LOOPS:
+                        logger.info(
+                            f"[{chat_id}] WAIT 超时收尾: idle={idle_secs:.0f}s, wait_loops={wait_loops}, count={count}"
+                        )
+                        await self._send_wrapup_message(chat_id)
+                        self._transition_to_semi_online(chat_id)
+                        return
                     await asyncio.sleep(self.FOLLOWUP_RECHECK_INTERVAL)
 
                 elif decision == "END":

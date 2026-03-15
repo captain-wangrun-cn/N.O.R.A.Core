@@ -45,8 +45,8 @@ class MessageHandlerMixin:
         
         # --- 更新 AI 在线状态：收到消息 → AI 进入在线 ---
         set_ai_presence(AIPresence.ONLINE)
-        _activity_id = chat_id if chat_type != "private" else user_id
-        record_user_activity(_activity_id)
+        # 统一使用 chat_id 进行对话活跃度追踪，避免后续 followup 循环取用不同 key 导致计数/空闲时间错乱
+        record_user_activity(chat_id)
         ai_state = get_ai_state_summary()
         logger.info(
             f"[{chat_id}] 当前在线状态: presence={ai_state['presence']}, "

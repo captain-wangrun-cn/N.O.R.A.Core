@@ -103,6 +103,9 @@ class NoraController(
         self.FOLLOWUP_INITIAL_DELAY = 120    # 2 分钟
         self.FOLLOWUP_RECHECK_INTERVAL = 60  # 1 分钟
         self.FOLLOWUP_MAX_COUNT = 3          # 最多追话 3 次
+    # WAIT 分支防抖与超时：最多连续等待次数 & 总空闲超时后收尾
+    self.FOLLOWUP_MAX_WAIT_LOOPS = 5     # WAIT 最多轮询 5 次（约 5 分钟）
+    self.FOLLOWUP_END_IDLE_SECONDS = 900 # 空闲 ≥15 分钟则收尾
         
         # 快速模型
         try:
