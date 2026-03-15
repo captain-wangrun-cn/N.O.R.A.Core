@@ -684,28 +684,12 @@ class TelegramAdapter(BaseAdapter):
             return
 
         try:
-            cfg = config.get_config() or {}
-            current_scopes = (cfg.get("custom_injection", {}) or {}).get("scopes") or []
-            if any(s in ("none", "off") for s in current_scopes):
-                scope_desc = "none"
-            elif not current_scopes:
-                scope_desc = "all"
-            else:
-                scope_desc = ", ".join(current_scopes)
-
-            keyboard = InlineKeyboardMarkup([
-                [InlineKeyboardButton("fast", callback_data="custom_scope:fast")],
-                [InlineKeyboardButton("smart", callback_data="custom_scope:smart")],
-                [InlineKeyboardButton("image", callback_data="custom_scope:image")],
-                [InlineKeyboardButton("coder", callback_data="custom_scope:coder")],
-            ])
-            text = (
-                "🧭 CUSTOM 注入范围\n"
-                f"当前: {scope_desc}\n"
-                "点击按钮将注入范围设置为单一 scope。"
-            )
+            scopes = self._load_custom_scopes()
             if update.message:
-                await update.message.reply_text(text, reply_markup=keyboard)
+                await update.message.reply_text(
+                    self._render_custom_scope_text(scopes),
+                    reply_markup=self._render_custom_scope_keyboard(scopes),
+                )
         except Exception:
             logger.error(f"[{chat_id}] /custom_scope 按钮初始化失败", exc_info=True)
             if update.message:
@@ -1043,24 +1027,85 @@ class TelegramAdapter(BaseAdapter):
         if not query or not query.message:
             return
         chat_id = str(query.message.chat.id)
-        scope = callback_data.split(":", 1)[1]
-        if scope not in {"fast", "smart", "image", "coder"}:
+        action = callback_data.split(":", 1)[1]
+
+        if action == "close":
+            scopes = self._load_custom_scopes()
+            await query.edit_message_text(self._render_custom_scope_text(scopes))
+            return
+
+        if action not in {"fast", "smart", "image", "coder", "none"}:
             await query.edit_message_text("❌ 无效范围。")
             return
 
-        if not self._message_handler:
-            await query.edit_message_text("❌ 指令处理器未就绪。")
-            return
+        try:
+            scopes = self._load_custom_scopes()
+            # Toggle logic
+            if action == "none":
+                scopes = ["none"]
+            else:
+                scopes = [s for s in scopes if s not in ("none", "off")]
+                if action in scopes:
+                    scopes = [s for s in scopes if s != action]
+                else:
+                    scopes.append(action)
 
-        event_context = {
-            "chat_id": chat_id,
-            "user_id": str(query.from_user.id) if query.from_user else chat_id,
-            "text": f"/custom_scope {scope}",
-            "chat_type": query.message.chat.type if query.message else "private",
-            "user_name": query.from_user.first_name if query.from_user else "Unknown",
-        }
-        await self._message_handler(event_context)
-        await query.edit_message_text(f"✅ CUSTOM 注入范围已设置为: {scope}")
+            self._save_custom_scopes(scopes)
+
+            # Refresh keyboard & text
+            scopes = self._load_custom_scopes()
+            await query.edit_message_text(
+                self._render_custom_scope_text(scopes),
+                reply_markup=self._render_custom_scope_keyboard(scopes),
+            )
+        except Exception as e:
+            logger.error(f"[{chat_id}] custom_scope 回调失败: {e}", exc_info=True)
+            await query.edit_message_text(f"❌ 失败: {e}")
+
+    def _load_custom_scopes(self) -> list:
+        cfg = config.get_config() or {}
+        scopes = (cfg.get("custom_injection", {}) or {}).get("scopes") or []
+        # normalize
+        scopes = [str(s).strip().lower() for s in scopes if str(s).strip()]
+        return scopes
+
+    def _save_custom_scopes(self, scopes: list):
+        cfg = config.get_config() or {}
+        cfg.setdefault("custom_injection", {})["scopes"] = scopes
+        config.save_config(cfg)
+
+    def _render_custom_scope_text(self, scopes: list) -> str:
+        if any(s in ("none", "off") for s in scopes):
+            desc = "none"
+        elif not scopes:
+            desc = "all"
+        else:
+            desc = ", ".join(scopes)
+        return (
+            "🧭 CUSTOM 注入范围\n"
+            f"当前: {desc}\n"
+            "点击勾选/取消需要的 scope，实时保存。\n"
+            "空列表=全量注入，none=关闭全部。"
+        )
+
+    def _render_custom_scope_keyboard(self, scopes: list) -> InlineKeyboardMarkup:
+        def mark(name: str) -> str:
+            return "✅ " if name in scopes else "☑ "
+
+        none_mark = "✅ " if any(s in ("none", "off") for s in scopes) else "☑ "
+        rows = [
+            [
+                InlineKeyboardButton(f"{mark('fast')}fast", callback_data="custom_scope:fast"),
+                InlineKeyboardButton(f"{mark('smart')}smart", callback_data="custom_scope:smart"),
+            ],
+            [
+                InlineKeyboardButton(f"{mark('image')}image", callback_data="custom_scope:image"),
+                InlineKeyboardButton(f"{mark('coder')}coder", callback_data="custom_scope:coder"),
+            ],
+            [InlineKeyboardButton(f"{none_mark}关闭全部", callback_data="custom_scope:none")],
+            [InlineKeyboardButton("取消", callback_data="custom_scope:close")],
+        ]
+        return InlineKeyboardMarkup(rows)
 
     async def _handle_model_pick_callback(self, query, callback_data: str):
         if not query or not query.message:

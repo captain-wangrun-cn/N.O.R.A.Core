@@ -97,7 +97,7 @@ python main.py
 # Telegram 指令（运行后在聊天中）
 # /regenerate_proactive [replace|append]
 # /schedule_today
-# /custom_scope [fast smart image coder | all | none]
+# /custom_scope （按钮勾选 fast/smart/image/coder，含 none/关闭）
 
 # 查看聊天记录统计
 python cli.py --show-history

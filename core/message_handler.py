@@ -478,7 +478,7 @@ class MessageHandlerMixin:
                     chat_id,
                     "🧭 CUSTOM 注入范围\n"
                     f"当前: {scope_desc}\n"
-                    "用法: /custom_scope fast smart image coder | /custom_scope all | /custom_scope none",
+                    "用法: /custom_scope（按钮多选）或 /custom_scope fast smart | image | coder | all | none",
                 )
                 return
 

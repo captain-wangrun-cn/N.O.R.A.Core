@@ -8,7 +8,7 @@
 ### 🧩 CUSTOM 注入范围可控 + Telegram 指令 — 2026-03-15
 
 - 新增 `custom_injection.scopes` 配置：控制 CUSTOM.md 注入范围（fast/smart/image/coder），空或缺失表示全量注入，`none` 关闭注入。
-- 新增 Telegram 指令 `/custom_scope`：按钮式切换注入范围（fast/smart/image/coder）并写入 `config.yml`。
+- 新增 Telegram 指令 `/custom_scope`：按钮式勾选/取消注入范围（fast/smart/image/coder，含“关闭全部”）并写入 `config.yml`。
 - 前脑/后脑/系统提示构建统一尊重 scope 配置。
 
 **涉及文件：**
