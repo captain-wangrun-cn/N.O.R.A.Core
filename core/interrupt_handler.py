@@ -54,90 +54,99 @@ class InterruptHandlerMixin:
             recent_history = []
         
         try:
-            response = ""
-            system_prompt = render_template('interrupt_detect.jinja', 'system', soul=soul)
-            if should_inject_custom("fast"):
-                custom_prompt = load_custom_prompt()
-                if custom_prompt:
-                    system_prompt = (
-                        system_prompt
-                        + "\n\n"
-                        + render_template('context_injection.jinja', 'custom', custom_content=custom_prompt)
+            for attempt in range(3):
+                response = ""
+                system_prompt = render_template('interrupt_detect.jinja', 'system', soul=soul)
+                if should_inject_custom("fast"):
+                    custom_prompt = load_custom_prompt()
+                    if custom_prompt:
+                        system_prompt = (
+                            system_prompt
+                            + "\n\n"
+                            + render_template('context_injection.jinja', 'custom', custom_content=custom_prompt)
+                        )
+                if attempt > 0:
+                    system_prompt += (
+                        "\n\n【重试】严格只输出以下格式："
+                        "ACTION: <stop|change|queue|list_queue|cancel_queue:N|clear_queue> | REPLY: <一句话>。"
+                        "禁止输出其他任何内容。"
                     )
 
-            stream = self.fast_llm.chat_stream(
-                system_prompt=system_prompt,
-                user_prompt=prompt,
-                history=recent_history,
-                tools=[]
-            )
-            async for chunk in stream:
-                if isinstance(chunk, dict) and chunk.get("type") == "text":
-                    response += chunk["content"]
-                elif isinstance(chunk, str):
-                    response += chunk
-            
-            # 解析 LLM 输出
-            response = response.strip()
-            if "|" in response and "ACTION:" in response.upper():
-                parts = response.split("|", 1)
-                action_part = parts[0].strip()
-                reply_part = parts[1].strip() if len(parts) > 1 else ""
-                
-                # 提取 ACTION（支持带参数格式如 cancel_queue:2）
-                action = "queue"  # 默认
-                action_param = None
-                if "ACTION:" in action_part.upper():
-                    action_text = action_part.split(":", 1)[1].strip().lower()
-                    if "stop" in action_text:
-                        action = "stop"
-                    elif "change" in action_text:
-                        action = "change"
-                    elif "clear_queue" in action_text:
-                        action = "clear_queue"
-                    elif "cancel_queue" in action_text:
-                        action = "cancel_queue"
-                        # 提取序号：cancel_queue:N
-                        import re
-                        num_match = re.search(r'(\d+)', action_text)
-                        if num_match:
-                            action_param = int(num_match.group(1))
-                    elif "list_queue" in action_text:
-                        action = "list_queue"
-                
-                # 提取 REPLY
-                reply = reply_part
-                if "REPLY:" in reply.upper():
-                    reply = reply.split(":", 1)[1].strip()
-                
-                if not reply:
-                    # fallback 回复
-                    if action == "stop":
-                        reply = "好的，已经停下来了～"
-                    elif action == "change":
-                        reply = "好，马上切换～"
-                    elif action == "list_queue":
-                        reply = "让我看看当前的情况～"
-                    elif action == "cancel_queue":
-                        reply = "好的，帮你取消了～"
-                    elif action == "clear_queue":
-                        reply = "好的，排队的任务都清掉了～"
-                    else:
-                        reply = f"收到～ 我正在处理之前的请求（{status.phase}），完成后马上看你的新消息！"
-                
-                result = {"action": action, "reply": reply}
-                if action_param is not None:
-                    result["param"] = action_param
-                logger.info(f"[{chat_id}] LLM判断意图: action={action}, param={action_param}, reply='{reply[:50]}'")
-                return result
-            
-            else:
-                # 解析失败，fallback 到 queue
-                logger.warning(f"[{chat_id}] 意图解析失败，fallback 到 queue。LLM输出: {response[:100]}")
-                return {
-                    "action": "queue",
-                    "reply": f"收到～ 我正在处理之前的请求（{status.phase}），完成后马上看你的新消息！"
-                }
+                stream = self.fast_llm.chat_stream(
+                    system_prompt=system_prompt,
+                    user_prompt=prompt,
+                    history=recent_history,
+                    tools=[]
+                )
+                async for chunk in stream:
+                    if isinstance(chunk, dict) and chunk.get("type") == "text":
+                        response += chunk["content"]
+                    elif isinstance(chunk, str):
+                        response += chunk
+
+                # 解析 LLM 输出
+                response = response.strip()
+                if "|" in response and "ACTION:" in response.upper():
+                    parts = response.split("|", 1)
+                    action_part = parts[0].strip()
+                    reply_part = parts[1].strip() if len(parts) > 1 else ""
+
+                    # 提取 ACTION（支持带参数格式如 cancel_queue:2）
+                    action = "queue"  # 默认
+                    action_param = None
+                    if "ACTION:" in action_part.upper():
+                        action_text = action_part.split(":", 1)[1].strip().lower()
+                        if "stop" in action_text:
+                            action = "stop"
+                        elif "change" in action_text:
+                            action = "change"
+                        elif "clear_queue" in action_text:
+                            action = "clear_queue"
+                        elif "cancel_queue" in action_text:
+                            action = "cancel_queue"
+                            # 提取序号：cancel_queue:N
+                            import re
+                            num_match = re.search(r'(\d+)', action_text)
+                            if num_match:
+                                action_param = int(num_match.group(1))
+                        elif "list_queue" in action_text:
+                            action = "list_queue"
+
+                    # 提取 REPLY
+                    reply = reply_part
+                    if "REPLY:" in reply.upper():
+                        reply = reply.split(":", 1)[1].strip()
+
+                    if not reply:
+                        # fallback 回复
+                        if action == "stop":
+                            reply = "好的，已经停下来了～"
+                        elif action == "change":
+                            reply = "好，马上切换～"
+                        elif action == "list_queue":
+                            reply = "让我看看当前的情况～"
+                        elif action == "cancel_queue":
+                            reply = "好的，帮你取消了～"
+                        elif action == "clear_queue":
+                            reply = "好的，排队的任务都清掉了～"
+                        else:
+                            reply = f"收到～ 我正在处理之前的请求（{status.phase}），完成后马上看你的新消息！"
+
+                    result = {"action": action, "reply": reply}
+                    if action_param is not None:
+                        result["param"] = action_param
+                    logger.info(f"[{chat_id}] LLM判断意图: action={action}, param={action_param}, reply='{reply[:50]}'")
+                    return result
+
+                if attempt == 0:
+                    logger.warning(f"[{chat_id}] 意图解析失败，准备重试。LLM输出: {response[:100]}")
+                else:
+                    logger.warning(f"[{chat_id}] 意图解析再次失败，fallback 到 queue。LLM输出: {response[:100]}")
+
+            return {
+                "action": "queue",
+                "reply": f"收到～ 我正在处理之前的请求（{status.phase}），完成后马上看你的新消息！"
+            }
         
         except Exception as e:
             logger.warning(f"[{chat_id}] 意图检测失败: {e}，fallback 到 queue")
