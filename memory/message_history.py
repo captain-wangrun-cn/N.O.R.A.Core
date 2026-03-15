@@ -9,6 +9,7 @@ import logging
 
 from workspace_config import get_workspace_manager
 from brain.prompts import render_template
+from memory.context_store import ContextCompressor, MessageLog
 
 logger = logging.getLogger(__name__)
 
@@ -39,7 +40,10 @@ class MessageHistory:
         compress_window: int = 200, # 开始压缩的阈值
         compress_ratio: int = 10,   # 压缩比例 (10:1)
         archive_threshold: int = 500, # 归档阈值
-        timezone: str = "Asia/Shanghai"  # 时间戳显示时区
+        timezone: str = "Asia/Shanghai",  # 时间戳显示时区
+        mirror_db_path: Optional[str] = None,  # 原文镜像库（独立）
+        context_db_path: Optional[str] = None,  # 压缩上下文库（独立）
+        long_message_threshold: int = 1200,  # 判定“过长”后提前压缩的阈值
     ):
         self.db_path = Path(db_path) if db_path else get_default_message_history_db()
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
@@ -58,6 +62,14 @@ class MessageHistory:
         
         self._init_db()
         self._summarizer = None  # 延迟加载
+
+        # 独立的原文镜像库 & 压缩上下文库
+        self.message_log = MessageLog(db_path=mirror_db_path)
+        self.context_compressor = ContextCompressor(
+            message_log=self.message_log,
+            db_path=context_db_path,
+            long_message_threshold=long_message_threshold,
+        )
     
     def _init_db(self):
         """初始化数据库表"""
@@ -209,18 +221,48 @@ class MessageHistory:
         conn.commit()
         conn.close()
 
+        # 镜像写入独立原文库
+        try:
+            self.message_log.add_message(
+                message_id=message_id,
+                platform=platform,
+                chat_id=chat_id,
+                role=role,
+                content_with_timestamp=content,
+                raw_content=original_content,
+                timestamp=timestamp,
+                metadata=metadata,
+            )
+        except Exception as e:
+            logger.warning(f"[{platform}/{chat_id}] 写入消息镜像失败: {e}")
+
+        # 触发压缩上下文刷新（独立上下文数据库）
+        self._schedule_context_refresh(platform, chat_id)
+
         logger.debug(f"[{platform}/{chat_id}] 添加消息 #{message_id}: {role}")
 
         # 异步触发压缩检查（不阻塞）
-        # 只在有运行中的事件循环时才创建任务
-        try:
-            asyncio.create_task(self._check_and_compress(platform, chat_id))
-        except RuntimeError:
-            # 没有运行中的事件循环，跳过压缩检查
-            # 这在测试或同步环境中是正常的
-            pass
+        self._launch_background(self._check_and_compress(platform, chat_id))
 
         return message_id
+
+    def _schedule_context_refresh(self, platform: str, chat_id: str):
+        """异步刷新滑动压缩上下文，失败时记录日志并不中断主流程。"""
+        if not self.context_compressor:
+            return
+        self._launch_background(self.context_compressor.refresh_context(platform, chat_id))
+
+    def _launch_background(self, coro):
+        """安全地启动后台任务，如无事件循环则直接运行。"""
+        try:
+            loop = asyncio.get_running_loop()
+            loop.create_task(coro)
+        except RuntimeError:
+            # 无运行中的事件循环时，阻塞运行一次
+            try:
+                asyncio.run(coro)
+            except Exception as e:  # pragma: no cover
+                logger.error(f"后台任务执行失败: {e}")
     
     def get_context_messages(
         self,
@@ -279,6 +321,16 @@ class MessageHistory:
                     "content": f"[📚 早期对话总结，共{archive_summary['message_count']}条] {archive_summary['summary_text']}",
                     "timestamp": 0
                 })
+
+        # 优先使用独立上下文数据库的滑动压缩结果
+        if include_summaries and self.context_compressor:
+            compressed_segments = self.context_compressor.get_context_messages(platform, chat_id)
+            if compressed_segments:
+                messages.extend(compressed_segments)
+                messages.sort(key=lambda x: x.get("timestamp", 0))
+                logger.info(f"[{platform}/{chat_id}] 使用上下文压缩库: {len(compressed_segments)} 段")
+                conn.close()
+                return messages
         
         # 3. 获取压缩总结 (Level 1-2)
         if include_summaries:
@@ -580,6 +632,10 @@ class MessageHistory:
             """, (platform, chat_id, started_at, ended_at, message_count, trigger_type, metadata_json))
 
             session_id = cursor.lastrowid
+            if session_id is None:
+                conn.commit()
+                conn.close()
+                return None
 
             # 批量更新消息的 session_id
             cursor.execute("""
@@ -595,7 +651,7 @@ class MessageHistory:
 
             # 异步生成段落摘要（不阻塞）
             try:
-                asyncio.create_task(self._generate_session_summary(platform, chat_id, session_id))
+                asyncio.create_task(self._generate_session_summary(platform, chat_id, int(session_id)))
             except RuntimeError:
                 pass  # 没有事件循环时跳过
 

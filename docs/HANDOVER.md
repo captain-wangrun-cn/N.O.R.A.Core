@@ -5,7 +5,20 @@
 
 ## 近期关键改动（截至 2026-03-12）
 
-### 🧩 CUSTOM 注入范围可控 + Telegram 指令 — 2026-03-15
+### � 对话滑动压缩与独立上下文库 — 2026-03-15
+
+- 新增独立消息镜像库 `workspace/data/memory/message_log.db`：所有用户/AI 消息原文双写，原库仍保留。
+- 新增上下文压缩库 `workspace/data/memory/context_compression.db`：存储滑动窗口摘要，重启可直接加载。
+- 滑动压缩策略（summary 模型）：最新 3 段完整保留（超阈值单独压缩）；第 4~6 段单独压缩；第 7~10 段合并压缩；新消息仅重压缩受影响窗口。
+- `MessageHistory.get_context_messages()` 优先读取压缩库，原有消息库和归档逻辑保留回退。
+- 配置示例新增 `mirror_db_path` / `context_db_path` / `long_message_threshold`。
+
+**涉及文件：**
+- `memory/context_store.py`（新）
+- `memory/message_history.py`（集成镜像写入与滑动压缩读取）
+- `core/controller.py`、`config.example.yml`（透传配置）
+
+### �🧩 CUSTOM 注入范围可控 + Telegram 指令 — 2026-03-15
 
 - 新增 `custom_injection.scopes` 配置：控制 CUSTOM.md 注入范围（fast/smart/image/coder），空或缺失表示全量注入，`none` 关闭注入。
 - 新增 Telegram 指令 `/custom_scope`：按钮式勾选/取消注入范围（fast/smart/image/coder，含“关闭全部”）并写入 `config.yml`。

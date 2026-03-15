@@ -124,6 +124,8 @@ python tui.py
 | 文件 | 说明 |
 |------|------|
 | `data/memory/message_history.db` | 聊天记录 + 压缩总结 + 对话段落（`messages` + `summaries` + `conversation_sessions` 表） |
+| `data/memory/message_log.db` | 消息镜像库：用户/AI 原文双写，便于追溯 |
+| `data/memory/context_compression.db` | 滑动窗口压缩上下文（最新3保留、4-6单独压缩、7-10合并压缩） |
 | `memory/cost_tracking.db` | 成本记录 |
 | `memory/vector.db` | 向量数据库（Qdrant） |
 
