@@ -285,7 +285,7 @@ class SchedulerMixin:
 
             response = self._strip_thinking_content(response.strip())
             if response:
-                await self.adapter.send_message(chat_id, response)
+                await self._send_split_response(chat_id, response)
                 self.message_history.add_message(
                     platform="telegram",
                     chat_id=storage_id,
@@ -305,6 +305,19 @@ class SchedulerMixin:
 
         except Exception as e:
             logger.error(f"[{chat_id}] 发送追话消息失败: {e}", exc_info=True)
+
+    async def _send_split_response(self, chat_id: str, response: str) -> bool:
+        """按 [SPLIT] 分段发送"""
+        if self._SPLIT_MARKER_PATTERN.search(response):
+            parts = self._SPLIT_MARKER_PATTERN.split(response)
+            for part in parts:
+                part = part.strip()
+                if part:
+                    await self.adapter.send_message(chat_id, part)
+            return True
+
+        await self.adapter.send_message(chat_id, response)
+        return False
 
     async def _send_wrapup_message(self, chat_id: str):
         """生成并发送结束对话的消息，同时写入聊天记录。"""
@@ -343,7 +356,7 @@ class SchedulerMixin:
 
             response = self._strip_thinking_content(response.strip())
             if response:
-                await self.adapter.send_message(chat_id, response)
+                await self._send_split_response(chat_id, response)
                 self.message_history.add_message(
                     platform="telegram",
                     chat_id=storage_id,
