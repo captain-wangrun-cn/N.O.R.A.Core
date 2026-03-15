@@ -256,9 +256,14 @@ class OpenAIProvider(BaseLLM):
         
         try:
             response = await self._with_retry(lambda: self.client.chat.completions.create(**kwargs))
-            
+
+            # 防御：兼容异常返回类型（例如 str）
+            if not hasattr(response, "choices"):
+                logger.error(f"OpenAI chat() unexpected response type: {type(response)} -> {response}")
+                return "Sorry, I encountered an issue processing your request with the OpenAI API."
+
             # 保存 usage 信息
-            if response.usage:
+            if hasattr(response, "usage") and response.usage:
                 self.last_usage = {
                     "input_tokens": response.usage.prompt_tokens,
                     "output_tokens": response.usage.completion_tokens
