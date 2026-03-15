@@ -10,7 +10,7 @@ import json
 import logging
 from typing import Dict, Any, List
 
-from brain.prompts import get_soul_prompt, render_template, _read_file_safe, WORKSPACE_SCHEDULE_FILE, WORKSPACE_SOUL_FILE, WORKSPACE_USER_FILE, WORKSPACE_MEMORY_FILE, _resolve_memory_file
+from brain.prompts import get_soul_prompt, render_template, _read_file_safe, WORKSPACE_SCHEDULE_FILE, WORKSPACE_SOUL_FILE, WORKSPACE_USER_FILE, WORKSPACE_MEMORY_FILE, _resolve_memory_file, load_custom_prompt, should_inject_custom
 from core.scheduler import (
     AIPresence,
     set_ai_presence,
@@ -199,6 +199,14 @@ class SchedulerMixin:
 
         try:
             system_prompt = render_template('schedule.jinja', 'followup_detect_system')
+            if should_inject_custom("fast"):
+                custom_prompt = load_custom_prompt()
+                if custom_prompt:
+                    system_prompt = (
+                        system_prompt
+                        + "\n\n"
+                        + render_template('context_injection.jinja', 'custom', custom_content=custom_prompt)
+                    )
             user_prompt = render_template('schedule.jinja', 'followup_detect_user',
                                           recent_conversation=recent_conversation,
                                           idle_seconds=int(idle_secs),

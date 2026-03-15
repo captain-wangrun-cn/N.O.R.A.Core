@@ -38,6 +38,7 @@ core/controller.py            NoraController.handle_message()
 | 成本跟踪 | `config.yml` → `cost_tracking.*` | `enabled`, `custom_prices` |
 | 主动消息调度 | `config.yml` → `schedule.*` | `enabled` |
 | 工作区路径 | `config.yml` → `workspace.root_path` | 技能/下载/数据的根目录 |
+| CUSTOM 注入范围 | `config.yml` → `custom_injection.scopes` | `fast`/`smart`/`image`/`coder`/`none` |
 
 ---
 
@@ -96,6 +97,7 @@ python main.py
 # Telegram 指令（运行后在聊天中）
 # /regenerate_proactive [replace|append]
 # /schedule_today
+# /custom_scope [fast smart image coder | all | none]
 
 # 查看聊天记录统计
 python cli.py --show-history

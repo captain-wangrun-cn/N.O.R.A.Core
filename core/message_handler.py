@@ -96,6 +96,10 @@ class MessageHandlerMixin:
             await self._cmd_debug(chat_id)
             return
 
+        if stripped.startswith("/custom_scope"):
+            await self._cmd_custom_scope(chat_id, stripped)
+            return
+
         # --- 前后端分离逻辑 ---
         status = self.worker_status.get(chat_id)
         if status and status.busy:
@@ -455,3 +459,55 @@ class MessageHandlerMixin:
         state_str = "🟢 已开启" if self.debug_mode[chat_id] else "🔴 已关闭"
         await self.adapter.send_message(chat_id, f"🐛 Debug 模式: {state_str}\n开启后每次工具调用、技能执行、思考阶段都会实时推送详情。")
         logger.info(f"[{chat_id}] Debug 模式切换为: {self.debug_mode[chat_id]}")
+
+    async def _cmd_custom_scope(self, chat_id: str, text: str):
+        """设置 CUSTOM.md 注入范围。"""
+        parts = text.strip().split()
+        args = [p.strip().lower() for p in parts[1:]]
+        try:
+            cfg = config.get_config() or {}
+            current_scopes = config.get_custom_injection_scopes()
+            if not args:
+                if not current_scopes:
+                    scope_desc = "all"
+                elif any(s in ("none", "off") for s in current_scopes):
+                    scope_desc = "none"
+                else:
+                    scope_desc = ", ".join(current_scopes)
+                await self.adapter.send_message(
+                    chat_id,
+                    "🧭 CUSTOM 注入范围\n"
+                    f"当前: {scope_desc}\n"
+                    "用法: /custom_scope fast smart image coder | /custom_scope all | /custom_scope none",
+                )
+                return
+
+            if "all" in args:
+                scopes_to_set = []
+            elif any(a in ("none", "off") for a in args):
+                scopes_to_set = ["none"]
+            else:
+                allowed = {"fast", "smart", "image", "coder"}
+                invalid = [a for a in args if a not in allowed]
+                if invalid:
+                    await self.adapter.send_message(
+                        chat_id,
+                        "❌ 无效范围: " + ", ".join(invalid) + "。可选: fast, smart, image, coder, all, none",
+                    )
+                    return
+                scopes_to_set = list(dict.fromkeys(args))
+
+            cfg.setdefault("custom_injection", {})["scopes"] = scopes_to_set
+            config.save_config(cfg)
+
+            if not scopes_to_set:
+                scope_desc = "all"
+            elif any(s in ("none", "off") for s in scopes_to_set):
+                scope_desc = "none"
+            else:
+                scope_desc = ", ".join(scopes_to_set)
+
+            await self.adapter.send_message(chat_id, f"✅ CUSTOM 注入范围已更新为: {scope_desc}")
+        except Exception as e:
+            logger.error(f"[{chat_id}] /custom_scope 执行失败: {e}", exc_info=True)
+            await self.adapter.send_message(chat_id, f"❌ 设置失败: {e}")

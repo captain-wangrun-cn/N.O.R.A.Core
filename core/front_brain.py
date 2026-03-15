@@ -16,6 +16,7 @@ from brain.prompts import (
     load_custom_prompt,
     _read_file_safe,
     WORKSPACE_SCHEDULE_FILE,
+    should_inject_custom,
 )
 from skills.loader import SkillLoader
 from core.routing import parse_front_brain_response, parse_front_brain_review
@@ -84,7 +85,7 @@ class FrontBrainMixin:
             logger.warning("前脑 SCHEDULE 注入失败，已忽略。", exc_info=True)
 
         try:
-            custom_prompt = load_custom_prompt()
+            custom_prompt = load_custom_prompt() if should_inject_custom("smart") else ""
             if custom_prompt:
                 custom_block = render_template(
                     'context_injection.jinja',
@@ -297,7 +298,7 @@ class FrontBrainMixin:
         except Exception:
             logger.warning("前脑审查 SCHEDULE 注入失败，已忽略。", exc_info=True)
         try:
-            custom_prompt = load_custom_prompt()
+            custom_prompt = load_custom_prompt() if should_inject_custom("smart") else ""
             if custom_prompt:
                 custom_block = render_template(
                     'context_injection.jinja',

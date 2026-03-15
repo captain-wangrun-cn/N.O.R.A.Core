@@ -11,9 +11,10 @@ import sys  # Added sys import for path manipulation
 import logging
 import shutil
 from datetime import datetime, timezone
-from typing import Optional, Dict, Any
+from typing import Optional, Dict, Any, Iterable, List
 
 from workspace_config import get_workspace_manager
+import config
 
 logger = logging.getLogger(__name__)
 
@@ -201,10 +202,50 @@ def load_custom_prompt() -> str:
     return _read_file_safe(WORKSPACE_CUSTOM_FILE)
 
 
+def _normalize_custom_scopes(scopes: Optional[Iterable[str]]) -> List[str]:
+    if not scopes:
+        return []
+    normalized = []
+    for scope in scopes:
+        if scope is None:
+            continue
+        value = str(scope).strip().lower()
+        if value:
+            normalized.append(value)
+    return normalized
+
+
+def should_inject_custom(scope: str, scopes_override: Optional[Iterable[str]] = None) -> bool:
+    """
+    Decide whether CUSTOM.md should be injected for a given scope.
+
+    Args:
+        scope: injection scope identifier (e.g. "system", "smart", "image").
+        scopes_override: optional override list; when omitted, uses config.yml custom_injection.scopes.
+    """
+    scope_value = str(scope).strip().lower()
+    scopes = _normalize_custom_scopes(scopes_override)
+    if not scopes:
+        scopes = _normalize_custom_scopes(config.get_custom_injection_scopes())
+
+    if not scopes:
+        return True
+
+    if "none" in scopes or "off" in scopes:
+        return False
+
+    return scope_value in scopes
+
+
 from typing import List
 
 
-def get_system_prompt(instructions: Optional[List[str]] = None, platform: Optional[str] = None) -> str:
+def get_system_prompt(
+    instructions: Optional[List[str]] = None,
+    platform: Optional[str] = None,
+    custom_scope: str = "system",
+    custom_scopes: Optional[Iterable[str]] = None,
+) -> str:
     """
     使用 Jinja2 模板渲染最终的 System Prompt。
     
@@ -236,7 +277,7 @@ def get_system_prompt(instructions: Optional[List[str]] = None, platform: Option
 
     # 加载身份与记忆上下文与自定义指令，注入到 instructions
     identity_context = load_identity_context()
-    custom_prompt = load_custom_prompt()
+    custom_prompt = load_custom_prompt() if should_inject_custom(custom_scope, custom_scopes) else ""
     all_instructions = list(instructions or [])
     if custom_prompt:
         all_instructions.insert(0, f"【用户自定义全局指令 CUSTOM.md】\n{custom_prompt}")

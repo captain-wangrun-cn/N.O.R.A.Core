@@ -80,6 +80,17 @@ memory:
     model: "BAAI/bge-m3" # Recommended for RAG
     dimensions: 1024 # BGE-M3 output dimensions
 
+# CUSTOM.md 注入范围（可选）
+# scopes 为空或缺失时表示全量注入。
+# 可选值: fast, smart, image, coder
+# 设置为 ["none"] 可关闭全部 CUSTOM 注入
+custom_injection:
+  scopes:
+    - fast
+    - smart
+    - image
+    - coder
+
 # Tavily 网络搜索 API (可选)
 tavily:
   api_key: "YOUR_TAVILY_API_KEY" # 从 https://tavily.com/ 获取

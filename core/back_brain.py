@@ -12,7 +12,7 @@ import re
 import time
 from typing import Dict, Any, List, cast
 
-from brain.prompts import get_system_prompt, render_template
+from brain.prompts import get_system_prompt, render_template, load_custom_prompt, should_inject_custom
 from brain.multimodal import extract_image_payloads
 from core.worker_status import WorkerStatus
 import config
@@ -215,6 +215,18 @@ class BackBrainMixin:
                     render_template('context_injection.jinja', 'rag', rag_context=rag_context)
                 )
 
+            # Inject CUSTOM.md based on scope configuration
+            try:
+                custom_scope = "image" if multimodal_images else "smart"
+                if should_inject_custom(custom_scope):
+                    custom_prompt = load_custom_prompt()
+                    if custom_prompt:
+                        instructions.append(
+                            render_template('context_injection.jinja', 'custom', custom_content=custom_prompt)
+                        )
+            except Exception:
+                logger.warning("后脑 CUSTOM 注入失败，已忽略。", exc_info=True)
+
             full_user_prompt = text
             
             # 如果有图片，将图片 ID 信息注入到用户 prompt 中，并告知 LLM 返回图片标签
@@ -308,7 +320,11 @@ class BackBrainMixin:
                     "4. 保持客观、简洁、信息密度高。前脑会将你的报告转化为自然对话回复用户。"
                 )
 
-            system_prompt = get_system_prompt(instructions, platform=self.adapter.platform_name)
+            system_prompt = get_system_prompt(
+                instructions,
+                platform=self.adapter.platform_name,
+                custom_scope="coder" if not multimodal_images else "image",
+            )
 
             # --- 3. 执行循环 (Tool Execution Loop) ---
             current_turn = 0

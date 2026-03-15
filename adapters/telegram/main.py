@@ -326,6 +326,7 @@ class TelegramAdapter(BaseAdapter):
         debug_handler = CommandHandler('debug', self._debug_command)
         regenerate_proactive_handler = CommandHandler('regenerate_proactive', self._regenerate_proactive_command)
         schedule_today_handler = CommandHandler('schedule_today', self._schedule_today_command)
+    custom_scope_handler = CommandHandler('custom_scope', self._custom_scope_command)
         debug_cleanup_handler = CommandHandler('debug_cleanup', self._debug_cleanup_command)
         model_handler = CommandHandler('model', self._model_command)
         msg_handler = MessageHandler(filters.TEXT & (~filters.COMMAND), self._handle_incoming_message)
@@ -341,6 +342,7 @@ class TelegramAdapter(BaseAdapter):
         self.application.add_handler(debug_handler)
         self.application.add_handler(regenerate_proactive_handler)
         self.application.add_handler(schedule_today_handler)
+    self.application.add_handler(custom_scope_handler)
         self.application.add_handler(debug_cleanup_handler)
         self.application.add_handler(model_handler)
         self.application.add_handler(msg_handler)
@@ -671,6 +673,44 @@ class TelegramAdapter(BaseAdapter):
         }
         await self._message_handler(event_context)
 
+    async def _custom_scope_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """设置 CUSTOM.md 注入范围。"""
+        if not update.effective_chat:
+            return
+        chat_id = str(update.effective_chat.id)
+        if not self._message_handler:
+            if update.message:
+                await update.message.reply_text("❌ 指令处理器未就绪。")
+            return
+
+        try:
+            cfg = config.get_config() or {}
+            current_scopes = (cfg.get("custom_injection", {}) or {}).get("scopes") or []
+            if any(s in ("none", "off") for s in current_scopes):
+                scope_desc = "none"
+            elif not current_scopes:
+                scope_desc = "all"
+            else:
+                scope_desc = ", ".join(current_scopes)
+
+            keyboard = InlineKeyboardMarkup([
+                [InlineKeyboardButton("fast", callback_data="custom_scope:fast")],
+                [InlineKeyboardButton("smart", callback_data="custom_scope:smart")],
+                [InlineKeyboardButton("image", callback_data="custom_scope:image")],
+                [InlineKeyboardButton("coder", callback_data="custom_scope:coder")],
+            ])
+            text = (
+                "🧭 CUSTOM 注入范围\n"
+                f"当前: {scope_desc}\n"
+                "点击按钮将注入范围设置为单一 scope。"
+            )
+            if update.message:
+                await update.message.reply_text(text, reply_markup=keyboard)
+        except Exception:
+            logger.error(f"[{chat_id}] /custom_scope 按钮初始化失败", exc_info=True)
+            if update.message:
+                await update.message.reply_text("❌ 无法加载按钮。")
+
     async def _handle_incoming_message(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not await self._should_process_message(update):
             return
@@ -920,6 +960,10 @@ class TelegramAdapter(BaseAdapter):
         if callback_data and callback_data.startswith("debug_cleanup:"):
             await self._handle_debug_cleanup_callback(query, callback_data)
             return
+
+        if callback_data and callback_data.startswith("custom_scope:"):
+            await self._handle_custom_scope_callback(query, callback_data)
+            return
         
         # 构造消息
         text = f"[按钮点击: {callback_data}]"
@@ -993,6 +1037,30 @@ class TelegramAdapter(BaseAdapter):
             result_lines.append(self._purge_chat_history())
 
         await query.edit_message_text("\n".join(result_lines))
+
+    async def _handle_custom_scope_callback(self, query, callback_data: str):
+        """处理 CUSTOM scope 按钮回调。"""
+        if not query or not query.message:
+            return
+        chat_id = str(query.message.chat.id)
+        scope = callback_data.split(":", 1)[1]
+        if scope not in {"fast", "smart", "image", "coder"}:
+            await query.edit_message_text("❌ 无效范围。")
+            return
+
+        if not self._message_handler:
+            await query.edit_message_text("❌ 指令处理器未就绪。")
+            return
+
+        event_context = {
+            "chat_id": chat_id,
+            "user_id": str(query.from_user.id) if query.from_user else chat_id,
+            "text": f"/custom_scope {scope}",
+            "chat_type": query.message.chat.type if query.message else "private",
+            "user_name": query.from_user.first_name if query.from_user else "Unknown",
+        }
+        await self._message_handler(event_context)
+        await query.edit_message_text(f"✅ CUSTOM 注入范围已设置为: {scope}")
 
     async def _handle_model_pick_callback(self, query, callback_data: str):
         if not query or not query.message:

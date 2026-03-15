@@ -5,6 +5,22 @@
 
 ## 近期关键改动（截至 2026-03-12）
 
+### 🧩 CUSTOM 注入范围可控 + Telegram 指令 — 2026-03-15
+
+- 新增 `custom_injection.scopes` 配置：控制 CUSTOM.md 注入范围（fast/smart/image/coder），空或缺失表示全量注入，`none` 关闭注入。
+- 新增 Telegram 指令 `/custom_scope`：按钮式切换注入范围（fast/smart/image/coder）并写入 `config.yml`。
+- 前脑/后脑/系统提示构建统一尊重 scope 配置。
+
+**涉及文件：**
+- `config.py`（新增 `get_custom_injection_scopes`）
+- `config.example.yml`（新增 `custom_injection.scopes` 示例）
+- `brain/prompts.py`（scope 解析 + system 注入开关）
+- `core/front_brain.py`（smart scope 注入控制）
+- `core/back_brain.py`（smart/image scope 注入控制）
+- `core/message_handler.py`（/custom_scope 指令实现）
+- `adapters/telegram/main.py`（指令注册与透传）
+- `docs/onboarding/QUICK_REFERENCE.md`（新增配置/指令说明）
+
 ### 🗝️ CUSTOM/SECRET 文件与加密私密本 — 2026-03-12
 
 - 新增 `CUSTOM.md`：用户维护的全局指令，自动注入提示，AI 禁止用文件工具读取/修改。

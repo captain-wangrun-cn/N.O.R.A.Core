@@ -127,3 +127,9 @@ def get_workspace_config():
     cfg = _safe_config()
     return cfg.get("workspace", {})
 
+
+def get_custom_injection_scopes():
+    """Gets the CUSTOM.md injection scopes configuration."""
+    cfg = _safe_config()
+    return (cfg.get("custom_injection", {}) or {}).get("scopes")
+

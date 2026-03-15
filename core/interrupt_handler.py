@@ -9,7 +9,7 @@ import asyncio
 import logging
 from typing import Dict, Any
 
-from brain.prompts import get_soul_prompt, render_template
+from brain.prompts import get_soul_prompt, render_template, load_custom_prompt, should_inject_custom
 from core.worker_status import WorkerStatus
 
 logger = logging.getLogger(__name__)
@@ -55,8 +55,18 @@ class InterruptHandlerMixin:
         
         try:
             response = ""
+            system_prompt = render_template('interrupt_detect.jinja', 'system', soul=soul)
+            if should_inject_custom("fast"):
+                custom_prompt = load_custom_prompt()
+                if custom_prompt:
+                    system_prompt = (
+                        system_prompt
+                        + "\n\n"
+                        + render_template('context_injection.jinja', 'custom', custom_content=custom_prompt)
+                    )
+
             stream = self.fast_llm.chat_stream(
-                system_prompt=render_template('interrupt_detect.jinja', 'system', soul=soul),
+                system_prompt=system_prompt,
                 user_prompt=prompt,
                 history=recent_history,
                 tools=[]
