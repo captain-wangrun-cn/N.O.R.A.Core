@@ -911,6 +911,45 @@ class StepCostTracking(ConfigStep):
         return True
 
 
+class StepOutputLimit(ConfigStep):
+    """输出 token 上限配置步骤"""
+
+    def run(self):
+        print("\n🧷 输出 token 上限")
+        print("-" * 50)
+        print("限制 LLM 单次响应的最大输出 token，避免回复过长。")
+
+        llm_cfg = self.state.get("llm", {})
+        current_limit = llm_cfg.get("max_output_tokens")
+        if current_limit is None:
+            current_limit = 768
+
+        raw = questionary.text(
+            "默认输出上限（空=不限制）:",
+            default=str(current_limit)
+        ).ask()
+
+        if raw is None:
+            return False
+
+        raw = raw.strip()
+        if raw == "":
+            llm_cfg.pop("max_output_tokens", None)
+        else:
+            try:
+                value = int(raw)
+                if value <= 0:
+                    questionary.print(t('wizard.invalid_positive_integer'), style="bold red")
+                    return False
+                llm_cfg["max_output_tokens"] = value
+            except ValueError:
+                questionary.print(t('wizard.invalid_positive_integer'), style="bold red")
+                return False
+
+        self.state["llm"] = llm_cfg
+        return True
+
+
 # --- 配置向导主流程 ---
 def run_wizard():
     """运行交互式配置向导"""
@@ -953,12 +992,13 @@ def run_wizard():
                 'providers': providers,
                 'model_providers': llm_cfg.get("model_providers", {}) or {},
                 'models': llm_cfg.get("models", {}),
+                'llm': llm_cfg,
                 'memory': cfg.get("memory", {}),
                 'tavily': cfg.get("tavily", {}),
                 'cost_tracking': cfg.get("cost_tracking", {'enabled': True})
             }
 
-    steps = [StepTelegram, StepWorkspace, StepProvider, StepAPIKeys, StepDatabase, StepEmbedding, StepTavily, StepTimezone, StepModels, StepCostTracking]
+    steps = [StepTelegram, StepWorkspace, StepProvider, StepAPIKeys, StepDatabase, StepEmbedding, StepTavily, StepTimezone, StepModels, StepOutputLimit, StepCostTracking]
     current_step = 0
     
     while current_step < len(steps):
@@ -989,6 +1029,10 @@ def run_wizard():
         'memory': state.get('memory', {}),
         'cost_tracking': state.get('cost_tracking', {'enabled': True})
     }
+    if isinstance(state.get('llm'), dict):
+        llm_state = state.get('llm') or {}
+        if llm_state.get('max_output_tokens') is not None:
+            final_config['llm']['max_output_tokens'] = llm_state.get('max_output_tokens')
 
     # 兼容旧配置结构：保留 api_keys/base_url/user_agent（取默认 provider 对应值）
     providers_cfg = final_config['llm'].get('providers', {}) or {}

@@ -6,7 +6,7 @@ with warnings.catch_warnings():
     warnings.simplefilter("ignore")
     import google.generativeai as genai
 
-from typing import List, Dict, Optional
+from typing import List, Dict, Optional, Any
 import re
 import random
 
@@ -50,6 +50,7 @@ class GeminiProvider(BaseLLM):
         
         self.model_alias = model_alias
         self.provider_name = provider_name
+        self.max_output_tokens = config.get_llm_max_output_tokens(model_alias)
         model_name = config.get_model_name(model_alias)
         if not model_name:
             raise ValueError(f"Model for alias '{model_alias}' not found in config.")
@@ -275,11 +276,25 @@ class GeminiProvider(BaseLLM):
         else:
             full_prompt = f"{system_prompt}\n\n---\n\n{user_prompt}"
 
+        generation_config: Optional[Any] = None
+        if self.max_output_tokens:
+            generation_config = {"max_output_tokens": int(self.max_output_tokens)}
+
         user_parts = self._build_user_parts(full_prompt, multimodal_images)
         chat_session = current_model.start_chat(history=gemini_history)
         
         try:
-            response_stream = await chat_session.send_message_async(user_parts, stream=True)
+            if generation_config:
+                response_stream = await chat_session.send_message_async(
+                    user_parts,
+                    stream=True,
+                    generation_config=generation_config
+                )
+            else:
+                response_stream = await chat_session.send_message_async(
+                    user_parts,
+                    stream=True
+                )
             
             # 收集 usage 数据
             input_tokens = 0

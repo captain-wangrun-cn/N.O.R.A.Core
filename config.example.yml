@@ -54,6 +54,15 @@ llm:
     image: "gemini-1.5-pro-latest" # 用于图片输入理解的模型
     summary: "gemini-1.5-flash-latest" # 用于消息历史总结的模型
 
+  # 输出 token 上限（统一）
+  max_output_tokens: 768
+
+  # 按 alias 单独设置输出 token 上限（优先级高于全局）
+  # max_output_tokens_by_alias:
+  #   smart: 768
+  #   fast: 512
+  #   coder: 1024
+
 memory:
   # 消息历史管理
   message_history:

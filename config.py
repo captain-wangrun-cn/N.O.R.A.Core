@@ -117,6 +117,15 @@ def get_llm_user_agent(provider=None):
     cfg = _safe_config()
     return cfg.get("llm", {}).get("user_agent")
 
+def get_llm_max_output_tokens(model_alias: str = "smart"):
+    """Gets max output tokens for a given model alias (if configured)."""
+    cfg = _safe_config()
+    llm_cfg = cfg.get("llm", {})
+    per_alias = (llm_cfg.get("max_output_tokens_by_alias") or {})
+    if model_alias in per_alias:
+        return per_alias.get(model_alias)
+    return llm_cfg.get("max_output_tokens")
+
 def get_message_history_config():
     """Gets the message history configuration."""
     cfg = _safe_config()

@@ -31,6 +31,7 @@ class OpenAIProvider(BaseLLM):
             default_headers=default_headers
         )
         self.model = config.get_model_name(model_alias)
+        self.max_output_tokens = config.get_llm_max_output_tokens(model_alias)
         if not self.model:
             raise ValueError(f"Model for alias '{model_alias}' not found in config.")
 
@@ -244,6 +245,8 @@ class OpenAIProvider(BaseLLM):
             "model": self.model,
             "messages": messages,
         }
+        if self.max_output_tokens:
+            kwargs["max_tokens"] = int(self.max_output_tokens)
         
         # 如果有 tools，转换格式并传入
         if tools:
@@ -300,6 +303,8 @@ class OpenAIProvider(BaseLLM):
             "messages": messages,
             "stream": True,
         }
+        if self.max_output_tokens:
+            kwargs["max_tokens"] = int(self.max_output_tokens)
         
         # 如果有 tools，转换格式并传入
         if tools:
