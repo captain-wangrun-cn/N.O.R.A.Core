@@ -123,10 +123,12 @@ class PollingMixin:
                 )
                 
                 action = review_result["action"]
-                review_reply = review_result["user_reply"]
+                review_reply = review_result.get("user_reply", "")
+                task_instruction = review_result.get("task_instruction", "")
+                should_reply = review_result.get("should_reply", True)
                 
                 # 发送前脑审查回复给用户（如果有实质内容）
-                if review_reply:
+                if review_reply and should_reply:
                     parts = self._SPLIT_MARKER_PATTERN.split(review_reply)
                     for part in parts:
                         part = part.strip()
@@ -153,13 +155,16 @@ class PollingMixin:
                 if action == "continue":
                     # 需要后脑继续 — 构建新 context
                     new_instruction = review_reply if review_reply else "请继续处理。"
+                    if task_instruction:
+                        new_instruction += f"\n\n【任务指示】\n{task_instruction}"
                     if new_user_texts:
                         new_instruction += "\n\n用户新消息:\n" + "\n".join(new_user_texts)
                     
                     context = context.copy()
                     context["text"] = new_instruction
                     context["_front_brain_handled"] = True
-                    context["_front_brain_reply"] = review_reply
+                    context["_front_brain_reply"] = review_reply if should_reply else ""
+                    context["task_instruction"] = task_instruction
                     # 消费掉队列中对应的消息
                     queue = self.task_queues.get(chat_id)
                     if queue and new_user_texts:

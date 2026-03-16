@@ -532,6 +532,10 @@ class SchedulerMixin:
             elif raw_front_reply:
                 backend_instruction += f"\n\n前脑原始回复: {raw_front_reply}"
 
+            task_instruction = front_result.get("task_instruction", "")
+            if task_instruction:
+                backend_instruction += f"\n\n【任务指示】\n{task_instruction}"
+
             backend_context = {
                 "chat_id": chat_id,
                 "chat_type": "private",
@@ -540,6 +544,7 @@ class SchedulerMixin:
                 "text": backend_instruction,
                 "_front_brain_handled": True,
                 "_front_brain_reply": user_reply,
+                "task_instruction": task_instruction,
             }
 
             logger.info(f"[{chat_id}] 前脑标记需要后脑，启动轮询处理主动消息")

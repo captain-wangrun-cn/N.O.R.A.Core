@@ -51,6 +51,10 @@ def has_image_input(text: str) -> bool:
 
 # 前脑回复中触发后脑的标记
 _BACKEND_SIGNAL = "[NEED_BACKEND]"
+# 可选：不向用户回复的标记
+_NO_REPLY_SIGNAL = "[NO_REPLY]"
+# 可选：任务指示块
+_TASK_INSTRUCTION_PATTERN = re.compile(r"\[TASK_INSTRUCTION\](.*?)\[/TASK_INSTRUCTION\]", re.IGNORECASE | re.DOTALL)
 
 # 前脑审查中任务完成的标记
 _TASK_DONE_SIGNAL = "[TASK_DONE]"
@@ -79,19 +83,40 @@ def parse_front_brain_response(response_text: str) -> dict:
         }
     """
     if not response_text:
-        return {"needs_backend": False, "user_reply": ""}
+        return {
+            "needs_backend": False,
+            "user_reply": "",
+            "task_instruction": "",
+            "should_reply": False,
+        }
 
     needs_backend = _BACKEND_SIGNAL in response_text
+    should_reply = _NO_REPLY_SIGNAL not in response_text
+
+    # 提取任务指示（可为空）
+    task_instruction = ""
+    task_match = _TASK_INSTRUCTION_PATTERN.search(response_text)
+    if task_match:
+        task_instruction = task_match.group(1).strip()
 
     # 清理标记，生成用户可见文本
-    user_reply = response_text.replace(_BACKEND_SIGNAL, "").strip()
+    user_reply = response_text
+    user_reply = user_reply.replace(_BACKEND_SIGNAL, "")
+    user_reply = user_reply.replace(_NO_REPLY_SIGNAL, "")
+    user_reply = _TASK_INSTRUCTION_PATTERN.sub("", user_reply)
+    user_reply = user_reply.strip()
     user_reply = _strip_timestamp_markers(user_reply)
     # 清理多余空行
     user_reply = re.sub(r'\n{3,}', '\n\n', user_reply)
 
+    if not should_reply:
+        user_reply = ""
+
     return {
         "needs_backend": needs_backend,
         "user_reply": user_reply,
+        "task_instruction": task_instruction,
+        "should_reply": should_reply,
     }
 
 
@@ -111,20 +136,54 @@ def parse_front_brain_review(response_text: str) -> dict:
         }
     """
     if not response_text:
-        return {"action": "done", "user_reply": ""}
+        return {
+            "action": "done",
+            "user_reply": "",
+            "task_instruction": "",
+            "should_reply": False,
+        }
 
     has_done = _TASK_DONE_SIGNAL in response_text
     has_backend = _BACKEND_SIGNAL in response_text
+    should_reply = _NO_REPLY_SIGNAL not in response_text
+
+    task_instruction = ""
+    task_match = _TASK_INSTRUCTION_PATTERN.search(response_text)
+    if task_match:
+        task_instruction = task_match.group(1).strip()
 
     # 清理标记，生成用户可见文本
-    user_reply = response_text.replace(_TASK_DONE_SIGNAL, "").replace(_BACKEND_SIGNAL, "").strip()
+    user_reply = response_text
+    user_reply = user_reply.replace(_TASK_DONE_SIGNAL, "")
+    user_reply = user_reply.replace(_BACKEND_SIGNAL, "")
+    user_reply = user_reply.replace(_NO_REPLY_SIGNAL, "")
+    user_reply = _TASK_INSTRUCTION_PATTERN.sub("", user_reply)
+    user_reply = user_reply.strip()
     user_reply = _strip_timestamp_markers(user_reply)
     user_reply = re.sub(r'\n{3,}', '\n\n', user_reply)
 
+    if not should_reply:
+        user_reply = ""
+
     if has_backend:
-        return {"action": "continue", "user_reply": user_reply}
+        return {
+            "action": "continue",
+            "user_reply": user_reply,
+            "task_instruction": task_instruction,
+            "should_reply": should_reply,
+        }
     elif has_done:
-        return {"action": "done", "user_reply": user_reply}
+        return {
+            "action": "done",
+            "user_reply": user_reply,
+            "task_instruction": task_instruction,
+            "should_reply": should_reply,
+        }
     else:
         # 无标记 = 纯聊天，也结束轮询
-        return {"action": "chat", "user_reply": user_reply}
+        return {
+            "action": "chat",
+            "user_reply": user_reply,
+            "task_instruction": task_instruction,
+            "should_reply": should_reply,
+        }

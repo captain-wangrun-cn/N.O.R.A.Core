@@ -207,8 +207,9 @@ class MessageHandlerMixin:
         front_result = await self._generate_front_chat_response(context)
 
         # 3) 发送前脑回复给用户（如果有的话）
-        user_reply = front_result["user_reply"]
-        if user_reply:
+        user_reply = front_result.get("user_reply", "")
+        should_reply = front_result.get("should_reply", True)
+        if user_reply and should_reply:
             # 使用 [SPLIT] 分段发送
             parts = self._SPLIT_MARKER_PATTERN.split(user_reply)
             for part in parts:
@@ -239,8 +240,9 @@ class MessageHandlerMixin:
             # 标记上下文：后脑应跳过用户消息保存（前脑已保存）
             backend_context = context.copy()
             backend_context["_front_brain_handled"] = True
-            backend_context["_front_brain_reply"] = user_reply
+            backend_context["_front_brain_reply"] = user_reply if should_reply else ""
             backend_context["_message_saved"] = True
+            backend_context["task_instruction"] = front_result.get("task_instruction", "")
             task = asyncio.create_task(self._run_polling_loop(backend_context))
             self.generation_tasks[chat_id] = task
         else:

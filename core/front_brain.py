@@ -241,16 +241,22 @@ class FrontBrainMixin:
         parsed = parse_front_brain_response(response_text)
         logger.info(
             f"[{chat_id}] 前脑结果: needs_backend={parsed['needs_backend']}, "
+            f"should_reply={parsed.get('should_reply')}, "
             f"reply='{parsed['user_reply'][:80]}...'"
         )
         await self._send_debug(
             chat_id,
-            f"⚡ 前脑: needs_backend={parsed['needs_backend']}\n回复: {parsed['user_reply'][:200]}"
+            f"⚡ 前脑: needs_backend={parsed['needs_backend']}\n"
+            f"should_reply={parsed.get('should_reply')}\n"
+            f"任务指示: {parsed.get('task_instruction', '')[:200]}\n"
+            f"回复: {parsed['user_reply'][:200]}"
         )
 
         return {
             "needs_backend": parsed["needs_backend"],
             "user_reply": parsed["user_reply"],
+            "task_instruction": parsed.get("task_instruction", ""),
+            "should_reply": parsed.get("should_reply", True),
             "raw_response": response_text,
         }
 
@@ -390,11 +396,15 @@ class FrontBrainMixin:
         parsed = parse_front_brain_review(response_text)
         logger.info(
             f"[{chat_id}] 前脑审查结果: action={parsed['action']}, "
+            f"should_reply={parsed.get('should_reply')}, "
             f"reply='{parsed['user_reply'][:80]}...'"
         )
         await self._send_debug(
             chat_id,
-            f"🔍 审查: action={parsed['action']}\n回复: {parsed['user_reply'][:200]}"
+            f"🔍 审查: action={parsed['action']}\n"
+            f"should_reply={parsed.get('should_reply')}\n"
+            f"任务指示: {parsed.get('task_instruction', '')[:200]}\n"
+            f"回复: {parsed['user_reply'][:200]}"
         )
 
         return parsed

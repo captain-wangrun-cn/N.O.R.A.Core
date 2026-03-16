@@ -178,6 +178,15 @@ class BackBrainMixin:
 
             # --- 2. 构建 Prompt (Context Reconstruction) ---
             instructions = []
+
+            # 前脑下发的任务指示（用户不可见），提供给后脑执行
+            task_instruction = context.get("task_instruction", "")
+            if task_instruction:
+                instructions.append(
+                    "【前脑任务指示 (Task Instruction)】\n"
+                    "以下指示来自前脑，用户不可见，请严格按此执行：\n"
+                    f"{task_instruction}\n"
+                )
             
             # Inject Workspace Context
             from brain.tools import WORKSPACE_ROOT, SKILLS_DIR, CODE_SKILLS_DIR
