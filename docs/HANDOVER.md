@@ -5,6 +5,28 @@
 
 ## 近期关键改动（截至 2026-03-12）
 
+### 🧠 前脑/审查静默转交与任务指示 — 2026-03-16
+
+- 新增前脑可选 **不向用户回复**：在前脑回复末尾标记 `[NO_REPLY]`，仅向后脑下达任务。
+- 新增 **任务指示块**：在前脑或前脑审查回复中使用
+   ```
+   [TASK_INSTRUCTION]
+   <写给后脑的指令，越具体越好>
+   [/TASK_INSTRUCTION]
+   ```
+   后脑读取执行，用户不可见。
+- 前脑普通对话与主动消息均可选择是否回复用户，且可附带任务指示。
+- 前脑转交后脑时，会将任务指示写入后脑上下文；前脑审查继续轮询时也会把新增指示注入后脑。
+
+**涉及文件：**
+- `core/routing.py`（解析 `[NO_REPLY]` 与 `[TASK_INSTRUCTION]`，返回 `should_reply`、`task_instruction`）
+- `core/front_brain.py`（透传 `should_reply`/`task_instruction` 调试与返回）
+- `core/message_handler.py`（根据 `should_reply` 决定是否发送前脑回复，传递任务指示给后脑）
+- `core/polling.py`（审查阶段支持 `NO_REPLY`，续跑时附带任务指示）
+- `core/back_brain.py`（后脑 prompt 注入前脑任务指示）
+- `core/scheduler_mixin.py`（主动消息链路传递任务指示）
+- `brain/templates/front_brain.jinja` / `front_brain_review.jinja`（文档化 `NO_REPLY` 与 `TASK_INSTRUCTION` 用法）
+
 ### � 对话滑动压缩与独立上下文库 — 2026-03-15
 
 - 新增独立消息镜像库 `workspace/data/memory/message_log.db`：所有用户/AI 消息原文双写，原库仍保留。
