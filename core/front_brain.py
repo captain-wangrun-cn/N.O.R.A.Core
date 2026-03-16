@@ -188,7 +188,10 @@ class FrontBrainMixin:
                 db_context = db_context[:-1]
 
         history = [
-            {"role": msg["role"], "content": msg["content"]}
+            {
+                "role": msg["role"],
+                "content": self._strip_timestamp_markers(str(msg["content"]))
+            }
             for msg in db_context
             if msg["role"] in ("user", "assistant")
         ]
@@ -344,7 +347,10 @@ class FrontBrainMixin:
             db_context = db_context[-15:]
         
         history = [
-            {"role": msg["role"], "content": msg["content"]}
+            {
+                "role": msg["role"],
+                "content": self._strip_timestamp_markers(str(msg["content"]))
+            }
             for msg in db_context
             if msg["role"] in ("user", "assistant")
         ]

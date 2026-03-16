@@ -59,7 +59,10 @@ _TASK_INSTRUCTION_PATTERN = re.compile(r"\[TASK_INSTRUCTION\](.*?)\[/TASK_INSTRU
 # 前脑审查中任务完成的标记
 _TASK_DONE_SIGNAL = "[TASK_DONE]"
 
-_TIMESTAMP_PATTERN = re.compile(r"\[\d{4}-\d{2}-\d{2} \d{2}:\d{2}\]\s*")
+_TIMESTAMP_PATTERN = re.compile(
+    r"\[\d{4}-\d{2}-\d{2} \d{2}:\d{2}(?::\d{2})?(?: [^\]]+)?\]\s*",
+    re.IGNORECASE,
+)
 
 
 def _strip_timestamp_markers(text: str) -> str:

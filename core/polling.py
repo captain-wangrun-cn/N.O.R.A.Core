@@ -67,7 +67,10 @@ class PollingMixin:
                 new_user_msgs = self.message_history.get_messages_since(
                     "telegram", storage_id, backend_start_ts, role="user"
                 )
-                new_user_texts = [msg["content"] for msg in new_user_msgs]
+                new_user_texts = [
+                    self._strip_timestamp_markers(str(msg["content"]))
+                    for msg in new_user_msgs
+                ]
                 
                 # 获取后脑的最终回复（从 session history 中取最后一条 assistant 消息）
                 session = self.sessions.get(chat_id, {})
@@ -75,7 +78,7 @@ class PollingMixin:
                 backend_result = ""
                 for h in reversed(session_history):
                     if h.get("role") == "assistant":
-                        backend_result = h["content"]
+                        backend_result = self._strip_timestamp_markers(str(h["content"]))
                         break
 
                 # 追加后脑执行过的工具操作记录，供前脑审查与转述

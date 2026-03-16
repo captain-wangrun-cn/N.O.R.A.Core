@@ -713,7 +713,7 @@ class BackBrainMixin:
                 clean_response = self._strip_timestamp_markers(clean_response)
                 if clean_response:
                     if not in_polling:
-                        await self.adapter.send_message(chat_id, clean_response)
+                        await self.adapter.send_message(chat_id, self._strip_timestamp_markers(clean_response))
                     else:
                         logger.info(f"[{chat_id}] [轮询模式] 后脑回复已缓存，等待前脑审查 ({len(clean_response)} 字符)")
                 elif latest_meaningful_output:
@@ -740,11 +740,11 @@ class BackBrainMixin:
                 final_response_buffer = self._strip_timestamp_markers(final_response_buffer)
                 if final_response_buffer:
                     if not in_polling:
-                        await self.adapter.send_message(chat_id, final_response_buffer)
+                        await self.adapter.send_message(chat_id, self._strip_timestamp_markers(final_response_buffer))
                 else:
                     final_response_buffer = "任务已完成。"
                     if not in_polling:
-                        await self.adapter.send_message(chat_id, final_response_buffer)
+                        await self.adapter.send_message(chat_id, self._strip_timestamp_markers(final_response_buffer))
             elif latest_tool_output:
                 temp_history.append({
                     "role": "user",
@@ -768,11 +768,11 @@ class BackBrainMixin:
                 final_response_buffer = self._strip_timestamp_markers(final_response_buffer)
                 if final_response_buffer:
                     if not in_polling:
-                        await self.adapter.send_message(chat_id, final_response_buffer)
+                        await self.adapter.send_message(chat_id, self._strip_timestamp_markers(final_response_buffer))
                 else:
                     final_response_buffer = "任务已完成。"
                     if not in_polling:
-                        await self.adapter.send_message(chat_id, final_response_buffer)
+                        await self.adapter.send_message(chat_id, self._strip_timestamp_markers(final_response_buffer))
             
             # --- 4.5 保存助手回复到数据库 ---
             if final_response_buffer:
