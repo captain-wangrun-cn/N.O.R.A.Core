@@ -128,3 +128,8 @@ schedule:
   #   - 支持动态闹钟工具 (set_alarm / list_alarms / cancel_alarm)
   #   - 闹钟数据持久化到 workspace/cache/alarms.json
   #   - 编辑 SCHEDULE.md (workspace 目录下) 自定义作息和日程
+
+# 交互配置
+interaction:
+  buffer_timeout: 3.0   # 消息聚合缓冲时间（秒）
+  non_stream: false     # 默认是否启用非流式（true=一次性输出；false=流式）

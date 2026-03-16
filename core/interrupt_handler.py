@@ -7,9 +7,16 @@ Copyright © WR（captain-wangrun-cn） All rights reserved
 
 import asyncio
 import logging
+import re
 from typing import Dict, Any
 
-from brain.prompts import get_soul_prompt, render_template, load_custom_prompt, should_inject_custom
+from brain.prompts import (
+    get_soul_prompt,
+    render_template,
+    load_custom_prompt,
+    should_inject_custom,
+    load_identity_context,
+)
 from core.worker_status import WorkerStatus
 
 logger = logging.getLogger(__name__)
@@ -18,9 +25,17 @@ logger = logging.getLogger(__name__)
 class InterruptHandlerMixin:
     """后端忙碌时的用户意图检测与任务打断。"""
 
+    _TIMESTAMP_PATTERN = re.compile(r"\[\d{4}-\d{2}-\d{2} \d{2}:\d{2}\]\s*")
+
+    @classmethod
+    def _strip_timestamp_markers(cls, text: str) -> str:
+        if not text:
+            return ""
+        return cls._TIMESTAMP_PATTERN.sub("", text).strip()
+
     async def _detect_interrupt_intent_and_reply(self, chat_id: str, text: str, status: WorkerStatus) -> Dict[str, str]:
         """
-        用 fast 模型智能判断用户意图并生成回复。
+        用 smart 模型智能判断用户意图并生成回复。
         
         Returns:
             {
@@ -39,16 +54,20 @@ class InterruptHandlerMixin:
                                  progress=progress, user_text=text,
                                  queue_summary=queue_summary)
         
-        # 带入最近几条对话历史，让 fast_llm 理解上下文（而不是只看当前这一句）
+        # 带入最近对话历史，让 smart_llm 理解上下文（而不是只看当前这一句）
         recent_history = []
         try:
-            session = self.sessions.get(chat_id, {})
-            session_history = session.get("history", [])
-            # 取最近 6 条（3 轮对话），足够理解上下文
+            storage_id = chat_id  # 无 user_id 信息时退化为 chat 维度
+            db_context = self.message_history.get_context_messages("telegram", storage_id)
+            if len(db_context) > 20:
+                db_context = db_context[-20:]
             recent_history = [
-                {"role": h["role"], "content": h["content"]}
-                for h in session_history[-6:]
-                if h.get("role") in ("user", "assistant") and h.get("content")
+                {
+                    "role": msg.get("role"),
+                    "content": self._strip_timestamp_markers(str(msg.get("content", ""))),
+                }
+                for msg in db_context
+                if msg.get("role") in ("user", "assistant") and msg.get("content")
             ]
         except Exception:
             recent_history = []
@@ -57,7 +76,10 @@ class InterruptHandlerMixin:
             for attempt in range(3):
                 response = ""
                 system_prompt = render_template('interrupt_detect.jinja', 'system', soul=soul)
-                if should_inject_custom("fast"):
+                identity_context = load_identity_context(include_schedule=False)
+                if identity_context:
+                    system_prompt = identity_context + "\n\n" + system_prompt
+                if should_inject_custom("smart"):
                     custom_prompt = load_custom_prompt()
                     if custom_prompt:
                         system_prompt = (
@@ -72,11 +94,13 @@ class InterruptHandlerMixin:
                         "禁止输出其他任何内容。"
                     )
 
-                stream = self.fast_llm.chat_stream(
+                stream = self._chat_stream_wrapper(
+                    self.llm,
+                    chat_id,
                     system_prompt=system_prompt,
                     user_prompt=prompt,
                     history=recent_history,
-                    tools=[]
+                    tools=[],
                 )
                 async for chunk in stream:
                     if isinstance(chunk, dict) and chunk.get("type") == "text":

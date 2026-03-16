@@ -358,6 +358,31 @@ class BackBrainMixin:
                 if db_context and db_context[-1].get("role") == "user" and str(db_context[-1].get("content", "")) == message_content:
                     db_context = db_context[:-1]
 
+            # 注入当前对话段落的完整消息序列，确保后脑拥有完整上下文（避免缺段）
+            try:
+                segment_messages = self.message_history.get_current_segment_messages(
+                    "telegram", storage_id
+                )
+                if segment_messages:
+                    segment_lines = []
+                    for msg in segment_messages:
+                        if msg["role"] in ("user", "assistant"):
+                            # 跳过当前轮已作为 user_prompt 的最后一条用户消息，避免重复
+                            if msg["content"] == message_content and msg == segment_messages[-1]:
+                                continue
+                            segment_lines.append(f"{msg['role']}: {msg['content']}")
+                    if segment_lines:
+                        segment_text = "\n".join(segment_lines)
+                        instructions.append(
+                            "【当前对话段落 (Current Conversation Segment)】\n"
+                            "以下是本轮对话段落中的完整交互记录（含前脑已回复的内容，如有），"
+                            "请基于此上下文继续工作：\n\n"
+                            f"{segment_text}\n\n"
+                            "⚠️ 不要重复前脑已说过的内容，直接执行任务并汇报。"
+                        )
+            except Exception:
+                logger.warning(f"[{chat_id}] 注入当前对话段落失败，继续执行", exc_info=True)
+
             temp_history = [
                 {"role": msg["role"], "content": msg["content"]}
                 for msg in db_context
@@ -387,12 +412,14 @@ class BackBrainMixin:
                 turn_user_prompt = full_user_prompt if current_turn == 1 else " (Continue processing tool outputs...)"
                 if current_turn > 1 and turn_multimodal_images and any(ti.get("from_tool") for ti in turn_multimodal_images):
                     turn_user_prompt += "\n\n（注意：以下图片是通过 view_image 工具回查的已有图片，**不要**生成 [IMAGE_TAGS] 标签，直接分析图片内容即可。）"
-                stream = turn_llm.chat_stream(
+                stream = self._chat_stream_wrapper(
+                    turn_llm,
+                    chat_id,
                     system_prompt=system_prompt,
                     user_prompt=turn_user_prompt,
                     history=temp_history,
                     tools=[] if force_no_tools else self.tool_manager.get_tool_schemas(),
-                    multimodal_images=turn_multimodal_images if turn_multimodal_images else None
+                    multimodal_images=turn_multimodal_images if turn_multimodal_images else None,
                 )
                 # 仅消费一轮，避免重复注入同一批工具图片
                 if current_turn > 1 and pending_tool_multimodal_images:
@@ -666,11 +693,13 @@ class BackBrainMixin:
                     "role": "user",
                     "content": render_template('loop_interventions.jinja', 'turns_exhausted')
                 })
-                stream = active_llm.chat_stream(
+                stream = self._chat_stream_wrapper(
+                    active_llm,
+                    chat_id,
                     system_prompt=system_prompt,
                     user_prompt=render_template('loop_interventions.jinja', 'summarize_turns_exhausted'),
                     history=temp_history,
-                    tools=[]
+                    tools=[],
                 )
                 async for raw_chunk in stream:
                     chunk = cast(Dict[str, Any], raw_chunk) if isinstance(raw_chunk, dict) else raw_chunk
@@ -723,11 +752,13 @@ class BackBrainMixin:
                     "role": "user",
                     "content": render_template('loop_interventions.jinja', 'llm_silent_meaningful')
                 })
-                stream = active_llm.chat_stream(
+                stream = self._chat_stream_wrapper(
+                    active_llm,
+                    chat_id,
                     system_prompt=system_prompt,
                     user_prompt=render_template('loop_interventions.jinja', 'summarize_meaningful'),
                     history=temp_history,
-                    tools=[]
+                    tools=[],
                 )
                 async for raw_chunk in stream:
                     chunk = cast(Dict[str, Any], raw_chunk) if isinstance(raw_chunk, dict) else raw_chunk
@@ -751,11 +782,13 @@ class BackBrainMixin:
                     "content": render_template('loop_interventions.jinja', 'llm_silent_fallback',
                                                tool_output=latest_tool_output[:1000])
                 })
-                stream = active_llm.chat_stream(
+                stream = self._chat_stream_wrapper(
+                    active_llm,
+                    chat_id,
                     system_prompt=system_prompt,
                     user_prompt=render_template('loop_interventions.jinja', 'summarize_fallback'),
                     history=temp_history,
-                    tools=[]
+                    tools=[],
                 )
                 async for raw_chunk in stream:
                     chunk = cast(Dict[str, Any], raw_chunk) if isinstance(raw_chunk, dict) else raw_chunk

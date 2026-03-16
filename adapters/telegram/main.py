@@ -327,6 +327,7 @@ class TelegramAdapter(BaseAdapter):
         regenerate_proactive_handler = CommandHandler('regenerate_proactive', self._regenerate_proactive_command)
         schedule_today_handler = CommandHandler('schedule_today', self._schedule_today_command)
         custom_scope_handler = CommandHandler('custom_scope', self._custom_scope_command)
+    nonstream_handler = CommandHandler('nonstream', self._nonstream_command)
         debug_cleanup_handler = CommandHandler('debug_cleanup', self._debug_cleanup_command)
         model_handler = CommandHandler('model', self._model_command)
         msg_handler = MessageHandler(filters.TEXT & (~filters.COMMAND), self._handle_incoming_message)
@@ -343,6 +344,7 @@ class TelegramAdapter(BaseAdapter):
         self.application.add_handler(regenerate_proactive_handler)
         self.application.add_handler(schedule_today_handler)
         self.application.add_handler(custom_scope_handler)
+    self.application.add_handler(nonstream_handler)
         self.application.add_handler(debug_cleanup_handler)
         self.application.add_handler(model_handler)
         self.application.add_handler(msg_handler)
@@ -694,6 +696,31 @@ class TelegramAdapter(BaseAdapter):
             logger.error(f"[{chat_id}] /custom_scope 按钮初始化失败", exc_info=True)
             if update.message:
                 await update.message.reply_text("❌ 无法加载按钮。")
+
+    async def _nonstream_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """切换当前会话的非流式输出模式。用法：/nonstream on|off （默认 on 关闭流式）。"""
+        if not update.effective_chat:
+            return
+        chat_id = str(update.effective_chat.id)
+        if not self._message_handler:
+            if update.message:
+                await update.message.reply_text("❌ 指令处理器未就绪。")
+            return
+
+        arg = (context.args[0].strip().lower() if context and context.args else "").replace("\n", " ")
+        if arg not in ("on", "off", ""):  # 空参视为查询
+            if update.message:
+                await update.message.reply_text("用法：/nonstream on|off（on=关闭流式，一次性输出；off=流式输出）")
+            return
+
+        event_context = {
+            "chat_id": chat_id,
+            "user_id": str(update.effective_user.id) if update.effective_user else chat_id,
+            "text": f"/nonstream {arg}".strip(),
+            "chat_type": update.effective_chat.type,
+            "user_name": update.effective_user.first_name if update.effective_user else "Unknown"
+        }
+        await self._message_handler(event_context)
 
     async def _handle_incoming_message(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not await self._should_process_message(update):

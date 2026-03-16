@@ -100,6 +100,10 @@ class MessageHandlerMixin:
             await self._cmd_custom_scope(chat_id, stripped)
             return
 
+        if stripped.startswith("/nonstream"):
+            await self._cmd_nonstream(chat_id, chat_type, user_id, stripped)
+            return
+
         # --- 前后端分离逻辑 ---
         status = self.worker_status.get(chat_id)
         if status and status.busy:
@@ -170,10 +174,8 @@ class MessageHandlerMixin:
                     logger.info(f"[{chat_id}] 已清空所有排队任务")
                 return
             else:  # action == "queue"
-                # 入队列，等后端完成后处理
-                queue = self.task_queues.setdefault(chat_id, BackendTaskQueue())
-                await queue.enqueue(context)
-                logger.info(f"[{chat_id}] 消息已入队，当前队列长度: {queue.size()}")
+                # 新需求：忙碌时不再入待生成队列，避免重复回复。
+                logger.info(f"[{chat_id}] 后端忙碌，按照策略不入队，已仅回复忙碌提示。")
                 return
 
         # --- 正常流程：后端空闲 ---
@@ -513,3 +515,27 @@ class MessageHandlerMixin:
         except Exception as e:
             logger.error(f"[{chat_id}] /custom_scope 执行失败: {e}", exc_info=True)
             await self.adapter.send_message(chat_id, f"❌ 设置失败: {e}")
+
+    async def _cmd_nonstream(self, chat_id: str, chat_type: str, user_id: str, text: str):
+        """切换 per-chat 非流式输出模式。/nonstream on|off，空参=查询当前值。"""
+        parts = text.strip().split()
+        arg = parts[1].lower() if len(parts) >= 2 else ""
+        current = self.non_stream_flags.get(chat_id, self.default_non_stream)
+
+        if arg in ("on", "off"):
+            new_val = arg == "on"
+            self.non_stream_flags[chat_id] = new_val
+            msg = "✅ 已开启非流式，一次性输出" if new_val else "✅ 已关闭非流式，恢复流式输出"
+        else:
+            msg = "ℹ️ 当前非流式状态: " + ("开启" if current else "关闭")
+
+        await self.adapter.send_message(chat_id, msg)
+        # 记录到历史
+        storage_id = chat_id if chat_type != "private" else user_id
+        self.message_history.add_message(
+            platform="telegram",
+            chat_id=storage_id,
+            role="assistant",
+            content=msg,
+            user_id="assistant",
+        )

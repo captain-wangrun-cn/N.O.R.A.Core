@@ -98,6 +98,11 @@ class NoraController(
         
         # 对话延续定时器：per-chat asyncio.Task
         self._followup_timers: Dict[str, asyncio.Task] = {}
+
+        # 是否启用非流式输出（per-chat，可被命令切换）
+        interaction_cfg = (config.get_config() or {}).get("interaction", {})
+        self.default_non_stream = interaction_cfg.get("non_stream", False)
+        self.non_stream_flags: Dict[str, bool] = {}
         
         # 对话延续配置
         self.FOLLOWUP_INITIAL_DELAY = 120    # 2 分钟
@@ -198,6 +203,26 @@ class NoraController(
             self.image_llm = get_llm_client(model_alias="image")
         except Exception:
             self.image_llm = self.llm
+
+    # ------------------------------------------------------------------
+    # LLM 调用包装（支持 per-chat 非流式开关）
+    # ------------------------------------------------------------------
+
+    def _should_use_non_stream(self, chat_id: str) -> bool:
+        flag = self.non_stream_flags.get(chat_id)
+        if flag is None:
+            return bool(self.default_non_stream)
+        return bool(flag)
+
+    def _chat_stream_wrapper(self, model_client, chat_id: str, **kwargs):
+        # 部分 provider 支持 non_stream 模式（返回一次性文本），用于特殊场景
+        use_non_stream = self._should_use_non_stream(chat_id)
+        if use_non_stream and hasattr(model_client, "chat"):
+            async def _gen():
+                text = await model_client.chat(**kwargs)
+                yield {"type": "text", "content": text}
+            return _gen()
+        return model_client.chat_stream(**kwargs)
 
     # ------------------------------------------------------------------
     # 通用辅助
