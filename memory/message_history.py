@@ -41,6 +41,7 @@ class MessageHistory:
         compress_ratio: int = 10,   # 压缩比例 (10:1)
         archive_threshold: int = 500, # 归档阈值
         timezone: str = "Asia/Shanghai",  # 时间戳显示时区
+        timestamp_format: str = "%Y-%m-%d %H:%M:%S %A",  # 时间戳格式
         mirror_db_path: Optional[str] = None,  # 原文镜像库（独立）
         context_db_path: Optional[str] = None,  # 压缩上下文库（独立）
         long_message_threshold: int = 1200,  # 判定“过长”后提前压缩的阈值
@@ -59,6 +60,8 @@ class MessageHistory:
         except Exception as e:
             logger.warning(f"无效的时区 '{timezone}'，回退到 UTC: {e}")
             self.timezone = ZoneInfo("UTC")
+
+        self.timestamp_format = timestamp_format or "%Y-%m-%d %H:%M:%S %A"
         
         self._init_db()
         self._summarizer = None  # 延迟加载
@@ -202,7 +205,7 @@ class MessageHistory:
         if should_add_timestamp:
             # 使用配置的时区格式化时间
             dt = datetime.fromtimestamp(timestamp, tz=self.timezone)
-            time_str = dt.strftime("%Y-%m-%d %H:%M")
+            time_str = dt.strftime(self.timestamp_format)
             content = f"[{time_str}] {content}"
             # 在元数据中标记此消息包含时间戳
             if metadata is None:

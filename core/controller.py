@@ -135,6 +135,7 @@ class NoraController(
             compress_ratio=history_cfg.get("compress_ratio", 10),
             archive_threshold=history_cfg.get("archive_threshold", 500),
             timezone=history_cfg.get("timezone", "Asia/Shanghai"),
+            timestamp_format=history_cfg.get("timestamp_format", "%Y-%m-%d %H:%M:%S %A"),
             mirror_db_path=history_cfg.get("mirror_db_path"),
             context_db_path=history_cfg.get("context_db_path"),
             long_message_threshold=history_cfg.get("long_message_threshold", 1200),

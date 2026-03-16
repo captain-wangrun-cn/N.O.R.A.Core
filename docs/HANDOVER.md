@@ -27,6 +27,12 @@
 - `core/scheduler_mixin.py`（主动消息链路传递任务指示）
 - `brain/templates/front_brain.jinja` / `front_brain_review.jinja`（文档化 `NO_REPLY` 与 `TASK_INSTRUCTION` 用法）
 
+### 🕒 消息时间戳可配置（含年月日星期时分秒） — 2026-03-16
+
+- `memory.message_history.timestamp_format` 支持自定义消息时间戳格式，默认 `%Y-%m-%d %H:%M:%S %A`（含年月日星期时分秒）。
+- MessageHistory 初始化时读取该配置，插入时间戳使用此格式，带上配置时区。
+- 示例配置已写入 `config.example.yml`。
+
 ### � 对话滑动压缩与独立上下文库 — 2026-03-15
 
 - 新增独立消息镜像库 `workspace/data/memory/message_log.db`：所有用户/AI 消息原文双写，原库仍保留。

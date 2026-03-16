@@ -71,6 +71,7 @@ memory:
     compress_ratio: 10 # 压缩比例（10条压缩为1条总结）
     archive_threshold: 500 # 超过此数量创建归档总结
     timezone: "Asia/Shanghai" # 时间戳显示时区（如 "Asia/Shanghai", "UTC", "America/New_York"）
+    timestamp_format: "%Y-%m-%d %H:%M:%S %A" # 消息时间戳格式，包含年月日星期时分秒
     mirror_db_path: null # （可选）原文镜像库路径，默认 workspace/data/memory/message_log.db
     context_db_path: null # （可选）压缩上下文库路径，默认 workspace/data/memory/context_compression.db
     long_message_threshold: 1200 # 最新 3 段判定“过长”并提前压缩的字符阈值
