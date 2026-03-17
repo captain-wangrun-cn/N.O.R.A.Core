@@ -100,8 +100,8 @@ class MessageHandlerMixin:
             await self._cmd_custom_scope(chat_id, stripped)
             return
 
-        if stripped.startswith("/nonstream"):
-            await self._cmd_nonstream(chat_id, chat_type, user_id, stripped)
+        if stripped.startswith("/set_stream") or stripped.startswith("/nonstream"):
+            await self._cmd_set_stream(chat_id, chat_type, user_id, stripped)
             return
 
         # --- 前后端分离逻辑 ---
@@ -516,8 +516,8 @@ class MessageHandlerMixin:
             logger.error(f"[{chat_id}] /custom_scope 执行失败: {e}", exc_info=True)
             await self.adapter.send_message(chat_id, f"❌ 设置失败: {e}")
 
-    async def _cmd_nonstream(self, chat_id: str, chat_type: str, user_id: str, text: str):
-        """切换 per-chat 非流式输出模式。/nonstream on|off，空参=查询当前值。"""
+    async def _cmd_set_stream(self, chat_id: str, chat_type: str, user_id: str, text: str):
+        """切换 per-chat 非流式输出模式。/set_stream on|off（on=一次性输出，off=流式），空参=查询当前状态。"""
         parts = text.strip().split()
         arg = parts[1].lower() if len(parts) >= 2 else ""
         current = self.non_stream_flags.get(chat_id, self.default_non_stream)
@@ -525,12 +525,11 @@ class MessageHandlerMixin:
         if arg in ("on", "off"):
             new_val = arg == "on"
             self.non_stream_flags[chat_id] = new_val
-            msg = "✅ 已开启非流式，一次性输出" if new_val else "✅ 已关闭非流式，恢复流式输出"
+            msg = "✅ 已启用一次性输出（非流式）" if new_val else "✅ 已恢复流式输出"
         else:
-            msg = "ℹ️ 当前非流式状态: " + ("开启" if current else "关闭")
+            msg = "ℹ️ 当前输出模式: " + ("一次性输出（非流式）" if current else "流式输出")
 
         await self.adapter.send_message(chat_id, msg)
-        # 记录到历史
         storage_id = chat_id if chat_type != "private" else user_id
         self.message_history.add_message(
             platform="telegram",

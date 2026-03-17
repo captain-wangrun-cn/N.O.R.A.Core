@@ -327,7 +327,8 @@ class TelegramAdapter(BaseAdapter):
         regenerate_proactive_handler = CommandHandler('regenerate_proactive', self._regenerate_proactive_command)
         schedule_today_handler = CommandHandler('schedule_today', self._schedule_today_command)
         custom_scope_handler = CommandHandler('custom_scope', self._custom_scope_command)
-        nonstream_handler = CommandHandler('nonstream', self._nonstream_command)
+        set_stream_handler = CommandHandler('set_stream', self._set_stream_command)
+        legacy_nonstream_handler = CommandHandler('nonstream', self._set_stream_command)
         debug_cleanup_handler = CommandHandler('debug_cleanup', self._debug_cleanup_command)
         model_handler = CommandHandler('model', self._model_command)
         msg_handler = MessageHandler(filters.TEXT & (~filters.COMMAND), self._handle_incoming_message)
@@ -344,7 +345,8 @@ class TelegramAdapter(BaseAdapter):
         self.application.add_handler(regenerate_proactive_handler)
         self.application.add_handler(schedule_today_handler)
         self.application.add_handler(custom_scope_handler)
-        self.application.add_handler(nonstream_handler)
+        self.application.add_handler(set_stream_handler)
+        self.application.add_handler(legacy_nonstream_handler)
         self.application.add_handler(debug_cleanup_handler)
         self.application.add_handler(model_handler)
         self.application.add_handler(msg_handler)
@@ -697,8 +699,8 @@ class TelegramAdapter(BaseAdapter):
             if update.message:
                 await update.message.reply_text("❌ 无法加载按钮。")
 
-    async def _nonstream_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """切换当前会话的非流式输出模式。用法：/nonstream on|off （默认 on 关闭流式）。"""
+    async def _set_stream_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """切换当前会话的输出模式。用法：/set_stream on|off，或点击按钮选择。"""
         if not update.effective_chat:
             return
         chat_id = str(update.effective_chat.id)
@@ -708,19 +710,42 @@ class TelegramAdapter(BaseAdapter):
             return
 
         arg = (context.args[0].strip().lower() if context and context.args else "").replace("\n", " ")
-        if arg not in ("on", "off", ""):  # 空参视为查询
+        if arg in ("on", "off"):
+            event_context = {
+                "chat_id": chat_id,
+                "user_id": str(update.effective_user.id) if update.effective_user else chat_id,
+                "text": f"/set_stream {arg}",
+                "chat_type": update.effective_chat.type,
+                "user_name": update.effective_user.first_name if update.effective_user else "Unknown"
+            }
+            await self._message_handler(event_context)
+            return
+
+        if arg:
             if update.message:
-                await update.message.reply_text("用法：/nonstream on|off（on=关闭流式，一次性输出；off=流式输出）")
+                await update.message.reply_text("用法：/set_stream on|off（on=一次性输出，off=流式输出）")
             return
 
         event_context = {
             "chat_id": chat_id,
             "user_id": str(update.effective_user.id) if update.effective_user else chat_id,
-            "text": f"/nonstream {arg}".strip(),
+            "text": "/set_stream",
             "chat_type": update.effective_chat.type,
             "user_name": update.effective_user.first_name if update.effective_user else "Unknown"
         }
         await self._message_handler(event_context)
+
+        keyboard = InlineKeyboardMarkup([
+            [InlineKeyboardButton("🟢 启用一次性输出", callback_data="set_stream:on")],
+            [InlineKeyboardButton("🔵 恢复流式输出", callback_data="set_stream:off")],
+        ])
+        prompt_text = (
+            "请选择输出模式：\n"
+            "- 🟢 启用一次性输出（非流式，完整内容一次发出）\n"
+            "- 🔵 恢复流式输出（逐步流式发送）"
+        )
+        if update.message:
+            await update.message.reply_text(prompt_text, reply_markup=keyboard)
 
     async def _handle_incoming_message(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not await self._should_process_message(update):
@@ -975,6 +1000,10 @@ class TelegramAdapter(BaseAdapter):
         if callback_data and callback_data.startswith("custom_scope:"):
             await self._handle_custom_scope_callback(query, callback_data)
             return
+
+        if callback_data and callback_data.startswith("set_stream:"):
+            await self._handle_set_stream_callback(query, callback_data)
+            return
         
         # 构造消息
         text = f"[按钮点击: {callback_data}]"
@@ -1048,6 +1077,41 @@ class TelegramAdapter(BaseAdapter):
             result_lines.append(self._purge_chat_history())
 
         await query.edit_message_text("\n".join(result_lines))
+
+    async def _handle_set_stream_callback(self, query, callback_data: str):
+        """处理 /set_stream 选择按钮回调。"""
+        if not query or not query.message:
+            return
+        if not self._message_handler:
+            await query.answer("指令处理器未就绪", show_alert=True)
+            return
+
+        chat_id = str(query.message.chat.id)
+        user_id = str(query.from_user.id) if query.from_user else chat_id
+        action = callback_data.split(":", 1)[1] if ":" in callback_data else ""
+        if action not in ("on", "off"):
+            await query.answer("未知选项", show_alert=True)
+            return
+
+        event_context = {
+            "chat_id": chat_id,
+            "user_id": user_id,
+            "text": f"/set_stream {action}",
+            "chat_type": query.message.chat.type if query.message else "private",
+            "user_name": query.from_user.first_name if query.from_user else "Unknown",
+        }
+
+        await self._message_handler(event_context)
+
+        status_text = "✅ 已启用一次性输出" if action == "on" else "✅ 已恢复流式输出"
+        try:
+            await query.edit_message_text(status_text)
+        except Exception:
+            logger.debug(f"[{chat_id}] set_stream edit_message_text 失败", exc_info=True)
+        try:
+            await query.answer(status_text, show_alert=False)
+        except Exception:
+            pass
 
     async def _handle_custom_scope_callback(self, query, callback_data: str):
         """处理 CUSTOM scope 按钮回调。"""

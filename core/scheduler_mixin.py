@@ -232,7 +232,9 @@ class SchedulerMixin:
                                           current_time=now.strftime('%H:%M'))
 
             response = ""
-            stream = self.fast_llm.chat_stream(
+            stream = self._chat_stream_wrapper(
+                self.fast_llm,
+                chat_id,
                 system_prompt=system_prompt,
                 user_prompt=user_prompt,
                 history=[],
@@ -285,7 +287,9 @@ class SchedulerMixin:
                                           idle_seconds=int(idle_secs))
 
             response = ""
-            stream = self.llm.chat_stream(
+            stream = self._chat_stream_wrapper(
+                self.llm,
+                chat_id,
                 system_prompt=system_prompt,
                 user_prompt=user_prompt,
                 history=[],
@@ -356,7 +360,9 @@ class SchedulerMixin:
                                           followup_count=count)
 
             response = ""
-            stream = self.llm.chat_stream(
+            stream = self._chat_stream_wrapper(
+                self.llm,
+                chat_id,
                 system_prompt=system_prompt,
                 user_prompt=user_prompt,
                 history=[],
@@ -427,7 +433,9 @@ class SchedulerMixin:
 
         try:
             response = ""
-            stream = self.llm.chat_stream(
+            stream = self._chat_stream_wrapper(
+                self.llm,
+                chat_id,
                 system_prompt=system_prompt,
                 user_prompt=user_prompt,
                 history=[],

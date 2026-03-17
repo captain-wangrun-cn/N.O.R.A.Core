@@ -361,7 +361,9 @@ class FrontBrainMixin:
         response_text = ""
         usage_data = None
         try:
-            stream = self.llm.chat_stream(
+            stream = self._chat_stream_wrapper(
+                self.llm,
+                chat_id,
                 system_prompt=system_prompt,
                 user_prompt=user_prompt,
                 history=history,
