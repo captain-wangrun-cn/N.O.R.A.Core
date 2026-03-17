@@ -36,8 +36,8 @@
 ### � 对话滑动压缩与独立上下文库 — 2026-03-15
 
 - 新增独立消息镜像库 `workspace/data/memory/message_log.db`：所有用户/AI 消息原文双写，原库仍保留。
-- 新增上下文压缩库 `workspace/data/memory/context_compression.db`：存储滑动窗口摘要，重启可直接加载。
-- 滑动压缩策略（summary 模型）：最新 3 段完整保留（超阈值单独压缩）；第 4~6 段单独压缩；第 7~10 段合并压缩；新消息仅重压缩受影响窗口。
+- 新增上下文压缩库 `workspace/data/memory/context_compression.db`：存储按对话段(session)组织的滑动窗口摘要，重启可直接加载。
+- 滑动压缩策略（summary 模型）：最新 3 个消息段完整保留（超阈值单独压缩）；第 4~6 个消息段单独压缩；第 7~10 个消息段合并压缩；新消息段出现时仅重压缩受影响窗口。
 - `MessageHistory.get_context_messages()` 优先读取压缩库，原有消息库和归档逻辑保留回退。
 - 配置示例新增 `mirror_db_path` / `context_db_path` / `long_message_threshold`。
 

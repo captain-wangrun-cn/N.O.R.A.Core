@@ -136,7 +136,7 @@ class NoraController(
         self.message_history = MessageHistory(
             db_path=db_path,
             raw_window=history_cfg.get("raw_window", 50),
-            compress_window=history_cfg.get("compress_window", 200),
+            compress_window=history_cfg.get("compress_window", 50),
             compress_ratio=history_cfg.get("compress_ratio", 10),
             archive_threshold=history_cfg.get("archive_threshold", 500),
             timezone=history_cfg.get("timezone", "Asia/Shanghai"),

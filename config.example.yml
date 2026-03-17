@@ -67,7 +67,7 @@ memory:
   # 消息历史管理
   message_history:
     raw_window: 50 # 原始消息窗口大小（完整保留）
-    compress_window: 200 # 超过此数量开始压缩
+  compress_window: 50 # 超过此数量开始压缩（按消息数量，可在 config.yml 自定义）
     compress_ratio: 10 # 压缩比例（10条压缩为1条总结）
     archive_threshold: 500 # 超过此数量创建归档总结
     timezone: "Asia/Shanghai" # 时间戳显示时区（如 "Asia/Shanghai", "UTC", "America/New_York"）

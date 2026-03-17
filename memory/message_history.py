@@ -37,7 +37,7 @@ class MessageHistory:
         self,
         db_path: Optional[str] = None,
         raw_window: int = 50,      # 原始消息窗口大小
-        compress_window: int = 200, # 开始压缩的阈值
+        compress_window: int = 50, # 开始压缩的阈值（按消息数量）
         compress_ratio: int = 10,   # 压缩比例 (10:1)
         archive_threshold: int = 500, # 归档阈值
         timezone: str = "Asia/Shanghai",  # 时间戳显示时区
@@ -65,6 +65,7 @@ class MessageHistory:
         
         self._init_db()
         self._summarizer = None  # 延迟加载
+        self._last_compress_log_count: Dict[Tuple[str, str], int] = {}
 
         # 独立的原文镜像库 & 压缩上下文库
         self.message_log = MessageLog(db_path=mirror_db_path)
@@ -72,6 +73,7 @@ class MessageHistory:
             message_log=self.message_log,
             db_path=context_db_path,
             long_message_threshold=long_message_threshold,
+            history_db_path=str(self.db_path),
         )
     
     def _init_db(self):
@@ -331,7 +333,7 @@ class MessageHistory:
             if compressed_segments:
                 messages.extend(compressed_segments)
                 messages.sort(key=lambda x: x.get("timestamp", 0))
-                logger.info(f"[{platform}/{chat_id}] 使用上下文压缩库: {len(compressed_segments)} 段")
+                logger.debug(f"[{platform}/{chat_id}] 使用上下文压缩库: {len(compressed_segments)} 段")
                 conn.close()
                 return messages
         
@@ -418,7 +420,12 @@ class MessageHistory:
             conn.close()
             
             if count > self.compress_window:
-                logger.info(f"[{platform}/{chat_id}] 消息数 {count} 超过阈值 {self.compress_window}，开始压缩")
+                key = (platform, chat_id)
+                last_count = self._last_compress_log_count.get(key, 0)
+                # 仅首次超过阈值，或每新增50条再提示一次，避免每条消息刷屏
+                if last_count == 0 or count - last_count >= 50:
+                    logger.info(f"[{platform}/{chat_id}] 消息数 {count} 超过阈值 {self.compress_window}，开始压缩")
+                    self._last_compress_log_count[key] = count
                 await self._perform_compression(platform, chat_id)
             
             if count > self.archive_threshold:
