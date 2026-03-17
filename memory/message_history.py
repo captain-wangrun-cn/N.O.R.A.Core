@@ -476,7 +476,7 @@ class MessageHistory:
             cursor.execute("""
                 INSERT INTO summaries (platform, chat_id, level, start_message_id, end_message_id, 
                                      summary_text, message_count, timestamp)
-                VALUES (?, ?, 1, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
             """, (platform, chat_id, 1, start_id, end_id, summary, len(messages_to_compress), timestamp))
             
             # 标记消息为已归档
