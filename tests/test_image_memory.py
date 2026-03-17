@@ -372,6 +372,43 @@ _IMAGE_OCR_PATTERN = re.compile(
 )
 
 
+def _remap_extracted_blocks_by_order(
+    multimodal_images: list[dict],
+    parsed_tag_blocks: list[tuple[str, str]],
+    parsed_ocr_blocks: list[tuple[str, str]],
+) -> tuple[dict[str, str], dict[str, str]]:
+    """模拟 back_brain 中对 IMAGE_TAGS/IMAGE_OCR 的顺序重映射逻辑。"""
+    image_tags_extracted: dict[str, str] = {
+        img_id: tags for img_id, tags in parsed_tag_blocks if img_id and tags
+    }
+    image_ocr_extracted: dict[str, str] = {
+        img_id: ocr for img_id, ocr in parsed_ocr_blocks if img_id and ocr and ocr != "（无文字）"
+    }
+
+    expected_ids = [img["image_id"] for img in multimodal_images]
+    expected_set = set(expected_ids)
+
+    for idx, expected_id in enumerate(expected_ids):
+        if expected_id in image_tags_extracted:
+            continue
+        if idx >= len(parsed_tag_blocks):
+            break
+        parsed_id, parsed_tags = parsed_tag_blocks[idx]
+        if parsed_id not in expected_set and parsed_tags:
+            image_tags_extracted[expected_id] = parsed_tags
+
+    for idx, expected_id in enumerate(expected_ids):
+        if expected_id in image_ocr_extracted:
+            continue
+        if idx >= len(parsed_ocr_blocks):
+            break
+        parsed_id, parsed_ocr = parsed_ocr_blocks[idx]
+        if parsed_id not in expected_set and parsed_ocr:
+            image_ocr_extracted[expected_id] = parsed_ocr
+
+    return image_tags_extracted, image_ocr_extracted
+
+
 def test_image_ocr_pattern_parsing():
     """_IMAGE_OCR_PATTERN 应正确提取 OCR 文字"""
     response = (
@@ -444,6 +481,60 @@ def test_strip_thinking_content_removes_image_ocr():
     assert "IMAGE_OCR" not in cleaned
     assert "Hello World" not in cleaned
     assert "这是回复正文" in cleaned
+
+
+def test_image_tags_placeholder_id_remap_to_real_image_id():
+    """当 LLM 输出占位 image_id 时，应按顺序映射到真实 image_id，避免 fallback。"""
+    multimodal_images = [
+        {"image_id": "img_real1111"},
+        {"image_id": "img_real2222"},
+    ]
+    parsed_tag_blocks = [
+        ("img_xxxxxxxx", "猫咪, 室内, 沙发"),
+        ("img_yyyyyyyy", "狗, 户外, 草地"),
+    ]
+    parsed_ocr_blocks = [
+        ("img_xxxxxxxx", "Hello"),
+        ("img_yyyyyyyy", "World"),
+    ]
+
+    tags_map, ocr_map = _remap_extracted_blocks_by_order(
+        multimodal_images,
+        parsed_tag_blocks,
+        parsed_ocr_blocks,
+    )
+
+    assert tags_map["img_real1111"] == "猫咪, 室内, 沙发"
+    assert tags_map["img_real2222"] == "狗, 户外, 草地"
+    assert ocr_map["img_real1111"] == "Hello"
+    assert ocr_map["img_real2222"] == "World"
+
+
+def test_image_tags_keep_exact_match_without_wrong_remap():
+    """当某张图已有精确 ID 命中时，不应被错误的占位块覆盖。"""
+    multimodal_images = [
+        {"image_id": "img_real1111"},
+        {"image_id": "img_real2222"},
+    ]
+    parsed_tag_blocks = [
+        ("img_real1111", "准确标签"),
+        ("img_xxxxxxxx", "占位标签"),
+    ]
+    parsed_ocr_blocks = [
+        ("img_real1111", "准确 OCR"),
+        ("img_xxxxxxxx", "占位 OCR"),
+    ]
+
+    tags_map, ocr_map = _remap_extracted_blocks_by_order(
+        multimodal_images,
+        parsed_tag_blocks,
+        parsed_ocr_blocks,
+    )
+
+    assert tags_map["img_real1111"] == "准确标签"
+    assert ocr_map["img_real1111"] == "准确 OCR"
+    assert tags_map["img_real2222"] == "占位标签"
+    assert ocr_map["img_real2222"] == "占位 OCR"
 
 
 # ---------------------------------------------------------------------------

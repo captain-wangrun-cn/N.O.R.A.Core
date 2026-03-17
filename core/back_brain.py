@@ -722,17 +722,54 @@ class BackBrainMixin:
             # 先提取图片标签（在任何清理之前），供后续存储
             image_tags_extracted: Dict[str, str] = {}
             image_ocr_extracted: Dict[str, str] = {}
+            parsed_tag_blocks: List[tuple[str, str]] = []
+            parsed_ocr_blocks: List[tuple[str, str]] = []
             if multimodal_images and final_response_buffer:
                 for m in self._IMAGE_TAGS_PATTERN.finditer(final_response_buffer):
                     img_id = m.group(1).strip()
                     tags_text = m.group(2).strip()
                     if img_id and tags_text:
                         image_tags_extracted[img_id] = tags_text
+                        parsed_tag_blocks.append((img_id, tags_text))
                 for m in self._IMAGE_OCR_PATTERN.finditer(final_response_buffer):
                     img_id = m.group(1).strip()
                     ocr_text = m.group(2).strip()
                     if img_id and ocr_text and ocr_text != "（无文字）":
                         image_ocr_extracted[img_id] = ocr_text
+                        parsed_ocr_blocks.append((img_id, ocr_text))
+
+                # LLM 可能输出占位符/错误 image_id（如 img_xxxxxxxx）。
+                # 若出现这种情况，按图片顺序重映射到本轮真实 image_id，避免标签丢失回退为文件名。
+                expected_ids = [img["image_id"] for img in multimodal_images]
+                expected_set = set(expected_ids)
+
+                if parsed_tag_blocks:
+                    for idx, expected_id in enumerate(expected_ids):
+                        if expected_id in image_tags_extracted:
+                            continue
+                        if idx >= len(parsed_tag_blocks):
+                            break
+                        parsed_id, parsed_tags = parsed_tag_blocks[idx]
+                        if parsed_id not in expected_set and parsed_tags:
+                            image_tags_extracted[expected_id] = parsed_tags
+                            logger.warning(
+                                f"[{chat_id}] IMAGE_TAGS image_id 不匹配，已按顺序重映射: "
+                                f"{parsed_id} -> {expected_id}"
+                            )
+
+                if parsed_ocr_blocks:
+                    for idx, expected_id in enumerate(expected_ids):
+                        if expected_id in image_ocr_extracted:
+                            continue
+                        if idx >= len(parsed_ocr_blocks):
+                            break
+                        parsed_id, parsed_ocr = parsed_ocr_blocks[idx]
+                        if parsed_id not in expected_set and parsed_ocr:
+                            image_ocr_extracted[expected_id] = parsed_ocr
+                            logger.warning(
+                                f"[{chat_id}] IMAGE_OCR image_id 不匹配，已按顺序重映射: "
+                                f"{parsed_id} -> {expected_id}"
+                            )
                 logger.debug(f"[{chat_id}] 已提取 {len(image_tags_extracted)} 个图片标签块，{len(image_ocr_extracted)} 个 OCR 文字块。")
 
             if final_response_buffer:
