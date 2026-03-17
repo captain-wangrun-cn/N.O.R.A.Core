@@ -29,12 +29,41 @@ class FrontBrainMixin:
     """前脑即时回复 + 后脑结果审查。"""
 
     _TIMESTAMP_PATTERN = re.compile(r"\[\d{4}-\d{2}-\d{2} \d{2}:\d{2}\]\s*")
+    _BLOCK_TAG_PAIRS = [
+        ("[TASK_INSTRUCTION]", "[/TASK_INSTRUCTION]"),
+    ]
 
     @classmethod
     def _strip_timestamp_markers(cls, text: str) -> str:
         if not text:
             return ""
         return cls._TIMESTAMP_PATTERN.sub("", text).strip()
+
+    @classmethod
+    def _find_unclosed_block_tags(cls, text: str) -> List[str]:
+        """检测成对标签是否缺失闭合，返回有问题的标签名列表。"""
+        issues: List[str] = []
+        lower_text = text.lower()
+        for head, tail in cls._BLOCK_TAG_PAIRS:
+            head_cnt = lower_text.count(head.lower())
+            tail_cnt = lower_text.count(tail.lower())
+            if head_cnt != tail_cnt:
+                issues.append(head)
+        return issues
+
+    @classmethod
+    def _clean_unclosed_block_tags(cls, text: str) -> str:
+        """移除缺失闭合的标签头或尾，避免污染下游解析。"""
+        lower_text = text.lower()
+        cleaned = text
+        for head, tail in cls._BLOCK_TAG_PAIRS:
+            head_cnt = lower_text.count(head.lower())
+            tail_cnt = lower_text.count(tail.lower())
+            if head_cnt > tail_cnt:
+                cleaned = cleaned.replace(head, "")
+            elif tail_cnt > head_cnt:
+                cleaned = cleaned.replace(tail, "")
+        return cleaned
 
     async def _generate_front_chat_response(
         self,
@@ -196,37 +225,54 @@ class FrontBrainMixin:
             if msg["role"] in ("user", "assistant")
         ]
 
-        # --- 调用 smart 模型生成回复（流式收集完整文本） ---
+        # --- 调用 smart 模型生成回复（流式收集完整文本，检测标签闭合） ---
         response_text = ""
         usage_data = None
-        try:
-            stream = self._chat_stream_wrapper(
-                self.llm,
-                chat_id,
-                system_prompt=system_prompt,
-                user_prompt=user_prompt,
-                history=history,
-                tools=None,  # 前脑不使用工具
-            )
-            async for raw_chunk in stream:
-                chunk = cast(Dict[str, Any], raw_chunk) if isinstance(raw_chunk, dict) else raw_chunk
-                if isinstance(chunk, dict):
-                    if chunk["type"] == "text":
-                        response_text += chunk["content"]
-                    elif chunk["type"] == "usage":
-                        usage_data = {
-                            "input_tokens": chunk.get("input_tokens", 0),
-                            "output_tokens": chunk.get("output_tokens", 0),
-                        }
-                elif isinstance(chunk, str):
-                    response_text += chunk
-        except Exception as e:
-            logger.error(f"[{chat_id}] 前脑生成失败: {e}", exc_info=True)
-            # 前脑失败时回退到后脑
-            return {"needs_backend": True, "user_reply": "", "raw_response": ""}
+        max_attempts = 2
+        for attempt in range(max_attempts):
+            response_text = ""
+            usage_data = None
+            try:
+                retry_system_prompt = system_prompt
+                if attempt > 0:
+                    retry_system_prompt += "\n\n【重试】确保所有成对标签完整闭合，特别是 [TASK_INSTRUCTION] ... [/TASK_INSTRUCTION]。不要输出缺失闭合的标签。"
 
-        # 清理思考标签
-        response_text = self._strip_thinking_content(response_text)
+                stream = self._chat_stream_wrapper(
+                    self.llm,
+                    chat_id,
+                    system_prompt=retry_system_prompt,
+                    user_prompt=user_prompt,
+                    history=history,
+                    tools=None,  # 前脑不使用工具
+                )
+                async for raw_chunk in stream:
+                    chunk = cast(Dict[str, Any], raw_chunk) if isinstance(raw_chunk, dict) else raw_chunk
+                    if isinstance(chunk, dict):
+                        if chunk["type"] == "text":
+                            response_text += chunk["content"]
+                        elif chunk["type"] == "usage":
+                            usage_data = {
+                                "input_tokens": chunk.get("input_tokens", 0),
+                                "output_tokens": chunk.get("output_tokens", 0),
+                            }
+                    elif isinstance(chunk, str):
+                        response_text += chunk
+            except Exception as e:
+                logger.error(f"[{chat_id}] 前脑生成失败: {e}", exc_info=True)
+                # 前脑失败时回退到后脑
+                return {"needs_backend": True, "user_reply": "", "raw_response": ""}
+
+            # 清理思考标签
+            response_text = self._strip_thinking_content(response_text)
+
+            issues = self._find_unclosed_block_tags(response_text)
+            if issues:
+                logger.warning(f"[{chat_id}] 前脑输出存在未闭合标签 {issues}，第 {attempt+1}/{max_attempts} 次尝试重试。")
+                if attempt < max_attempts - 1:
+                    continue
+                # 最后一轮，清理未闭合标签再继续解析，避免污染用户侧
+                response_text = self._clean_unclosed_block_tags(response_text)
+            break
 
         # 记录成本
         if self.cost_tracking_enabled and self.cost_tracker and usage_data:
