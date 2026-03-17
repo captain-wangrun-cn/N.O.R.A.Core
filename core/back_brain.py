@@ -863,10 +863,24 @@ class BackBrainMixin:
             if multimodal_images and self.image_store.enabled:
                 for img in multimodal_images:
                     img_id = img["image_id"]
+                    # view_image 等工具回查的旧图不需要重新入库，避免写入占位标签
+                    if img.get("from_tool"):
+                        logger.debug(f"[{chat_id}] 跳过工具回查图片入库: {img_id} ({img['path']})")
+                        continue
+
                     tags = image_tags_extracted.get(img_id, "")
+                    ocr_text = image_ocr_extracted.get(img_id, "")
+
+                    # 若标签和 OCR 都为空，跳过存储并记录，避免 fallback 文件名污染
+                    if not tags and not ocr_text:
+                        logger.warning(
+                            f"[{chat_id}] 图片 {img_id} 未生成标签/OCR，已跳过入库 (path={img['path']})"
+                        )
+                        continue
+
                     if not tags:
                         tags = f"用户发送的图片: {os.path.basename(img['path'])}"
-                    ocr_text = image_ocr_extracted.get(img_id, "")
+
                     asyncio.create_task(
                         self._async_save_image_metadata(
                             image_id=img_id,
