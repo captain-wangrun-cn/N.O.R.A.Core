@@ -1256,6 +1256,7 @@ class TelegramAdapter(BaseAdapter):
             return
         chat_id = token_entry.get("chat_id")
         model_name = token_entry.get("model")
+        provider_name = token_entry.get("provider")
         if str(query.message.chat.id) != str(chat_id):
             await query.edit_message_text("⚠️ 当前会话无法使用该选项。")
             return
@@ -1265,6 +1266,8 @@ class TelegramAdapter(BaseAdapter):
             llm_cfg = cfg.setdefault("llm", {})
             models_cfg = llm_cfg.setdefault("models", {})
             models_cfg[alias] = model_name
+            if provider_name:
+                llm_cfg.setdefault("model_providers", {})[alias] = provider_name
             config.save_config(cfg)
             await query.edit_message_text(f"✅ 已更新 {alias} 模型为: {model_name}\n正在刷新模型...")
 
@@ -1375,6 +1378,7 @@ class TelegramAdapter(BaseAdapter):
                 "kind": "model_set",
                 "chat_id": str(query.message.chat.id),
                 "model": model_name,
+                "provider": provider_name,
             }
             label = f"{model_name}"
             if model_name == current_model:
