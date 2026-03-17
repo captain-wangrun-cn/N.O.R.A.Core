@@ -141,8 +141,8 @@ class BackBrainMixin:
         self._update_scheduler_state(chat_id, busy=True)
 
         # 根据输入类型选择模型：图片消息优先走 image 模型，其余走 coder 模型
-        model_alias_in_use = "image" if multimodal_images else "coder"
-        active_llm = self.image_llm if model_alias_in_use == "image" else self.coder_llm
+        base_model_alias = "image" if multimodal_images else "coder"
+        active_llm = self.image_llm if base_model_alias == "image" else self.coder_llm
         
         try:
             if self.tui_callback: self.tui_callback(f"🏃 Handling new message...")
@@ -341,6 +341,8 @@ class BackBrainMixin:
             latest_tool_output = ""  # Safeguard: fallback to show tool output if LLM stays silent
             latest_meaningful_output = ""  # Only meaningful outputs (execute_skill, etc.)
             force_no_tools = False  # 循环检测触发后，下一轮禁用工具
+            last_turn_model_alias = base_model_alias
+            last_turn_llm = active_llm
             
             # 临时历史，从数据库加载持久化上下文
             db_context = self.message_history.get_context_messages("telegram", storage_id)
@@ -407,7 +409,10 @@ class BackBrainMixin:
                 await self._send_debug(chat_id, f"💭 开始第 {current_turn}/{MAX_TURNS} 轮推理...")
                 
                 turn_multimodal_images = multimodal_images if current_turn == 1 else pending_tool_multimodal_images
-                turn_llm = self.image_llm if turn_multimodal_images else active_llm
+                turn_model_alias = "image" if turn_multimodal_images else base_model_alias
+                turn_llm = self.image_llm if turn_model_alias == "image" else self.coder_llm
+                last_turn_model_alias = turn_model_alias
+                last_turn_llm = turn_llm
                 # 构造本轮 user_prompt：工具返回图片时追加提示（这些是回查的旧图，不要生成 IMAGE_TAGS）
                 turn_user_prompt = full_user_prompt if current_turn == 1 else " (Continue processing tool outputs...)"
                 if current_turn > 1 and turn_multimodal_images and any(ti.get("from_tool") for ti in turn_multimodal_images):
@@ -488,15 +493,15 @@ class BackBrainMixin:
                 
                 # 记录成本（如果启用）
                 if self.cost_tracking_enabled and self.cost_tracker and usage_data:
-                    provider_name = config.get_model_provider(model_alias_in_use)
+                    provider_name = config.get_model_provider(last_turn_model_alias)
                     provider = config.get_provider_type(provider_name)
-                    model = config.get_model_name(model_alias_in_use)
+                    model = config.get_model_name(last_turn_model_alias)
                     self.cost_tracker.log_usage(
                         provider=provider,
                         model=model,
                         input_tokens=usage_data["input_tokens"],
                         output_tokens=usage_data["output_tokens"],
-                        model_alias=model_alias_in_use,
+                        model_alias=last_turn_model_alias,
                         context="chat"
                     )
                 
@@ -694,7 +699,7 @@ class BackBrainMixin:
                     "content": render_template('loop_interventions.jinja', 'turns_exhausted')
                 })
                 stream = self._chat_stream_wrapper(
-                    active_llm,
+                    last_turn_llm,
                     chat_id,
                     system_prompt=system_prompt,
                     user_prompt=render_template('loop_interventions.jinja', 'summarize_turns_exhausted'),
@@ -753,7 +758,7 @@ class BackBrainMixin:
                     "content": render_template('loop_interventions.jinja', 'llm_silent_meaningful')
                 })
                 stream = self._chat_stream_wrapper(
-                    active_llm,
+                    last_turn_llm,
                     chat_id,
                     system_prompt=system_prompt,
                     user_prompt=render_template('loop_interventions.jinja', 'summarize_meaningful'),
@@ -783,7 +788,7 @@ class BackBrainMixin:
                                                tool_output=latest_tool_output[:1000])
                 })
                 stream = self._chat_stream_wrapper(
-                    active_llm,
+                    last_turn_llm,
                     chat_id,
                     system_prompt=system_prompt,
                     user_prompt=render_template('loop_interventions.jinja', 'summarize_fallback'),
