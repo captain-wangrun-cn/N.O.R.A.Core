@@ -1,233 +1,146 @@
-# 消息历史压缩 (Message History Compression)
+# 消息压缩 (Message Compression)
 
-## 设计动机
+## 概述
 
-**核心问题**：如何让 AI 能记住长时间、大量对话，同时避免 token 成本爆炸？
+当前压缩系统采用**双轨策略**：
 
-### 真实场景
+1. **主路径（推荐）**：按对话段（Session）进行滑动压缩，产物写入独立上下文库。
+2. **回退路径（兼容）**：历史的消息级压缩（`summaries` 表）继续保留，以便旧流程与统计兼容。
 
-```
-Day 1: 用户与 AI 讨论项目架构（100条消息）
-Day 2: 继续讨论实现细节（150条消息）
-Day 3: Debug 和优化（200条消息）
-...
-Day 30: 总共 5000+ 条消息
-```
-
-**问题**：
-
-- ❌ 全部发送给 LLM → 数万 tokens，API 费用高昂
-- ❌ 只保留最近 N 条 → 丢失早期重要上下文
-- ❌ 简单截断 → 对话断裂，AI "失忆"
-
-### 期望改进
+二者共同目标：在不丢失关键上下文的前提下，降低传给 LLM 的上下文体积与成本。
 
-```
-用户: "还记得我们第一天讨论的架构方案吗？"
-AI:   "记得！你当时提出了微服务架构，我们讨论了..."
-```
+---
 
-希望 AI 能够：
+## 核心原则
 
-- 记得早期的重要讨论
-- 保留最近的详细对话
-- 避免完整重放所有历史
+- 压缩单位优先是**消息段**（`conversation_sessions` + 当前活跃段）。
+- 所有自动摘要均优先使用 `summary` 模型。
+- 原文与压缩上下文分库保存，重启后可恢复。
+- 最近对话优先保真，远期对话逐级摘要。
 
-## 核心设计
+---
 
-### 三层存储架构
+## 数据层设计
 
-```mermaid
-graph TD
-    A[新消息到达] --> B[Level 1: 原始消息]
-    B --> C{消息数 > 50?}
-    C -->|否| D[保持原始]
-    C -->|是| E{消息数 > 200?}
-    E -->|否| F[Level 2: 一级总结]
-    F --> G[压缩 10:1]
-    E -->|是| H{消息数 > 500?}
-    H -->|否| I[继续压缩]
-    H -->|是| J[Level 3: 归档总结]
-    J --> K[创建全局摘要]
-```
+### 1) 原始历史库（主库）
 
-### 层级详解
+文件：`workspace/data/memory/message_history.db`
 
-#### Level 1: 原始消息（Raw Window）
+主要表：
+- `messages`：原始消息（含 `session_id`）
+- `conversation_sessions`：封闭对话段
+- `summaries`：兼容旧消息级压缩的摘要
 
-**范围**：最近 50 条消息  
-**保留方式**：完整原文  
-**用途**：提供最新、最详细的对话上下文
+### 2) 消息镜像库（独立）
 
-#### Level 2: 压缩总结（Compressed Summary）
+文件：`workspace/data/memory/message_log.db`
 
-**范围**：50-200 条消息  
-**压缩比例**：10:1（每 10 条消息压缩为 1 条总结）  
-**用途**：保留中期对话的核心内容
+主要表：
+- `raw_messages`：用户/AI 原文镜像（完整保留）
 
-压缩后的消息会标注为系统消息，包含原始消息数量和关键内容摘要。
+### 3) 上下文压缩库（独立）
 
-#### Level 3: 归档总结（Archive Summary）
+文件：`workspace/data/memory/context_compression.db`
 
-**范围**：200-500 条消息  
-**保留方式**：单条全局摘要  
-**用途**：记录早期重要主题和结论
+主要表：
+- `context_segments`：按槽位保存滑动窗口段摘要/原文段
 
-归档总结会包含早期对话的主要话题和重要决策。
+---
 
-### 数据库设计
+## 按段滑动压缩策略（主路径）
 
-#### 消息表 (messages)
+按“最近到更早”的段位（slot）处理：
 
-```sql
-CREATE TABLE messages (
-    id INTEGER PRIMARY KEY,
-    platform TEXT NOT NULL,        -- 'telegram', 'discord'
-    chat_id TEXT NOT NULL,          -- 聊天标识
-    role TEXT NOT NULL,             -- 'user', 'assistant', 'system'
-    content TEXT NOT NULL,          -- 消息内容
-    timestamp REAL NOT NULL,        -- Unix 时间戳
-    metadata TEXT,                  -- JSON 格式额外信息
-    is_pinned INTEGER DEFAULT 0,    -- 永久标记（重要消息）
-    is_archived INTEGER DEFAULT 0,  -- 已归档标记
-    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-);
+1. **slot 1~3（最新三段）**
+    - 默认完整保留。
+    - 若段内容超过 `long_message_threshold`（字符阈值），该段单独摘要。
 
-CREATE INDEX idx_messages_chat ON messages(platform, chat_id, timestamp);
-CREATE INDEX idx_messages_pinned ON messages(platform, chat_id, is_pinned);
-```
+2. **slot 4~6**
+    - 每段分别单独摘要。
 
-#### 总结表 (summaries)
+3. **slot 7~10**
+    - 合并为一组生成一个摘要。
 
-```sql
-CREATE TABLE summaries (
-    id INTEGER PRIMARY KEY,
-    platform TEXT NOT NULL,
-    chat_id TEXT NOT NULL,
-    level INTEGER NOT NULL,         -- 1=一级总结, 2=二级总结, 3=归档总结
-    start_message_id INTEGER,       -- 总结起始消息ID
-    end_message_id INTEGER,         -- 总结结束消息ID
-    summary_text TEXT NOT NULL,     -- 总结内容
-    message_count INTEGER,          -- 总结了多少条消息
-    timestamp REAL NOT NULL,
-    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    FOREIGN KEY (start_message_id) REFERENCES messages(id),
-    FOREIGN KEY (end_message_id) REFERENCES messages(id)
-);
+4. **新段到来时**
+    - 重新计算滑动窗口；由于使用段级 `source_key` 缓存，未变化段不会重复调用总结模型。
 
-CREATE INDEX idx_summaries_chat ON summaries(platform, chat_id, level, timestamp);
-```
+> 注：当前通过段级键缓存实现“只重压缩受影响窗口”的效果。
 
-## 工作流程
+---
 
-### 1. 消息添加
+## 触发机制
 
-当新消息到达时：
+### A. 段压缩刷新（主路径）
 
-1. 存储原始消息到数据库
-2. 异步触发压缩检查（不阻塞消息添加）
+每次 `add_message()` 后异步触发 `ContextCompressor.refresh_context()`：
 
-### 2. 压缩检查
+- 从 `message_history.db` 读取：
+  - 当前活跃段（`session_id IS NULL`）
+  - 最近封闭段（`conversation_sessions`）
+- 计算 slot 1~10 的压缩结果
+- 写入 `context_compression.db`
 
-定期检查未归档消息数量：
+### B. 消息级压缩检查（回退路径）
 
-- 超过压缩阈值时，对旧消息进行总结
-- 保留最近的原始消息窗口
-- 调用 LLM 生成总结并保存
-- 标记原始消息为已归档
+`_check_and_compress()` 仍保留：
 
-### 3. 上下文重建
+- 当未归档消息数 > `compress_window` 时触发一级压缩。
+- 当消息数 > `archive_threshold` 时触发归档总结。
 
-构建发送给 LLM 的上下文时，按优先级组合：
+这一路径主要用于兼容旧逻辑与历史数据，不再是推荐上下文主来源。
 
-1. 永久标记的重要消息（Pinned）
-2. 归档总结（早期对话的全局摘要）
-3. 压缩总结（中期对话的分段摘要）
-4. 原始消息（最近的完整对话）
+---
 
-### 4. LLM 总结生成
+## 上下文读取优先级
 
-使用 LLM 对一组消息生成简洁总结：
+`MessageHistory.get_context_messages()` 顺序：
 
-- 保留关键信息和决策
-- 省略无关细节
-- 按主题或时间组织
-- 控制总结长度
+1. `Pinned` 永久消息
+2. 归档总结（`level=3`）
+3. **优先尝试 `context_compression.db` 的段压缩结果**
+4. 若无段压缩结果，回退到旧 `summaries` + 原始消息窗口
 
-## 配置参数
+---
 
-系统支持以下配置项：
+## 配置项
 
-- `raw_window`: 原始消息窗口大小（默认 50）
-- `compress_window`: 开始压缩的阈值（默认 200）
-- `compress_ratio`: 压缩比例（默认 10:1）
-- `archive_threshold`: 归档阈值（默认 500）
-- `db_path`: 数据库文件路径
+配置位置：`config.yml` → `memory.message_history`
 
-## 性能优化
+| 参数 | 默认值 | 含义 |
+|---|---:|---|
+| `raw_window` | `50` | 回退路径中原始消息窗口大小 |
+| `compress_window` | `50` | **消息数量阈值**（旧消息级压缩触发线） |
+| `compress_ratio` | `10` | 回退路径一级压缩比例 |
+| `archive_threshold` | `500` | 回退路径归档阈值 |
+| `long_message_threshold` | `1200` | 段级“过长提前压缩”的**字符阈值** |
+| `mirror_db_path` | `null` | 镜像库路径（空则使用默认） |
+| `context_db_path` | `null` | 压缩上下文库路径（空则使用默认） |
 
-### 1. 异步压缩
+> 重要：`compress_window` 是“消息条数”，不是 token 数。
 
-压缩操作在后台进行，不阻塞消息添加，保证用户体验流畅。
+---
 
-### 2. 索引优化
+## 模型要求
 
-在关键字段上建立索引，加速消息查询和筛选。
+- 段压缩与回退压缩都使用 `summary` 模型。
+- 若 `summary` 调用失败，系统会使用回退摘要（截断文本）以保证主流程可用。
 
-### 3. 批量处理
+---
 
-对多组消息批量生成总结，减少 LLM 调用次数。
+## 相关实现文件
 
-## 效果分析
+- `memory/context_store.py`：段压缩与独立上下文库存取
+- `memory/message_history.py`：主库写入、压缩触发与上下文组装
+- `core/scheduler_mixin.py`：`ONLINE → SEMI_ONLINE` 时封段（`close_session`）
+- `docs/architecture/conversation-segmentation.md`：段切分机制说明
 
-### Token 使用
+---
 
-| 消息数  | 无压缩          | 有压缩         | 变化       |
-| ------- | --------------- | -------------- | ---------- |
-| 100 条  | ~50,000 tokens  | ~10,000 tokens | 减少约 80% |
-| 500 条  | ~250,000 tokens | ~15,000 tokens | 减少约 94% |
-| 1000 条 | ~500,000 tokens | ~20,000 tokens | 减少约 96% |
+## 已知限制
 
-### 信息保留
+- 长段阈值当前按字符长度计算，尚非 tokenizer 精确 token。
+- 消息级回退压缩仍存在，后续可视情况进一步简化为纯段压缩。
 
-- **重要信息**: 通过 Pinned 机制完整保留
-- **最近对话**: 原始消息窗口保留完整内容
-- **中期上下文**: 压缩总结保留核心内容
-- **早期主题**: 归档总结保留主要话题
+---
 
-## 特殊机制
-
-### 1. Pinned 消息
-
-支持将重要消息标记为永久保留，这些消息不会被压缩或归档，始终出现在上下文中。
-
-### 2. 手动归档
-
-支持手动清空对话历史，同时保留总结和重要消息。
-
-## 局限性
-
-### 当前限制
-
-1. **总结质量依赖 LLM**：
-   - 总结的准确性取决于 LLM 的能力
-   - 可能丢失部分细节信息
-
-2. **固定压缩比例**：
-   - 使用固定的 10:1 比例
-   - 未根据内容重要性动态调整
-
-3. **异步处理**：
-   - 压缩在后台进行，可能有延迟
-   - 需要合理处理异常情况
-
-## 相关文件
-
-- `memory/message_history.py` - 核心实现
-- `core/controller.py` - 集成和使用
-- `config.yml` - 配置参数
-
-## 参考文档
-
-- [工具循环 (Tool Loop)](tool-loop.md) - 了解消息流
-- [日志系统 (Logging)](logging.md) - 调试压缩过程
+**最后更新**：2026-03-17
