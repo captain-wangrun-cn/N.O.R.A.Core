@@ -413,6 +413,7 @@ class BackBrainMixin:
                 turn_llm = self.image_llm if turn_model_alias == "image" else self.coder_llm
                 last_turn_model_alias = turn_model_alias
                 last_turn_llm = turn_llm
+                image_turn_raw_parts: List[str] = [] if turn_model_alias == "image" else None
                 # 构造本轮 user_prompt：工具返回图片时追加提示（这些是回查的旧图，不要生成 IMAGE_TAGS）
                 turn_user_prompt = full_user_prompt if current_turn == 1 else " (Continue processing tool outputs...)"
                 if current_turn > 1 and turn_multimodal_images and any(ti.get("from_tool") for ti in turn_multimodal_images):
@@ -452,6 +453,8 @@ class BackBrainMixin:
                             content = chunk["content"]
                             
                             response_text_buffer += content
+                            if image_turn_raw_parts is not None:
+                                image_turn_raw_parts.append(content)
                             
                             # Real-time splitting logic
                             if self._SPLIT_MARKER_PATTERN.search(response_text_buffer):
@@ -490,7 +493,14 @@ class BackBrainMixin:
                     elif isinstance(chunk, str):
                         # Fallback for legacy providers
                         response_text_buffer += chunk
+                        if image_turn_raw_parts is not None:
+                            image_turn_raw_parts.append(chunk)
                 
+                # Debug: 在 image 模型回合输出完整原始内容，便于排查标签缺失
+                if turn_model_alias == "image" and self.debug_mode.get(chat_id, False):
+                    raw_image_text = "".join(image_turn_raw_parts) if image_turn_raw_parts else ""
+                    await self._send_debug(chat_id, f"[image turn {current_turn}] raw output:\n{raw_image_text or '(empty)'}")
+
                 # 记录成本（如果启用）
                 if self.cost_tracking_enabled and self.cost_tracker and usage_data:
                     provider_name = config.get_model_provider(last_turn_model_alias)
