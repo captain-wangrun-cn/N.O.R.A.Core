@@ -11,6 +11,11 @@ workspace:
   #   - 用户主目录: ~/my_workspace
   root_path: "~/.nora/workspace"
 
+# 日志配置（按日期切分，自动清理过期文件）
+logging:
+  retention_days: 7   # 日志保留天数，<=0 表示不自动清理
+  dir: null             # 可选：自定义日志目录，默认使用 workspace/logs
+
 telegram:
   bot_token: "YOUR_TELEGRAM_BOT_TOKEN"
 

@@ -3,6 +3,7 @@ from telegram.ext import Application, ApplicationBuilder, ContextTypes, CommandH
 from telegram.constants import ChatAction, ParseMode
 from telegram.error import TimedOut, RetryAfter
 from typing import Callable, Any, Optional, List, Dict, Tuple
+from pathlib import Path
 import os
 import re
 import logging
@@ -11,6 +12,7 @@ import asyncio
 import time
 import uuid
 import importlib
+import traceback
 
 from adapters.base import BaseAdapter, PlatformFeatures
 from adapters.aggregator import MessageAggregator
@@ -540,6 +542,8 @@ class TelegramAdapter(BaseAdapter):
         keyboard = InlineKeyboardMarkup([
             [InlineKeyboardButton("🧹 清空 Qdrant 记忆", callback_data="debug_cleanup:qdrant")],
             [InlineKeyboardButton("🧹 清空 Mongo 图片库", callback_data="debug_cleanup:mongo")],
+            [InlineKeyboardButton("🧹 清空消息镜像库", callback_data="debug_cleanup:mirror")],
+            [InlineKeyboardButton("🧹 清空上下文压缩库", callback_data="debug_cleanup:context")],
             [InlineKeyboardButton("🧹 清空聊天记录", callback_data="debug_cleanup:chat")],
             [InlineKeyboardButton("💥 全部清空", callback_data="debug_cleanup:all")],
             [InlineKeyboardButton("取消", callback_data="debug_cleanup:cancel")],
@@ -1073,6 +1077,10 @@ class TelegramAdapter(BaseAdapter):
             result_lines.append(self._purge_qdrant())
         if action in ("mongo", "all"):
             result_lines.append(self._purge_mongo())
+        if action in ("mirror", "all"):
+            result_lines.append(self._purge_message_log())
+        if action in ("context", "all"):
+            result_lines.append(self._purge_context_db())
         if action in ("chat", "all"):
             result_lines.append(self._purge_chat_history())
 
@@ -1462,6 +1470,30 @@ class TelegramAdapter(BaseAdapter):
             return "- 聊天记录已全部清空（含 pinned）"
         except Exception as e:
             return f"- 聊天记录清空失败: {e}"
+
+    def _purge_message_log(self) -> str:
+        """清空原文镜像库（message_log.db）。"""
+        try:
+            path = Path(self.message_history.message_log.db_path)
+            if path.exists():
+                path.unlink()
+            # 重新初始化以确保表结构存在
+            self.message_history.message_log._init_db()
+            return f"- 消息镜像库已清空: {path.name}"
+        except Exception as e:
+            return f"- 消息镜像库清空失败: {e}"
+
+    def _purge_context_db(self) -> str:
+        """清空上下文压缩库（context_compression.db）。"""
+        try:
+            path = Path(self.message_history.context_compressor.db_path)
+            if path.exists():
+                path.unlink()
+            # 重新初始化以确保表结构存在
+            self.message_history.context_compressor._init_db()
+            return f"- 上下文压缩库已清空: {path.name}"
+        except Exception as e:
+            return f"- 上下文压缩库清空失败: {e}"
 
     async def _extract_reply_info(self, message: Message) -> Optional[str]:
         """提取回复消息的信息"""
@@ -1864,6 +1896,35 @@ class TelegramAdapter(BaseAdapter):
             logger.warning(f"[{chat_id}] 删除消息 {message_id} 失败: {e}")
             return False
 
+    async def _notify_debug_exception(self, chat_id: Optional[str], error: Exception):
+        """在 debug 模式下将异常详情输出给用户。"""
+        if not chat_id:
+            return
+
+        controller = getattr(self._message_handler, "__self__", None)
+        debug_map = getattr(controller, "debug_mode", {}) if controller else {}
+        try:
+            is_debug = bool(debug_map.get(chat_id, False))
+        except Exception:
+            is_debug = False
+
+        if not is_debug:
+            return
+
+        tb = traceback.format_exc()
+        detail = f"{type(error).__name__}: {error}\n{tb}"
+        if len(detail) > 1800:
+            detail = detail[:1800] + "\n... (truncated)"
+
+        try:
+            await self.send_message(
+                chat_id,
+                f"🐛 调试：请求处理失败\n```\n{detail}\n```",
+                parse_media=False,
+            )
+        except Exception as send_err:
+            logger.debug(f"[{chat_id}] 调试错误信息发送失败: {send_err}")
+
     # ------------------------------------------------------------------
     # 生命周期
     # ------------------------------------------------------------------
@@ -1896,7 +1957,27 @@ class TelegramAdapter(BaseAdapter):
 
     async def on_aggregator_complete(self, context: Dict[str, Any]):
         """当消息聚合完成时调用。"""
-        if self._message_handler:
-            processed_context = await self.before_message(context)
+        if not self._message_handler:
+            return
+
+        processed_context = await self.before_message(context)
+        try:
             result = await self._message_handler(processed_context)
-            await self.after_message(processed_context, result)
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            chat_id = processed_context.get("chat_id")
+            logger.error(f"[{chat_id}] 聚合消息处理异常: {e}", exc_info=True)
+            if chat_id:
+                try:
+                    await self.send_message(
+                        chat_id,
+                        "❌ 抱歉，处理请求时发生错误，请稍后重试。",
+                        parse_media=False,
+                    )
+                except Exception as send_err:
+                    logger.debug(f"[{chat_id}] 错误提示发送失败: {send_err}")
+            await self._notify_debug_exception(chat_id, e)
+            return
+
+        await self.after_message(processed_context, result)

@@ -142,3 +142,9 @@ def get_custom_injection_scopes():
     cfg = _safe_config()
     return (cfg.get("custom_injection", {}) or {}).get("scopes")
 
+
+def get_logging_config():
+    """Gets logging configuration (retention, directory, etc.)."""
+    cfg = _safe_config()
+    return cfg.get("logging", {}) or {}
+

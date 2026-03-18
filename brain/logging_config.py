@@ -2,15 +2,8 @@ import logging
 import logging.handlers
 import os
 import sys
-from datetime import datetime
-
-# Log directories
-LOG_DIR = "logs"
-os.makedirs(LOG_DIR, exist_ok=True)
-
-# Log file paths
-MAIN_LOG = os.path.join(LOG_DIR, "nora.log")
-ERROR_LOG = os.path.join(LOG_DIR, "error.log")
+from datetime import datetime, timedelta
+from typing import Dict, Optional
 
 # Custom formatter with color support for console
 class ColoredFormatter(logging.Formatter):
@@ -47,14 +40,72 @@ class SafeFormatter(logging.Formatter):
         return super().format(record)
 
 
+def _get_logging_config() -> Dict:
+    try:
+        import config
+
+        return (config.get_logging_config() or {})
+    except Exception:
+        return {}
+
+
+def _resolve_log_dir(override: Optional[str] = None) -> str:
+    """Resolve log directory (workspace/logs by default)."""
+    try:
+        from workspace_config import get_workspace_manager
+
+        workspace_dir = get_workspace_manager().logs_dir
+    except Exception:
+        workspace_dir = os.path.abspath(os.path.join(os.getcwd(), "logs"))
+
+    log_dir = override or workspace_dir
+    log_dir = os.path.abspath(os.path.expanduser(log_dir))
+    os.makedirs(log_dir, exist_ok=True)
+    return log_dir
+
+
+def _cleanup_old_logs(log_dir: str, retention_days: int, prefixes: Optional[list[str]] = None):
+    """Remove log files older than retention_days based on modified time."""
+    if retention_days is None or retention_days <= 0:
+        return
+
+    prefixes = prefixes or ["nora.log", "nora-error.log", "nora", "error"]
+    cutoff = datetime.now() - timedelta(days=retention_days)
+
+    for name in os.listdir(log_dir):
+        if name in {"nora.log", "nora-error.log"}:
+            # 基础文件保留，由 TimedRotatingFileHandler 负责轮转
+            continue
+        if not any(name.startswith(p) for p in prefixes):
+            continue
+        path = os.path.join(log_dir, name)
+        if not os.path.isfile(path):
+            continue
+        try:
+            mtime = datetime.fromtimestamp(os.path.getmtime(path))
+            if mtime < cutoff:
+                os.remove(path)
+        except Exception:
+            # 清理失败不应中断主流程
+            continue
+
+
 def setup_logging(console_level=logging.WARNING, file_level=logging.DEBUG):
     """
     Setup centralized logging with console and file handlers.
+    Logs rotate daily and old files are cleaned automatically.
     
     Args:
         console_level: Minimum level for console output (default: WARNING)
         file_level: Minimum level for file output (default: DEBUG)
     """
+    logging_cfg = _get_logging_config()
+    retention_days = logging_cfg.get("retention_days", 14)
+    log_dir_override = logging_cfg.get("dir") or logging_cfg.get("path")
+
+    log_dir = _resolve_log_dir(log_dir_override)
+    main_log_path = os.path.join(log_dir, "nora.log")
+    error_log_path = os.path.join(log_dir, "nora-error.log")
     # Root logger configuration
     root_logger = logging.getLogger()
     root_logger.setLevel(logging.DEBUG)  # Capture everything, filter at handler level
@@ -74,12 +125,14 @@ def setup_logging(console_level=logging.WARNING, file_level=logging.DEBUG):
     
     # --- Main Log File (DEBUG and above, rotating) ---
     # RotatingFileHandler: max 10MB per file, keep 5 backups
-    main_file_handler = logging.handlers.RotatingFileHandler(
-        MAIN_LOG,
-        maxBytes=10 * 1024 * 1024,  # 10MB
-        backupCount=5,
-        encoding='utf-8'
+    main_file_handler = logging.handlers.TimedRotatingFileHandler(
+        main_log_path,
+        when="midnight",
+        interval=1,
+        backupCount=retention_days,
+        encoding='utf-8',
     )
+    main_file_handler.suffix = "%Y-%m-%d"
     main_file_handler.setLevel(file_level)
     file_formatter = SafeFormatter(
         fmt='%(asctime)s - %(name)s - %(levelname)s - [%(chat_id)s] %(funcName)s:%(lineno)d - %(message)s',
@@ -89,12 +142,14 @@ def setup_logging(console_level=logging.WARNING, file_level=logging.DEBUG):
     root_logger.addHandler(main_file_handler)
     
     # --- Error Log File (ERROR and above only) ---
-    error_file_handler = logging.handlers.RotatingFileHandler(
-        ERROR_LOG,
-        maxBytes=10 * 1024 * 1024,
-        backupCount=3,
-        encoding='utf-8'
+    error_file_handler = logging.handlers.TimedRotatingFileHandler(
+        error_log_path,
+        when="midnight",
+        interval=1,
+        backupCount=retention_days,
+        encoding='utf-8',
     )
+    error_file_handler.suffix = "%Y-%m-%d"
     error_file_handler.setLevel(logging.ERROR)
     error_file_handler.setFormatter(file_formatter)
     root_logger.addHandler(error_file_handler)
@@ -132,9 +187,12 @@ def setup_logging(console_level=logging.WARNING, file_level=logging.DEBUG):
         extra={'chat_id': 'SYSTEM'}
     )
     root_logger.info(
-        f"Logs: {MAIN_LOG} (main), {ERROR_LOG} (errors only)",
+        f"Logs: {main_log_path} (daily rotate), {error_log_path} (errors)",
         extra={'chat_id': 'SYSTEM'}
     )
+
+    # 清理过期日志
+    _cleanup_old_logs(log_dir, retention_days)
 
 
 # Utility: Context-aware logger factory
