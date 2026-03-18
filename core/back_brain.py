@@ -782,6 +782,52 @@ class BackBrainMixin:
                             )
                 logger.debug(f"[{chat_id}] 已提取 {len(image_tags_extracted)} 个图片标签块，{len(image_ocr_extracted)} 个 OCR 文字块。")
 
+                # 如果缺少 IMAGE_TAGS，则补发一次仅请求 TAGS 的最小提示，避免图片入库缺标签
+                missing_tag_ids = [img_id for img_id in expected_ids if not image_tags_extracted.get(img_id)]
+                if missing_tag_ids:
+                    await self._send_debug(chat_id, f"⚠️ 检测到缺失 {len(missing_tag_ids)} 个 IMAGE_TAGS，尝试补齐...")
+                    retry_prompt = (
+                        "仅输出缺失图片的 IMAGE_TAGS 块，不要输出其他任何文本或 OCR。\n"
+                        "为每个缺失 ID 输出一组：[IMAGE_TAGS:ID]\n标签1, 标签2, ...（至少8个，2-8字关键词）\n[/IMAGE_TAGS]\n"
+                        "禁止输出解释、编号或额外文字。\n"
+                        "缺失 ID 列表：\n" + "\n".join(f"- {mid}" for mid in missing_tag_ids)
+                    )
+                    retry_images = [img for img in multimodal_images if img.get("image_id") in missing_tag_ids]
+                    retry_stream = self._chat_stream_wrapper(
+                        self.image_llm,
+                        chat_id,
+                        system_prompt=system_prompt,
+                        user_prompt=retry_prompt,
+                        history=temp_history,
+                        tools=[],
+                        multimodal_images=retry_images if retry_images else None,
+                    )
+                    retry_buffer = ""
+                    async for raw_chunk in retry_stream:
+                        chunk = cast(Dict[str, Any], raw_chunk) if isinstance(raw_chunk, dict) else raw_chunk
+                        if isinstance(chunk, dict) and chunk.get("type") == "text":
+                            retry_buffer += chunk.get("content", "")
+                        elif isinstance(chunk, str):
+                            retry_buffer += chunk
+
+                    for m in self._IMAGE_TAGS_PATTERN.finditer(retry_buffer):
+                        img_id = m.group(1).strip()
+                        tags_text = m.group(2).strip()
+                        if img_id and tags_text:
+                            # 若模型仍使用占位符 ID，则按缺失顺序映射
+                            if img_id not in expected_set and missing_tag_ids:
+                                mapped_id = missing_tag_ids.pop(0)
+                                image_tags_extracted[mapped_id] = tags_text
+                                logger.warning(f"[{chat_id}] IMAGE_TAGS 补齐时检测到占位符 ID，已按顺序映射: {img_id} -> {mapped_id}")
+                            else:
+                                image_tags_extracted[img_id] = tags_text
+
+                    still_missing = [img_id for img_id in expected_ids if not image_tags_extracted.get(img_id)]
+                    if still_missing:
+                        logger.warning(f"[{chat_id}] 仍缺少 {len(still_missing)} 个 IMAGE_TAGS: {still_missing}")
+                    else:
+                        logger.info(f"[{chat_id}] 已补齐全部 IMAGE_TAGS。")
+
             if final_response_buffer:
                 clean_response = re.sub(
                     r'(?:execute_skill|execute_tool_plan|write_file|read_file|edit_file|exec_command|list_dir|create_new_skill|search)\s*\([^)]*\)',
