@@ -26,7 +26,7 @@ import json
 import logging
 import os
 import time
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, date
 from enum import Enum
 from typing import Any, Awaitable, Callable, Dict, List, Optional
 
@@ -238,6 +238,7 @@ class ProactiveScheduler:
         timezone_str: str = "Asia/Shanghai",
         generate_plan_callback: Optional[Callable[..., Awaitable[List[Dict[str, str]]]]] = None,
         send_proactive_callback: Optional[Callable[..., Awaitable[None]]] = None,
+    daily_summary_callback: Optional[Callable[[date], Awaitable[None]]] = None,
     ):
         self.cache_dir = cache_dir
         os.makedirs(cache_dir, exist_ok=True)
@@ -246,6 +247,7 @@ class ProactiveScheduler:
 
         self._generate_plan_callback = generate_plan_callback
         self._send_proactive_callback = send_proactive_callback
+        self._daily_summary_callback = daily_summary_callback
 
         # 事件列表（用于查询/序列化，实际触发由 APScheduler Job 驱动）
         self._daily_events: List[ScheduledEvent] = []
@@ -277,6 +279,15 @@ class ProactiveScheduler:
             id="daily_plan_cron",
             replace_existing=True,
             name="每日计划生成",
+        )
+
+        # 注册每日总结 CronTrigger (每天 00:00)
+        self._scheduler.add_job(
+            self._on_daily_summary_trigger,
+            CronTrigger(hour=0, minute=0, timezone=self.tz),
+            id="daily_summary_cron",
+            replace_existing=True,
+            name="每日对话总结",
         )
 
         # 恢复之前加载的未触发闹钟 → DateTrigger
@@ -426,6 +437,24 @@ class ProactiveScheduler:
             生成结果摘要。
         """
         return await self._on_daily_plan_trigger(force=True, clear_existing=clear_existing)
+
+    # ----------------------------------------------------------------
+    # 每日总结回调
+    # ----------------------------------------------------------------
+
+    async def _on_daily_summary_trigger(self):
+        """CronTrigger 回调：凌晨生成上一日对话总结文件。"""
+        if not self._daily_summary_callback:
+            logger.debug("未设置 daily_summary_callback，跳过每日总结")
+            return
+
+        now = datetime.now(self.tz)
+        target_date = now.date() - timedelta(days=1)
+        try:
+            await self._daily_summary_callback(target_date)
+            logger.info(f"每日总结完成: {target_date.isoformat()}")
+        except Exception as e:
+            logger.error(f"每日总结失败: {e}", exc_info=True)
 
     # ----------------------------------------------------------------
     # APScheduler 回调

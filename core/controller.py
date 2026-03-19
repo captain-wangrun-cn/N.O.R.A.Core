@@ -170,6 +170,7 @@ class NoraController(
                 timezone_str=scheduler_tz,
                 generate_plan_callback=self._generate_daily_plan_via_llm,
                 send_proactive_callback=self._send_proactive_message,
+                daily_summary_callback=self._generate_daily_summary,
             )
             logger.info("主动消息调度器已初始化")
         else:

@@ -3,7 +3,9 @@ author:        captain-wangrun-cn <wangrun114514@foxmail.com>
 date:          2026-03-12 13:37:36
 Copyright © WR（captain-wangrun-cn） All rights reserved
 '''
-"""调度器 Mixin — Scheduler 集成 + 对话延续 + 主动消息。"""
+"""调度器 Mixin — Scheduler 集成 + 对话延续 + 主动消息 + 每日总结。"""
+# mypy: disable-error-code=attr-defined
+# pyright: reportAttributeAccessIssue=false
 
 import asyncio
 import json
@@ -23,6 +25,12 @@ from core.scheduler import (
     get_ai_state_summary,
     get_user_idle_seconds,
 )
+from workspace_config import get_workspace_manager
+from memory.message_history import MessageHistory
+from datetime import datetime, date, timedelta
+from zoneinfo import ZoneInfo
+from pathlib import Path
+import os
 import config
 
 logger = logging.getLogger(__name__)
@@ -30,6 +38,131 @@ logger = logging.getLogger(__name__)
 
 class SchedulerMixin:
     """Scheduler 集成、对话延续（followup）、主动消息（proactive）。"""
+
+    # ------------------------------------------------------------------
+    # 每日总结
+    # ------------------------------------------------------------------
+
+    async def _generate_daily_summary(self, target_date: date):
+        """
+        生成指定日期的对话每日总结，写入 workspace/data/memory/yyyy-mm-dd.md。
+
+        - 如果文件已存在，会把旧内容带入提示，生成融合后的新摘要。
+        - 若无新的对话消息且已有文件，跳过改写。
+        """
+
+        # 1) 准备时区与时间范围
+        try:
+            tz_str = config.get_message_history_config().get("timezone", "Asia/Shanghai")
+        except Exception:
+            tz_str = "Asia/Shanghai"
+        tz = ZoneInfo(tz_str)
+        start_dt = datetime.combine(target_date, datetime.min.time()).replace(tzinfo=tz)
+        end_dt = start_dt + timedelta(days=1)
+        start_ts = start_dt.timestamp()
+        end_ts = end_dt.timestamp()
+
+        # 2) 确定 chat_id（默认用 scheduler.default_chat_id）
+        storage_id = ""
+        scheduler = getattr(self, "scheduler", None)
+        if scheduler:
+            storage_id = getattr(scheduler, "default_chat_id", "") or ""
+        sessions = getattr(self, "sessions", {}) or {}
+        if not storage_id and sessions:
+            storage_id = next(iter(sessions.keys()), "")
+
+        if not storage_id:
+            logger.warning("每日总结跳过：default_chat_id 未设置，尚无会话")
+            return
+
+        platform = "telegram"
+
+        # 3) 读取当日消息
+        msgs = []
+        try:
+            history = getattr(self, "message_history", None)
+            if history:
+                msgs = history.get_messages_between(platform, storage_id, start_ts, end_ts)
+        except Exception as e:
+            logger.error(f"每日总结：读取消息失败: {e}")
+            msgs = []
+
+        # 4) 读取旧文件内容（若有），供融合
+        ws = get_workspace_manager()
+        summary_dir = Path(ws.data_dir) / "memory"
+        summary_dir.mkdir(parents=True, exist_ok=True)
+        summary_path = summary_dir / f"{target_date.isoformat()}.md"
+        existing_content = ""
+        if summary_path.exists():
+            try:
+                existing_content = summary_path.read_text(encoding="utf-8")
+            except Exception:
+                existing_content = ""
+
+        if not msgs and existing_content:
+            logger.info(f"每日总结：无新消息，保留已有文件 {summary_path.name}")
+            return
+
+        # 5) 构造对话文本
+        convo_lines = []
+        for m in msgs:
+            ts = m.get("timestamp", 0)
+            try:
+                ts_str = datetime.fromtimestamp(ts, tz).strftime("%H:%M")
+            except Exception:
+                ts_str = "--:--"
+            role = m.get("role", "?")
+            content = m.get("raw_content") or m.get("content") or ""
+            convo_lines.append(f"[{ts_str}] {role}: {content}")
+        convo_text = "\n".join(convo_lines)
+
+        # 6) 选择总结模型
+        llm_client = getattr(self, "llm", None)
+        try:
+            from brain.llm import get_llm_client
+            summary_client = get_llm_client(model_alias="summary")
+            llm_client = summary_client or llm_client
+        except Exception:
+            pass
+
+        if llm_client is None:
+            logger.warning("每日总结跳过：未找到可用的 LLM 客户端")
+            return
+
+        # 7) 生成总结
+        system_prompt = (
+            "你是对话日志整理助手，请为给定日期生成简明的每日总结。"
+            " 保留关键事件、决定、情绪、待办，避免复述冗余。"
+        )
+        user_prompt = (
+            f"日期: {target_date.isoformat()}\n"
+            f"已有总结(可为空):\n{existing_content}\n\n"
+            f"当日对话原文:\n{convo_text}\n\n"
+            "请输出 Markdown，要点列表和待办 (如有)。"
+        )
+
+        summary_text = ""
+        try:
+            summary_text = await llm_client.chat(
+                system_prompt=system_prompt,
+                user_prompt=user_prompt,
+                history=[],
+            )
+        except Exception as e:
+            logger.error(f"每日总结生成失败，使用回退: {e}")
+
+        if not summary_text:
+            if not msgs:
+                summary_text = "今日无对话记录。"
+            else:
+                summary_text = "生成失败，以下为原始要点：\n" + "\n".join(convo_lines[:20])
+
+        content_to_write = f"# Daily Summary {target_date.isoformat()}\n\n" + summary_text.strip()
+        try:
+            summary_path.write_text(content_to_write, encoding="utf-8")
+            logger.info(f"每日总结已写入: {summary_path}")
+        except Exception as e:
+            logger.error(f"每日总结写入失败: {e}")
 
     # ------------------------------------------------------------------
     # Scheduler 启停

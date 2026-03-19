@@ -457,6 +457,36 @@ class MessageHistory:
         
         logger.info(f"[{platform}/{chat_id}] 获取上下文: {len(messages)} 条消息")
         return messages
+
+    # ------------------------------------------------------------------
+    # 日志查询辅助
+    # ------------------------------------------------------------------
+    def get_messages_between(
+        self,
+        platform: str,
+        chat_id: str,
+        start_ts: float,
+        end_ts: float,
+    ) -> List[Dict[str, Any]]:
+        """获取指定时间戳区间内的原始消息（来自镜像库）。"""
+        if not self.message_log:
+            return []
+
+        conn = sqlite3.connect(str(self.message_log.db_path))
+        conn.row_factory = sqlite3.Row
+        cursor = conn.cursor()
+        cursor.execute(
+            """
+            SELECT role, raw_content, timestamp, metadata
+            FROM raw_messages
+            WHERE platform = ? AND chat_id = ? AND timestamp >= ? AND timestamp < ?
+            ORDER BY timestamp ASC
+            """,
+            (platform, chat_id, start_ts, end_ts),
+        )
+        rows = [dict(row) for row in cursor.fetchall()]
+        conn.close()
+        return rows
     
     async def _check_and_compress(self, platform: str, chat_id: str):
         """检查是否需要压缩，并执行压缩"""
