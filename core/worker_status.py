@@ -40,6 +40,7 @@ class WorkerStatus:
         self.detail: str = ""         # 更详细描述 (e.g. "正在执行 execute_skill(web_search)")
         self.tool_history: List[str] = []  # 本次任务执行过的工具步骤摘要
         self.tool_history_readable: List[str] = []  # 用户可读的步骤描述
+        self.key_results: List[str] = []   # 关键结果信息（路径/ID/主输出摘要）
         self.current_turn: int = 0
         self.max_turns: int = 0
         self.started_at: float = 0.0
@@ -52,6 +53,7 @@ class WorkerStatus:
         self.detail = "正在准备处理请求..."
         self.tool_history = []
         self.tool_history_readable = []
+        self.key_results = []
         self.current_turn = 0
         self.max_turns = max_turns
         self.started_at = time.time()

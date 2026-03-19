@@ -66,6 +66,7 @@ core/controller.py            NoraController.handle_message()
 - `ProactiveScheduler` — APScheduler 驱动主动消息调度
 - `AIPresence` — 全局 AI 在线状态（ONLINE / SEMI_ONLINE）
 - 手动重建接口：`regenerate_today_plan(clear_existing=True)`
+- 每日总结：每日 00:00 触发 `_on_daily_summary_trigger`，调用 `daily_summary_callback` 生成上一日摘要
 
 ### `memory/message_history.py`
 - `MessageHistory` — 消息持久化
@@ -134,6 +135,7 @@ python tui.py
 | 撤销（/undo）影响 | 仅删除前脑的上一条 assistant 消息：`message_history.messages` 与 `message_log.raw_messages` 删除对应记录；若记录了平台 `message_id` 且平台支持，会尝试删除原消息。 |
 | `memory/cost_tracking.db` | 成本记录 |
 | `memory/vector.db` | 向量数据库（Qdrant） |
+| `data/memory/YYYY-MM-DD.md` | 每日对话总结：每日 00:00 生成上一日摘要；若文件已存在则带入旧内容融合输出，默认使用 `scheduler.default_chat_id`（无则回落首个 session），平台默认 `telegram` |
 
 ---
 

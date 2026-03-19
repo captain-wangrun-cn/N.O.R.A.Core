@@ -684,6 +684,17 @@ class BackBrainMixin:
                     result_preview = tool_result[:500] if len(tool_result) > 500 else tool_result
                     await self._send_debug(chat_id, f"📋 {tool_name} 结果 ({len(tool_result)} 字符):\n{result_preview}")
 
+                    # 记录关键结果：保留路径/ID/摘要，供前脑总结
+                    try:
+                        if isinstance(tool_result, str):
+                            snippet = tool_result.strip()
+                            if snippet:
+                                if len(snippet) > 400:
+                                    snippet = snippet[:397] + "..."
+                                status.key_results.append(f"{tool_name}: {snippet}")
+                    except Exception:
+                        logger.debug("记录关键结果失败，已忽略", exc_info=True)
+
                     # --- TRUNCATION SAFETY VALVE ---
                     TRUNCATE_LIMIT = 8000 if tool_name == "read_file" else 4000
                     if len(tool_result) > TRUNCATE_LIMIT:

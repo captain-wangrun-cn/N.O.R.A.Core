@@ -74,6 +74,19 @@
 - `adapters/telegram/main.py`（指令按钮与回调，新增 `_purge_message_log`、`_purge_context_db`）
 - `docs/onboarding/QUICK_REFERENCE.md`（指令与数据库清理说明）
 
+### 📝 每日对话总结任务 — 2026-03-19
+
+- 调度器新增每日 00:00 触发的对话总结：汇总前一日的镜像消息，生成摘要写入 `workspace/data/memory/YYYY-MM-DD.md`。
+- 若文件已存在，会将旧内容一并带入模型提示进行融合；若当日无新消息且已有文件则跳过改写。
+- 默认使用 `scheduler.default_chat_id`（缺省回落首个 session），平台默认为 `telegram`；依赖消息镜像库 `message_log.db`。
+- 摘要通过 `summary` 模型（回退通用 llm），输出 Markdown 要点/待办。
+
+**涉及文件：**
+- `core/scheduler.py`（每日总结 Cron 触发）
+- `core/controller.py`（注册 `daily_summary_callback`）
+- `core/scheduler_mixin.py`（`_generate_daily_summary` 实现，融合旧文件并落盘）
+- `memory/message_history.py`（`get_messages_between` 按时间段取原文）
+
 - 新增 `CUSTOM.md`：用户维护的全局指令，自动注入提示，AI 禁止用文件工具读取/修改。
 - 新增 `SECRET.md`：AI 私人加密记事本，使用专用工具 `read_secret_vault` / `write_secret_vault`，首次写入生成 `workspace/data/secret.key`（Fernet）。通用文件/命令工具禁止访问。
 - 前脑 prompt 增加 CUSTOM/SECRET 路由说明：

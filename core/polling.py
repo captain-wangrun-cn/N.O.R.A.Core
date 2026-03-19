@@ -82,7 +82,6 @@ class PollingMixin:
                         break
 
                 # 追加后脑执行过的工具操作记录，供前脑审查与转述
-                status = self.worker_status.get(chat_id)
                 if status and status.tool_history_readable:
                     compact_steps = []
                     for step in status.tool_history_readable:
@@ -111,6 +110,23 @@ class PollingMixin:
                         if backend_result
                         else f"【后脑执行的操作】\n{tool_lines}"
                     )
+
+                # 追加关键结果摘要（如路径/ID/主要输出），便于前脑转述
+                if status and status.key_results:
+                    key_lines = []
+                    for item in status.key_results[-5:]:  # 仅取最近 5 条关键结果
+                        item_str = str(item).strip()
+                        if not item_str:
+                            continue
+                        if len(item_str) > 300:
+                            item_str = item_str[:297] + "..."
+                        key_lines.append(f"- {item_str}")
+                    if key_lines:
+                        key_block = "\n".join(key_lines)
+                        backend_result = (
+                            f"{backend_result}\n\n【关键结果】\n{key_block}"
+                            if backend_result else f"【关键结果】\n{key_block}"
+                        )
                 
                 if not backend_result:
                     logger.info(f"[{chat_id}] 轮询第 {polling_round} 轮: 后脑无输出，结束轮询")
