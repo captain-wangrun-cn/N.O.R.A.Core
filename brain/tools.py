@@ -904,7 +904,8 @@ class ToolManager:
         end_time: str = "",
         user_id: str = "",
         limit: int = 10,
-        return_image: bool = False,
+        return_image: bool = True,
+        use_image_model: bool = False,
     ) -> str:
         """
         Retrieves images from the image memory database. Supports multiple search modes:
@@ -921,9 +922,10 @@ class ToolManager:
         :param end_time: End of time range as Unix timestamp string (e.g. '1709942400').
         :param user_id: Filter by user ID. If empty, searches all users.
         :param limit: Maximum number of results (1-50, default 10).
-        :param return_image: IMPORTANT. When true, the tool returns image CONTENT references
-            via `[image: absolute_path]` tags (can be directly sent or re-fed to image model),
-            not only metadata. When false, returns metadata only (id/path/tags/time/score).
+        :param return_image: When true, the tool returns image references via `[image: abs_path]`
+            MediaTags，供多模态管线自动读取图片内容。Default: True.
+        :param use_image_model: When true, downstream should switch to the image model
+            for subsequent reasoning until a crop_image_for_llm round finishes.
         """
         if not self.image_store:
             return "Error: Image memory system is not available (ImageStore not initialized)."
@@ -950,10 +952,16 @@ class ToolManager:
         if not results:
             return "No images found matching the criteria."
 
+        # 如果开启 use_image_model，强制 return_image 为 True 以便注入 MediaTag
+        if use_image_model:
+            return_image = True
+
         # Format results for LLM consumption
         output_lines = [f"Found {len(results)} image(s):\n"]
         if return_image:
-            output_lines.append("[Mode] return_image=true: output includes image content tags (MediaTag lines), not metadata-only.\n")
+            output_lines.append("[Mode] return_image=true: output includes MediaTag lines [image: abs_path] for downstream multimodal ingestion.\n")
+        if use_image_model:
+            output_lines.append("[Hint] use_image_model=true: downstream should switch to the image model until crop_image_for_llm completes.\n")
         for i, img in enumerate(results, 1):
             output_lines.append(f"--- Image {i} ---")
             output_lines.append(f"  ID: {img.get('image_id', 'N/A')}")

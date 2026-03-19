@@ -395,6 +395,7 @@ class BackBrainMixin:
             typing_started = False
             # 工具回查图片（view_image return_image=true）注入到下一轮多模态输入
             pending_tool_multimodal_images: List[Dict[str, Any]] = []
+            force_image_model_until_crop_done = False
             
             status.update("思考中", "正在生成回复...")
 
@@ -409,7 +410,11 @@ class BackBrainMixin:
                 await self._send_debug(chat_id, f"💭 开始第 {current_turn}/{MAX_TURNS} 轮推理...")
                 
                 turn_multimodal_images = multimodal_images if current_turn == 1 else pending_tool_multimodal_images
-                turn_model_alias = "image" if turn_multimodal_images else base_model_alias
+                # 如果上游工具要求使用 image 模型，则强制切换（直到 crop 轮返回首个响应后清除）
+                if force_image_model_until_crop_done:
+                    turn_model_alias = "image"
+                else:
+                    turn_model_alias = "image" if turn_multimodal_images else base_model_alias
                 turn_llm = self.image_llm if turn_model_alias == "image" else self.coder_llm
                 last_turn_model_alias = turn_model_alias
                 last_turn_llm = turn_llm
@@ -653,6 +658,25 @@ class BackBrainMixin:
                                 logger.info(f"[{chat_id}] {tool_name} 返回 {len(tool_images)} 张图片，下一轮切换 image 模型进行分析。")
                         except Exception:
                             logger.warning(f"[{chat_id}] 解析 {tool_name} 返回图片失败，已跳过多模态注入。", exc_info=True)
+
+                    # 如果工具要求强制使用 image 模型，则标记，直到 crop_image_for_llm 第一轮输出后清除
+                    if tool_name == "view_image" and isinstance(tool_args, dict) and bool(tool_args.get("use_image_model", False)):
+                        force_image_model_until_crop_done = True
+                        # 如果返回了 MediaTag，已在上方提取；若未提取到但有 file_path，可直接注入
+                        if not pending_tool_multimodal_images and isinstance(tool_result, str):
+                            try:
+                                from core.routing import extract_image_payloads as _ex
+                                _, inferred_images = _ex(tool_result)
+                                if inferred_images:
+                                    for ti in inferred_images:
+                                        ti["from_tool"] = True
+                                    pending_tool_multimodal_images = inferred_images
+                            except Exception:
+                                logger.debug(f"[{chat_id}] use_image_model 标记下未能注入图片，多模态输入保持为空。", exc_info=True)
+
+                    # 在 crop_image_for_llm 回合的首个文本输出后，解除强制 image 模型
+                    if force_image_model_until_crop_done and tool_name == "crop_image_for_llm":
+                        force_image_model_until_crop_done = False
                     status.update("处理结果", f"{tool_name} 执行完毕，正在分析结果...")
                     # --- 抢占检查点：工具执行后检查取消 ---
                     await asyncio.sleep(0)
@@ -782,17 +806,20 @@ class BackBrainMixin:
                             )
                 logger.debug(f"[{chat_id}] 已提取 {len(image_tags_extracted)} 个图片标签块，{len(image_ocr_extracted)} 个 OCR 文字块。")
 
-                # 如果缺少 IMAGE_TAGS，则补发一次仅请求 TAGS 的最小提示，避免图片入库缺标签
+                # 如果缺少 IMAGE_TAGS 或标签未使用英文逗号，则补发一次仅请求 TAGS 的最小提示
                 missing_tag_ids = [img_id for img_id in expected_ids if not image_tags_extracted.get(img_id)]
-                if missing_tag_ids:
-                    await self._send_debug(chat_id, f"⚠️ 检测到缺失 {len(missing_tag_ids)} 个 IMAGE_TAGS，尝试补齐...")
+                bad_comma_ids = [img_id for img_id, tags in image_tags_extracted.items() if "," not in tags]
+                retry_ids = list(dict.fromkeys(missing_tag_ids + bad_comma_ids))
+
+                if retry_ids:
+                    await self._send_debug(chat_id, f"⚠️ 检测到 {len(retry_ids)} 个 IMAGE_TAGS 缺失或未使用英文逗号，尝试补齐...")
                     retry_prompt = (
-                        "仅输出缺失图片的 IMAGE_TAGS 块，不要输出其他任何文本或 OCR。\n"
-                        "为每个缺失 ID 输出一组：[IMAGE_TAGS:ID]\n标签1, 标签2, ...（至少8个，2-8字关键词）\n[/IMAGE_TAGS]\n"
+                        "仅输出以下图片的 IMAGE_TAGS 块，不要输出其他任何文本或 OCR。\n"
+                        "为每个待补齐/修复的 ID 输出一组：[IMAGE_TAGS:ID]\n标签1, 标签2, ...（至少8个，2-8字关键词，必须使用英文逗号分隔）\n[/IMAGE_TAGS]\n"
                         "禁止输出解释、编号或额外文字。\n"
-                        "缺失 ID 列表：\n" + "\n".join(f"- {mid}" for mid in missing_tag_ids)
+                        "需要补齐/修复的 ID 列表：\n" + "\n".join(f"- {mid}" for mid in retry_ids)
                     )
-                    retry_images = [img for img in multimodal_images if img.get("image_id") in missing_tag_ids]
+                    retry_images = [img for img in multimodal_images if img.get("image_id") in retry_ids]
                     retry_stream = self._chat_stream_wrapper(
                         self.image_llm,
                         chat_id,
@@ -815,8 +842,8 @@ class BackBrainMixin:
                         tags_text = m.group(2).strip()
                         if img_id and tags_text:
                             # 若模型仍使用占位符 ID，则按缺失顺序映射
-                            if img_id not in expected_set and missing_tag_ids:
-                                mapped_id = missing_tag_ids.pop(0)
+                            if img_id not in expected_set and retry_ids:
+                                mapped_id = retry_ids.pop(0)
                                 image_tags_extracted[mapped_id] = tags_text
                                 logger.warning(f"[{chat_id}] IMAGE_TAGS 补齐时检测到占位符 ID，已按顺序映射: {img_id} -> {mapped_id}")
                             else:
