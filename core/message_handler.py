@@ -100,6 +100,10 @@ class MessageHandlerMixin:
             await self._cmd_custom_scope(chat_id, stripped)
             return
 
+        if stripped.startswith("/undo"):
+            await self._cmd_undo(chat_id, chat_type, user_id)
+            return
+
         if stripped.startswith("/set_stream") or stripped.startswith("/nonstream"):
             await self._cmd_set_stream(chat_id, chat_type, user_id, stripped)
             return
@@ -214,18 +218,25 @@ class MessageHandlerMixin:
         if user_reply and should_reply:
             # 使用 [SPLIT] 分段发送
             parts = self._SPLIT_MARKER_PATTERN.split(user_reply)
+            sent_message_ids = []
             for part in parts:
                 part = part.strip()
                 if part:
-                    await self.adapter.send_message(chat_id, part)
+                    msg_id = await self.adapter.send_message(chat_id, part)
+                    if msg_id:
+                        sent_message_ids.append(str(msg_id))
 
-            # 保存前脑回复到数据库
+            # 保存前脑回复到数据库，记录来源与平台 message_id
+            metadata = {"source": "front"}
+            if sent_message_ids:
+                metadata["platform_message_ids"] = sent_message_ids
             self.message_history.add_message(
                 platform="telegram",
                 chat_id=storage_id,
                 role="assistant",
                 content=user_reply,
                 user_id="assistant",
+                metadata=metadata,
             )
 
             # 同步到 session history
@@ -515,6 +526,55 @@ class MessageHandlerMixin:
         except Exception as e:
             logger.error(f"[{chat_id}] /custom_scope 执行失败: {e}", exc_info=True)
             await self.adapter.send_message(chat_id, f"❌ 设置失败: {e}")
+
+        async def _cmd_undo(self, chat_id: str, chat_type: str, user_id: str):
+            """撤销前脑上一条已发送的消息（仅 assistant / front 来源）。"""
+            storage_id = chat_id if chat_type != "private" else user_id
+            try:
+                removed = self.message_history.delete_last_assistant_message(
+                    platform="telegram",
+                    chat_id=storage_id,
+                    source="front",
+                )
+                if removed is None:
+                    await self.adapter.send_message(chat_id, "❌ 没有可撤销的前脑消息。")
+                    return
+
+                # 内存会话历史同步删除最近一条 assistant（不连带用户）
+                session = self.sessions.get(chat_id)
+                if session and session.get("history"):
+                    hist = session["history"]
+                    for idx in range(len(hist) - 1, -1, -1):
+                        if hist[idx].get("role") == "assistant":
+                            hist.pop(idx)
+                            break
+
+                # 尝试删除平台消息
+                md = removed.get("metadata") or {}
+                platform_ids = md.get("platform_message_ids") or []
+                delete_ok = False
+                delete_attempted = False
+                if platform_ids and getattr(self.adapter, "platform_features", None):
+                    feats = self.adapter.platform_features
+                    if getattr(feats, "supports_delete_message", False):
+                        delete_attempted = True
+                        for pid in platform_ids:
+                            try:
+                                ok = await self.adapter.delete_message(chat_id, pid)
+                                delete_ok = delete_ok or ok
+                            except Exception:
+                                logger.warning(f"[{chat_id}] 平台删除消息 {pid} 失败", exc_info=True)
+
+                if delete_attempted:
+                    if delete_ok:
+                        await self.adapter.send_message(chat_id, "✅ 已撤销上一条前脑消息（聊天界面已删除）。")
+                    else:
+                        await self.adapter.send_message(chat_id, "✅ 已撤销存档；⚠️ 平台消息删除失败或权限不足。")
+                else:
+                    await self.adapter.send_message(chat_id, "✅ 已撤销上一条前脑消息（仅存档层面）。")
+            except Exception as e:
+                logger.error(f"[{chat_id}] /undo 执行失败: {e}", exc_info=True)
+                await self.adapter.send_message(chat_id, f"❌ 撤销失败: {e}")
 
     async def _cmd_set_stream(self, chat_id: str, chat_type: str, user_id: str, text: str):
         """切换 per-chat 非流式输出模式。/set_stream on|off（on=一次性输出，off=流式），空参=查询当前状态。"""

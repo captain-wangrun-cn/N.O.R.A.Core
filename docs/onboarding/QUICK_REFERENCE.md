@@ -58,6 +58,8 @@ core/controller.py            NoraController.handle_message()
 ### `brain/tools.py`
 - `ToolManager` — 工具注册、schema 生成、执行
   - 内置工具：`create_new_skill`, `execute_skill`, `execute_tool_plan`, `read_file`, `search`, `write_file`, `edit_file`, `list_dir`, `get_available_skills`, `exec_command`, `view_image`, `crop_image_for_llm`, `set_alarm`, `list_alarms`, `cancel_alarm`
+  - `view_image`: 默认 `return_image=true`，输出 `[image: abs_path]` MediaTag，后脑会自动读取图片并送入 image 模型；`use_image_model=true` 时强制切换 image 模型，直到下一次 `crop_image_for_llm` 返回首个响应后解除。
+  - IMAGE_TAGS 质量兜底：缺失标签或标签未使用英文逗号分隔时，会触发一次仅请求 `IMAGE_TAGS` 的补齐重试。
   - 详细说明：`docs/architecture/tools.md`
 
 ### `core/scheduler.py`
@@ -98,6 +100,8 @@ python main.py
 # /regenerate_proactive [replace|append]
 # /schedule_today
 # /custom_scope （按钮勾选 fast/smart/image/coder，含 none/关闭）
+# /debug_cleanup （按钮选择清理范围：Qdrant 记忆、Qdrant 图片、Mongo 图片库、消息镜像库、上下文压缩库、聊天记录，含“全部清空”与取消；二次确认防误触）
+# /undo （撤销上一条前脑发送的消息；删除消息历史与镜像库，若记录了平台 message_id 且平台支持，会尝试删除聊天界面消息）
 
 # 查看聊天记录统计
 python cli.py --show-history
@@ -126,6 +130,8 @@ python tui.py
 | `data/memory/message_history.db` | 聊天记录 + 压缩总结 + 对话段落（`messages` + `summaries` + `conversation_sessions` 表） |
 | `data/memory/message_log.db` | 消息镜像库：用户/AI 原文双写，便于追溯 |
 | `data/memory/context_compression.db` | 按消息段(session)的滑动窗口压缩上下文（最新3段保留、4-6段单独压缩、7-10段合并压缩） |
+| `data/memory/message_log.db` / `data/memory/context_compression.db` 清理 | 通过 `/debug_cleanup` 可选单独清空或在“全部清空”时一并删除并重建 |
+| 撤销（/undo）影响 | 仅删除前脑的上一条 assistant 消息：`message_history.messages` 与 `message_log.raw_messages` 删除对应记录；若记录了平台 `message_id` 且平台支持，会尝试删除原消息。 |
 | `memory/cost_tracking.db` | 成本记录 |
 | `memory/vector.db` | 向量数据库（Qdrant） |
 

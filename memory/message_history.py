@@ -3,7 +3,7 @@ import json
 import asyncio
 from datetime import datetime
 from zoneinfo import ZoneInfo
-from typing import List, Dict, Optional, Tuple
+from typing import List, Dict, Optional, Tuple, Any
 from pathlib import Path
 import logging
 
@@ -250,6 +250,60 @@ class MessageHistory:
         self._launch_background(self._check_and_compress(platform, chat_id))
 
         return message_id
+
+    def delete_last_assistant_message(
+        self,
+        platform: str,
+        chat_id: str,
+        source: str = "front",
+    ) -> Optional[Dict[str, Any]]:
+        """
+        删除最近一条指定来源的 assistant 消息（未归档且未置顶）。
+
+        仅用于前脑撤销：匹配 metadata.source == source (默认 front)。
+        返回包含 message_id 与 metadata 的字典；若未找到则返回 None。
+        """
+        conn = sqlite3.connect(str(self.db_path))
+        conn.row_factory = sqlite3.Row
+        cursor = conn.cursor()
+        try:
+            cursor.execute(
+                """
+                SELECT id, metadata FROM messages
+                WHERE platform = ? AND chat_id = ? AND role = 'assistant'
+                      AND is_archived = 0 AND is_pinned = 0
+                ORDER BY id DESC
+                LIMIT 50
+                """,
+                (platform, chat_id),
+            )
+            rows = cursor.fetchall()
+            target_id: Optional[int] = None
+            target_md: Dict[str, Any] = {}
+            for row in rows:
+                md_raw = row["metadata"]
+                md = json.loads(md_raw) if md_raw else {}
+                if md.get("source") == source:
+                    target_id = int(row["id"])
+                    target_md = md
+                    break
+            if target_id is None:
+                return None
+            cursor.execute("DELETE FROM messages WHERE id = ?", (target_id,))
+            conn.commit()
+            # 同步删除镜像库
+            try:
+                self.message_log.delete_by_message_id(target_id)
+            except Exception:
+                logger.warning("删除镜像库记录失败 (id=%s)", target_id, exc_info=True)
+            logger.info(f"[{platform}/{chat_id}] 撤销 assistant 消息 #{target_id} (source={source})")
+            return {"message_id": target_id, "metadata": target_md}
+        except Exception:
+            logger.error(f"[{platform}/{chat_id}] 撤销 assistant 消息失败", exc_info=True)
+            conn.rollback()
+            return None
+        finally:
+            conn.close()
 
     def _schedule_context_refresh(self, platform: str, chat_id: str):
         """异步刷新滑动压缩上下文，失败时记录日志并不中断主流程。"""

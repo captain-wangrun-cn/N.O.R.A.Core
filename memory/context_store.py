@@ -127,6 +127,17 @@ class MessageLog:
         conn.close()
         return rows
 
+    def delete_by_message_id(self, message_id: int) -> None:
+        """删除指定 message_id 的镜像记录。"""
+        conn = sqlite3.connect(str(self.db_path))
+        cursor = conn.cursor()
+        cursor.execute(
+            "DELETE FROM raw_messages WHERE message_id = ?",
+            (message_id,),
+        )
+        conn.commit()
+        conn.close()
+
 
 # ---------------------------------------------------------------------------
 # 上下文压缩存储：滑动窗口策略

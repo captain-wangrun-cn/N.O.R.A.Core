@@ -64,6 +64,16 @@
 
 ### 🗝️ CUSTOM/SECRET 文件与加密私密本 — 2026-03-12
 
+### 🧹 Telegram /debug_cleanup 清理范围扩展 — 2026-03-19
+
+- `/debug_cleanup` 按钮新增：消息镜像库（`message_log.db`）、上下文压缩库（`context_compression.db`）。
+- “全部清空” 现在会同时删除并重建以上两个库，仍包含 Qdrant 记忆/Qdrant 图片、Mongo 图片库、聊天记录。
+- 所有清理操作均需二次确认，避免误触。
+
+**涉及文件：**
+- `adapters/telegram/main.py`（指令按钮与回调，新增 `_purge_message_log`、`_purge_context_db`）
+- `docs/onboarding/QUICK_REFERENCE.md`（指令与数据库清理说明）
+
 - 新增 `CUSTOM.md`：用户维护的全局指令，自动注入提示，AI 禁止用文件工具读取/修改。
 - 新增 `SECRET.md`：AI 私人加密记事本，使用专用工具 `read_secret_vault` / `write_secret_vault`，首次写入生成 `workspace/data/secret.key`（Fernet）。通用文件/命令工具禁止访问。
 - 前脑 prompt 增加 CUSTOM/SECRET 路由说明：
