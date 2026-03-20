@@ -6,6 +6,8 @@
 
 N.O.R.A. Core 引入了 **"脑口分离" (Brain-Mouth Separation)** 的设计理念，将"即时交互"与"深度思考"解耦。
 
+> 2026-03 更新：后脑在轮询模式下不再直接对用户发送分段输出，而是将全部结果汇总给前脑，由前脑统一转述，避免重复回复；后脑也会将工具结果与关键路径写入 `WorkerStatus`，前脑审查时一并可见。
+
 ## 路由策略：前脑优先 (Front-Brain-First)
 
 **所有消息首先进入前脑**，由前脑自行判断是否需要后脑介入：
@@ -47,6 +49,7 @@ N.O.R.A. Core 引入了 **"脑口分离" (Brain-Mouth Separation)** 的设计理
   3. 移除信号标记后发送清洁回复给用户
   4. 若需要后脑 → 启动后脑任务（`_generate_response`）
   5. 若不需要 → 直接结束
+ - **轮询场景**：后脑忙碌期间，前脑只负责意图判定/队列；后脑完成后，前脑审查后脑的“工作报告”并转述给用户（后脑不直接对用户说）。
 
 ### 3. 后脑思考层 (Back Brain / Slow Path)
 
@@ -56,6 +59,7 @@ N.O.R.A. Core 引入了 **"脑口分离" (Brain-Mouth Separation)** 的设计理
   - 这是一个 `asyncio.Task` 后台任务。
   - 执行 RAG、工具调用循环、最终回复生成。
   - **关键**: 在执行的每一步（RAG前、工具调用前、生成前），都会更新 `WorkerStatus`，让前端时刻"知道"自己在干什么。
+  - **轮询模式下的输出汇总**：后脑流式分段（[SPLIT]）不会直接发送用户，而是累积到 `final_response_buffer` + `temp_history`，供前脑审查时一次性查看。工具结果/关键结果也写入 `WorkerStatus.tool_history_readable` 与 `key_results`，前脑审查时会附带给用户。
 
 ### 4. 忙碌时的意图检测
 
@@ -88,6 +92,7 @@ N.O.R.A. Core 引入了 **"脑口分离" (Brain-Mouth Separation)** 的设计理
 3) **队列协同**：QUEUE 结果会将消息放入 per-chat `BackendTaskQueue`；当前任务完成的 `finally` 中会轮询队列并启动下一任务。
 4) **在线状态轮询**：`_update_scheduler_state` / `_mark_scheduler_idle` 同步到全局在线状态，驱动对话延续计时器（FOLLOWUP 循环）。
 5) **对话分段闭环**：FOLLOWUP 循环判定 END 或追话超限后，调用 `_transition_to_semi_online` 触发 `close_session`，封闭本轮对话段落。
+6) **结果交接**：后脑结束后构建“工作报告”（包含分段输出、工具步骤、关键结果），前脑调用 `_front_brain_review` 审查并生成最终用户向回复；后脑在轮询模式下不直接触达用户。
 
 ### 时序（轮询协同）
 
@@ -121,18 +126,21 @@ graph TD
     
     Signal -- No --> Done[结束 ✅]
     
-    Signal -- Yes --> BackBrain[启动后脑任务]
-    BackBrain --> Brain[后脑思考层\n(RAG / Tools / Generate)]
-    Brain -->|更新状态| SharedState[(WorkerStatus)]
-    Brain -->|完成| Reply2[发送后脑结果给用户]
+  Signal -- Yes --> BackBrain[启动后脑任务]
+  BackBrain --> Brain[后脑思考层<br/>(RAG/Tools/Generate)]
+  Brain -->|更新状态| SharedState[(WorkerStatus)]
+  Brain -->|完成工作报告| Report[后脑工作报告<br/>(含工具步骤/关键结果)]
+  Report --> Review[前脑审查转述]
+  Review --> Reply2[发送最终用户回复]
 
-    User2[用户新消息\n(后脑忙碌时)] --> CheckBusy{后端忙吗?}
-    CheckBusy -- Yes --> FastLLM[快速模型判断意图]
-    SharedState --> FastLLM
+  User2[用户新消息<br/>(后脑忙碌时)] --> CheckBusy{后端忙吗?}
+  CheckBusy -- Yes --> FastLLM[快速模型判断意图]
+  SharedState --> FastLLM
     
-    FastLLM -->|ACTION: queue| Queue[加入待处理队列]
-    FastLLM -->|ACTION: stop| Stop[取消后端任务]
-    FastLLM -->|ACTION: change| Change[取消后端 + 启动新任务]
+  FastLLM -->|ACTION: queue| Queue[加入待处理队列]
+  FastLLM -->|ACTION: stop| Stop[取消后端任务]
+  FastLLM -->|ACTION: change| Change[取消后端 + 启动新任务]
+  Queue -->|当前任务完成后出队| BackBrain
 ```
 
 ## 路由信号协议
