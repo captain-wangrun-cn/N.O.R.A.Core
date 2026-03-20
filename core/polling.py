@@ -82,6 +82,7 @@ class PollingMixin:
                         break
 
                 # 追加后脑执行过的工具操作记录，供前脑审查与转述
+                status = self.worker_status.get(chat_id)
                 if status and status.tool_history_readable:
                     compact_steps = []
                     for step in status.tool_history_readable:
