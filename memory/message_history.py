@@ -386,10 +386,7 @@ class MessageHistory:
             compressed_segments = self.context_compressor.get_context_messages(platform, chat_id)
             if compressed_segments:
                 messages.extend(compressed_segments)
-                messages.sort(key=lambda x: x.get("timestamp", 0))
                 logger.debug(f"[{platform}/{chat_id}] 使用上下文压缩库: {len(compressed_segments)} 段")
-                conn.close()
-                return messages
         
         # 3. 获取压缩总结 (Level 1-2)
         if include_summaries:
