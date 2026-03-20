@@ -396,6 +396,7 @@ class BackBrainMixin:
             # 工具回查图片（view_image return_image=true）注入到下一轮多模态输入
             pending_tool_multimodal_images: List[Dict[str, Any]] = []
             force_image_model_until_crop_done = False
+            in_polling_mode = context.get("_in_polling_loop", False)
             
             status.update("思考中", "正在生成回复...")
 
@@ -475,7 +476,14 @@ class BackBrainMixin:
                                         r'(?:execute_skill|execute_tool_plan|write_file|read_file|edit_file|exec_command|list_dir|create_new_skill|search)\s*\(',
                                         text_to_send
                                     ):
-                                        await self.adapter.send_message(chat_id, text_to_send)
+                                        # 轮询模式下不直接发送，由前脑统一转述
+                                        if not in_polling_mode:
+                                            await self.adapter.send_message(chat_id, text_to_send)
+                                        else:
+                                            # 轮询模式下需要将分段也汇总到最终结果供前脑审查
+                                            if final_response_buffer:
+                                                final_response_buffer += "\n\n"
+                                            final_response_buffer += text_to_send
                                         # Important: keep final buffer synchronized
                                         temp_history.append({"role": "assistant", "content": text_to_send})
                         
