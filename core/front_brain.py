@@ -385,23 +385,39 @@ class FrontBrainMixin:
         user_prompt = render_template(
             'front_brain_review.jinja',
             'user',
-            backend_result=backend_result[:2000],  # 截断过长的后脑输出
+            backend_result=backend_result,
             new_user_messages=new_user_messages,
         )
 
-        # 加载最近对话历史
+        # 仅取当前对话段的上下文；过长时再截断
         db_context = self.message_history.get_context_messages("telegram", storage_id)
-        if len(db_context) > 15:
-            db_context = db_context[-15:]
-        
-        history = [
+        current_session_msgs = [
             {
                 "role": msg["role"],
                 "content": self._strip_timestamp_markers(str(msg["content"]))
             }
             for msg in db_context
-            if msg["role"] in ("user", "assistant")
+            if msg.get("role") in ("user", "assistant")
         ]
+
+        # 将后脑报告与新用户消息显式放入上下文，便于审查模型完整感知
+        backend_report = backend_result.strip()
+        if backend_report:
+            current_session_msgs.append({
+                "role": "assistant",
+                "content": f"【后脑工作报告】\n{backend_report}"
+            })
+
+        for msg in new_user_messages:
+            msg = str(msg).strip()
+            if msg:
+                current_session_msgs.append({"role": "user", "content": msg})
+
+        # 若当前消息段过长（>40），仅保留最近 40 条
+        if len(current_session_msgs) > 40:
+            current_session_msgs = current_session_msgs[-40:]
+
+        history = current_session_msgs
 
         # 调用 smart 模型审查
         response_text = ""
