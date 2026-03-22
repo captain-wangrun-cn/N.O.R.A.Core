@@ -1,5 +1,6 @@
 import asyncio
-from typing import Callable, Any, Dict
+from collections import deque
+from typing import Callable, Any, Dict, Deque
 
 class MessageAggregator:
     """消息聚合器，用于合并用户的连续输入。"""
@@ -10,9 +11,20 @@ class MessageAggregator:
         self._buffers: Dict[str, str] = {}
         self._contexts: Dict[str, Dict[str, Any]] = {}
         self._timers: Dict[str, asyncio.Task] = {}
+        # 记录最近处理过的 message_id，避免平台重复投递导致的重复拼接
+        self._recent_message_ids: Dict[str, Deque[str]] = {}
 
     async def add_message(self, chat_id: str, text: str, context: Dict[str, Any]):
         """添加一条新消息到缓冲区。"""
+        platform_msg_id = context.get("platform_message_id")
+        if platform_msg_id:
+            msg_id_str = str(platform_msg_id)
+            recent_ids = self._recent_message_ids.setdefault(chat_id, deque(maxlen=50))
+            if msg_id_str in recent_ids:
+                # 已处理过同一平台消息，跳过重复聚合
+                return
+            recent_ids.append(msg_id_str)
+
         if chat_id in self._timers:
             self._timers[chat_id].cancel()
 
