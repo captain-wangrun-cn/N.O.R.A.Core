@@ -111,12 +111,25 @@ class MessageHandlerMixin:
         # --- 前后端分离逻辑 ---
         status = self.worker_status.get(chat_id)
         if status and status.busy:
-            # 后端忙碌：用 fast 模型判断用户意图并生成回复
+            # 后端忙碌：
+            storage_id = chat_id if chat_type != "private" else user_id
+            message_content = f"{user_name}: {text}" if chat_type != "private" else text
+
+            # 若包含图片输入，直接入队，避免图片丢失
+            if image_input_detected:
+                queue = self.task_queues.setdefault(chat_id, BackendTaskQueue())
+                await queue.enqueue({
+                    "context": context,
+                    "text": text,
+                })
+                await self.adapter.send_message(chat_id, "后端忙碌，已把图片需求排队，稍后处理哦～")
+                logger.info(f"[{chat_id}] 后端忙碌且检测到图片，消息已入队 (队列长度 {queue.size()})")
+                return
+
+            # 无图片则走原有忙碌意图判断
             logger.info(f"[{chat_id}] 后端忙碌，分析用户意图...")
             
             # 保存用户消息到数据库（不丢消息）
-            storage_id = chat_id if chat_type != "private" else user_id
-            message_content = f"{user_name}: {text}" if chat_type != "private" else text
             self.message_history.add_message(
                 platform="telegram",
                 chat_id=storage_id,
@@ -178,7 +191,6 @@ class MessageHandlerMixin:
                     logger.info(f"[{chat_id}] 已清空所有排队任务")
                 return
             else:  # action == "queue"
-                # 新需求：忙碌时不再入待生成队列，避免重复回复。
                 logger.info(f"[{chat_id}] 后端忙碌，按照策略不入队，已仅回复忙碌提示。")
                 return
 
