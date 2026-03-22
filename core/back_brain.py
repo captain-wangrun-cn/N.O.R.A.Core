@@ -10,7 +10,7 @@ import logging
 import os
 import re
 import time
-from typing import Dict, Any, List, cast
+from typing import Dict, Any, List, Optional, cast
 
 from brain.prompts import get_system_prompt, render_template, load_custom_prompt, should_inject_custom
 from brain.multimodal import extract_image_payloads
@@ -825,20 +825,27 @@ class BackBrainMixin:
                             )
                 logger.debug(f"[{chat_id}] 已提取 {len(image_tags_extracted)} 个图片标签块，{len(image_ocr_extracted)} 个 OCR 文字块。")
 
-                # 如果缺少 IMAGE_TAGS 或标签未使用英文逗号，则补发一次仅请求 TAGS 的最小提示
-                missing_tag_ids = [img_id for img_id in expected_ids if not image_tags_extracted.get(img_id)]
-                bad_comma_ids = [img_id for img_id, tags in image_tags_extracted.items() if "," not in tags]
-                retry_ids = list(dict.fromkeys(missing_tag_ids + bad_comma_ids))
+                def _find_tag_issues():
+                    missing = [img_id for img_id in expected_ids if not image_tags_extracted.get(img_id)]
+                    bad = [img_id for img_id, tags in image_tags_extracted.items() if "," not in tags]
+                    return missing, bad
 
-                if retry_ids:
-                    await self._send_debug(chat_id, f"⚠️ 检测到 {len(retry_ids)} 个 IMAGE_TAGS 缺失或未使用英文逗号，尝试补齐...")
+                missing_tag_ids, bad_comma_ids = _find_tag_issues()
+                retry_attempt = 0
+                MAX_TAG_RETRY = 2
+
+                while (missing_tag_ids or bad_comma_ids) and retry_attempt < MAX_TAG_RETRY:
+                    retry_attempt += 1
+                    await self._send_debug(
+                        chat_id,
+                        f"⚠️ 检测到 {len(missing_tag_ids)} 个 IMAGE_TAGS 缺失、{len(bad_comma_ids)} 个格式异常，重新请求完整标签（第 {retry_attempt}/{MAX_TAG_RETRY} 次）..."
+                    )
                     retry_prompt = (
                         "仅输出以下图片的 IMAGE_TAGS 块，不要输出其他任何文本或 OCR。\n"
-                        "为每个待补齐/修复的 ID 输出一组：[IMAGE_TAGS:ID]\n标签1, 标签2, ...（至少8个，2-8字关键词，必须使用英文逗号分隔）\n[/IMAGE_TAGS]\n"
+                        "为每个图片 ID 输出一组：[IMAGE_TAGS:ID]\n标签1, 标签2, ...（至少8个，2-8字关键词，必须使用英文逗号分隔）\n[/IMAGE_TAGS]\n"
                         "禁止输出解释、编号或额外文字。\n"
-                        "需要补齐/修复的 ID 列表：\n" + "\n".join(f"- {mid}" for mid in retry_ids)
+                        "图片 ID 列表：\n" + "\n".join(f"- {mid}" for mid in expected_ids)
                     )
-                    retry_images = [img for img in multimodal_images if img.get("image_id") in retry_ids]
                     retry_stream = self._chat_stream_wrapper(
                         self.image_llm,
                         chat_id,
@@ -846,7 +853,7 @@ class BackBrainMixin:
                         user_prompt=retry_prompt,
                         history=temp_history,
                         tools=[],
-                        multimodal_images=retry_images if retry_images else None,
+                        multimodal_images=multimodal_images,
                     )
                     retry_buffer = ""
                     async for raw_chunk in retry_stream:
@@ -856,23 +863,39 @@ class BackBrainMixin:
                         elif isinstance(chunk, str):
                             retry_buffer += chunk
 
+                    new_tags: Dict[str, str] = {}
+                    retry_order = list(expected_ids)
                     for m in self._IMAGE_TAGS_PATTERN.finditer(retry_buffer):
                         img_id = m.group(1).strip()
                         tags_text = m.group(2).strip()
-                        if img_id and tags_text:
-                            # 若模型仍使用占位符 ID，则按缺失顺序映射
-                            if img_id not in expected_set and retry_ids:
-                                mapped_id = retry_ids.pop(0)
-                                image_tags_extracted[mapped_id] = tags_text
-                                logger.warning(f"[{chat_id}] IMAGE_TAGS 补齐时检测到占位符 ID，已按顺序映射: {img_id} -> {mapped_id}")
-                            else:
-                                image_tags_extracted[img_id] = tags_text
+                        if not img_id or not tags_text:
+                            continue
+                        mapped_id: Optional[str]
+                        if img_id in expected_set and img_id not in new_tags:
+                            mapped_id = img_id
+                        else:
+                            mapped_id = None
+                            while retry_order and (retry_order[0] in new_tags):
+                                retry_order.pop(0)
+                            if retry_order:
+                                mapped_id = retry_order.pop(0)
+                                logger.warning(
+                                    f"[{chat_id}] IMAGE_TAGS 重新请求时检测到占位符或重复 ID，已按顺序映射: {img_id} -> {mapped_id}"
+                                )
+                        if mapped_id:
+                            new_tags[mapped_id] = tags_text
 
-                    still_missing = [img_id for img_id in expected_ids if not image_tags_extracted.get(img_id)]
-                    if still_missing:
-                        logger.warning(f"[{chat_id}] 仍缺少 {len(still_missing)} 个 IMAGE_TAGS: {still_missing}")
-                    else:
-                        logger.info(f"[{chat_id}] 已补齐全部 IMAGE_TAGS。")
+                    if new_tags:
+                        image_tags_extracted = new_tags
+
+                    missing_tag_ids, bad_comma_ids = _find_tag_issues()
+
+                if missing_tag_ids or bad_comma_ids:
+                    logger.warning(
+                        f"[{chat_id}] 重新请求后仍有缺失/格式问题的 IMAGE_TAGS，缺失 {missing_tag_ids}，格式异常 {bad_comma_ids}"
+                    )
+                elif retry_attempt:
+                    logger.info(f"[{chat_id}] 重新请求后已补齐全部 IMAGE_TAGS。")
 
             if final_response_buffer:
                 clean_response = re.sub(
