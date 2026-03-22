@@ -958,7 +958,8 @@ class BackBrainMixin:
                     chat_id=storage_id,
                     role="assistant",
                     content=final_response_buffer,
-                    user_id="assistant"
+                    user_id="assistant",
+                    metadata={"image_ids": [img.get("image_id") for img in multimodal_images] if multimodal_images else None},
                 )
             
             # --- 4.6 图片记忆存储 (Image Memory Storage) ---
@@ -991,6 +992,8 @@ class BackBrainMixin:
                             user_id=storage_id,
                             chat_id=chat_id,
                             ocr_text=ocr_text,
+                            platform=context.get("platform", "telegram"),
+                            platform_message_id=context.get("platform_message_id"),
                         )
                     )
                     ocr_info = f", ocr_text='{ocr_text[:40]}...'" if ocr_text else ""

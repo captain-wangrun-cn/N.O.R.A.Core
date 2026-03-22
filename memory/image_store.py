@@ -159,6 +159,8 @@ class ImageStore:
         user_id: str,
         chat_id: str = "",
         extra: Optional[Dict[str, Any]] = None,
+        platform: str = "",
+        platform_message_id: Optional[str] = None,
     ) -> bool:
         """
         保存一张图片的完整元数据。
@@ -195,6 +197,8 @@ class ImageStore:
             "tags": tags,
             "user_id": user_id,
             "chat_id": chat_id,
+            "platform": platform,
+            "platform_message_id": platform_message_id,
             "timestamp": now,
             "datetime": datetime.fromtimestamp(now, tz=timezone.utc).isoformat(),
             **(extra or {}),

@@ -267,6 +267,8 @@ class NoraController(
         user_id: str,
         chat_id: str,
         ocr_text: str = "",
+        platform: str = "",
+        platform_message_id: Optional[str] = None,
     ):
         """异步保存图片元数据到 MongoDB + Qdrant。"""
         try:
@@ -281,6 +283,8 @@ class NoraController(
                 user_id=user_id,
                 chat_id=chat_id,
                 extra=extra,
+                platform=platform,
+                platform_message_id=platform_message_id,
             )
             logger.debug(f"[{chat_id}] 图片元数据已异步保存: {image_id}" + (f" (含 OCR {len(ocr_text)} 字)" if ocr_text else ""))
         except Exception as e:

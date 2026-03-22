@@ -778,7 +778,9 @@ class TelegramAdapter(BaseAdapter):
                 "user_id": str(update.effective_user.id) if update.effective_user else chat_id,
                 "text": text,
                 "chat_type": update.effective_chat.type,
-                "user_name": update.effective_user.first_name if update.effective_user else "Unknown"
+                "user_name": update.effective_user.first_name if update.effective_user else "Unknown",
+                "platform": "telegram",
+                "platform_message_id": str(update.message.message_id) if update.message else None,
             }
             await self._aggregator.add_message(chat_id, text or "", full_context)
 
@@ -817,9 +819,13 @@ class TelegramAdapter(BaseAdapter):
                     "chat_type": update.effective_chat.type,
                     "user_name": update.effective_user.first_name if update.effective_user else "Unknown",
                     "reply_info": reply_info,
+                    "platform": "telegram",
+                    "message_ids": [],
                 }
             
             self._media_group_buffers[media_group_id]["photos"].append(rel_file_path)
+            if update.message:
+                self._media_group_buffers[media_group_id]["message_ids"].append(str(update.message.message_id))
             # caption 只取第一张非空的（Telegram 相册只允许第一张图有 caption）
             if caption and not self._media_group_buffers[media_group_id]["caption"]:
                 self._media_group_buffers[media_group_id]["caption"] = caption
@@ -846,7 +852,9 @@ class TelegramAdapter(BaseAdapter):
                     "user_id": str(update.effective_user.id) if update.effective_user else chat_id,
                     "text": text,
                     "chat_type": update.effective_chat.type,
-                    "user_name": update.effective_user.first_name if update.effective_user else "Unknown"
+                    "user_name": update.effective_user.first_name if update.effective_user else "Unknown",
+                    "platform": "telegram",
+                    "platform_message_id": str(update.message.message_id) if update.message else None,
                 }
                 await self._aggregator.add_message(chat_id, text, full_context)
             
@@ -870,6 +878,7 @@ class TelegramAdapter(BaseAdapter):
             text = f"[回复: {buf['reply_info']}]\n{text}"
         
         chat_id = buf["chat_id"]
+        platform_msg_id = buf.get("message_ids", [None])[0]
         if self._aggregator:
             full_context = {
                 "chat_id": chat_id,
@@ -877,6 +886,8 @@ class TelegramAdapter(BaseAdapter):
                 "text": text,
                 "chat_type": buf["chat_type"],
                 "user_name": buf["user_name"],
+                "platform": buf.get("platform", "telegram"),
+                "platform_message_id": platform_msg_id,
             }
             await self._aggregator.add_message(chat_id, text, full_context)
         
@@ -1512,7 +1523,19 @@ class TelegramAdapter(BaseAdapter):
         # 查找对应的回复消息
         for msg in history:
             if msg.get("message_id") == reply_msg_id:
-                return msg["content"]
+                content = msg.get("content", "")
+                md_raw = msg.get("metadata")
+                image_id = None
+                if md_raw:
+                    try:
+                        import json as _json
+                        md = _json.loads(md_raw) if isinstance(md_raw, str) else md_raw
+                        image_id = md.get("image_id")
+                    except Exception:
+                        image_id = None
+                if image_id:
+                    return f"[image_id: {image_id}]\n{content}"
+                return content
         
         return None
 
