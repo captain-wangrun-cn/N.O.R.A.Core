@@ -203,7 +203,15 @@ class MessageHandlerMixin:
 
         # 图片消息直接走后脑（需要 image 模型 + 工具能力）
         if image_input_detected:
+            if not multimodal_images:
+                warn = "没有读取到图片内容，可能文件路径或下载失败了，能再发一次原图吗？"
+                await self.adapter.send_message(chat_id, warn)
+                logger.warning(f"[{chat_id}] 检测到图片标记但未能加载图片，已提示用户重发。原始文本: {text[:100]}")
+                return
             logger.info(f"[{chat_id}] 检测到图片输入，直接启动后脑。")
+            # 将解析后的干净文本放入 context，避免后脑重复清洗
+            context = dict(context)
+            context["text"] = text
             task = asyncio.create_task(self._generate_response(context))
             self.generation_tasks[chat_id] = task
             return
