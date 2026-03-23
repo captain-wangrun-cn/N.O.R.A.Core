@@ -111,7 +111,8 @@ class MessageHandlerMixin:
         # --- 前后端分离逻辑 ---
         status = self.worker_status.get(chat_id)
         if status and status.busy:
-            # 后端忙碌：
+            # 后端忙碌：允许前脑继续生成，不强制回复“在忙”。
+            # 仅在有图片时直接排队，其他情况交由前脑处理并按需打断/切换。
             storage_id = chat_id if chat_type != "private" else user_id
             message_content = f"{user_name}: {text}" if chat_type != "private" else text
 
@@ -126,10 +127,9 @@ class MessageHandlerMixin:
                 logger.info(f"[{chat_id}] 后端忙碌且检测到图片，消息已入队 (队列长度 {queue.size()})")
                 return
 
-            # 无图片则走原有忙碌意图判断
-            logger.info(f"[{chat_id}] 后端忙碌，分析用户意图...")
-            
-            # 保存用户消息到数据库（不丢消息）
+            # 无图片：记录消息并运行意图检测，仅在需要打断/切换/队列操作时回复；
+            # 普通 queue 场景不再强制提示“在忙”，让前脑即时回复。
+            logger.info(f"[{chat_id}] 后端忙碌（允许前脑即时回复），记录消息后进行意图检测")
             self.message_history.add_message(
                 platform="telegram",
                 chat_id=storage_id,
@@ -137,43 +137,44 @@ class MessageHandlerMixin:
                 content=message_content,
                 user_id=user_id
             )
-            
-            # LLM 判断意图并生成回复
             decision = await self._detect_interrupt_intent_and_reply(chat_id, text, status)
-            action = decision["action"]
-            reply = decision["reply"]
-            
-            # 发送回复
-            await self.adapter.send_message(chat_id, reply)
-            self.message_history.add_message(
-                platform="telegram",
-                chat_id=storage_id,
-                role="assistant",
-                content=reply,
-                user_id="assistant"
-            )
-            
-            # 同步忙碌期间的对话到 session history（让后脑也能感知这段交互）
+            action = decision.get("action", "queue")
+            reply = decision.get("reply", "")
+
+            # 标记已保存用户消息，后续前脑阶段无需重复写库
+            context["_message_saved"] = True
             session = self.sessions.setdefault(chat_id, {"history": [], "interrupted_thought": "", "pending_text": ""})
             session_history = session.setdefault("history", [])
-            session_history.append({"role": "user", "content": message_content})
-            session_history.append({"role": "assistant", "content": reply})
-            # 保持 session history 不过度膨胀
-            if len(session_history) > 20:
-                session["history"] = session_history[-20:]
-            
-            # 根据 action 执行操作
-            if action == "stop":
-                await self._interrupt_backend(chat_id, reason="stop", user_text=text, skip_reply=True)
-                return
-            elif action == "change":
-                await self._interrupt_backend(chat_id, reason="change", user_text=text, skip_reply=True)
+
+            if action in {"stop", "change"}:
+                session_history.append({"role": "user", "content": message_content})
+                if reply:
+                    await self.adapter.send_message(chat_id, reply)
+                    self.message_history.add_message(
+                        platform="telegram",
+                        chat_id=storage_id,
+                        role="assistant",
+                        content=reply,
+                        user_id="assistant",
+                    )
+                    session_history.append({"role": "assistant", "content": reply})
+                await self._interrupt_backend(chat_id, reason=action, user_text=text, skip_reply=True)
                 return
             elif action == "list_queue":
-                # 查看队列：AI 已在 reply 中汇报了状态，无需额外操作
+                session_history.append({"role": "user", "content": message_content})
+                if reply:
+                    await self.adapter.send_message(chat_id, reply)
+                    self.message_history.add_message(
+                        platform="telegram",
+                        chat_id=storage_id,
+                        role="assistant",
+                        content=reply,
+                        user_id="assistant",
+                    )
+                    session_history.append({"role": "assistant", "content": reply})
                 return
             elif action == "cancel_queue":
-                # 取消特定排队任务
+                session_history.append({"role": "user", "content": message_content})
                 queue = self.task_queues.get(chat_id)
                 param = decision.get("param")
                 if queue and param:
@@ -182,17 +183,37 @@ class MessageHandlerMixin:
                         logger.info(f"[{chat_id}] 已取消排队任务 #{param}: '{removed_text}'")
                     else:
                         logger.warning(f"[{chat_id}] 取消排队任务 #{param} 失败（序号无效或队列已空）")
+                if reply:
+                    await self.adapter.send_message(chat_id, reply)
+                    self.message_history.add_message(
+                        platform="telegram",
+                        chat_id=storage_id,
+                        role="assistant",
+                        content=reply,
+                        user_id="assistant",
+                    )
+                    session_history.append({"role": "assistant", "content": reply})
                 return
             elif action == "clear_queue":
-                # 清空所有排队任务
+                session_history.append({"role": "user", "content": message_content})
                 queue = self.task_queues.get(chat_id)
                 if queue:
                     await queue.clear()
                     logger.info(f"[{chat_id}] 已清空所有排队任务")
+                if reply:
+                    await self.adapter.send_message(chat_id, reply)
+                    self.message_history.add_message(
+                        platform="telegram",
+                        chat_id=storage_id,
+                        role="assistant",
+                        content=reply,
+                        user_id="assistant",
+                    )
+                    session_history.append({"role": "assistant", "content": reply})
                 return
-            else:  # action == "queue"
-                logger.info(f"[{chat_id}] 后端忙碌，按照策略不入队，已仅回复忙碌提示。")
-                return
+            else:
+                # action == "queue"：不发忙碌提示，让前脑继续。
+                pass
 
         # --- 正常流程：后端空闲 ---
         # 旧的抢占逻辑保留，以防万一有残留任务
@@ -220,14 +241,15 @@ class MessageHandlerMixin:
         # 1) 保存用户消息到数据库（保证前脑能读到历史）
         storage_id = chat_id if chat_type != "private" else user_id
         message_content = f"{user_name}: {text}" if chat_type != "private" else text
-        self.message_history.add_message(
-            platform="telegram",
-            chat_id=storage_id,
-            role="user",
-            content=message_content,
-            user_id=user_id,
-        )
-        context["_message_saved"] = True
+        if not context.get("_message_saved"):
+            self.message_history.add_message(
+                platform="telegram",
+                chat_id=storage_id,
+                role="user",
+                content=message_content,
+                user_id=user_id,
+            )
+            context["_message_saved"] = True
 
         # 2) 前脑生成即时回复 + 路由判断
         front_result = await self._generate_front_chat_response(context)

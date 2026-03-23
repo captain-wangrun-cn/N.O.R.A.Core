@@ -8,6 +8,8 @@ import subprocess
 import logging
 import inspect
 import uuid
+import time
+import time
 from cryptography.fernet import Fernet
 from typing import List, Dict, Callable, Any, Optional
 from adapters.base import BaseAdapter
@@ -35,6 +37,8 @@ TOOL_INTROS = {
     "cancel_alarm": "取消指定闹钟，适合调整已设置提醒。",
     "read_secret_vault": "读取加密的 SECRET.md 私人记事本（仅 AI 自用，不向用户披露）。",
     "write_secret_vault": "写入/追加加密的 SECRET.md 私人记事本，首次调用自动生成密钥并创建文件。",
+    "store_progress_note": "（后脑）记录当前步骤与讲解，供前脑/用户查询进度。",
+    "get_progress_note": "（前脑/后脑）获取最近记录的步骤与讲解，便于汇报。",
 }
 
 # --- Workspace & Security Constants ---
@@ -52,6 +56,9 @@ CODE_SKILLS_DIR = os.path.join(CODE_ROOT, "skills")
 SECRET_FILE = os.path.join(WORKSPACE_ROOT, "SECRET.md")
 SECRET_KEY_FILE = os.path.join(DATA_DIR, "secret.key")
 CUSTOM_FILE = os.path.join(WORKSPACE_ROOT, "CUSTOM.md")
+
+# 进度共享存储：chat_id → {"step": str, "explanation": str, "updated_at": float}
+_PROGRESS_STORE: Dict[str, Dict[str, Any]] = {}
 
 # Files that LLM should NEVER read (contain secrets)
 SENSITIVE_FILES = {"config.yml", "config.yaml", ".env", ".env.local", "SECRET.md", "CUSTOM.md", "secret.key"}
@@ -127,6 +134,9 @@ class ToolManager:
             self.register(self.set_alarm)
             self.register(self.list_alarms)
             self.register(self.cancel_alarm)
+        # 进度共享工具（后脑写入，前脑可读取）
+        self.register(self.store_progress_note)
+        self.register(self.get_progress_note)
 
     def register(self, func: Callable):
         self._tools[func.__name__] = func
@@ -134,6 +144,51 @@ class ToolManager:
 
     def get_tool_schemas(self) -> List[Dict[str, Any]]:
         return self._schemas
+
+    # ------------------------------------------------------------------
+    # 进度共享工具
+    # ------------------------------------------------------------------
+
+    def store_progress_note(self, chat_id: str, step: str, explanation: str) -> str:
+        """
+        记录当前步骤与讲解，供前脑/用户查询。
+
+        :param chat_id: 会话唯一标识（通常是 chat_id 或 user_id）
+        :param step: 当前进行到的步骤概述
+        :param explanation: 该步骤的详细说明或补充
+        :return: 确认信息
+
+        典型用法（后脑调用）：
+        - 在长流程中，随时写入最新的步骤描述，便于前脑汇报或用户询问时提供进度。
+        - 如果 step/explanation 为空字符串，会使用上一次的值；但建议显式填写。
+        """
+        now = time.time()
+        _PROGRESS_STORE[chat_id] = {
+            "step": (step or ""),
+            "explanation": (explanation or ""),
+            "updated_at": now,
+        }
+        logger.info(f"[progress] chat={chat_id} step='{step[:80]}'")
+        return "Progress stored"
+
+    def get_progress_note(self, chat_id: str) -> str:
+        """
+        获取最近记录的步骤与讲解。
+
+        :param chat_id: 会话唯一标识（通常是 chat_id 或 user_id）
+        :return: JSON 字符串 {"step": str, "explanation": str, "updated_at": timestamp}，若不存在返回说明。
+
+        典型用法（前脑/后脑调用）：
+        - 前脑在回复用户时获取最新进度，用于回答“做到哪了/现在在干嘛”。
+        - 后脑需要自查最近记录的步骤时调用。
+        """
+        data = _PROGRESS_STORE.get(chat_id)
+        if not data:
+            return "No progress recorded yet."
+        try:
+            return json.dumps(data, ensure_ascii=False)
+        except Exception:
+            return f"Step: {data.get('step', '')}\nExplanation: {data.get('explanation', '')}\nUpdatedAt: {data.get('updated_at', 0)}"
 
     async def execute(self, name: str, args: Dict[str, Any]) -> str:
         if name not in self._tools: return f"Error: Tool '{name}' not found."
