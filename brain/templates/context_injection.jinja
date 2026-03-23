@@ -25,7 +25,9 @@
 
 {# 作息/日程注入 #}
 {% block schedule %}【作息与日程 (SCHEDULE.md)】
-{{ schedule_content }}{% endblock %}
+{{ schedule_content }}
+
+⚠️ 说明：SCHEDULE.md 只记录通用/长期作息，不写每日临时安排；当日或一次性事项请写入 memory/YYYY-MM-DD.md。{% endblock %}
 
 {# 用户自定义全局指令 #}
 {% block custom %}【用户自定义全局指令 (CUSTOM.md)】
