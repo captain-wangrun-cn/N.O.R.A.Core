@@ -534,7 +534,7 @@ class SchedulerMixin:
     # 主动消息 (Proactive Messages)
     # ------------------------------------------------------------------
 
-    async def _generate_daily_plan_via_llm(self) -> List[Dict[str, str]]:
+    async def _generate_daily_plan_via_llm(self, chat_id: str) -> List[Dict[str, str]]:
         """
         LLM 回调：读取 SCHEDULE.md + SOUL.md + USER.md + MEMORY.md，
         生成今日主动消息触发计划。
