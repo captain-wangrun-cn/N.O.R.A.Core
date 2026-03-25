@@ -269,13 +269,14 @@ class NoraController(
         ocr_text: str = "",
         platform: str = "",
         platform_message_id: Optional[str] = None,
+        tag_status: str = "completed",
     ):
         """异步保存图片元数据到 MongoDB + Qdrant。"""
         try:
             extra = {}
             if ocr_text:
                 extra["ocr_text"] = ocr_text
-            await asyncio.to_thread(
+            await asyncio.to_thread(  # type: ignore[attr-defined]
                 self.image_store.save_image_metadata,
                 image_id=image_id,
                 file_path=file_path,
@@ -285,7 +286,60 @@ class NoraController(
                 extra=extra,
                 platform=platform,
                 platform_message_id=platform_message_id,
+                tag_status=tag_status,
             )
             logger.debug(f"[{chat_id}] 图片元数据已异步保存: {image_id}" + (f" (含 OCR {len(ocr_text)} 字)" if ocr_text else ""))
         except Exception as e:
             logger.error(f"保存图片元数据失败: {image_id} - {e}")
+
+    async def _async_save_image_stub(
+        self,
+        image_id: str,
+        file_path: str,
+        user_id: str,
+        chat_id: str,
+        platform: str = "",
+        platform_message_id: Optional[str] = None,
+    ):
+        """异步保存占位图片元数据（无标签，不写向量）。"""
+        try:
+            await asyncio.to_thread(  # type: ignore[attr-defined]
+                self.image_store.save_image_stub,
+                image_id=image_id,
+                file_path=file_path,
+                user_id=user_id,
+                chat_id=chat_id,
+                platform=platform,
+                platform_message_id=platform_message_id,
+            )
+            logger.debug(f"[{chat_id}] 图片占位已异步保存: {image_id}")
+        except Exception as e:
+            logger.error(f"保存图片占位失败: {image_id} - {e}")
+
+    async def _async_update_image_tags(
+        self,
+        image_id: str,
+        tags: str,
+        ocr_text: str,
+        user_id: str,
+        chat_id: str,
+        file_path: str,
+        platform: str = "",
+        platform_message_id: Optional[str] = None,
+    ):
+        """异步补充标签/OCR 并写向量。"""
+        try:
+            await asyncio.to_thread(  # type: ignore[attr-defined]
+                self.image_store.update_image_tags,
+                image_id=image_id,
+                tags=tags,
+                ocr_text=ocr_text,
+                user_id=user_id,
+                chat_id=chat_id,
+                file_path=file_path,
+                platform=platform,
+                platform_message_id=platform_message_id,
+            )
+            logger.debug(f"[{chat_id}] 图片标签已异步更新: {image_id}")
+        except Exception as e:
+            logger.error(f"更新图片标签失败: {image_id} - {e}")

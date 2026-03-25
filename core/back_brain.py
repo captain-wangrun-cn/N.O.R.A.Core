@@ -34,12 +34,12 @@ class BackBrainMixin:
         """移除模型可能泄漏的思维链标签内容（如 <think>...</think>）和图片标签块。"""
         if not text:
             return ""
-        cleaned = cls._THINK_BLOCK_PATTERN.sub("", text)
-        cleaned = cls._THINK_INLINE_PATTERN.sub("", cleaned)
+        cleaned = cls._THINK_BLOCK_PATTERN.sub("", text)  # type: ignore[attr-defined]
+        cleaned = cls._THINK_INLINE_PATTERN.sub("", cleaned)  # type: ignore[attr-defined]
         # 移除 IMAGE_TAGS 块（不应展示给用户，仅后台存储用）
-        cleaned = cls._IMAGE_TAGS_PATTERN.sub("", cleaned)
+        cleaned = cls._IMAGE_TAGS_PATTERN.sub("", cleaned)  # type: ignore[attr-defined]
         # 移除 IMAGE_OCR 块（不应展示给用户，仅后台存储用）
-        cleaned = cls._IMAGE_OCR_PATTERN.sub("", cleaned)
+        cleaned = cls._IMAGE_OCR_PATTERN.sub("", cleaned)  # type: ignore[attr-defined]
         cleaned = re.sub(r'\n{3,}', '\n\n', cleaned).strip()
         return cleaned
 
@@ -98,7 +98,7 @@ class BackBrainMixin:
         ready_parts: List[str] = []
         last_idx = 0
 
-        for marker in cls._SPLIT_MARKER_PATTERN.finditer(buffer):
+        for marker in cls._SPLIT_MARKER_PATTERN.finditer(buffer):  # type: ignore[attr-defined]
             raw_part = buffer[last_idx:marker.start()]
             visible_part, in_think_block = cls._strip_stream_think_segment(raw_part, in_think_block)
             if visible_part.strip():
@@ -124,6 +124,22 @@ class BackBrainMixin:
         clean_text, multimodal_images = extract_image_payloads(text)
         if clean_text:
             text = clean_text
+
+        # 图片先占位入库（无标签，不写向量），待模型回复后再补标签
+        if multimodal_images and self.image_store.enabled:
+            for img in multimodal_images:
+                if img.get("from_tool"):
+                    continue
+                asyncio.create_task(
+                    self._async_save_image_stub(
+                        image_id=img["image_id"],
+                        file_path=img["path"],
+                        user_id=user_id,
+                        chat_id=chat_id,
+                        platform=context.get("platform", "telegram"),
+                        platform_message_id=context.get("platform_message_id"),
+                    )
+                )
 
         # 确定用于存储和检索的唯一ID
         storage_id = chat_id if chat_type != "private" else user_id
@@ -989,7 +1005,7 @@ class BackBrainMixin:
             if multimodal_images and self.image_store.enabled:
                 for img in multimodal_images:
                     img_id = img["image_id"]
-                    # view_image 等工具回查的旧图不需要重新入库，避免写入占位标签
+                    # view_image 等工具回查的旧图不需要重新入库
                     if img.get("from_tool"):
                         logger.debug(f"[{chat_id}] 跳过工具回查图片入库: {img_id} ({img['path']})")
                         continue
@@ -997,30 +1013,25 @@ class BackBrainMixin:
                     tags = image_tags_extracted.get(img_id, "")
                     ocr_text = image_ocr_extracted.get(img_id, "")
 
-                    # 若标签和 OCR 都为空，跳过存储并记录，避免 fallback 文件名污染
                     if not tags and not ocr_text:
-                        logger.warning(
-                            f"[{chat_id}] 图片 {img_id} 未生成标签/OCR，已跳过入库 (path={img['path']})"
-                        )
+                        # 保持 pending 占位，待后续补充
+                        logger.warning(f"[{chat_id}] 图片 {img_id} 未生成标签/OCR，保持占位待补全 (path={img['path']})")
                         continue
 
-                    if not tags:
-                        tags = f"用户发送的图片: {os.path.basename(img['path'])}"
-
                     asyncio.create_task(
-                        self._async_save_image_metadata(
+                        self._async_update_image_tags(
                             image_id=img_id,
-                            file_path=img["path"],
                             tags=tags,
+                            ocr_text=ocr_text,
                             user_id=storage_id,
                             chat_id=chat_id,
-                            ocr_text=ocr_text,
+                            file_path=img["path"],
                             platform=context.get("platform", "telegram"),
                             platform_message_id=context.get("platform_message_id"),
                         )
                     )
                     ocr_info = f", ocr_text='{ocr_text[:40]}...'" if ocr_text else ""
-                    logger.info(f"[{chat_id}] 图片 {img_id} 标签已提取并入库: '{tags[:60]}...'{ocr_info}")            
+                    logger.info(f"[{chat_id}] 图片 {img_id} 标签已补充: '{tags[:60]}...'{ocr_info}")            
             # --- 5. RAG 记忆存储 (Memory Storage) ---
             if self.rag.enabled:
                 asyncio.create_task(self._async_save_memory(message_content, storage_id, {"role": "user", "chat_id": chat_id}))

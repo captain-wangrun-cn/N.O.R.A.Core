@@ -15,6 +15,7 @@ adapters/aggregator.py        聚合连续消息（3秒缓冲）
   ↓
 core/controller.py            NoraController.handle_message()
   ├─ 忙碌？→ fast_llm 判定 stop/change/queue → 即时回复
+  │            └─ 若前脑新判定需要后脑：先展示当前队列详情并二次确认，确认后再入队
   └─ 空闲？→ 进入生成循环：
        ├─ 加载持久化上下文（message_history.db）
        ├─ 拼接系统提示词（system.jinja + persona）

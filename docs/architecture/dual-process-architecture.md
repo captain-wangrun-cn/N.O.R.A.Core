@@ -90,6 +90,7 @@ N.O.R.A. Core 引入了 **"脑口分离" (Brain-Mouth Separation)** 的设计理
 1) **异步后台任务**：后脑始终以 `asyncio.Task` 形式运行，不阻塞前脑；状态实时写入 `WorkerStatus`。
 2) **忙碌轮询**：当后脑忙碌时，前脑收到新消息会触发 `_detect_interrupt_intent_and_reply`（fast_llm），按 STOP / CHANGE / QUEUE 路径处理。
 3) **队列协同**：QUEUE 结果会将消息放入 per-chat `BackendTaskQueue`；当前任务完成的 `finally` 中会轮询队列并启动下一任务。
+  - 2026-03-25 更新：如果是“前脑主动判定需要后脑”的新请求，而此时后脑仍忙碌，则不会直接入队；会先进入“待确认入队”状态，由前脑展示当前进度与队列详情，用户确认后才真正入队。
 4) **在线状态轮询**：`_update_scheduler_state` / `_mark_scheduler_idle` 同步到全局在线状态，驱动对话延续计时器（FOLLOWUP 循环）。
 5) **对话分段闭环**：FOLLOWUP 循环判定 END 或追话超限后，调用 `_transition_to_semi_online` 触发 `close_session`，封闭本轮对话段落。
 6) **结果交接**：后脑结束后构建“工作报告”（包含分段输出、工具步骤、关键结果），前脑调用 `_front_brain_review` 审查并生成最终用户向回复；后脑在轮询模式下不直接触达用户。
@@ -101,7 +102,7 @@ N.O.R.A. Core 引入了 **"脑口分离" (Brain-Mouth Separation)** 的设计理
   ↓ (后脑忙碌期间)
 用户再发消息 → fast_llm 轮询意图 (STOP/CHANGE/QUEUE)
   ↓
-QUEUE → 入队 → 当前后脑任务完成 → 轮询队列启动下一任务
+QUEUE → 入队（或先二次确认后入队）→ 当前后脑任务完成 → 轮询队列启动下一任务
 STOP/CHANGE → 取消当前任务 (CHANGE 会立即以新消息重启后脑)
   ↓
 后脑任务完成 → _mark_scheduler_idle → FOLLOWUP 计时开始
@@ -169,7 +170,8 @@ graph TD
   - 行为: 停止当前任务 -> 立即启动新任务处理该消息。
 - **QUEUE (排队/追加)**:
   - 用户语料: "还有个事...", "进度怎么样了?", (补充细节)
-  - 行为: 回复用户已收到 -> 将消息存入 `pending_messages` -> 后端任务完成后自动处理。
+  - 行为: 回复用户已收到 -> 将消息存入队列 -> 后端任务完成后自动处理。
+  - 若这是前脑新判定出的后脑请求，且后脑当前忙碌，则先由前脑展示当前队列详情并询问是否确认入队；确认后才真正加入队列。
 
 ## 优势
 

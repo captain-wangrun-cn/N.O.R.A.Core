@@ -161,28 +161,12 @@ class ImageStore:
         extra: Optional[Dict[str, Any]] = None,
         platform: str = "",
         platform_message_id: Optional[str] = None,
+        tag_status: str = "completed",
     ) -> bool:
         """
-        保存一张图片的完整元数据。
+        保存/更新一张图片的元数据（默认完成态）。
 
-        Parameters
-        ----------
-        image_id : str
-            由 generate_image_id() 生成的唯一标识
-        file_path : str
-            图片在本地的文件路径
-        tags : str
-            LLM 生成的详细图片标签/描述文本
-        user_id : str
-            发送者 ID
-        chat_id : str
-            所在对话 ID
-        extra : dict, optional
-            其他自定义字段
-
-        Returns
-        -------
-        bool  存储是否成功
+        若 tags 为空仅写 Mongo，不写向量；为兼容新增的「先暂存，后补标签」流程。
         """
         if not self.enabled:
             logger.warning("ImageStore 未启用，跳过图片元数据保存。")
@@ -201,6 +185,7 @@ class ImageStore:
             "platform_message_id": platform_message_id,
             "timestamp": now,
             "datetime": datetime.fromtimestamp(now, tz=timezone.utc).isoformat(),
+            "tag_status": tag_status,
             **(extra or {}),
         }
         try:
@@ -239,6 +224,149 @@ class ImageStore:
                 # MongoDB 已写入，不算完全失败
         
         logger.info(f"图片元数据已保存: {image_id} tags='{tags[:60]}...'")
+        return True
+
+    # ------------------------------------------------------------------
+    # 新增：先暂存、后补标签
+    # ------------------------------------------------------------------
+
+    def save_image_stub(
+        self,
+        image_id: str,
+        file_path: str,
+        user_id: str,
+        chat_id: str = "",
+        extra: Optional[Dict[str, Any]] = None,
+        platform: str = "",
+        platform_message_id: Optional[str] = None,
+    ) -> bool:
+        """先写入占位元数据（无标签、不写向量），等待模型回复后再补标签。"""
+        if not self.enabled:
+            logger.warning("ImageStore 未启用，跳过图片占位入库。")
+            return False
+
+        now = time.time()
+        doc = {
+            "image_id": image_id,
+            "file_path": file_path,
+            "tags": "",
+            "user_id": user_id,
+            "chat_id": chat_id,
+            "platform": platform,
+            "platform_message_id": platform_message_id,
+            "timestamp": now,
+            "datetime": datetime.fromtimestamp(now, tz=timezone.utc).isoformat(),
+            "tag_status": "pending",
+            **(extra or {}),
+        }
+        try:
+            self.mongo_col.replace_one({"image_id": image_id}, doc, upsert=True)
+            logger.info(f"图片占位已入库（等待标签）：{image_id} -> {file_path}")
+            return True
+        except Exception as e:
+            logger.error(f"MongoDB 占位写入失败: {e}")
+            return False
+
+    def update_image_tags(
+        self,
+        image_id: str,
+        tags: str,
+        ocr_text: str = "",
+        user_id: Optional[str] = None,
+        chat_id: Optional[str] = None,
+        file_path: Optional[str] = None,
+        platform: str = "",
+        platform_message_id: Optional[str] = None,
+    ) -> bool:
+        """在模型回复后补充标签/OCR，并写入向量。"""
+        if not self.enabled:
+            logger.warning("ImageStore 未启用，跳过标签更新。")
+            return False
+
+        now = time.time()
+        existing: Dict[str, Any] = {}
+        try:
+            existing = self.mongo_col.find_one({"image_id": image_id}, {"_id": 0}) or {}
+        except Exception:
+            existing = {}
+
+        base_file_path = file_path or existing.get("file_path", "")
+        base_user_id = user_id or existing.get("user_id", "")
+        base_chat_id = chat_id or existing.get("chat_id", "")
+        base_ts = existing.get("timestamp", now)
+
+        set_doc: Dict[str, Any] = {
+            "tags": tags,
+            "tag_status": "completed" if tags.strip() else existing.get("tag_status", "pending"),
+            "updated_at": now,
+            "updated_datetime": datetime.fromtimestamp(now, tz=timezone.utc).isoformat(),
+        }
+        if ocr_text:
+            set_doc["ocr_text"] = ocr_text
+        if platform:
+            set_doc["platform"] = platform
+        if platform_message_id:
+            set_doc["platform_message_id"] = platform_message_id
+        if file_path:
+            set_doc["file_path"] = file_path
+        if user_id:
+            set_doc["user_id"] = user_id
+        if chat_id:
+            set_doc["chat_id"] = chat_id
+
+        try:
+            result = self.mongo_col.update_one({"image_id": image_id}, {"$set": set_doc}, upsert=False)
+            if result.matched_count == 0:
+                # 占位记录缺失，补一条
+                fallback_doc = {
+                    "image_id": image_id,
+                    "file_path": base_file_path,
+                    "user_id": base_user_id,
+                    "chat_id": base_chat_id,
+                    "platform": platform,
+                    "platform_message_id": platform_message_id,
+                    "timestamp": base_ts,
+                    "datetime": datetime.fromtimestamp(base_ts, tz=timezone.utc).isoformat(),
+                    "tag_status": set_doc.get("tag_status", "completed"),
+                }
+                fallback_doc.update(set_doc)
+                self.mongo_col.replace_one({"image_id": image_id}, fallback_doc, upsert=True)
+        except Exception as e:
+            logger.error(f"MongoDB 更新图片标签失败: {e}")
+            return False
+
+        # ---- Qdrant ----
+        if tags.strip():
+            try:
+                vector = self.embed_client.get_embedding(tags)
+                if vector:
+                    point_id = str(uuid.uuid4())
+                    self.qdrant.upsert(
+                        collection_name=IMAGE_COLLECTION,
+                        points=[
+                            qdrant_models.PointStruct(
+                                id=point_id,
+                                vector=vector,
+                                payload={
+                                    "image_id": image_id,
+                                    "text": tags,
+                                    "file_path": base_file_path,
+                                    "user_id": base_user_id,
+                                    "chat_id": base_chat_id,
+                                    "timestamp": base_ts,
+                                },
+                            )
+                        ],
+                    )
+                else:
+                    logger.warning(f"图片标签向量化失败（更新阶段），已仅写 MongoDB: {image_id}")
+            except Exception as e:
+                logger.error(f"Qdrant 写入图片向量失败（更新阶段）: {e}")
+
+        logger.info(
+            f"图片标签已更新: {image_id} tags='{tags[:60]}...'"
+            + (f", ocr='{ocr_text[:40]}...'" if ocr_text else "")
+        )
         return True
 
     # ------------------------------------------------------------------
