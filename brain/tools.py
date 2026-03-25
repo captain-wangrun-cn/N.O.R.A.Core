@@ -961,6 +961,7 @@ class ToolManager:
         limit: int = 10,
         return_image: bool = True,
         use_image_model: bool = False,
+        local_path: str = "",
     ) -> str:
         """
         Retrieves images from the image memory database. Supports multiple search modes:
@@ -981,6 +982,8 @@ class ToolManager:
             MediaTags，供多模态管线自动读取图片内容。Default: True.
         :param use_image_model: When true, downstream should switch to the image model
             for subsequent reasoning until a crop_image_for_llm round finishes.
+        :param local_path: Optional local file path to view directly (workspace-relative or absolute).
+            When provided, bypasses DB search and returns the file with MediaTag if exists.
         """
         if not self.image_store:
             return "Error: Image memory system is not available (ImageStore not initialized)."
@@ -994,15 +997,28 @@ class ToolManager:
         except (ValueError, TypeError) as e:
             return f"Error: Invalid parameter value: {e}"
 
-        results = self.image_store.search_images(
-            image_id=image_id,
-            keyword=keyword,
-            text_query=text_query,
-            start_time=s_time,
-            end_time=e_time,
-            user_id=user_id,
-            limit=limit,
-        )
+        # Local file direct view (bypass DB)
+        if local_path:
+            resolved_local = self._resolve_workspace_path(local_path)
+            if not os.path.isfile(resolved_local):
+                return f"Error: local file not found: {local_path}"
+            results = [{
+                "image_id": image_id or os.path.basename(resolved_local),
+                "file_path": resolved_local,
+                "tags": keyword or "(local file)",
+                "user_id": user_id or "",
+                "timestamp": time.time(),
+            }]
+        else:
+            results = self.image_store.search_images(
+                image_id=image_id,
+                keyword=keyword,
+                text_query=text_query,
+                start_time=s_time,
+                end_time=e_time,
+                user_id=user_id,
+                limit=limit,
+            )
 
         if not results:
             return "No images found matching the criteria."
