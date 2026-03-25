@@ -7,10 +7,12 @@ Copyright © WR（captain-wangrun-cn） All rights reserved
 
 import asyncio
 import logging
+import re
 import time
-from typing import Dict, Any
+from typing import Dict, Any, Optional
 
 from brain.multimodal import extract_image_payloads
+from brain.prompts import render_template, get_soul_prompt, load_identity_context
 from core.routing import has_image_input
 from core.scheduler import (
     AIPresence,
@@ -26,6 +28,15 @@ logger = logging.getLogger(__name__)
 
 class MessageHandlerMixin:
     """处理来自适配器的新消息 / 命令路由。"""
+
+    _CONFIRM_DECISION_PATTERN = re.compile(
+        r"DECISION\s*:\s*(confirm|cancel|unclear)",
+        re.IGNORECASE,
+    )
+    _CONFIRM_REPLY_PATTERN = re.compile(
+        r"REPLY\s*:\s*(.*)",
+        re.IGNORECASE | re.DOTALL,
+    )
 
     async def handle_new_message(self, context: Dict[str, Any]):
         """处理来自适配器的新消息/命令。"""
@@ -106,6 +117,10 @@ class MessageHandlerMixin:
 
         if stripped.startswith("/set_stream") or stripped.startswith("/nonstream"):
             await self._cmd_set_stream(chat_id, chat_type, user_id, stripped)
+            return
+
+        # 若存在“待确认入队”请求，优先处理确认结果
+        if await self._try_handle_pending_backend_enqueue(context, text, chat_type, user_id, user_name):
             return
 
         # --- 前后端分离逻辑 ---
@@ -291,19 +306,287 @@ class MessageHandlerMixin:
 
         # 4) 根据路由信号决定是否启动后脑
         if front_result["needs_backend"]:
-            logger.info(f"[{chat_id}] 前脑判定需要后脑，启动轮询循环...")
             # 标记上下文：后脑应跳过用户消息保存（前脑已保存）
             backend_context = context.copy()
             backend_context["_front_brain_handled"] = True
             backend_context["_front_brain_reply"] = user_reply if should_reply else ""
             backend_context["_message_saved"] = True
             backend_context["task_instruction"] = front_result.get("task_instruction", "")
+
+            status = self.worker_status.get(chat_id)
+            if status and status.busy:
+                logger.info(f"[{chat_id}] 前脑判定需要后脑，但后脑忙碌，进入二次确认入队流程")
+                await self._prepare_backend_enqueue_confirmation(
+                    chat_id=chat_id,
+                    storage_id=storage_id,
+                    user_message_content=message_content,
+                    backend_context=backend_context,
+                    pending_request_text=text,
+                )
+                return
+
+            logger.info(f"[{chat_id}] 前脑判定需要后脑，启动轮询循环...")
             task = asyncio.create_task(self._run_polling_loop(backend_context))
             self.generation_tasks[chat_id] = task
         else:
             logger.info(f"[{chat_id}] 前脑判定纯聊天，无需后脑。")
             # 纯聊天完成后，也需要标记空闲并启动 followup 计时
             self._mark_scheduler_idle(chat_id)
+
+    async def _prepare_backend_enqueue_confirmation(
+        self,
+        chat_id: str,
+        storage_id: str,
+        user_message_content: str,
+        backend_context: Dict[str, Any],
+        pending_request_text: str,
+    ) -> None:
+        """后脑忙碌时，先缓存待入队任务并向用户发起二次确认。"""
+        session = self.sessions.setdefault(chat_id, {"history": [], "interrupted_thought": "", "pending_text": ""})
+
+        queue = self.task_queues.get(chat_id)
+        queue_summary = queue.get_queue_summary() if queue else ""
+        status = self.worker_status.get(chat_id)
+        progress_summary = status.get_summary() if status else ""
+
+        session["pending_backend_enqueue"] = {
+            "backend_context": backend_context,
+            "pending_request_text": pending_request_text,
+            "queue_summary": queue_summary,
+            "created_at": time.time(),
+        }
+
+        confirm_reply = await self._generate_enqueue_confirmation_reply(
+            chat_id=chat_id,
+            pending_request_text=pending_request_text,
+            queue_summary=queue_summary,
+            progress_summary=progress_summary,
+        )
+
+        if confirm_reply:
+            sent_ids = await self._send_split_message(chat_id, confirm_reply)
+            metadata = {"source": "front", "stage": "queue_confirm"}
+            if sent_ids:
+                metadata["platform_message_ids"] = sent_ids
+
+            self.message_history.add_message(
+                platform="telegram",
+                chat_id=storage_id,
+                role="assistant",
+                content=confirm_reply,
+                user_id="assistant",
+                metadata=metadata,
+            )
+
+            session_history = session.setdefault("history", [])
+            session_history.append({"role": "user", "content": user_message_content})
+            session_history.append({"role": "assistant", "content": confirm_reply})
+            if len(session_history) > 20:
+                session["history"] = session_history[-20:]
+
+    async def _try_handle_pending_backend_enqueue(
+        self,
+        context: Dict[str, Any],
+        text: str,
+        chat_type: str,
+        user_id: str,
+        user_name: str,
+    ) -> bool:
+        """处理“待确认入队”对话；已处理返回 True。"""
+        chat_id = context["chat_id"]
+        session = self.sessions.setdefault(chat_id, {"history": [], "interrupted_thought": "", "pending_text": ""})
+        pending = session.get("pending_backend_enqueue")
+        if not pending:
+            return False
+
+        storage_id = chat_id if chat_type != "private" else user_id
+        message_content = f"{user_name}: {text}" if chat_type != "private" else text
+
+        self.message_history.add_message(
+            platform="telegram",
+            chat_id=storage_id,
+            role="user",
+            content=message_content,
+            user_id=user_id,
+        )
+        context["_message_saved"] = True
+
+        decision, reply = await self._detect_enqueue_confirmation_decision(
+            chat_id=chat_id,
+            user_text=text,
+            pending_request_text=str(pending.get("pending_request_text", "")),
+            queue_summary=str(pending.get("queue_summary", "")),
+        )
+
+        session_history = session.setdefault("history", [])
+        session_history.append({"role": "user", "content": message_content})
+
+        if decision == "confirm":
+            backend_context = pending.get("backend_context") or {}
+            status = self.worker_status.get(chat_id)
+            if status and status.busy:
+                queue = self.task_queues.setdefault(chat_id, BackendTaskQueue())
+                await queue.enqueue({
+                    "context": backend_context,
+                    "text": backend_context.get("text", ""),
+                })
+                logger.info(f"[{chat_id}] 待确认任务已入队 (队列长度 {queue.size()})")
+            else:
+                task = asyncio.create_task(self._run_polling_loop(backend_context))
+                self.generation_tasks[chat_id] = task
+                logger.info(f"[{chat_id}] 待确认任务已直接启动（后脑空闲）")
+
+            session.pop("pending_backend_enqueue", None)
+        elif decision == "cancel":
+            session.pop("pending_backend_enqueue", None)
+            logger.info(f"[{chat_id}] 用户取消待确认入队任务")
+        else:
+            logger.info(f"[{chat_id}] 待确认入队：用户回复不明确，继续等待确认")
+
+        if reply:
+            sent_ids = await self._send_split_message(chat_id, reply)
+            metadata = {"source": "front", "stage": "queue_confirm"}
+            if sent_ids:
+                metadata["platform_message_ids"] = sent_ids
+
+            self.message_history.add_message(
+                platform="telegram",
+                chat_id=storage_id,
+                role="assistant",
+                content=reply,
+                user_id="assistant",
+                metadata=metadata,
+            )
+            session_history.append({"role": "assistant", "content": reply})
+
+        if len(session_history) > 20:
+            session["history"] = session_history[-20:]
+
+        return True
+
+    async def _generate_enqueue_confirmation_reply(
+        self,
+        chat_id: str,
+        pending_request_text: str,
+        queue_summary: str,
+        progress_summary: str,
+    ) -> str:
+        """让前脑生成“是否入队”的二次确认消息。"""
+        soul = get_soul_prompt()
+        identity_context = load_identity_context(include_schedule=False)
+        system_prompt = render_template(
+            "queue_confirmation.jinja",
+            "ask_system",
+            soul=soul,
+            identity_context=identity_context,
+        )
+        user_prompt = render_template(
+            "queue_confirmation.jinja",
+            "ask_user",
+            pending_request_text=pending_request_text,
+            queue_summary=queue_summary,
+            progress_summary=progress_summary,
+        )
+
+        response = ""
+        try:
+            stream = self._chat_stream_wrapper(
+                self.fast_llm,
+                chat_id,
+                system_prompt=system_prompt,
+                user_prompt=user_prompt,
+                history=[],
+                tools=None,
+            )
+            async for chunk in stream:
+                if isinstance(chunk, dict) and chunk.get("type") == "text":
+                    response += str(chunk.get("content", ""))
+                elif isinstance(chunk, str):
+                    response += chunk
+        except Exception:
+            logger.warning(f"[{chat_id}] 生成入队确认消息失败，使用模板回退", exc_info=True)
+            response = render_template(
+                "queue_confirmation.jinja",
+                "ask_fallback",
+                pending_request_text=pending_request_text,
+                queue_summary=queue_summary,
+            )
+
+        return self._strip_timestamp_markers(response.strip())
+
+    async def _detect_enqueue_confirmation_decision(
+        self,
+        chat_id: str,
+        user_text: str,
+        pending_request_text: str,
+        queue_summary: str,
+    ) -> tuple[str, str]:
+        """识别用户对“是否入队”的确认意图。"""
+        soul = get_soul_prompt()
+        identity_context = load_identity_context(include_schedule=False)
+        system_prompt = render_template(
+            "queue_confirmation.jinja",
+            "detect_system",
+            soul=soul,
+            identity_context=identity_context,
+        )
+        user_prompt = render_template(
+            "queue_confirmation.jinja",
+            "detect_user",
+            user_text=user_text,
+            pending_request_text=pending_request_text,
+            queue_summary=queue_summary,
+        )
+
+        response = ""
+        try:
+            stream = self._chat_stream_wrapper(
+                self.fast_llm,
+                chat_id,
+                system_prompt=system_prompt,
+                user_prompt=user_prompt,
+                history=[],
+                tools=None,
+            )
+            async for chunk in stream:
+                if isinstance(chunk, dict) and chunk.get("type") == "text":
+                    response += str(chunk.get("content", ""))
+                elif isinstance(chunk, str):
+                    response += chunk
+        except Exception:
+            logger.warning(f"[{chat_id}] 入队确认意图检测失败，默认 unclear", exc_info=True)
+            return "unclear", render_template("queue_confirmation.jinja", "unclear_fallback")
+
+        response = response.strip()
+        decision_match = self._CONFIRM_DECISION_PATTERN.search(response)
+        decision = decision_match.group(1).lower() if decision_match else "unclear"
+
+        reply_match = self._CONFIRM_REPLY_PATTERN.search(response)
+        reply = reply_match.group(1).strip() if reply_match else ""
+        reply = self._strip_timestamp_markers(reply)
+
+        if not reply:
+            if decision == "confirm":
+                reply = render_template("queue_confirmation.jinja", "confirm_fallback")
+            elif decision == "cancel":
+                reply = render_template("queue_confirmation.jinja", "cancel_fallback")
+            else:
+                reply = render_template("queue_confirmation.jinja", "unclear_fallback")
+
+        return decision, reply
+
+    async def _send_split_message(self, chat_id: str, text: str) -> list[str]:
+        """按 [SPLIT] 规则发送消息，返回平台消息 ID 列表。"""
+        sent_message_ids: list[str] = []
+        parts = self._SPLIT_MARKER_PATTERN.split(text)
+        for part in parts:
+            part = part.strip()
+            if not part:
+                continue
+            msg_id = await self.adapter.send_message(chat_id, part)
+            if msg_id:
+                sent_message_ids.append(str(msg_id))
+        return sent_message_ids
 
     # ------------------------------------------------------------------
     # 斜杠命令处理子方法
