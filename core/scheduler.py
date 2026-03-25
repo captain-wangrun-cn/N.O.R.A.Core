@@ -484,7 +484,7 @@ class ProactiveScheduler:
             return {"success": False, "message": "default_chat_id 未设置，等待用户首条消息"}
 
         try:
-            plan_items = await self._generate_plan_callback()
+            plan_items = await self._generate_plan_callback(self.default_chat_id)
 
             if clear_existing:
                 # 清除旧的 daily event Jobs
