@@ -59,6 +59,9 @@ _TASK_INSTRUCTION_PATTERN = re.compile(r"\[TASK_INSTRUCTION\](.*?)\[/TASK_INSTRU
 # 前脑审查中任务完成的标记
 _TASK_DONE_SIGNAL = "[TASK_DONE]"
 
+# 支持审查输出使用 action: continue / [CONTINUE]，优先于老的 [NEED_BACKEND]
+_CONTINUE_PATTERN = re.compile(r"\baction\s*:\s*continue\b", re.IGNORECASE)
+
 _TIMESTAMP_PATTERN = re.compile(
     r"\[\d{4}-\d{2}-\d{2} \d{2}:\d{2}(?::\d{2})?(?: [^\]]+)?\]\s*",
     re.IGNORECASE,
@@ -148,6 +151,7 @@ def parse_front_brain_review(response_text: str) -> dict:
 
     has_done = _TASK_DONE_SIGNAL in response_text
     has_backend = _BACKEND_SIGNAL in response_text
+    has_continue = bool(_CONTINUE_PATTERN.search(response_text)) or has_backend
     should_reply = _NO_REPLY_SIGNAL not in response_text
 
     task_instruction = ""
@@ -168,7 +172,7 @@ def parse_front_brain_review(response_text: str) -> dict:
     if not should_reply:
         user_reply = ""
 
-    if has_backend:
+    if has_continue:
         return {
             "action": "continue",
             "user_reply": user_reply,

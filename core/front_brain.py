@@ -443,53 +443,84 @@ class FrontBrainMixin:
 
         history = current_session_msgs
 
-        # 调用 smart 模型审查
-        response_text = ""
-        usage_data = None
-        try:
-            stream = self._chat_stream_wrapper(
-                self.llm,
-                chat_id,
-                system_prompt=system_prompt,
-                user_prompt=user_prompt,
-                history=history,
-                tools=None,
-            )
-            async for raw_chunk in stream:
-                chunk = cast(Dict[str, Any], raw_chunk) if isinstance(raw_chunk, dict) else raw_chunk
-                if isinstance(chunk, dict):
-                    if chunk["type"] == "text":
-                        response_text += chunk["content"]
-                    elif chunk["type"] == "usage":
-                        usage_data = {
-                            "input_tokens": chunk.get("input_tokens", 0),
-                            "output_tokens": chunk.get("output_tokens", 0),
-                        }
-                elif isinstance(chunk, str):
-                    response_text += chunk
-        except Exception as e:
-            logger.error(f"[{chat_id}] 前脑审查失败: {e}", exc_info=True)
+        async def _run_review_once(system_prompt_candidate: str):
+            response_text_local = ""
+            usage_data_local = None
+            try:
+                stream = self._chat_stream_wrapper(
+                    self.llm,
+                    chat_id,
+                    system_prompt=system_prompt_candidate,
+                    user_prompt=user_prompt,
+                    history=history,
+                    tools=None,
+                )
+                async for raw_chunk in stream:
+                    chunk = cast(Dict[str, Any], raw_chunk) if isinstance(raw_chunk, dict) else raw_chunk
+                    if isinstance(chunk, dict):
+                        if chunk["type"] == "text":
+                            response_text_local += chunk["content"]
+                        elif chunk["type"] == "usage":
+                            usage_data_local = {
+                                "input_tokens": chunk.get("input_tokens", 0),
+                                "output_tokens": chunk.get("output_tokens", 0),
+                            }
+                    elif isinstance(chunk, str):
+                        response_text_local += chunk
+            except Exception as e:
+                logger.error(f"[{chat_id}] 前脑审查失败: {e}", exc_info=True)
+                return None, None
+
+            response_text_local = self._strip_thinking_content(response_text_local)
+
+            if self.cost_tracking_enabled and self.cost_tracker and usage_data_local:
+                provider_name = config.get_model_provider("smart")
+                provider = config.get_provider_type(provider_name)
+                model = config.get_model_name("smart")
+                self.cost_tracker.log_usage(
+                    provider=provider,
+                    model=model,
+                    input_tokens=usage_data_local["input_tokens"],
+                    output_tokens=usage_data_local["output_tokens"],
+                    model_alias="smart",
+                    context="front_brain_review",
+                )
+
+            parsed_local = parse_front_brain_review(response_text_local)
+            return parsed_local, response_text_local
+
+        parsed, response_text = await _run_review_once(system_prompt)
+        if not parsed:
             return {"action": "done", "user_reply": ""}
 
-        # 清理思考标签
-        response_text = self._strip_thinking_content(response_text)
-
-        # 记录成本
-        if self.cost_tracking_enabled and self.cost_tracker and usage_data:
-            provider_name = config.get_model_provider("smart")
-            provider = config.get_provider_type(provider_name)
-            model = config.get_model_name("smart")
-            self.cost_tracker.log_usage(
-                provider=provider,
-                model=model,
-                input_tokens=usage_data["input_tokens"],
-                output_tokens=usage_data["output_tokens"],
-                model_alias="smart",
-                context="front_brain_review",
+        if parsed.get("task_instruction") and parsed.get("action") != "continue":
+            logger.warning(f"[{chat_id}] 审查输出含任务指示但未标记继续，提醒模型确认。")
+            await self._send_debug(
+                chat_id,
+                "⚠️ 审查输出含任务指示但未给出 [NEED_BACKEND]/continue，将提醒模型确认是否需携带指示继续后脑。"
             )
 
-        # 解析审查结果
-        parsed = parse_front_brain_review(response_text)
+            reminder_system_prompt = (
+                system_prompt
+                + "\n\n【重要提醒】你给出了 [TASK_INSTRUCTION] 指示，但没有明确继续。" \
+                  "请判断是否需要携带该指示让后脑继续：" \
+                  "如果需要继续，务必添加 [NEED_BACKEND] 并保留任务指示；" \
+                  "如果不需要继续，去掉任务指示并明确 [TASK_DONE] 或直接给出最终给用户的回复。"
+            )
+
+            parsed_retry, response_text_retry = await _run_review_once(reminder_system_prompt)
+            if parsed_retry:
+                parsed = parsed_retry
+                response_text = response_text_retry
+            else:
+                # 回退：默认继续，避免任务指示丢失
+                return {
+                    "action": "continue",
+                    "user_reply": parsed.get("user_reply", ""),
+                    "task_instruction": parsed.get("task_instruction", ""),
+                    "should_reply": parsed.get("should_reply", True),
+                }
+
         logger.info(
             f"[{chat_id}] 前脑审查结果: action={parsed['action']}, "
             f"should_reply={parsed.get('should_reply')}, "
