@@ -226,53 +226,60 @@ class FrontBrainMixin:
         ]
 
         # --- 调用 smart 模型生成回复（流式收集完整文本，检测标签闭合） ---
-        response_text = ""
-        usage_data = None
-        max_attempts = 2
-        for attempt in range(max_attempts):
-            response_text = ""
-            usage_data = None
-            try:
-                retry_system_prompt = system_prompt
-                if attempt > 0:
-                    retry_system_prompt += "\n\n【重试】确保所有成对标签完整闭合，特别是 [TASK_INSTRUCTION] ... [/TASK_INSTRUCTION]。不要输出缺失闭合的标签。"
+        async def _run_with_retries(system_prompt_candidate: str):
+            response_text_local = ""
+            usage_data_local = None
+            max_attempts = 2
+            for attempt in range(max_attempts):
+                response_text_local = ""
+                usage_data_local = None
+                try:
+                    retry_system_prompt = system_prompt_candidate
+                    if attempt > 0:
+                        retry_system_prompt += "\n\n【重试】确保所有成对标签完整闭合，特别是 [TASK_INSTRUCTION] ... [/TASK_INSTRUCTION]。不要输出缺失闭合的标签。"
 
-                stream = self._chat_stream_wrapper(
-                    self.llm,
-                    chat_id,
-                    system_prompt=retry_system_prompt,
-                    user_prompt=user_prompt,
-                    history=history,
-                    tools=None,  # 前脑不使用工具
-                )
-                async for raw_chunk in stream:
-                    chunk = cast(Dict[str, Any], raw_chunk) if isinstance(raw_chunk, dict) else raw_chunk
-                    if isinstance(chunk, dict):
-                        if chunk["type"] == "text":
-                            response_text += chunk["content"]
-                        elif chunk["type"] == "usage":
-                            usage_data = {
-                                "input_tokens": chunk.get("input_tokens", 0),
-                                "output_tokens": chunk.get("output_tokens", 0),
-                            }
-                    elif isinstance(chunk, str):
-                        response_text += chunk
-            except Exception as e:
-                logger.error(f"[{chat_id}] 前脑生成失败: {e}", exc_info=True)
-                # 前脑失败时回退到后脑
-                return {"needs_backend": True, "user_reply": "", "raw_response": ""}
+                    stream = self._chat_stream_wrapper(
+                        self.llm,
+                        chat_id,
+                        system_prompt=retry_system_prompt,
+                        user_prompt=user_prompt,
+                        history=history,
+                        tools=None,  # 前脑不使用工具
+                    )
+                    async for raw_chunk in stream:
+                        chunk = cast(Dict[str, Any], raw_chunk) if isinstance(raw_chunk, dict) else raw_chunk
+                        if isinstance(chunk, dict):
+                            if chunk["type"] == "text":
+                                response_text_local += chunk["content"]
+                            elif chunk["type"] == "usage":
+                                usage_data_local = {
+                                    "input_tokens": chunk.get("input_tokens", 0),
+                                    "output_tokens": chunk.get("output_tokens", 0),
+                                }
+                        elif isinstance(chunk, str):
+                            response_text_local += chunk
+                except Exception as e:
+                    logger.error(f"[{chat_id}] 前脑生成失败: {e}", exc_info=True)
+                    raise
 
-            # 清理思考标签
-            response_text = self._strip_thinking_content(response_text)
+                # 清理思考标签
+                response_text_local = self._strip_thinking_content(response_text_local)
 
-            issues = self._find_unclosed_block_tags(response_text)
-            if issues:
-                logger.warning(f"[{chat_id}] 前脑输出存在未闭合标签 {issues}，第 {attempt+1}/{max_attempts} 次尝试重试。")
-                if attempt < max_attempts - 1:
-                    continue
-                # 最后一轮，清理未闭合标签再继续解析，避免污染用户侧
-                response_text = self._clean_unclosed_block_tags(response_text)
-            break
+                issues = self._find_unclosed_block_tags(response_text_local)
+                if issues:
+                    logger.warning(f"[{chat_id}] 前脑输出存在未闭合标签 {issues}，第 {attempt+1}/{max_attempts} 次尝试重试。")
+                    if attempt < max_attempts - 1:
+                        continue
+                    # 最后一轮，清理未闭合标签再继续解析，避免污染用户侧
+                    response_text_local = self._clean_unclosed_block_tags(response_text_local)
+                break
+            return response_text_local, usage_data_local
+
+        try:
+            response_text, usage_data = await _run_with_retries(system_prompt)
+        except Exception:
+            # 前脑失败时回退到后脑
+            return {"needs_backend": True, "user_reply": "", "raw_response": ""}
 
         # 记录成本
         if self.cost_tracking_enabled and self.cost_tracker and usage_data:
@@ -290,6 +297,23 @@ class FrontBrainMixin:
 
         # 解析路由信号
         parsed = parse_front_brain_response(response_text)
+
+        # 如果前脑输出了任务指示但缺少后脑标记，提醒模型并重试一次
+        if parsed.get("task_instruction") and not parsed.get("needs_backend"):
+            logger.warning(f"[{chat_id}] 检测到任务指示但无 [NEED_BACKEND] 标记，提醒模型重试。")
+            await self._send_debug(chat_id, "⚠️ 前脑输出任务指示但未包含 [NEED_BACKEND]，将提醒并重试一次。")
+
+            reminder_system_prompt = (
+                system_prompt
+                + "\n\n【重要提醒】如果你输出了 [TASK_INSTRUCTION]...[/TASK_INSTRUCTION]，必须同时添加 [NEED_BACKEND] 标记以触发后脑执行。"
+                "如果无需后脑，请不要输出任务指示块。"
+            )
+
+            try:
+                response_text, usage_data = await _run_with_retries(reminder_system_prompt)
+                parsed = parse_front_brain_response(response_text)
+            except Exception:
+                return {"needs_backend": True, "user_reply": "", "raw_response": ""}
         logger.info(
             f"[{chat_id}] 前脑结果: needs_backend={parsed['needs_backend']}, "
             f"should_reply={parsed.get('should_reply')}, "
