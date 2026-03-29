@@ -332,6 +332,7 @@ class FrontBrainMixin:
             "user_reply": parsed["user_reply"],
             "task_instruction": parsed.get("task_instruction", ""),
             "should_reply": parsed.get("should_reply", True),
+            "use_image_model": parsed.get("use_image_model", False),
             "raw_response": response_text,
         }
 
@@ -519,6 +520,7 @@ class FrontBrainMixin:
                     "user_reply": parsed.get("user_reply", ""),
                     "task_instruction": parsed.get("task_instruction", ""),
                     "should_reply": parsed.get("should_reply", True),
+                    "use_image_model": parsed.get("use_image_model", False),
                 }
 
         logger.info(

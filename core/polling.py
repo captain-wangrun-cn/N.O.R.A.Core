@@ -185,6 +185,7 @@ class PollingMixin:
                     context["_front_brain_handled"] = True
                     context["_front_brain_reply"] = review_reply if should_reply else ""
                     context["task_instruction"] = task_instruction
+                    context["use_image_model"] = review_result.get("use_image_model", context.get("use_image_model", False))
                     # 消费掉队列中对应的消息
                     queue = self.task_queues.get(chat_id)
                     if queue and new_user_texts:
@@ -234,10 +235,19 @@ class PollingMixin:
         # 如果还有排队任务，通知用户
         if remaining > 0:
             try:
+                msg = f"📋 开始处理排队任务... (还有 {remaining} 个任务在等待)"
                 await self.adapter.send_message(
                     chat_id,
-                    f"📋 开始处理排队任务... (还有 {remaining} 个任务在等待)",
+                    msg,
                     parse_media=False
+                )
+                storage_id = chat_id if context.get("chat_type", "private") != "private" else context.get("user_id", chat_id)
+                self.message_history.add_message(
+                    platform="telegram",
+                    chat_id=storage_id,
+                    role="assistant",
+                    content=msg,
+                    user_id="assistant",
                 )
             except Exception:
                 pass

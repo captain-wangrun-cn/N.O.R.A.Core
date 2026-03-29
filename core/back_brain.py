@@ -121,7 +121,9 @@ class BackBrainMixin:
         user_name = context.get("user_name", "User")
 
         # 解析多模态输入：把 [image: ...] 对应的本地图片读取为模型可用内容
-        clean_text, multimodal_images = extract_image_payloads(text)
+        provided_images = context.get("multimodal_images") or []
+        clean_text, extracted_images = extract_image_payloads(text)
+        multimodal_images = provided_images or extracted_images
         if clean_text:
             text = clean_text
 
@@ -156,9 +158,10 @@ class BackBrainMixin:
         # 通知 scheduler: 后端开始忙碌
         self._update_scheduler_state(chat_id, busy=True)
 
-        # 根据输入类型选择模型：图片消息优先走 image 模型，其余走 coder 模型
-        base_model_alias = "image" if multimodal_images else "coder"
-        active_llm = self.image_llm if base_model_alias == "image" else self.coder_llm
+    # 根据输入类型选择模型：图片消息优先走 image 模型，其余走 coder 模型
+    force_image_model_until_crop_done = bool(context.get("use_image_model", False))
+    base_model_alias = "image" if (multimodal_images or force_image_model_until_crop_done) else "coder"
+    active_llm = self.image_llm if base_model_alias == "image" else self.coder_llm
         
         try:
             if self.tui_callback: self.tui_callback(f"🏃 Handling new message...")
@@ -411,7 +414,8 @@ class BackBrainMixin:
             typing_started = False
             # 工具回查图片（view_image return_image=true）注入到下一轮多模态输入
             pending_tool_multimodal_images: List[Dict[str, Any]] = []
-            force_image_model_until_crop_done = False
+            # 若上游要求强制使用图片模型，保持标记直到 crop_image_for_llm 首轮输出
+            force_image_model_until_crop_done = bool(force_image_model_until_crop_done)
             in_polling_mode = context.get("_in_polling_loop", False)
             
             status.update("思考中", "正在生成回复...")
@@ -657,6 +661,13 @@ class BackBrainMixin:
                         if progress_msg and not in_polling:
                             try:
                                 await self.adapter.send_message(chat_id, f"⏳ {progress_msg}", parse_media=False)
+                                self.message_history.add_message(
+                                    platform="telegram",
+                                    chat_id=storage_id,
+                                    role="assistant",
+                                    content=f"⏳ {progress_msg}",
+                                    user_id="assistant",
+                                )
                             except Exception as e:
                                 logger.debug(f"[{chat_id}] 发送进度消息失败: {e}")
                             tool_result = "Progress message sent to user."
@@ -689,8 +700,7 @@ class BackBrainMixin:
                         # 如果返回了 MediaTag，已在上方提取；若未提取到但有 file_path，可直接注入
                         if not pending_tool_multimodal_images and isinstance(tool_result, str):
                             try:
-                                from core.routing import extract_image_payloads as _ex
-                                _, inferred_images = _ex(tool_result)
+                                _, inferred_images = extract_image_payloads(tool_result)
                                 if inferred_images:
                                     for ti in inferred_images:
                                         ti["from_tool"] = True

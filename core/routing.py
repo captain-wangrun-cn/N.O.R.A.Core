@@ -53,6 +53,8 @@ def has_image_input(text: str) -> bool:
 _BACKEND_SIGNAL = "[NEED_BACKEND]"
 # 可选：不向用户回复的标记
 _NO_REPLY_SIGNAL = "[NO_REPLY]"
+# 可选：强制使用图片模型的标记
+_USE_IMAGE_MODEL_PATTERN = re.compile(r"\[USE_IMAGE_MODEL\]|use_image_model\s*[:=]\s*(true|1|yes)", re.IGNORECASE)
 # 可选：任务指示块
 _TASK_INSTRUCTION_PATTERN = re.compile(r"\[TASK_INSTRUCTION\](.*?)\[/TASK_INSTRUCTION\]", re.IGNORECASE | re.DOTALL)
 
@@ -60,7 +62,7 @@ _TASK_INSTRUCTION_PATTERN = re.compile(r"\[TASK_INSTRUCTION\](.*?)\[/TASK_INSTRU
 _TASK_DONE_SIGNAL = "[TASK_DONE]"
 
 # 支持审查输出使用 action: continue / [CONTINUE]，优先于老的 [NEED_BACKEND]
-_CONTINUE_PATTERN = re.compile(r"\baction\s*:\s*continue\b", re.IGNORECASE)
+_CONTINUE_PATTERN = re.compile(r"(?:\baction\s*:\s*continue\b|\[CONTINUE\])", re.IGNORECASE)
 
 _TIMESTAMP_PATTERN = re.compile(
     r"\[\d{4}-\d{2}-\d{2} \d{2}:\d{2}(?::\d{2})?(?: [^\]]+)?\]\s*",
@@ -94,9 +96,11 @@ def parse_front_brain_response(response_text: str) -> dict:
             "user_reply": "",
             "task_instruction": "",
             "should_reply": False,
+            "use_image_model": False,
         }
 
     needs_backend = _BACKEND_SIGNAL in response_text
+    force_image_model = bool(_USE_IMAGE_MODEL_PATTERN.search(response_text))
     should_reply = _NO_REPLY_SIGNAL not in response_text
 
     # 提取任务指示（可为空）
@@ -109,6 +113,7 @@ def parse_front_brain_response(response_text: str) -> dict:
     user_reply = response_text
     user_reply = user_reply.replace(_BACKEND_SIGNAL, "")
     user_reply = user_reply.replace(_NO_REPLY_SIGNAL, "")
+    user_reply = _USE_IMAGE_MODEL_PATTERN.sub("", user_reply)
     user_reply = _TASK_INSTRUCTION_PATTERN.sub("", user_reply)
     user_reply = user_reply.strip()
     user_reply = _strip_timestamp_markers(user_reply)
@@ -123,6 +128,7 @@ def parse_front_brain_response(response_text: str) -> dict:
         "user_reply": user_reply,
         "task_instruction": task_instruction,
         "should_reply": should_reply,
+        "use_image_model": force_image_model,
     }
 
 
@@ -147,11 +153,13 @@ def parse_front_brain_review(response_text: str) -> dict:
             "user_reply": "",
             "task_instruction": "",
             "should_reply": False,
+            "use_image_model": False,
         }
 
     has_done = _TASK_DONE_SIGNAL in response_text
     has_backend = _BACKEND_SIGNAL in response_text
     has_continue = bool(_CONTINUE_PATTERN.search(response_text)) or has_backend
+    force_image_model = bool(_USE_IMAGE_MODEL_PATTERN.search(response_text))
     should_reply = _NO_REPLY_SIGNAL not in response_text
 
     task_instruction = ""
@@ -164,6 +172,9 @@ def parse_front_brain_review(response_text: str) -> dict:
     user_reply = user_reply.replace(_TASK_DONE_SIGNAL, "")
     user_reply = user_reply.replace(_BACKEND_SIGNAL, "")
     user_reply = user_reply.replace(_NO_REPLY_SIGNAL, "")
+    user_reply = _USE_IMAGE_MODEL_PATTERN.sub("", user_reply)
+    # 清理 continue 标记文本，避免泄漏给用户
+    user_reply = _CONTINUE_PATTERN.sub("", user_reply)
     user_reply = _TASK_INSTRUCTION_PATTERN.sub("", user_reply)
     user_reply = user_reply.strip()
     user_reply = _strip_timestamp_markers(user_reply)
@@ -178,6 +189,7 @@ def parse_front_brain_review(response_text: str) -> dict:
             "user_reply": user_reply,
             "task_instruction": task_instruction,
             "should_reply": should_reply,
+            "use_image_model": force_image_model,
         }
     elif has_done:
         return {
@@ -185,6 +197,7 @@ def parse_front_brain_review(response_text: str) -> dict:
             "user_reply": user_reply,
             "task_instruction": task_instruction,
             "should_reply": should_reply,
+            "use_image_model": force_image_model,
         }
     else:
         # 无标记 = 纯聊天，也结束轮询
@@ -193,4 +206,5 @@ def parse_front_brain_review(response_text: str) -> dict:
             "user_reply": user_reply,
             "task_instruction": task_instruction,
             "should_reply": should_reply,
+            "use_image_model": force_image_model,
         }

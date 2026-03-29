@@ -40,6 +40,8 @@ class MessageHandlerMixin:
 
     async def handle_new_message(self, context: Dict[str, Any]):
         """处理来自适配器的新消息/命令。"""
+        # copy context to allow safe mutation (inject multimodal payloads, flags, etc.)
+        context = dict(context)
         chat_id = context["chat_id"]
         user_id = context["user_id"]
         text = context["text"]
@@ -51,6 +53,11 @@ class MessageHandlerMixin:
         image_input_detected = bool(multimodal_images) or has_image_input(text)
         if clean_text:
             text = clean_text
+
+        # 将清洗后的文本和多模态图片回填到 context，避免后续丢失图片（尤其是带 caption 时）
+        context["text"] = text
+        if multimodal_images:
+            context["multimodal_images"] = multimodal_images
 
         logger.debug(f"[{chat_id}] 收到新聚合消息: '{text[:50]}...'")
         
@@ -75,47 +82,47 @@ class MessageHandlerMixin:
         # ── 命令分发 ──
         stripped = text.strip()
 
-        if stripped.startswith("/start"):
+        if re.search(r"(?m)^\s*/start\b", stripped):
             await self._cmd_start(chat_id, chat_type, user_id)
             return
 
-        if stripped.startswith("/reload_models"):
+        if re.search(r"(?m)^\s*/reload_models\b", stripped):
             await self._cmd_reload_models(chat_id)
             return
 
-        if stripped.startswith("/clear"):
+        if re.search(r"(?m)^\s*/clear\b", stripped):
             await self._cmd_clear(chat_id, chat_type, user_id)
             return
 
-        if stripped.startswith("/stop"):
+        if re.search(r"(?m)^\s*/stop\b", stripped):
             await self._cmd_stop(chat_id)
             return
 
-        if stripped.startswith("/regenerate_proactive"):
+        if re.search(r"(?m)^\s*/regenerate_proactive\b", stripped):
             await self._cmd_regenerate_proactive(chat_id, stripped)
             return
 
-        if stripped.startswith("/schedule_today"):
+        if re.search(r"(?m)^\s*/schedule_today\b", stripped):
             await self._cmd_schedule_today(chat_id)
             return
 
-        if stripped.startswith("/status"):
+        if re.search(r"(?m)^\s*/status\b", stripped):
             await self._cmd_status(chat_id, chat_type, user_id)
             return
 
-        if stripped.startswith("/debug"):
+        if re.search(r"(?m)^\s*/debug\b", stripped):
             await self._cmd_debug(chat_id)
             return
 
-        if stripped.startswith("/custom_scope"):
+        if re.search(r"(?m)^\s*/custom_scope\b", stripped):
             await self._cmd_custom_scope(chat_id, stripped)
             return
 
-        if stripped.startswith("/undo"):
+        if re.search(r"(?m)^\s*/undo\b", stripped):
             await self._cmd_undo(chat_id, chat_type, user_id)
             return
 
-        if stripped.startswith("/set_stream") or stripped.startswith("/nonstream"):
+        if re.search(r"(?m)^\s*/set_stream\b", stripped) or re.search(r"(?m)^\s*/nonstream\b", stripped):
             await self._cmd_set_stream(chat_id, chat_type, user_id, stripped)
             return
 
@@ -138,7 +145,15 @@ class MessageHandlerMixin:
                     "context": context,
                     "text": text,
                 })
-                await self.adapter.send_message(chat_id, "后端忙碌，已把图片需求排队，稍后处理哦～")
+                busy_reply = "后端忙碌，已把图片需求排队，稍后处理哦～"
+                await self.adapter.send_message(chat_id, busy_reply)
+                self.message_history.add_message(
+                    platform="telegram",
+                    chat_id=storage_id,
+                    role="assistant",
+                    content=busy_reply,
+                    user_id="assistant",
+                )
                 logger.info(f"[{chat_id}] 后端忙碌且检测到图片，消息已入队 (队列长度 {queue.size()})")
                 return
 
@@ -248,6 +263,8 @@ class MessageHandlerMixin:
             # 将解析后的干净文本放入 context，避免后脑重复清洗
             context = dict(context)
             context["text"] = text
+            if multimodal_images:
+                context["multimodal_images"] = multimodal_images
             task = asyncio.create_task(self._generate_response(context))
             self.generation_tasks[chat_id] = task
             return
@@ -272,7 +289,13 @@ class MessageHandlerMixin:
         # 3) 发送前脑回复给用户（如果有的话）
         user_reply = front_result.get("user_reply", "")
         should_reply = front_result.get("should_reply", True)
-        if user_reply and should_reply:
+        send_front_reply = user_reply and should_reply
+        status = self.worker_status.get(chat_id)
+        if status and status.busy and front_result.get("needs_backend"):
+            # 避免后脑忙碌时重复回复：保留前脑回复供后脑参考，但不再发送给用户
+            send_front_reply = False
+
+        if send_front_reply:
             # 使用 [SPLIT] 分段发送
             parts = self._SPLIT_MARKER_PATTERN.split(user_reply)
             sent_message_ids = []
@@ -312,6 +335,7 @@ class MessageHandlerMixin:
             backend_context["_front_brain_reply"] = user_reply if should_reply else ""
             backend_context["_message_saved"] = True
             backend_context["task_instruction"] = front_result.get("task_instruction", "")
+            backend_context["use_image_model"] = front_result.get("use_image_model", context.get("use_image_model", False))
 
             status = self.worker_status.get(chat_id)
             if status and status.busy:
@@ -650,7 +674,18 @@ class MessageHandlerMixin:
             if status:
                 status.finish()
             self._cancel_followup_timer(chat_id)
-            await self.adapter.send_message(chat_id, "✅ 已停止当前所有任务。")
+            # 标记被前端打断，避免 finally 再次调度排队任务
+            session = self.sessions.setdefault(chat_id, {"history": [], "interrupted_thought": "", "pending_text": ""})
+            session["_interrupted_by_frontend"] = True
+            reply = "✅ 已停止当前所有任务。"
+            await self.adapter.send_message(chat_id, reply)
+            self.message_history.add_message(
+                platform="telegram",
+                chat_id=chat_id,
+                role="assistant",
+                content=reply,
+                user_id="assistant",
+            )
             logger.info(f"[{chat_id}] 已通过 /stop 命令停止所有任务。")
         except Exception as e:
             logger.error(f"[{chat_id}] 停止任务时出错: {e}")

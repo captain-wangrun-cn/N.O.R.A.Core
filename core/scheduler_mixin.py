@@ -686,6 +686,7 @@ class SchedulerMixin:
                 "_front_brain_handled": True,
                 "_front_brain_reply": user_reply,
                 "task_instruction": task_instruction,
+                "use_image_model": front_result.get("use_image_model", False),
             }
 
             logger.info(f"[{chat_id}] 前脑标记需要后脑，启动轮询处理主动消息")
