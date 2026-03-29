@@ -143,6 +143,7 @@ class PollingMixin:
                 )
                 
                 action = review_result["action"]
+                need_follow = review_result.get("need_follow")
                 review_reply = review_result.get("user_reply", "")
                 task_instruction = review_result.get("task_instruction", "")
                 should_reply = review_result.get("should_reply", True)
@@ -186,6 +187,8 @@ class PollingMixin:
                     context["_front_brain_reply"] = review_reply if should_reply else ""
                     context["task_instruction"] = task_instruction
                     context["use_image_model"] = review_result.get("use_image_model", context.get("use_image_model", False))
+                    if need_follow:
+                        context["_followup_initial_delay"] = self.FOLLOWUP_NEED_FOLLOW_DELAY
                     # 消费掉队列中对应的消息
                     queue = self.task_queues.get(chat_id)
                     if queue and new_user_texts:
@@ -199,6 +202,9 @@ class PollingMixin:
                 else:
                     # action == "done" or "chat" → 结束轮询
                     logger.info(f"[{chat_id}] 轮询结束: action={action}")
+                    if need_follow:
+                        # 用 NEED_FOLLOW 覆盖后续跟进的首次间隔
+                        self._start_followup_timer(chat_id, initial_delay=self.FOLLOWUP_NEED_FOLLOW_DELAY)
                     break
             
             else:

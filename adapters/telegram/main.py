@@ -9,6 +9,7 @@ import re
 import logging
 import io
 import asyncio
+import json
 import time
 import uuid
 import importlib
@@ -1522,22 +1523,55 @@ class TelegramAdapter(BaseAdapter):
         
         # 查找对应的回复消息
         for msg in history:
-            if msg.get("message_id") == reply_msg_id:
+            md = msg.get("metadata") or {}
+            platform_ids = msg.get("platform_message_ids") or []
+            db_message_id = str(msg.get("message_id")) if msg.get("message_id") is not None else None
+
+            if reply_msg_id == db_message_id or reply_msg_id in platform_ids:
                 content = msg.get("content", "")
-                md_raw = msg.get("metadata")
                 image_id = None
-                if md_raw:
-                    try:
-                        import json as _json
-                        md = _json.loads(md_raw) if isinstance(md_raw, str) else md_raw
-                        image_id = md.get("image_id")
-                    except Exception:
-                        image_id = None
+                if isinstance(md, dict):
+                    image_id = md.get("image_id") or md.get("image_ids", [None])[0]
                 if image_id:
                     return f"[image_id: {image_id}]\n{content}"
                 return content
-        
-        return None
+
+        # 次级查找：回溯消息镜像库，扩大检索窗口，避免 raw_window 限制导致找不到
+        try:
+            log = getattr(self.message_history, "message_log", None)
+            if log:
+                recent_logs = log.get_recent_messages("telegram", reply_chat_id, limit=500)
+                for row in recent_logs:
+                    md_raw = row.get("metadata")
+                    try:
+                        md = json.loads(md_raw) if md_raw else {}
+                    except Exception:
+                        md = {}
+                    platform_ids = md.get("platform_message_ids") or md.get("platform_message_id") or []
+                    if isinstance(platform_ids, str):
+                        platform_ids = [platform_ids]
+                    platform_ids = [str(pid) for pid in platform_ids if pid is not None]
+
+                    if reply_msg_id in platform_ids:
+                        content = row.get("raw_content") or row.get("content_with_timestamp") or ""
+                        image_id = md.get("image_id") or (md.get("image_ids") or [None])[0]
+                        if image_id:
+                            return f"[image_id: {image_id}]\n{content}"
+                        return content
+        except Exception as e:
+            logger.debug(f"[telegram] reply lookup in message_log failed: {e}")
+
+        # 如果历史中没有找到对应消息，退回直接使用 Telegram 回复内容
+        fallback_parts = []
+        if reply_msg.text:
+            fallback_parts.append(reply_msg.text)
+        if reply_msg.caption:
+            fallback_parts.append(reply_msg.caption)
+        if reply_msg.photo:
+            # 保留一个提示，表明引用的是图片
+            fallback_parts.append("[image: reply_photo]")
+
+        return "\n".join(part for part in fallback_parts if part) or None
 
     def _compress_image(self, file_path: str, target_size: int = COMPRESS_TARGET_SIZE) -> Optional[io.BytesIO]:
         """

@@ -1,8 +1,9 @@
 import asyncio
+import pytest
 from memory.message_history import MessageHistory, get_default_message_history_db
 
 
-async def test_message_history():
+async def _async_test_message_history():
     """测试消息历史管理"""
     
     # 1. 初始化历史管理器
@@ -148,7 +149,7 @@ if __name__ == "__main__":
     """)
     
     # 运行测试
-    asyncio.run(test_message_history())
+    asyncio.run(_async_test_message_history())
     
     # 运行集成示例
     asyncio.run(demo_integration())
@@ -159,3 +160,8 @@ if __name__ == "__main__":
     print("  - 可以使用 SQLite 客户端查看数据")
     print("  - 压缩和归档是自动异步执行的")
     print("  - 重要消息可以通过 pin_message() 永久保留")
+
+
+def test_message_history():
+    """同步包装以便 pytest 无需异步插件即可运行。"""
+    asyncio.run(_async_test_message_history())

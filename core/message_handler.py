@@ -140,32 +140,58 @@ class MessageHandlerMixin:
 
             # 若包含图片输入，直接入队，避免图片丢失
             if image_input_detected:
+                user_metadata = {}
+                platform_msg_id = context.get("platform_message_id")
+                if platform_msg_id:
+                    user_metadata["platform_message_ids"] = [str(platform_msg_id)]
+
                 queue = self.task_queues.setdefault(chat_id, BackendTaskQueue())
                 await queue.enqueue({
                     "context": context,
                     "text": text,
                 })
                 busy_reply = "后端忙碌，已把图片需求排队，稍后处理哦～"
-                await self.adapter.send_message(chat_id, busy_reply)
+                busy_msg_id = await self.adapter.send_message(chat_id, busy_reply)
+                busy_md = {}
+                if busy_msg_id:
+                    busy_md["platform_message_ids"] = [str(busy_msg_id)]
+
+                # 保存用户消息与提示
+                self.message_history.add_message(
+                    platform="telegram",
+                    chat_id=storage_id,
+                    role="user",
+                    content=message_content,
+                    user_id=user_id,
+                    metadata=user_metadata or None,
+                )
                 self.message_history.add_message(
                     platform="telegram",
                     chat_id=storage_id,
                     role="assistant",
                     content=busy_reply,
                     user_id="assistant",
+                    metadata=busy_md or None,
                 )
+                context["_message_saved"] = True
                 logger.info(f"[{chat_id}] 后端忙碌且检测到图片，消息已入队 (队列长度 {queue.size()})")
                 return
 
             # 无图片：记录消息并运行意图检测，仅在需要打断/切换/队列操作时回复；
             # 普通 queue 场景不再强制提示“在忙”，让前脑即时回复。
             logger.info(f"[{chat_id}] 后端忙碌（允许前脑即时回复），记录消息后进行意图检测")
+            user_metadata = {}
+            platform_msg_id = context.get("platform_message_id")
+            if platform_msg_id:
+                user_metadata["platform_message_ids"] = [str(platform_msg_id)]
+
             self.message_history.add_message(
                 platform="telegram",
                 chat_id=storage_id,
                 role="user",
                 content=message_content,
-                user_id=user_id
+                user_id=user_id,
+                metadata=user_metadata or None,
             )
             decision = await self._detect_interrupt_intent_and_reply(chat_id, text, status)
             action = decision.get("action", "queue")
@@ -179,13 +205,17 @@ class MessageHandlerMixin:
             if action in {"stop", "change"}:
                 session_history.append({"role": "user", "content": message_content})
                 if reply:
-                    await self.adapter.send_message(chat_id, reply)
+                    msg_id = await self.adapter.send_message(chat_id, reply)
+                    md = {"source": "interrupt"}
+                    if msg_id:
+                        md["platform_message_ids"] = [str(msg_id)]
                     self.message_history.add_message(
                         platform="telegram",
                         chat_id=storage_id,
                         role="assistant",
                         content=reply,
                         user_id="assistant",
+                        metadata=md,
                     )
                     session_history.append({"role": "assistant", "content": reply})
                 await self._interrupt_backend(chat_id, reason=action, user_text=text, skip_reply=True)
@@ -193,13 +223,17 @@ class MessageHandlerMixin:
             elif action == "list_queue":
                 session_history.append({"role": "user", "content": message_content})
                 if reply:
-                    await self.adapter.send_message(chat_id, reply)
+                    msg_id = await self.adapter.send_message(chat_id, reply)
+                    md = {"source": "queue_status"}
+                    if msg_id:
+                        md["platform_message_ids"] = [str(msg_id)]
                     self.message_history.add_message(
                         platform="telegram",
                         chat_id=storage_id,
                         role="assistant",
                         content=reply,
                         user_id="assistant",
+                        metadata=md,
                     )
                     session_history.append({"role": "assistant", "content": reply})
                 return
@@ -214,13 +248,17 @@ class MessageHandlerMixin:
                     else:
                         logger.warning(f"[{chat_id}] 取消排队任务 #{param} 失败（序号无效或队列已空）")
                 if reply:
-                    await self.adapter.send_message(chat_id, reply)
+                    msg_id = await self.adapter.send_message(chat_id, reply)
+                    md = {"source": "queue_cancel"}
+                    if msg_id:
+                        md["platform_message_ids"] = [str(msg_id)]
                     self.message_history.add_message(
                         platform="telegram",
                         chat_id=storage_id,
                         role="assistant",
                         content=reply,
                         user_id="assistant",
+                        metadata=md,
                     )
                     session_history.append({"role": "assistant", "content": reply})
                 return
@@ -231,13 +269,17 @@ class MessageHandlerMixin:
                     await queue.clear()
                     logger.info(f"[{chat_id}] 已清空所有排队任务")
                 if reply:
-                    await self.adapter.send_message(chat_id, reply)
+                    msg_id = await self.adapter.send_message(chat_id, reply)
+                    md = {"source": "queue_clear"}
+                    if msg_id:
+                        md["platform_message_ids"] = [str(msg_id)]
                     self.message_history.add_message(
                         platform="telegram",
                         chat_id=storage_id,
                         role="assistant",
                         content=reply,
                         user_id="assistant",
+                        metadata=md,
                     )
                     session_history.append({"role": "assistant", "content": reply})
                 return
@@ -274,12 +316,18 @@ class MessageHandlerMixin:
         storage_id = chat_id if chat_type != "private" else user_id
         message_content = f"{user_name}: {text}" if chat_type != "private" else text
         if not context.get("_message_saved"):
+            user_metadata = {}
+            platform_msg_id = context.get("platform_message_id")
+            if platform_msg_id:
+                user_metadata["platform_message_ids"] = [str(platform_msg_id)]
+
             self.message_history.add_message(
                 platform="telegram",
                 chat_id=storage_id,
                 role="user",
                 content=message_content,
                 user_id=user_id,
+                metadata=user_metadata or None,
             )
             context["_message_saved"] = True
 
@@ -328,6 +376,7 @@ class MessageHandlerMixin:
                 session["history"] = session_history[-20:]
 
         # 4) 根据路由信号决定是否启动后脑
+        followup_delay = self.FOLLOWUP_NEED_FOLLOW_DELAY if front_result.get("need_follow") else None
         if front_result["needs_backend"]:
             # 标记上下文：后脑应跳过用户消息保存（前脑已保存）
             backend_context = context.copy()
@@ -336,6 +385,8 @@ class MessageHandlerMixin:
             backend_context["_message_saved"] = True
             backend_context["task_instruction"] = front_result.get("task_instruction", "")
             backend_context["use_image_model"] = front_result.get("use_image_model", context.get("use_image_model", False))
+            if followup_delay is not None:
+                backend_context["_followup_initial_delay"] = followup_delay
 
             status = self.worker_status.get(chat_id)
             if status and status.busy:
@@ -355,7 +406,7 @@ class MessageHandlerMixin:
         else:
             logger.info(f"[{chat_id}] 前脑判定纯聊天，无需后脑。")
             # 纯聊天完成后，也需要标记空闲并启动 followup 计时
-            self._mark_scheduler_idle(chat_id)
+            self._mark_scheduler_idle(chat_id, initial_delay=followup_delay)
 
     async def _prepare_backend_enqueue_confirmation(
         self,
@@ -426,12 +477,18 @@ class MessageHandlerMixin:
         storage_id = chat_id if chat_type != "private" else user_id
         message_content = f"{user_name}: {text}" if chat_type != "private" else text
 
+        user_metadata = {}
+        platform_msg_id = context.get("platform_message_id")
+        if platform_msg_id:
+            user_metadata["platform_message_ids"] = [str(platform_msg_id)]
+
         self.message_history.add_message(
             platform="telegram",
             chat_id=storage_id,
             role="user",
             content=message_content,
             user_id=user_id,
+            metadata=user_metadata or None,
         )
         context["_message_saved"] = True
 

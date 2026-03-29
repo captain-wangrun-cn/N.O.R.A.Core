@@ -197,7 +197,7 @@ class SchedulerMixin:
             f"generating={state['is_generating']}, backend_busy={state['is_backend_busy']}"
         )
 
-    def _mark_scheduler_idle(self, chat_id: str):
+    def _mark_scheduler_idle(self, chat_id: str, *, initial_delay: float | None = None):
         """标记 AI 生成完毕。保持 ONLINE 状态并启动对话延续定时器。"""
         set_ai_generating(False)
         set_ai_backend_busy(False)
@@ -206,21 +206,25 @@ class SchedulerMixin:
             f"[{chat_id}] 进入空闲跟进状态: presence={state['presence']}, "
             f"generating={state['is_generating']}, backend_busy={state['is_backend_busy']}"
         )
-        self._start_followup_timer(chat_id)
+        self._start_followup_timer(chat_id, initial_delay=initial_delay)
 
     # ------------------------------------------------------------------
     # 对话延续机制 (Conversation Follow-up)
     # ------------------------------------------------------------------
 
-    def _start_followup_timer(self, chat_id: str):
+    def _start_followup_timer(self, chat_id: str, *, initial_delay: float | None = None):
         """启动对话延续定时器。如果已有定时器则先取消。"""
         self._cancel_followup_timer(chat_id)
+        delay = initial_delay if initial_delay is not None else self.FOLLOWUP_INITIAL_DELAY
+        # 记录单次延迟，防止并发覆盖
+        self._followup_delay_override[chat_id] = delay
         task = asyncio.create_task(self._followup_loop(chat_id))
         self._followup_timers[chat_id] = task
-        logger.debug(f"[{chat_id}] 对话延续定时器已启动（{self.FOLLOWUP_INITIAL_DELAY}s 后首次检测）")
+        logger.debug(f"[{chat_id}] 对话延续定时器已启动（{delay}s 后首次检测）")
 
     def _cancel_followup_timer(self, chat_id: str):
         """取消对话延续定时器。"""
+        self._followup_delay_override.pop(chat_id, None)
         task = self._followup_timers.pop(chat_id, None)
         if task and not task.done():
             task.cancel()
@@ -238,7 +242,8 @@ class SchedulerMixin:
         5. 若 END 或追话次数超限 → 生成结束消息，进入 SEMI_ONLINE
         """
         try:
-            await asyncio.sleep(self.FOLLOWUP_INITIAL_DELAY)
+            delay = self._followup_delay_override.pop(chat_id, self.FOLLOWUP_INITIAL_DELAY)
+            await asyncio.sleep(delay)
 
             wait_loops = 0  # 连续 WAIT 轮数（用于超时收尾）
 

@@ -305,14 +305,9 @@ if __name__ == "__main__":
     )
     parser.add_argument(
         "--include_answer",
-        action="store_true",
-        default=True,
-        help="包含 AI 生成的答案摘要，默认: True"
-    )
-    parser.add_argument(
-        "--no_answer",
-        action="store_true",
-        help="不包含 AI 答案摘要"
+        choices=["true", "false"],
+        default="true",
+        help="是否包含 AI 生成的答案摘要，默认: true"
     )
     parser.add_argument(
         "--include_raw_content",
@@ -328,9 +323,8 @@ if __name__ == "__main__":
     
     args = parser.parse_args()
     
-    # 处理 no_answer 标志
-    if args.no_answer:
-        args.include_answer = False
+    # 规范化布尔参数
+    args.include_answer = str(args.include_answer).lower() == "true"
     
     result = run(**vars(args))
     sys.exit(result)

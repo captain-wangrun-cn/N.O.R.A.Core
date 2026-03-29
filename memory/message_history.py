@@ -36,15 +36,15 @@ class MessageHistory:
     def __init__(
         self,
         db_path: Optional[str] = None,
-        raw_window: int = 50,      # 原始消息窗口大小
-        compress_window: int = 50, # 开始压缩的阈值（按消息数量）
-        compress_ratio: int = 10,   # 压缩比例 (10:1)
-        archive_threshold: int = 500, # 归档阈值
+    raw_window: int = 80,      # 原始消息窗口大小（放宽，减少过早截断）
+    compress_window: int = 120, # 开始压缩的阈值（按消息数量，推迟压缩）
+    compress_ratio: int = 12,   # 压缩比例 (12:1)，兼顾上下文保留
+    archive_threshold: int = 600, # 归档阈值
         timezone: str = "Asia/Shanghai",  # 时间戳显示时区
         timestamp_format: str = "%Y-%m-%d %H:%M:%S %A",  # 时间戳格式
         mirror_db_path: Optional[str] = None,  # 原文镜像库（独立）
         context_db_path: Optional[str] = None,  # 压缩上下文库（独立）
-        long_message_threshold: int = 1200,  # 判定“过长”后提前压缩的阈值
+    long_message_threshold: int = 1600,  # 判定“过长”后提前压缩的阈值，放宽减少过早截断
     ):
         self.db_path = Path(db_path) if db_path else get_default_message_history_db()
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
@@ -439,12 +439,24 @@ class MessageHistory:
                 })
             
             prev_session_id = current_session_id
-            
+            md_raw = msg.get("metadata")
+            try:
+                md = json.loads(md_raw) if md_raw else {}
+            except Exception:
+                md = {}
+
+            platform_ids = md.get("platform_message_ids") or md.get("platform_message_id") or []
+            if isinstance(platform_ids, str):
+                platform_ids = [platform_ids]
+            platform_ids = [str(pid) for pid in platform_ids if pid is not None]
+
             messages.append({
                 "role": msg["role"],
                 "content": msg["content"],
                 "timestamp": msg["timestamp"],
-                "message_id": msg["id"]
+                "message_id": msg["id"],
+                "metadata": md,
+                "platform_message_ids": platform_ids,
             })
         
         conn.close()

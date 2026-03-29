@@ -317,6 +317,7 @@ class FrontBrainMixin:
         logger.info(
             f"[{chat_id}] 前脑结果: needs_backend={parsed['needs_backend']}, "
             f"should_reply={parsed.get('should_reply')}, "
+            f"need_follow={parsed.get('need_follow')}, "
             f"reply='{parsed['user_reply'][:80]}...'"
         )
         await self._send_debug(
@@ -324,6 +325,7 @@ class FrontBrainMixin:
             f"⚡ 前脑: needs_backend={parsed['needs_backend']}\n"
             f"should_reply={parsed.get('should_reply')}\n"
             f"任务指示: {parsed.get('task_instruction', '')[:200]}\n"
+            f"need_follow={parsed.get('need_follow')}\n"
             f"回复: {parsed['user_reply'][:200]}"
         )
 
@@ -333,6 +335,7 @@ class FrontBrainMixin:
             "task_instruction": parsed.get("task_instruction", ""),
             "should_reply": parsed.get("should_reply", True),
             "use_image_model": parsed.get("use_image_model", False),
+            "need_follow": parsed.get("need_follow", False),
             "raw_response": response_text,
         }
 

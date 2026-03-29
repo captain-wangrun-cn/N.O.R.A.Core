@@ -158,11 +158,13 @@ class BackBrainMixin:
         # 通知 scheduler: 后端开始忙碌
         self._update_scheduler_state(chat_id, busy=True)
 
-    # 根据输入类型选择模型：图片消息优先走 image 模型，其余走 coder 模型
-    force_image_model_until_crop_done = bool(context.get("use_image_model", False))
-    base_model_alias = "image" if (multimodal_images or force_image_model_until_crop_done) else "coder"
-    active_llm = self.image_llm if base_model_alias == "image" else self.coder_llm
-        
+        response_platform_ids: List[str] = []
+
+        # 根据输入类型选择模型：图片消息优先走 image 模型，其余走 coder 模型
+        force_image_model_until_crop_done = bool(context.get("use_image_model", False))
+        base_model_alias = "image" if (multimodal_images or force_image_model_until_crop_done) else "coder"
+        active_llm = self.image_llm if base_model_alias == "image" else self.coder_llm
+
         try:
             if self.tui_callback: self.tui_callback(f"🏃 Handling new message...")
             
@@ -173,12 +175,18 @@ class BackBrainMixin:
             status.update("保存消息", "正在保存用户消息...")
             message_content = f"{user_name}: {text}" if chat_type != "private" else text
             if not front_brain_handled and not message_saved:
+                user_metadata = {}
+                platform_msg_id = context.get("platform_message_id")
+                if platform_msg_id:
+                    user_metadata["platform_message_ids"] = [str(platform_msg_id)]
+
                 self.message_history.add_message(
                     platform="telegram",
                     chat_id=storage_id,
                     role="user",
                     content=message_content,
-                    user_id=user_id
+                    user_id=user_id,
+                    metadata=user_metadata or None,
                 )
             
             # --- 1. RAG 记忆检索 (Memory Retrieval) ---
@@ -498,7 +506,9 @@ class BackBrainMixin:
                                     ):
                                         # 轮询模式下不直接发送，由前脑统一转述
                                         if not in_polling_mode:
-                                            await self.adapter.send_message(chat_id, text_to_send)
+                                            msg_id = await self.adapter.send_message(chat_id, text_to_send)
+                                            if msg_id:
+                                                response_platform_ids.append(str(msg_id))
                                         else:
                                             # 轮询模式下需要将分段也汇总到最终结果供前脑审查
                                             if final_response_buffer:
@@ -964,11 +974,15 @@ class BackBrainMixin:
                 final_response_buffer = self._strip_timestamp_markers(final_response_buffer)
                 if final_response_buffer:
                     if not in_polling:
-                        await self.adapter.send_message(chat_id, self._strip_timestamp_markers(final_response_buffer))
+                        msg_id = await self.adapter.send_message(chat_id, self._strip_timestamp_markers(final_response_buffer))
+                        if msg_id:
+                            response_platform_ids.append(str(msg_id))
                 else:
                     final_response_buffer = "任务已完成。"
                     if not in_polling:
-                        await self.adapter.send_message(chat_id, self._strip_timestamp_markers(final_response_buffer))
+                        msg_id = await self.adapter.send_message(chat_id, self._strip_timestamp_markers(final_response_buffer))
+                        if msg_id:
+                            response_platform_ids.append(str(msg_id))
             elif latest_tool_output:
                 temp_history.append({
                     "role": "user",
@@ -1002,13 +1016,17 @@ class BackBrainMixin:
             
             # --- 4.5 保存助手回复到数据库 ---
             if final_response_buffer:
+                metadata = {"image_ids": [img.get("image_id") for img in multimodal_images] if multimodal_images else None}
+                if response_platform_ids:
+                    metadata["platform_message_ids"] = response_platform_ids
+
                 self.message_history.add_message(
                     platform="telegram",
                     chat_id=storage_id,
                     role="assistant",
                     content=final_response_buffer,
                     user_id="assistant",
-                    metadata={"image_ids": [img.get("image_id") for img in multimodal_images] if multimodal_images else None},
+                    metadata=metadata,
                 )
             
             # --- 4.6 图片记忆存储 (Image Memory Storage) ---
@@ -1051,7 +1069,7 @@ class BackBrainMixin:
                     full_assistant_turn += " " + final_response_buffer
                 
                 if full_assistant_turn.strip():
-                     asyncio.create_task(self._async_save_memory(full_assistant_turn.strip(), storage_id, {"role": "assistant", "chat_id": chat_id}))
+                    asyncio.create_task(self._async_save_memory(full_assistant_turn.strip(), storage_id, {"role": "assistant", "chat_id": chat_id}))
 
             # Update session history
             session["history"] = [
@@ -1060,7 +1078,7 @@ class BackBrainMixin:
                 and not str(h.get("content", "")).startswith("【Tool Output for ")
             ]
             if final_response_buffer:
-                 if not any(final_response_buffer in str(h.get('content', '')) for h in session["history"]):
+                if not any(final_response_buffer in str(h.get('content', '')) for h in session["history"]):
                     session["history"].append({"role": "assistant", "content": final_response_buffer})
 
             if len(session["history"]) > 20:
@@ -1089,7 +1107,8 @@ class BackBrainMixin:
             
         finally:
             status.finish()
-            self._mark_scheduler_idle(chat_id)
+            followup_delay = context.get("_followup_initial_delay")
+            self._mark_scheduler_idle(chat_id, initial_delay=followup_delay)
             if self.tui_callback: self.tui_callback("✅ Idle")
             self.generation_tasks.pop(chat_id, None)
             logger.debug(f"[{chat_id}] 本次生成任务结束。")
