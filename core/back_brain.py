@@ -216,10 +216,10 @@ class BackBrainMixin:
                 )
             
             # Inject Workspace Context
-            from brain.tools import WORKSPACE_ROOT, SKILLS_DIR, CODE_SKILLS_DIR
+            from brain.tools import WORKSPACE_ROOT, SKILLS_DIR
             workspace_info = render_template('context_injection.jinja', 'workspace',
                                              workspace_root=WORKSPACE_ROOT,
-                                             skills_dir=CODE_SKILLS_DIR,
+                                             skills_dir=SKILLS_DIR,
                                              downloads_dir=os.path.join(WORKSPACE_ROOT, 'downloads'))
             instructions.append(workspace_info)
             

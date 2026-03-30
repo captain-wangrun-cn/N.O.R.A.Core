@@ -19,15 +19,15 @@ logger = logging.getLogger(__name__)
 
 # 工具一句话简介（用于注入前脑/后脑提示词）
 TOOL_INTROS = {
-    "create_new_skill": "创建新的技能脚手架目录与基础文件，用于新增能力；调用前先阅读 skills/skill_creator/ 下的文档并遵循其规范。",
-    "execute_skill": "运行指定技能并返回输出结果，适合调用已实现能力。",
+    "create_new_skill": "在 workspace/skills 下创建新的技能脚手架目录与基础文件；调用前先阅读 workspace/skills/skill_creator/ 下的文档并遵循其规范。",
+    "execute_skill": "运行 workspace/skills 下指定技能并返回输出结果，适合调用已实现能力。",
     "execute_tool_plan": "按计划顺序批量执行多个工具步骤，适合多步流水线。",
     "read_file": "读取文件内容，支持按行范围读取，适合查看源码/文档。",
     "search": "在代码库中搜索关键词或模式，定位实现或配置。",
     "write_file": "创建或覆盖写入文件内容，适合新增文件或重写。",
     "edit_file": "基于旧内容对文件做精确修改，适合小范围替换。",
     "list_dir": "列出目录内容，查看文件和子目录，适合确认路径。",
-    "get_available_skills": "列出当前可用技能清单，便于选择技能。",
+    "get_available_skills": "列出 workspace/skills 下当前可用技能清单，便于选择技能。",
     "exec_command": "执行受限的系统命令，作为无法用高层工具时的兜底。",
     "view_image": "仅用于检索用户之前发送给 AI 的历史图片（图片记忆库），支持标签语义与 OCR 文本模糊搜索，不用于搜索或生成新图。",
     "crop_image_for_llm": "裁剪图片以便模型分析，用户要求仔细观察图片某个部分时可调用。",
@@ -49,9 +49,8 @@ SKILLS_DIR = workspace_manager.skills_dir
 DOWNLOADS_DIR = workspace_manager.downloads_dir
 DATA_DIR = workspace_manager.data_dir
 
-# 代码仓库根目录（brain/ 的上一级），技能脚本位于此目录下的 skills/
+# 代码仓库根目录（brain/ 的上一级）
 CODE_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-CODE_SKILLS_DIR = os.path.join(CODE_ROOT, "skills")
 
 SECRET_FILE = os.path.join(WORKSPACE_ROOT, "SECRET.md")
 SECRET_KEY_FILE = os.path.join(DATA_DIR, "secret.key")
@@ -367,13 +366,20 @@ class ToolManager:
         :param description: A one-sentence description of what the new skill does.
         """
         logger.info(f"Request to create new skill: {skill_name}")
-        skill_dir = os.path.join(CODE_SKILLS_DIR, skill_name)
+        skill_dir = os.path.join(SKILLS_DIR, skill_name)
         if os.path.exists(skill_dir):
             return f"Error: Skill '{skill_name}' already exists. Please choose a different name."
         try:
             os.makedirs(skill_dir)
             with open(os.path.join(skill_dir, "SKILL.md"), 'w', encoding='utf-8') as f:
-                f.write(f"---\nname: {skill_name}\ndescription: {description}\n---\n\n# {skill_name}\n\n{description}\n")
+                f.write(
+                    f"---\n"
+                    f"name: {skill_name}\n"
+                    f"description: {description}\n"
+                    f"version: 1.0.0\n"
+                    f"---\n\n"
+                    f"# {skill_name}\n\n{description}\n"
+                )
             with open(os.path.join(skill_dir, "__init__.py"), 'w', encoding='utf-8') as f: pass
             with open(os.path.join(skill_dir, "main.py"), 'w', encoding='utf-8') as f:
                 # Use a simple placeholder replacement to avoid str.format interpreting template braces
@@ -388,8 +394,9 @@ class ToolManager:
                 f"  2. Print results to stdout (so execute_skill can capture them)\n"
                 f"  3. Have an 'if __name__ == \"__main__\":' entry point\n"
                 f"  4. Use os.getenv('WORKSPACE_ROOT') for workspace root path (currently: {WORKSPACE_ROOT})\n"
-                f"  5. Use os.getenv('DOWNLOADS_DIR') for download directory (currently: {DOWNLOADS_DIR})\n"
-                f"  6. NEVER hardcode paths like '/root/xxx' — always use the environment variables above!\n\n"
+                f"  5. Use os.getenv('SKILLS_DIR') for skill root path (currently: {SKILLS_DIR})\n"
+                f"  6. Use os.getenv('DOWNLOADS_DIR') for download directory (currently: {DOWNLOADS_DIR})\n"
+                f"  7. NEVER hardcode paths like '/root/xxx' — always use the environment variables above!\n\n"
                 f"After writing the code, also update '{os.path.join(skill_dir, 'SKILL.md')}' with the correct usage docs.\n"
                 f"Do NOT call execute_skill until the real code is written."
             )
@@ -402,7 +409,7 @@ class ToolManager:
         :param skill_name: The name of the skill directory (e.g., 'pixiv_manager').
         :param args_json: A JSON string of arguments for the skill (e.g., '{"keyword": "blue archive"}').
         """
-        skill_script_path = os.path.join(CODE_SKILLS_DIR, skill_name, "main.py")
+        skill_script_path = os.path.join(SKILLS_DIR, skill_name, "main.py")
         if not os.path.exists(skill_script_path):
             return f"Error: Skill '{skill_name}' not found. Use get_available_skills to see what's available."
         
@@ -426,7 +433,7 @@ class ToolManager:
         env["DOWNLOADS_DIR"] = str(DOWNLOADS_DIR)
         env["SKILLS_DIR"] = str(SKILLS_DIR)
         env["CODE_ROOT"] = str(CODE_ROOT)
-        config_path = os.path.join(CODE_SKILLS_DIR, skill_name, "config.json")
+        config_path = os.path.join(SKILLS_DIR, skill_name, "config.json")
         if os.path.exists(config_path):
             try:
                 with open(config_path, 'r', encoding='utf-8') as f:
@@ -482,9 +489,9 @@ class ToolManager:
 
     def get_available_skills(self) -> str:
         """Lists all available skills that N.O.R.A. Core can use."""
-        if not os.path.exists(CODE_SKILLS_DIR): return f"Error: Skills directory not found at {CODE_SKILLS_DIR}."
+        if not os.path.exists(SKILLS_DIR): return f"Error: Skills directory not found at {SKILLS_DIR}."
         try:
-            skill_folders = [d for d in os.listdir(CODE_SKILLS_DIR) if os.path.isdir(os.path.join(CODE_SKILLS_DIR, d)) and not d.startswith('__')]
+            skill_folders = [d for d in os.listdir(SKILLS_DIR) if os.path.isdir(os.path.join(SKILLS_DIR, d)) and not d.startswith('__')]
             if not skill_folders: return "No skills are currently available."
             return "Available skills:\\n" + "\\n".join([f"- {s}" for s in skill_folders])
         except Exception as e: return f"Error listing skills: {e}"

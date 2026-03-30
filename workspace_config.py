@@ -7,6 +7,8 @@ Copyright © WR（captain-wangrun-cn） All rights reserved
 
 import os
 import json
+import shutil
+import re
 from pathlib import Path
 from typing import Optional
 
@@ -39,7 +41,8 @@ class WorkspaceManager:
             try:
                 import config
                 config.load_config()
-                workspace_cfg = config.get_config().get("workspace", {})
+                cfg = config.get_config() or {}
+                workspace_cfg = cfg.get("workspace", {})
                 raw_path = workspace_cfg.get("root_path", DEFAULT_WORKSPACE_PATH)
                 self.workspace_root = os.path.abspath(os.path.expanduser(raw_path))
             except:
@@ -65,6 +68,81 @@ class WorkspaceManager:
                     "version": "1.0",
                     "description": "N.O.R.A. Core Workspace"
                 }, indent=2, ensure_ascii=False))
+
+        # 启动时同步仓库预装技能到 workspace/skills：缺失则复制，低版本则升级覆盖
+        self._sync_bundled_skills_by_version()
+
+    def _parse_version_tuple(self, version_str: str) -> tuple:
+        """将版本号转换为可比较的三段整数元组，非法值回退为 (0,0,0)。"""
+        if not version_str:
+            return (0, 0, 0)
+        parts = re.findall(r"\d+", str(version_str))
+        if not parts:
+            return (0, 0, 0)
+        nums = [int(x) for x in parts[:3]]
+        while len(nums) < 3:
+            nums.append(0)
+        return tuple(nums)
+
+    def _extract_skill_version(self, skill_md_path: str) -> str:
+        """从 SKILL.md 的 YAML Frontmatter 中提取 version。"""
+        try:
+            with open(skill_md_path, 'r', encoding='utf-8') as f:
+                content = f.read()
+            fm = re.match(r'^---\s*\n(.*?)\n---\s*\n', content, re.DOTALL)
+            block = fm.group(1) if fm else content
+            m = re.search(r'^version\s*:\s*([^\n#]+)', block, re.MULTILINE)
+            return m.group(1).strip() if m else "0.0.0"
+        except Exception:
+            return "0.0.0"
+
+    def _sync_bundled_skills_by_version(self):
+        """启动时同步仓库预装技能：缺失则复制，workspace 版本低于仓库则自动覆盖更新。"""
+        seed_marker = os.path.join(self.skills_dir, ".seeded")
+
+        # 仓库自带技能目录（workspace_config.py 同级的 skills/）
+        bundled_skills_root = os.path.join(os.path.dirname(os.path.abspath(__file__)), "skills")
+        if not os.path.isdir(bundled_skills_root):
+            return
+
+        os.makedirs(self.skills_dir, exist_ok=True)
+
+        copied = 0
+        upgraded = 0
+        skipped = 0
+        for item in os.listdir(bundled_skills_root):
+            src_dir = os.path.join(bundled_skills_root, item)
+            src_skill_md = os.path.join(src_dir, "SKILL.md")
+            if not os.path.isdir(src_dir):
+                continue
+            # 仅复制真正的技能目录（包含 SKILL.md）
+            if not os.path.isfile(src_skill_md):
+                continue
+
+            dst_dir = os.path.join(self.skills_dir, item)
+            dst_skill_md = os.path.join(dst_dir, "SKILL.md")
+
+            if not os.path.exists(dst_dir):
+                shutil.copytree(src_dir, dst_dir)
+                copied += 1
+                continue
+
+            repo_ver = self._extract_skill_version(src_skill_md)
+            ws_ver = self._extract_skill_version(dst_skill_md) if os.path.isfile(dst_skill_md) else "0.0.0"
+            if self._parse_version_tuple(ws_ver) < self._parse_version_tuple(repo_ver):
+                shutil.rmtree(dst_dir, ignore_errors=True)
+                shutil.copytree(src_dir, dst_dir)
+                upgraded += 1
+            else:
+                skipped += 1
+
+        with open(seed_marker, 'w', encoding='utf-8') as f:
+            f.write(json.dumps({
+                "seeded": True,
+                "copied_skills": copied,
+                "upgraded_skills": upgraded,
+                "skipped_skills": skipped,
+            }, indent=2, ensure_ascii=False))
     
     @property
     def root(self) -> str:

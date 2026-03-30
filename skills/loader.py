@@ -1,8 +1,9 @@
 import os
 import re
 import logging
-from typing import List, Dict, Optional
+from typing import List, Dict, Optional, Any
 import yaml
+from workspace_config import get_workspace_manager
 
 logger = logging.getLogger(__name__)
 
@@ -13,14 +14,17 @@ class SkillLoader:
     优先解析 YAML Frontmatter，兼容旧的 XML 标签。
     """
 
-    def __init__(self, skills_dir: str = "skills"):
-        if not os.path.isabs(skills_dir):
-            base_path = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-            skills_dir = os.path.join(base_path, skills_dir)
-        
-        self.skills_dir = skills_dir
+    def __init__(self, skills_dir: Optional[str] = None):
+        if skills_dir:
+            if not os.path.isabs(skills_dir):
+                ws = get_workspace_manager()
+                skills_dir = os.path.join(ws.root, skills_dir)
+            self.skills_dir = os.path.abspath(skills_dir)
+        else:
+            # 默认使用 workspace/skills
+            self.skills_dir = get_workspace_manager().skills_dir
 
-    def scan_skills(self) -> List[Dict[str, any]]:
+    def scan_skills(self) -> List[Dict[str, Any]]:
         """
         扫描目录，返回所有可用技能的摘要列表。
         """
@@ -49,7 +53,7 @@ class SkillLoader:
         logger.info(f"扫描到 {len(skills)} 个技能: {[s['name'] for s in skills]}")
         return skills
 
-    def _parse_skill_md(self, file_path: str) -> Optional[Dict[str, any]]:
+    def _parse_skill_md(self, file_path: str) -> Optional[Dict[str, Any]]:
         """
         解析 SKILL.md, 优先 YAML Frontmatter, 其次 XML 标签。
         """
