@@ -19,7 +19,7 @@ logger = logging.getLogger(__name__)
 
 # 工具一句话简介（用于注入前脑/后脑提示词）
 TOOL_INTROS = {
-    "create_new_skill": "创建新的技能脚手架目录与基础文件，用于新增能力。",
+    "create_new_skill": "创建新的技能脚手架目录与基础文件，用于新增能力；调用前先阅读 skills/skill_creator/ 下的文档并遵循其规范。",
     "execute_skill": "运行指定技能并返回输出结果，适合调用已实现能力。",
     "execute_tool_plan": "按计划顺序批量执行多个工具步骤，适合多步流水线。",
     "read_file": "读取文件内容，支持按行范围读取，适合查看源码/文档。",

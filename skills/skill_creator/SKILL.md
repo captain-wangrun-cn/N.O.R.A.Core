@@ -30,12 +30,17 @@ parameters:
 - `execute_skill("skill_creator", '{"skill_name": "new_skill", "action": "create", "requirement": "功能需求..."}')`
 - 禁止使用 `exec_command` 或直接运行脚本。
 
+## 关键约束（创建技能时必须遵守）
+
+- 创建新技能时，必须先调用 `create_new_skill` 生成标准脚手架，禁止手动 `mkdir`/手写初始文件绕过模板。
+- 在调用 `create_new_skill` 前，必须先阅读 `skills/skill_creator/` 下的文档（至少本 `SKILL.md`），确保命名、参数、流程符合规范。
+
 ## 标准操作流程 (SOP)
 
 ### 阶段 1: 文档先行 (Documentation First)
 1.  **确认需求:** 与主人沟通，明确新技能的目标、输入参数和期望的输出格式。
-2.  **创建目录:** 使用 `mkdir -p skills/<skill_name>`。
-3.  **编写 SKILL.md:** 使用 `write_file` 创建 `skills/<skill_name>/SKILL.md`。**必须** 使用下面的 "SKILL.md 最佳实践模板"。
+2.  **创建脚手架（强制）:** 调用 `create_new_skill("<skill_name>", "<一句话描述>")` 自动创建目录与基础文件。
+3.  **完善 SKILL.md:** 在脚手架生成的 `skills/<skill_name>/SKILL.md` 基础上，用 `write_file`/`edit_file` 按下方模板补全参数、示例和约束。
 4.  <b>请求审核与自主推进:</b> 将 `SKILL.md` 的内容展示给主人。<b>如果主人的请求明确表示需要立即实现功能（例如：“帮我从Pixiv抓图”），则在展示后可直接进入代码实现阶段，无需等待明确的 “批准” 指令。否则，请等待批准后再进行代码实现。严禁</b> 在文档批准前编写任何代码。
 
 ### 阶段 2: 代码实现 (Code Implementation)
@@ -49,6 +54,7 @@ parameters:
 - 运行入口：只能通过 `execute_skill("<skill_name>", '{"arg": "value"}')` 调用；不要用 `exec_command` 直接跑脚本。
 - 路径使用框架注入的环境变量，禁止硬编码绝对路径：`WORKSPACE_ROOT`、`SKILLS_DIR`、`DOWNLOADS_DIR`、`CODE_ROOT`。
 - 配置注入：若存在 `skills/<skill_name>/config.json`，会以环境变量形式注入；不要去读根目录的 `config.yml` / `.env`。
+- 密钥/配置储存：请统一储存在 `skills/<skill_name>/config.json` 内，执行代码时会以环境变量形式注入。
 - 输出契约：成功写 `stdout`，错误/调试写 `stderr`，必要时退出码非 0。
 - 敏感文件：不要读取/修改 `CUSTOM.md`、`SECRET.md` 等敏感文件；遵守系统提示的文件访问限制。
 
