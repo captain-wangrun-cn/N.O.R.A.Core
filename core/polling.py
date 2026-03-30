@@ -71,6 +71,11 @@ class PollingMixin:
                     self._strip_timestamp_markers(str(msg["content"]))
                     for msg in new_user_msgs
                 ]
+
+                # 审查阶段不再夹带用户在后脑执行期间的新提问，避免重复回复
+                if new_user_texts:
+                    logger.info(f"[{chat_id}] 轮询审查丢弃后脑期间的 {len(new_user_texts)} 条用户消息，避免重复回复")
+                    new_user_texts = []
                 
                 # 获取后脑的最终回复（从 session history 中取最后一条 assistant 消息）
                 session = self.sessions.get(chat_id, {})
@@ -178,8 +183,7 @@ class PollingMixin:
                     new_instruction = review_reply if review_reply else "请继续处理。"
                     if task_instruction:
                         new_instruction += f"\n\n【任务指示】\n{task_instruction}"
-                    if new_user_texts:
-                        new_instruction += "\n\n用户新消息:\n" + "\n".join(new_user_texts)
+                    # 审查阶段已丢弃后脑期间的用户消息，避免重复回复
                     
                     context = context.copy()
                     context["text"] = new_instruction
@@ -191,11 +195,6 @@ class PollingMixin:
                         context["_followup_initial_delay"] = self.FOLLOWUP_NEED_FOLLOW_DELAY
                     # 消费掉队列中对应的消息
                     queue = self.task_queues.get(chat_id)
-                    if queue and new_user_texts:
-                        consumed = 0
-                        while consumed < len(new_user_texts) and queue.size() > 0:
-                            await queue.dequeue()
-                            consumed += 1
                     
                     logger.info(f"[{chat_id}] 轮询继续: 新指示='{new_instruction[:60]}...'")
                     continue
