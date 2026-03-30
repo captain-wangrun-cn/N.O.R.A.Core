@@ -433,6 +433,7 @@ class ToolManager:
         env["DOWNLOADS_DIR"] = str(DOWNLOADS_DIR)
         env["SKILLS_DIR"] = str(SKILLS_DIR)
         env["CODE_ROOT"] = str(CODE_ROOT)
+        env["NORA_CONFIG_PATH"] = str(os.path.join(CODE_ROOT, "config.yml"))
         config_path = os.path.join(SKILLS_DIR, skill_name, "config.json")
         if os.path.exists(config_path):
             try:
@@ -462,6 +463,7 @@ class ToolManager:
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
                 env=env,
+                cwd=CODE_ROOT,
             )
             try:
                 stdout_bytes, stderr_bytes = await asyncio.wait_for(proc.communicate(), timeout=120)

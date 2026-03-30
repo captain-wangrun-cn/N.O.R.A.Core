@@ -1,7 +1,7 @@
 ---
 name: web_search
 description: 使用 Tavily API 进行智能网络搜索，返回高质量的搜索结果和内容摘要
-version: 1.0.0
+version: 1.0.1
 author: N.O.R.A. Core
 parameters:
   type: object

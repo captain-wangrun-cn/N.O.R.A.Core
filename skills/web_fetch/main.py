@@ -32,8 +32,14 @@ EXTRACTION_SYSTEM_PROMPT = (
 
 def load_config() -> dict:
     """加载项目配置文件"""
-    config_path = os.path.join(os.path.dirname(__file__), '..', '..', 'config.yml')
-    if not os.path.exists(config_path):
+    candidates = [
+        os.environ.get("NORA_CONFIG_PATH", ""),
+        os.path.join(os.environ.get("CODE_ROOT", ""), "config.yml") if os.environ.get("CODE_ROOT") else "",
+        os.path.join(os.environ.get("WORKSPACE_ROOT", ""), "config.yml") if os.environ.get("WORKSPACE_ROOT") else "",
+        os.path.join(os.path.dirname(__file__), '..', '..', 'config.yml'),
+    ]
+    config_path = next((p for p in candidates if p and os.path.exists(p)), "")
+    if not config_path:
         return {}
     try:
         import yaml

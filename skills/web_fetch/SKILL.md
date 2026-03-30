@@ -1,7 +1,7 @@
 ---
 name: web_fetch
 description: 抓取指定网页的内容并使用 AI 提取关键信息。当需要阅读和理解某个网页的内容时使用此技能。
-version: 1.0.0
+version: 1.0.1
 author: N.O.R.A. Core
 parameters:
   type: object
