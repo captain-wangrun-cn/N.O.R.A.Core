@@ -25,7 +25,8 @@ parameters:
       type: boolean
       description: 是否包含原始网页内容
       default: false
-  required: [query]
+  required: 
+      - query
 ---
 
 # Web Search Skill

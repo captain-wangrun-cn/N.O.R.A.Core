@@ -15,7 +15,9 @@ parameters:
 		raw:
 			type: boolean
 			description: 是否直接返回 Markdown 原文
-	required: [url, query]
+	required:
+		- url
+		- query
 ---
 
 # Web Fetch Skill
