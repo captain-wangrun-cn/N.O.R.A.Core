@@ -38,6 +38,21 @@ class MessageHandlerMixin:
         re.IGNORECASE | re.DOTALL,
     )
 
+    def _append_busy_queue_summary(self, chat_id: str, reply: str) -> str:
+        """后脑忙碌时，在给用户的回复后附带当前队列详情。"""
+        text = (reply or "").strip()
+        queue = self.task_queues.get(chat_id)
+        queue_summary = queue.get_queue_summary() if queue else ""
+        queue_block = queue_summary if queue_summary else "（暂无排队任务）"
+
+        # 避免重复附加
+        if "【后脑队列详情】" in text:
+            return text
+
+        if text:
+            return f"{text}\n\n【后脑队列详情】\n{queue_block}"
+        return f"【后脑队列详情】\n{queue_block}"
+
     async def handle_new_message(self, context: Dict[str, Any]):
         """处理来自适配器的新消息/命令。"""
         # copy context to allow safe mutation (inject multimodal payloads, flags, etc.)
@@ -150,7 +165,10 @@ class MessageHandlerMixin:
                     "context": context,
                     "text": text,
                 })
-                busy_reply = "后端忙碌，已把图片需求排队，稍后处理哦～"
+                busy_reply = self._append_busy_queue_summary(
+                    chat_id,
+                    "后端忙碌，已把图片需求排队，稍后处理哦～",
+                )
                 busy_msg_id = await self.adapter.send_message(chat_id, busy_reply)
                 busy_md = {}
                 if busy_msg_id:
@@ -205,6 +223,7 @@ class MessageHandlerMixin:
             if action in {"stop", "change"}:
                 session_history.append({"role": "user", "content": message_content})
                 if reply:
+                    reply = self._append_busy_queue_summary(chat_id, reply)
                     msg_id = await self.adapter.send_message(chat_id, reply)
                     md = {"source": "interrupt"}
                     if msg_id:
@@ -223,6 +242,7 @@ class MessageHandlerMixin:
             elif action == "list_queue":
                 session_history.append({"role": "user", "content": message_content})
                 if reply:
+                    reply = self._append_busy_queue_summary(chat_id, reply)
                     msg_id = await self.adapter.send_message(chat_id, reply)
                     md = {"source": "queue_status"}
                     if msg_id:
@@ -248,6 +268,7 @@ class MessageHandlerMixin:
                     else:
                         logger.warning(f"[{chat_id}] 取消排队任务 #{param} 失败（序号无效或队列已空）")
                 if reply:
+                    reply = self._append_busy_queue_summary(chat_id, reply)
                     msg_id = await self.adapter.send_message(chat_id, reply)
                     md = {"source": "queue_cancel"}
                     if msg_id:
@@ -269,6 +290,7 @@ class MessageHandlerMixin:
                     await queue.clear()
                     logger.info(f"[{chat_id}] 已清空所有排队任务")
                 if reply:
+                    reply = self._append_busy_queue_summary(chat_id, reply)
                     msg_id = await self.adapter.send_message(chat_id, reply)
                     md = {"source": "queue_clear"}
                     if msg_id:
@@ -342,6 +364,10 @@ class MessageHandlerMixin:
         if status and status.busy and front_result.get("needs_backend"):
             # 避免后脑忙碌时重复回复：保留前脑回复供后脑参考，但不再发送给用户
             send_front_reply = False
+
+        # 后脑忙碌时，只要要给用户发消息，就附带当前队列详情
+        if send_front_reply and status and status.busy:
+            user_reply = self._append_busy_queue_summary(chat_id, user_reply)
 
         if send_front_reply:
             # 使用 [SPLIT] 分段发送
