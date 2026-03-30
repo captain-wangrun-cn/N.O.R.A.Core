@@ -305,14 +305,17 @@ if __name__ == "__main__":
     )
     parser.add_argument(
         "--include_answer",
+        type=lambda s: str(s).lower(),
         choices=["true", "false"],
         default="true",
-        help="是否包含 AI 生成的答案摘要，默认: true"
+        help="是否包含 AI 生成的答案摘要，默认: true（大小写不敏感）"
     )
     parser.add_argument(
         "--include_raw_content",
-        action="store_true",
-        help="包含原始网页内容（会增加响应大小）"
+        type=lambda s: str(s).lower(),
+        choices=["true", "false"],
+        default="false",
+        help="是否包含原始网页内容（会增加响应大小），默认: false（大小写不敏感）"
     )
     parser.add_argument(
         "--output_format",
@@ -325,6 +328,7 @@ if __name__ == "__main__":
     
     # 规范化布尔参数
     args.include_answer = str(args.include_answer).lower() == "true"
+    args.include_raw_content = str(args.include_raw_content).lower() == "true"
     
     result = run(**vars(args))
     sys.exit(result)
