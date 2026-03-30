@@ -4,20 +4,20 @@ description: 抓取指定网页的内容并使用 AI 提取关键信息。当需
 version: 1.0.0
 author: N.O.R.A. Core
 parameters:
-	type: object
-	properties:
-		url:
-			type: string
-			description: 要抓取的网页完整 URL
-		query:
-			type: string
-			description: 需要从网页中提取的信息描述
-		raw:
-			type: boolean
-			description: 是否直接返回 Markdown 原文
-	required:
-		- url
-		- query
+  type: object
+  properties:
+    url:
+      type: string
+      description: 要抓取的网页完整 URL
+    query:
+      type: string
+      description: 需要从网页中提取的信息描述
+    raw:
+      type: boolean
+      description: 是否直接返回 Markdown 原文
+  required:
+    - url
+    - query
 ---
 
 # Web Fetch Skill
