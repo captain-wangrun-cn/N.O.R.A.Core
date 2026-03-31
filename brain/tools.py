@@ -28,7 +28,7 @@ TOOL_INTROS = {
     "edit_file": "基于旧内容对文件做精确修改，适合小范围替换。",
     "list_dir": "列出目录内容，查看文件和子目录，适合确认路径。",
     "get_available_skills": "列出 workspace/skills 下当前可用技能清单，便于选择技能。",
-    "exec_command": "执行受限的系统命令，作为无法用高层工具时的兜底。",
+    "exec_command": "执行受限的系统命令，作为无法用高层工具时的兜底；默认工作目录为 workspace 根目录。",
     "view_image": "仅用于检索用户之前发送给 AI 的历史图片（图片记忆库），支持标签语义与 OCR 文本模糊搜索，不用于搜索或生成新图。",
     "crop_image_for_llm": "裁剪图片以便模型分析，用户要求仔细观察图片某个部分时可调用。",
     "report_progress": "向用户发送阶段性进度汇报，适合长任务中途更新。",
@@ -463,7 +463,7 @@ class ToolManager:
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
                 env=env,
-                cwd=CODE_ROOT,
+                cwd=str(WORKSPACE_ROOT),
             )
             try:
                 stdout_bytes, stderr_bytes = await asyncio.wait_for(proc.communicate(), timeout=120)
@@ -932,6 +932,7 @@ class ToolManager:
                 command,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
+                cwd=str(WORKSPACE_ROOT),
             )
             try:
                 stdout_bytes, stderr_bytes = await asyncio.wait_for(proc.communicate(), timeout=timeout)
