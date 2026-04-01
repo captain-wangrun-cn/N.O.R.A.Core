@@ -10,6 +10,7 @@ import logging
 import os
 import re
 import time
+import traceback
 from typing import Dict, Any, List, Optional, cast
 
 from brain.prompts import get_system_prompt, render_template, load_custom_prompt, should_inject_custom
@@ -425,6 +426,8 @@ class BackBrainMixin:
             # 若上游要求强制使用图片模型，保持标记直到 crop_image_for_llm 首轮输出
             force_image_model_until_crop_done = bool(force_image_model_until_crop_done)
             in_polling_mode = context.get("_in_polling_loop", False)
+            # 记录最后一次 image 回合的原始输出，便于检测空输出/标签结构异常
+            last_image_raw_output: Optional[str] = None
             
             status.update("思考中", "正在生成回复...")
 
@@ -542,7 +545,11 @@ class BackBrainMixin:
                 # Debug: 在 image 模型回合输出完整原始内容，便于排查标签缺失
                 if turn_model_alias == "image" and self.debug_mode.get(chat_id, False):
                     raw_image_text = "".join(image_turn_raw_parts) if image_turn_raw_parts else ""
+                    last_image_raw_output = raw_image_text
                     await self._send_debug(chat_id, f"[image turn {current_turn}] raw output:\n{raw_image_text or '(empty)'}")
+                elif turn_model_alias == "image":
+                    raw_image_text = "".join(image_turn_raw_parts) if image_turn_raw_parts else ""
+                    last_image_raw_output = raw_image_text
 
                 # 记录成本（如果启用）
                 if self.cost_tracking_enabled and self.cost_tracker and usage_data:
@@ -807,20 +814,22 @@ class BackBrainMixin:
             
             # --- 4. 发送响应 ---
             in_polling = context.get("_in_polling_loop", False)
+            image_tags_failed = False
             
             # 先提取图片标签（在任何清理之前），供后续存储
             image_tags_extracted: Dict[str, str] = {}
             image_ocr_extracted: Dict[str, str] = {}
             parsed_tag_blocks: List[tuple[str, str]] = []
             parsed_ocr_blocks: List[tuple[str, str]] = []
-            if multimodal_images and final_response_buffer:
-                for m in self._IMAGE_TAGS_PATTERN.finditer(final_response_buffer):
+            if multimodal_images:
+                source_text_for_tags = final_response_buffer or last_image_raw_output or ""
+                for m in self._IMAGE_TAGS_PATTERN.finditer(source_text_for_tags):
                     img_id = m.group(1).strip()
                     tags_text = m.group(2).strip()
                     if img_id and tags_text:
                         image_tags_extracted[img_id] = tags_text
                         parsed_tag_blocks.append((img_id, tags_text))
-                for m in self._IMAGE_OCR_PATTERN.finditer(final_response_buffer):
+                for m in self._IMAGE_OCR_PATTERN.finditer(source_text_for_tags):
                     img_id = m.group(1).strip()
                     ocr_text = m.group(2).strip()
                     if img_id and ocr_text and ocr_text != "（无文字）":
@@ -866,15 +875,52 @@ class BackBrainMixin:
                     bad = [img_id for img_id, tags in image_tags_extracted.items() if "," not in tags]
                     return missing, bad
 
+                def _detect_tag_structure_issue(text: str) -> bool:
+                    if not text:
+                        return False
+                    lower = text.lower()
+                    has_marker = ("[image_tags" in lower) or ("[/image_tags" in lower)
+                    tokens = list(re.finditer(r"\[/?image_tags[^\]]*\]", text, re.IGNORECASE))
+                    if not has_marker:
+                        return False
+                    if not tokens:
+                        return True
+                    balance = 0
+                    for token in tokens:
+                        if token.group(0).startswith("[/"):
+                            balance -= 1
+                        else:
+                            balance += 1
+                        if balance < 0:
+                            return True
+                    return balance != 0
+
                 missing_tag_ids, bad_comma_ids = _find_tag_issues()
+                image_output_empty = bool(multimodal_images and (last_image_raw_output is not None) and not str(last_image_raw_output).strip())
+                tag_structure_invalid = _detect_tag_structure_issue(source_text_for_tags)
+                no_tags_generated = bool(expected_ids) and not image_tags_extracted
+
                 retry_attempt = 0
                 MAX_TAG_RETRY = 2
+                need_tag_retry = bool(missing_tag_ids or bad_comma_ids or tag_structure_invalid or no_tags_generated or image_output_empty)
 
-                while (missing_tag_ids or bad_comma_ids) and retry_attempt < MAX_TAG_RETRY:
+                while need_tag_retry and retry_attempt < MAX_TAG_RETRY:
                     retry_attempt += 1
+                    reasons = []
+                    if missing_tag_ids:
+                        reasons.append(f"缺失 {len(missing_tag_ids)} 个")
+                    if bad_comma_ids:
+                        reasons.append(f"格式异常 {len(bad_comma_ids)} 个")
+                    if tag_structure_invalid:
+                        reasons.append("标签结构未闭合/多余")
+                    if image_output_empty:
+                        reasons.append("输出为空")
+                    if no_tags_generated and not missing_tag_ids:
+                        reasons.append("未生成任何标签")
+                    reason_text = "，".join(reasons) or "未知原因"
                     await self._send_debug(
                         chat_id,
-                        f"⚠️ 检测到 {len(missing_tag_ids)} 个 IMAGE_TAGS 缺失、{len(bad_comma_ids)} 个格式异常，重新请求完整标签（第 {retry_attempt}/{MAX_TAG_RETRY} 次）..."
+                        f"⚠️ IMAGE_TAGS 异常（{reason_text}），重新请求完整标签（第 {retry_attempt}/{MAX_TAG_RETRY} 次）..."
                     )
                     retry_prompt = (
                         "仅输出以下图片的 IMAGE_TAGS 块，不要输出其他任何文本或 OCR。\n"
@@ -923,17 +969,33 @@ class BackBrainMixin:
 
                     if new_tags:
                         image_tags_extracted = new_tags
+                        source_text_for_tags = retry_buffer
 
                     missing_tag_ids, bad_comma_ids = _find_tag_issues()
+                    tag_structure_invalid = _detect_tag_structure_issue(retry_buffer)
+                    no_tags_generated = bool(expected_ids) and not image_tags_extracted
+                    image_output_empty = False
+                    need_tag_retry = bool(missing_tag_ids or bad_comma_ids or tag_structure_invalid or no_tags_generated or image_output_empty)
 
-                if missing_tag_ids or bad_comma_ids:
+                if need_tag_retry:
                     logger.warning(
-                        f"[{chat_id}] 重新请求后仍有缺失/格式问题的 IMAGE_TAGS，缺失 {missing_tag_ids}，格式异常 {bad_comma_ids}"
+                        f"[{chat_id}] 重新请求后仍有缺失/结构问题的 IMAGE_TAGS，缺失 {missing_tag_ids}，格式异常 {bad_comma_ids}，结构异常={tag_structure_invalid}, 未生成标签={no_tags_generated}"
                     )
+                    await self._send_debug(chat_id, "❌ 仍未获得有效的 IMAGE_TAGS，建议稍后重试。")
+                    # 避免向用户发送包含残缺标签的响应
+                    final_response_buffer = re.sub(r"\[/?IMAGE_TAGS[^\]]*", "", final_response_buffer or "", flags=re.IGNORECASE)
+                    image_tags_failed = True
                 elif retry_attempt:
                     logger.info(f"[{chat_id}] 重新请求后已补齐全部 IMAGE_TAGS。")
+                elif tag_structure_invalid:
+                    final_response_buffer = re.sub(r"\[/?IMAGE_TAGS[^\]]*", "", final_response_buffer or "", flags=re.IGNORECASE)
 
-            if final_response_buffer:
+            if image_tags_failed:
+                if not in_polling:
+                    await self.adapter.send_message(chat_id, "图片输出异常，已自动重试失败，请稍后重试。")
+                else:
+                    logger.info(f"[{chat_id}] [轮询模式] 图片输出异常，已自动重试失败，前脑稍后重试。")
+            elif final_response_buffer:
                 clean_response = re.sub(
                     r'(?:execute_skill|execute_tool_plan|write_file|read_file|edit_file|exec_command|list_dir|create_new_skill|search)\s*\([^)]*\)',
                     '', final_response_buffer
@@ -1100,6 +1162,12 @@ class BackBrainMixin:
         except Exception as e:
             if self.tui_callback: self.tui_callback(f"❌ Error: {e.__class__.__name__}")
             logger.error(f"[{chat_id}] 生成响应时出现严重错误。", exc_info=True)
+            if self.debug_mode.get(chat_id, False):
+                try:
+                    err_detail = ''.join(traceback.format_exception(type(e), e, e.__traceback__))
+                    await self._send_debug(chat_id, f"❌ 后脑异常: {e}\n{err_detail}")
+                except Exception:
+                    logger.debug("发送错误详情失败", exc_info=True)
             try:
                 await self.adapter.send_message(chat_id, "抱歉，处理您的请求时出现内部错误。")
             except Exception:
