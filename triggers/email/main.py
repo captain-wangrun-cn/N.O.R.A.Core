@@ -172,15 +172,19 @@ class EmailTrigger(BaseTrigger):
         )
 
         decision = self._parse_filter_decision(decision_text)
-        logger.debug(
-            f"[trigger:email] 过滤判定: decision={decision.get('decision')}, subject={email_data.get('subject', '')[:60]}"
+        decision_value = str(decision.get("decision", "SKIP")).upper()
+        decision_reason = (decision.get("reason") or "").strip()
+        subject_preview = email_data.get("subject", "")[:80]
+        logger.info(
+            f"[trigger:email] 审查结果: decision={decision_value}, reason={decision_reason[:120]}, subject={subject_preview}"
         )
-        if decision["decision"] != "NOTIFY":
+
+        if decision_value != "NOTIFY":
             return False
 
         sender = email_data.get("from", "(未知发件人)")
         subject = email_data.get("subject", "(无主题)")
-        reason = decision.get("reason") or "邮件命中通知规则"
+        reason = decision_reason or "邮件命中通知规则"
         event_reason = f"📧 新邮件提醒\n发件人: {sender}\n主题: {subject}\n判定: {reason}"
 
         event = TriggerEvent(
