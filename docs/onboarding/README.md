@@ -64,6 +64,7 @@
 | 消息历史/压缩 | `memory/message_history.py` |
 | RAG | `memory/rag.py`, `memory/vector.py`, `memory/embed.py` |
 | Telegram 适配 | `adapters/telegram/main.py` |
+| 外部触发器系统 | `triggers/` |
 | 技能加载 | `skills/loader.py` |
 | 成本跟踪 | `core/cost_tracker.py`, `view_costs.py` |
 | 配置 | `config.py`, `config.example.yml` |
@@ -114,5 +115,6 @@ python view_costs.py --today
 - 如果要**添加新技能** → 使用 `skill_creator` 或手动创建 `skills/技能名/`
 - 如果要**修改消息处理逻辑** → 编辑 `core/controller.py`
 - 如果要**适配新平台** → 继承 `adapters/base.py` 创建新适配器
+- 如果要**新增外部触发源（邮件/日历/Webhook）** → 继承 `triggers/base.py` 并在 `triggers/factory.py` 注册
 
 > 💡 **提示：** 修改完成后，请更新 `docs/HANDOVER.md` 记录你的改动，方便下一个会话接手。

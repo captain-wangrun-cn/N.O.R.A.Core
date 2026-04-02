@@ -3,6 +3,7 @@ import yaml
 import os
 
 CONFIG_FILE = "config.yml"
+TRIGGERS_CONFIG_FILE = os.path.join(os.path.dirname(__file__), "triggers", "config.yml")
 _config = None
 
 
@@ -141,6 +142,25 @@ def get_custom_injection_scopes():
     """Gets the CUSTOM.md injection scopes configuration."""
     cfg = _safe_config()
     return (cfg.get("custom_injection", {}) or {}).get("scopes")
+
+
+def get_triggers_config():
+    """Gets external triggers configuration.
+
+    Priority:
+    1) triggers/config.yml (new location)
+    2) config.yml -> triggers (legacy fallback)
+    """
+    if os.path.exists(TRIGGERS_CONFIG_FILE):
+        try:
+            with open(TRIGGERS_CONFIG_FILE, "r", encoding="utf-8") as f:
+                data = yaml.safe_load(f) or {}
+            return data if isinstance(data, dict) else {}
+        except Exception:
+            pass
+
+    cfg = _safe_config()
+    return cfg.get("triggers", {}) or {}
 
 
 def get_logging_config():

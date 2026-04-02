@@ -37,6 +37,8 @@ from skills.loader import SkillLoader
 from core.cost_tracker import get_cost_tracker
 from core.worker_status import WorkerStatus, BackendTaskQueue
 from core.scheduler import ProactiveScheduler
+from triggers import TriggerManager
+from triggers.factory import build_triggers
 import config
 
 # Mixin 导入
@@ -179,13 +181,45 @@ class NoraController(
         else:
             self.scheduler = None
             logger.info("主动消息调度器已禁用")
+
+        trigger_cfg = config.get_triggers_config()
+        trigger_enabled = trigger_cfg.get("enabled", False)
+        trigger_default_chat_id = trigger_cfg.get("default_chat_id", "")
+        if trigger_enabled:
+            self.trigger_manager = TriggerManager(
+                notify_callback=self._handle_trigger_notification,
+                default_chat_id=trigger_default_chat_id,
+            )
+            for trigger in build_triggers(trigger_cfg, default_chat_id=trigger_default_chat_id):
+                self.trigger_manager.register(trigger)
+            logger.info("Trigger 系统已初始化")
+        else:
+            self.trigger_manager = None
+            logger.info("Trigger 系统已禁用")
         
         self.tool_manager = ToolManager(adapter, image_store=self.image_store, scheduler=self.scheduler)
         
         logger.info(
             f"NoraController 已初始化。RAG: {'Online' if self.rag.enabled else 'Offline'}, "
-            f"MessageHistory: Online, Scheduler: {'Online' if self.scheduler else 'Offline'}"
+            f"MessageHistory: Online, Scheduler: {'Online' if self.scheduler else 'Offline'}, "
+            f"Triggers: {'Online' if self.trigger_manager else 'Offline'}"
         )
+
+    async def _handle_trigger_notification(self, chat_id: str, reason: str, event_type: str):
+        """将外部 trigger 事件转换为主动消息链路通知。"""
+        await self._send_proactive_message(chat_id, reason, event_type=event_type)
+
+    async def start_triggers(self, default_chat_id: str = ""):
+        """启动 Trigger 系统。应在 adapter 就绪后调用。"""
+        if self.trigger_manager:
+            if default_chat_id:
+                self.trigger_manager.default_chat_id = default_chat_id
+            await self.trigger_manager.startup()
+
+    async def stop_triggers(self):
+        """停止 Trigger 系统。"""
+        if self.trigger_manager:
+            await self.trigger_manager.shutdown()
 
     # ------------------------------------------------------------------
     # 模型重载

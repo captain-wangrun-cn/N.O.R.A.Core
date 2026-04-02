@@ -93,6 +93,9 @@ class MessageHandlerMixin:
                 storage_id_for_scheduler = chat_id if chat_type != "private" else user_id
                 self.scheduler.default_chat_id = storage_id_for_scheduler
                 logger.info(f"Scheduler default_chat_id 已设置: {storage_id_for_scheduler}")
+                if getattr(self, "trigger_manager", None) and not self.trigger_manager.default_chat_id:
+                    self.trigger_manager.default_chat_id = storage_id_for_scheduler
+                    logger.info(f"Trigger default_chat_id 已设置: {storage_id_for_scheduler}")
         
         # ── 命令分发 ──
         stripped = text.strip()

@@ -5,6 +5,28 @@
 
 ## 近期关键改动（截至 2026-03-25）
 
+### 🔔 外部 Trigger 子系统 + Email 触发器 — 2026-04-02
+
+- 新增独立 `triggers/` 子系统（与 `adapters/` 解耦），用于接入非 IM 外部触发源。
+- 新增 `BaseTrigger` 基类，风格对齐 `BaseAdapter`：生命周期 + hooks + health_check。
+- 新增 `TriggerManager`：统一注册/启动/事件分发，并提供 trigger 内临时模型调用能力。
+- 新增 `EmailTrigger`（IMAP 轮询）：
+   - 拉取新邮件摘要
+   - 使用 `fast` 模型 + `brain/templates/trigger_email.jinja` 判定 `NOTIFY/SKIP`
+   - 命中后通过 controller 复用 `_send_proactive_message` 链路通知 Nora。
+- 主程序在 adapter ready 后同时启动 scheduler + triggers。
+- `core/message_handler.py` 在首次用户消息时，会同步设置 trigger 默认 chat_id（与 scheduler 一致）。
+- 配置新增 `triggers.*`（含 `email.*` 示例，默认关闭）。
+
+**涉及文件：**
+- `triggers/base.py` / `triggers/manager.py` / `triggers/factory.py`
+- `triggers/email/main.py` / `triggers/email/PROMPT.md`
+- `core/controller.py` / `core/message_handler.py` / `main.py`
+- `brain/templates/trigger_email.jinja`
+- `config.py` / `config.example.yml`
+- `docs/architecture/trigger-system.md` / `docs/architecture/README.md`
+- `docs/onboarding/README.md` / `docs/onboarding/QUICK_REFERENCE.md`
+
 ### 🧾 后脑忙碌时的二次确认入队 — 2026-03-25
 
 - 新增“待确认入队”流程：当前脑判定用户请求需要后脑，但后脑此时仍在忙碌时，**不再直接入队**。

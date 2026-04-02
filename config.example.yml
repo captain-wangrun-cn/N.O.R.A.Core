@@ -134,6 +134,9 @@ schedule:
   #   - 闹钟数据持久化到 workspace/cache/alarms.json
   #   - 编辑 SCHEDULE.md (workspace 目录下) 自定义作息和日程
 
+# 外部触发器配置已迁移到 `triggers/config.yml`
+# 请复制：`triggers/config.example.yml` -> `triggers/config.yml`
+
 # 交互配置
 interaction:
   buffer_timeout: 3.0   # 消息聚合缓冲时间（秒）

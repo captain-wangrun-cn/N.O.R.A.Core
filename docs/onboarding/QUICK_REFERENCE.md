@@ -38,6 +38,7 @@ core/controller.py            NoraController.handle_message()
 | 消息历史 | `config.yml` → `memory.message_history.*` | `raw_window`, `compress_window` 等 |
 | 成本跟踪 | `config.yml` → `cost_tracking.*` | `enabled`, `custom_prices` |
 | 主动消息调度 | `config.yml` → `schedule.*` | `enabled` |
+| 外部触发器 | `triggers/config.yml` | `enabled`、`default_chat_id`、`email.*` |
 | 工作区路径 | `config.yml` → `workspace.root_path` | 技能/下载/数据的根目录 |
 | CUSTOM 注入范围 | `config.yml` → `custom_injection.scopes` | `fast`/`smart`/`image`/`coder`/`none` |
 
@@ -83,6 +84,17 @@ core/controller.py            NoraController.handle_message()
 ### `adapters/base.py`
 - `BaseAdapter` — 平台适配器基类
   - `send_message(chat_id, text)`, `start_typing(chat_id)` 等
+
+### `triggers/base.py`
+- `BaseTrigger` — 外部触发器基类（仿 `BaseAdapter`）
+  - 生命周期：`startup()` / `shutdown()`
+  - 钩子：`on_startup()` / `on_ready()` / `before_event()` / `after_event()`
+  - 临时模型调用：`call_model(model_alias="fast", ...)`
+
+### `triggers/email/main.py`
+- `EmailTrigger` — IMAP 邮件轮询触发器
+  - 检测新邮件后，用 `fast` 模型 + `trigger_email.jinja` 判定 `NOTIFY/SKIP`
+  - 命中 `NOTIFY` 时通过 TriggerManager 走主动消息通知链路（等价自动消息体验）
 
 ### `skills/loader.py`
 - `SkillLoader` — 扫描 `skills/` 加载可用技能

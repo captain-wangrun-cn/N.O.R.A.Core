@@ -1,0 +1,22 @@
+# Trigger 子系统配置示例
+# 使用方式：复制本文件为 triggers/config.yml 并填写真实参数
+
+enabled: false
+
+# 默认通知聊天目标（可选）
+# 为空时，系统会在首次用户消息后自动继承当前会话 chat_id
+default_chat_id: ""
+
+email:
+  enabled: false
+  host: "imap.gmail.com"
+  port: 993
+  username: "your_email@example.com"
+  password: "YOUR_EMAIL_APP_PASSWORD"
+  mailbox: "INBOX"
+  unseen_only: true
+  poll_interval_sec: 60
+  max_fetch_per_poll: 20
+  max_body_chars: 1200
+  # 可选：覆盖默认通知目标 chat_id
+  # chat_id: "123456789"

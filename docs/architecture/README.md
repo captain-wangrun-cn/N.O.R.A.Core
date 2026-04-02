@@ -81,6 +81,10 @@
 
 - **[主动消息调度 (Proactive Scheduler)](./schedule-system.md)**
   - 每日主动消息计划生成、动态闹钟、在线状态管理。
+- **[外部触发系统 (Trigger System)](./trigger-system.md)**
+  - 非 IM 渠道事件（如 Email）接入、模型过滤判定、通知链路复用。
+- **[Trigger 开发指南 (Trigger Development Guide)](./trigger-development.md)**
+  - 如何实现、注册、调试一个自定义 Trigger（Email 为示例）。
 - **[日志系统 (Logging)](./logging.md)**
   - 结构化日志设计，区分用户可见与调试信息。
 - **[工具循环控制 (Tool Loop Detection)](./tool-loop.md)**
