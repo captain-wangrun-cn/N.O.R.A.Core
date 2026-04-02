@@ -293,51 +293,16 @@ class BackBrainMixin:
                 session["pending_text"] = ""
                 session["interrupted_thought"] = ""
             
-            # --- 前脑上下文注入（让后脑知道当前对话段落和前脑的回复） ---
+            # --- 前脑上下文注入（告知后脑前脑的回复） ---
             if front_brain_handled:
-                # 获取当前活跃对话段落（session_id IS NULL 的消息）
-                segment_messages = self.message_history.get_current_segment_messages(
-                    "telegram", storage_id
-                )
-                if segment_messages:
-                    # 格式化段落内容（排除当前轮次的用户消息，因为已作为 user_prompt 传入）
-                    segment_lines = []
-                    for msg in segment_messages:
-                        if msg["role"] in ("user", "assistant"):
-                            # 跳过当前轮已作为 user_prompt 的消息
-                            if msg["content"] == message_content and msg == segment_messages[-1]:
-                                continue
-                            segment_lines.append(f"{msg['role']}: {msg['content']}")
-                    
-                    if segment_lines:
-                        segment_text = "\n".join(segment_lines)
-                        instructions.append(
-                            f"【当前对话段落 (Current Conversation Segment)】\n"
-                            f"以下是本轮对话段落中的完整交互记录（包含前脑的即时回复），"
-                            f"请基于此上下文继续工作：\n\n{segment_text}\n\n"
-                            f"⚠️ 前脑已经给用户发送了即时回复，不要重复前脑已说过的内容。"
-                            f"直接执行任务，完成后汇报结果即可。"
-                        )
-                    else:
-                        # 段落为空但前脑有回复，至少告知后脑前脑说了什么
-                        front_reply = context.get("_front_brain_reply", "")
-                        if front_reply:
-                            instructions.append(
-                                f"【前脑已回复 (Front-Brain Reply)】\n"
-                                f"在你接手之前，前脑已经给用户发送了以下即时回复：\n"
-                                f"「{front_reply}」\n"
-                                f"请基于此继续工作，不要重复前脑已经说过的内容。直接执行任务，完成后汇报结果即可。"
-                            )
-                else:
-                    # 没有段落消息时，回退到简单的前脑回复注入
-                    front_reply = context.get("_front_brain_reply", "")
-                    if front_reply:
-                        instructions.append(
-                            f"【前脑已回复 (Front-Brain Reply)】\n"
-                            f"在你接手之前，前脑已经给用户发送了以下即时回复：\n"
-                            f"「{front_reply}」\n"
-                            f"请基于此继续工作，不要重复前脑已经说过的内容。直接执行任务，完成后汇报结果即可。"
-                        )
+                front_reply = context.get("_front_brain_reply", "")
+                if front_reply:
+                    instructions.append(
+                        f"【前脑已回复 (Front-Brain Reply)】\n"
+                        f"在你接手之前，前脑（你较快的一个处理分支）已经给用户发送了以下即时回复：\n"
+                        f"「{front_reply}」\n"
+                        f"请基于此继续工作，绝对不要重复前脑已经说过的内容。直接执行长耗时任务，完成后汇报结果即可。"
+                    )
 
             # --- 轮询模式指令注入 ---
             # 在轮询模式下，后脑不直接与用户沟通，而是产出详细专业的工作报告
@@ -374,51 +339,26 @@ class BackBrainMixin:
             
             # 临时历史，从数据库加载持久化上下文
             db_context = self.message_history.get_context_messages("telegram", storage_id)
-            # 避免重复注入：当前轮用户消息已作为 user_prompt 传入，不应再在 history 中重复一遍
-            if db_context:
-                last_msg = db_context[-1]
-                if last_msg.get("role") == "user" and str(last_msg.get("content", "")) == message_content:
-                    db_context = db_context[:-1]
-            # 如果前脑已处理，历史尾部可能是 [user, assistant(前脑)]，需要都去掉避免重复
-            if front_brain_handled and db_context:
-                # 去掉前脑的 assistant 回复
-                if db_context[-1].get("role") == "assistant":
-                    db_context = db_context[:-1]
-                # 再去掉已作为 user_prompt 传入的用户消息
-                if db_context and db_context[-1].get("role") == "user" and str(db_context[-1].get("content", "")) == message_content:
-                    db_context = db_context[:-1]
 
-            # 注入当前对话段落的完整消息序列，确保后脑拥有完整上下文（避免缺段）
-            try:
-                segment_messages = self.message_history.get_current_segment_messages(
-                    "telegram", storage_id
-                )
-                if segment_messages:
-                    segment_lines = []
-                    for msg in segment_messages:
-                        if msg["role"] in ("user", "assistant"):
-                            # 跳过当前轮已作为 user_prompt 的最后一条用户消息，避免重复
-                            if msg["content"] == message_content and msg == segment_messages[-1]:
-                                continue
-                            segment_lines.append(f"{msg['role']}: {msg['content']}")
-                    if segment_lines:
-                        segment_text = "\n".join(segment_lines)
-                        instructions.append(
-                            "【当前对话段落 (Current Conversation Segment)】\n"
-                            "以下是本轮对话段落中的完整交互记录（含前脑已回复的内容，如有），"
-                            "请基于此上下文继续工作：\n\n"
-                            f"{segment_text}\n\n"
-                            "⚠️ 不要重复前脑已说过的内容，直接执行任务并汇报。"
-                        )
-            except Exception:
-                logger.warning(f"[{chat_id}] 注入当前对话段落失败，继续执行", exc_info=True)
+            # 避免重复注入：清理历史尾部与当前轮次重合的消息
+            # 可能的尾部结构： [user(当前消息)], 或 [user(当前消息), assistant(前脑/忙碌回复)]
+            if db_context:
+                # 先弹出无用的“忙碌/前脑/已排队”的助手回复
+                while db_context and db_context[-1].get("role") == "assistant" and (
+                    front_brain_handled or context.get("_message_saved")
+                ):
+                    db_context.pop()
+                
+                # 再看看末部的是不是刚好就是本轮要处理的用户消息
+                if db_context and db_context[-1].get("role") == "user" and str(db_context[-1].get("content", "")) == message_content:
+                    db_context.pop()
 
             temp_history = [
                 {"role": msg["role"], "content": msg["content"]}
                 for msg in db_context
                 if msg["role"] in ("user", "assistant", "system")
             ]
-            
+
             # Typing 状态跟踪（在所有 turns 中保持）
             typing_started = False
             # 工具回查图片（view_image return_image=true）注入到下一轮多模态输入
