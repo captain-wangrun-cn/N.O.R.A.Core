@@ -364,6 +364,8 @@ class BackBrainMixin:
 
             # Typing 状态跟踪（在所有 turns 中保持）
             typing_started = False
+            # 若本轮包含“新图片”（非工具回查图片），先缓存文本，待 IMAGE_TAGS 校验/重试完成后再统一发送
+            defer_user_send_until_image_tags_ready = any(not img.get("from_tool") for img in multimodal_images)
             # 工具回查图片（view_image return_image=true）注入到下一轮多模态输入
             pending_tool_multimodal_images: List[Dict[str, Any]] = []
             # 若上游要求强制使用图片模型，保持标记直到 crop_image_for_llm 首轮输出
@@ -451,13 +453,13 @@ class BackBrainMixin:
                                         r'(?:execute_skill|execute_tool_plan|write_file|read_file|edit_file|exec_command|list_dir|create_new_skill|search)\s*\(',
                                         text_to_send
                                     ):
-                                        # 轮询模式下不直接发送，由前脑统一转述
-                                        if not in_polling_mode and not no_reply:
+                                        # 轮询模式 / no_reply / 图片标签待校验 时均不直接发送，先缓冲
+                                        if not in_polling_mode and not no_reply and not defer_user_send_until_image_tags_ready:
                                             msg_id = await self.adapter.send_message(chat_id, text_to_send)
                                             if msg_id:
                                                 response_platform_ids.append(str(msg_id))
                                         else:
-                                            # 轮询模式下需要将分段也汇总到最终结果供前脑审查
+                                            # 将分段汇总到最终结果，后续统一发送（或由前脑审查）
                                             if final_response_buffer:
                                                 final_response_buffer += "\n\n"
                                             final_response_buffer += text_to_send
