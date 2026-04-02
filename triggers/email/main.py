@@ -7,8 +7,11 @@ from __future__ import annotations
 
 import asyncio
 import email
+import hashlib
 import imaplib
+import json
 import logging
+import os
 import re
 from email.header import decode_header
 from email.message import Message
@@ -16,6 +19,7 @@ from typing import Any, Dict, List
 
 from brain.prompts import render_template, get_soul_prompt, _read_file_safe, WORKSPACE_USER_FILE
 from triggers.base import BaseTrigger, TriggerEvent, TriggerFeatures
+from workspace_config import get_workspace_manager
 
 logger = logging.getLogger(__name__)
 
@@ -28,7 +32,10 @@ class EmailTrigger(BaseTrigger):
         self.cfg = cfg
         self.default_chat_id = default_chat_id
         self._poll_task: asyncio.Task | None = None
-        self._seen_uids: set[str] = set()
+        self._reviewed_keys: set[str] = set()
+        self._reviewed_order: List[str] = []
+        self._reviewed_store_path = self._resolve_reviewed_store_path()
+        self._reviewed_store_max = int(self.cfg.get("reviewed_store_max", 5000) or 5000)
         self._warned_missing_config = False
         self._poll_round = 0
 
@@ -46,6 +53,7 @@ class EmailTrigger(BaseTrigger):
 
     def run(self, event_handler):
         self._event_handler = event_handler
+        self._load_reviewed_keys()
         logger.info("[trigger:email] 启动轮询任务")
         self._poll_task = asyncio.create_task(self._poll_loop())
 
@@ -71,10 +79,13 @@ class EmailTrigger(BaseTrigger):
                     should_notify = await self._handle_email(item)
                     if should_notify:
                         notified_count += 1
+                    review_key = item.get("review_key") or ""
+                    if review_key:
+                        self._mark_reviewed(review_key)
 
                 if self._poll_round % log_every == 0:
                     logger.info(
-                        f"[trigger:email] 心跳 round={self._poll_round}, fetched={len(emails)}, notified={notified_count}, seen_uids={len(self._seen_uids)}"
+                        f"[trigger:email] 心跳 round={self._poll_round}, fetched={len(emails)}, notified={notified_count}, reviewed={len(self._reviewed_keys)}"
                     )
             except Exception as exc:
                 logger.error(f"[trigger:email] 轮询失败: {exc}", exc_info=True)
@@ -119,8 +130,6 @@ class EmailTrigger(BaseTrigger):
                     continue
 
                 uid = self._extract_uid(fetched)
-                if uid and uid in self._seen_uids:
-                    continue
 
                 raw_bytes = None
                 for part in fetched:
@@ -139,17 +148,29 @@ class EmailTrigger(BaseTrigger):
                 if len(body_preview) > max_body_chars:
                     body_preview = body_preview[:max_body_chars] + "..."
 
+                message_id = self._decode_header_value(msg.get("Message-ID", ""))
+                review_key = self._build_review_key(
+                    uid=uid,
+                    message_id=message_id,
+                    sender=sender,
+                    subject=subject,
+                    date_str=date_str,
+                    body_preview=body_preview,
+                )
+                if review_key in self._reviewed_keys:
+                    continue
+
                 parsed.append(
                     {
+                        "review_key": review_key,
                         "uid": uid,
+                        "message_id": message_id,
                         "from": sender,
                         "subject": subject,
                         "date": date_str,
                         "body_preview": body_preview,
                     }
                 )
-                if uid:
-                    self._seen_uids.add(uid)
 
         return parsed
 
@@ -217,6 +238,89 @@ class EmailTrigger(BaseTrigger):
         logger.info(f"[trigger:email] 命中通知规则，准备分发事件: subject={subject[:80]}")
         await self.dispatch_event(event)
         return True
+
+    def _resolve_reviewed_store_path(self) -> str:
+        configured = (self.cfg.get("reviewed_store_path") or "").strip()
+        if configured:
+            return os.path.abspath(os.path.expanduser(configured))
+
+        ws = get_workspace_manager()
+        return os.path.join(ws.cache_dir, "email_trigger_reviewed.json")
+
+    def _load_reviewed_keys(self) -> None:
+        path = self._reviewed_store_path
+        try:
+            if not os.path.exists(path):
+                os.makedirs(os.path.dirname(path), exist_ok=True)
+                self._reviewed_keys = set()
+                self._reviewed_order = []
+                logger.info(f"[trigger:email] 已审查名单不存在，将新建: {path}")
+                return
+
+            with open(path, "r", encoding="utf-8") as f:
+                data = json.load(f) or {}
+            keys = data.get("keys", []) if isinstance(data, dict) else []
+            if not isinstance(keys, list):
+                keys = []
+
+            normalized = [str(k).strip() for k in keys if str(k).strip()]
+            self._reviewed_order = normalized[-self._reviewed_store_max:]
+            self._reviewed_keys = set(self._reviewed_order)
+            logger.info(f"[trigger:email] 已加载已审查名单: {len(self._reviewed_keys)} 条")
+        except Exception as e:
+            logger.warning(f"[trigger:email] 加载已审查名单失败，将使用空名单: {e}")
+            self._reviewed_keys = set()
+            self._reviewed_order = []
+
+    def _save_reviewed_keys(self) -> None:
+        path = self._reviewed_store_path
+        try:
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            with open(path, "w", encoding="utf-8") as f:
+                json.dump({"keys": self._reviewed_order}, f, ensure_ascii=False, indent=2)
+        except Exception as e:
+            logger.warning(f"[trigger:email] 保存已审查名单失败: {e}")
+
+    def _mark_reviewed(self, review_key: str) -> None:
+        key = (review_key or "").strip()
+        if not key or key in self._reviewed_keys:
+            return
+
+        self._reviewed_keys.add(key)
+        self._reviewed_order.append(key)
+
+        if len(self._reviewed_order) > self._reviewed_store_max:
+            overflow = len(self._reviewed_order) - self._reviewed_store_max
+            removed = self._reviewed_order[:overflow]
+            self._reviewed_order = self._reviewed_order[overflow:]
+            for item in removed:
+                self._reviewed_keys.discard(item)
+
+        self._save_reviewed_keys()
+
+    @staticmethod
+    def _build_review_key(
+        *,
+        uid: str,
+        message_id: str,
+        sender: str,
+        subject: str,
+        date_str: str,
+        body_preview: str,
+    ) -> str:
+        if uid:
+            return f"uid:{uid}"
+        if message_id:
+            return f"mid:{message_id.strip().lower()}"
+
+        fallback_src = "|".join([
+            (sender or "").strip().lower(),
+            (subject or "").strip().lower(),
+            (date_str or "").strip().lower(),
+            (body_preview or "").strip().lower()[:200],
+        ])
+        digest = hashlib.sha1(fallback_src.encode("utf-8", errors="ignore")).hexdigest()
+        return f"fallback:{digest}"
 
     @staticmethod
     def _extract_uid(fetch_data: List[Any]) -> str:

@@ -18,5 +18,10 @@ email:
   poll_interval_sec: 60
   max_fetch_per_poll: 20
   max_body_chars: 1200
+  # 已审查名单持久化文件（可选）
+  # 默认：workspace/cache/email_trigger_reviewed.json
+  # reviewed_store_path: "./triggers/email_reviewed.json"
+  # 已审查名单最大条数（超出后按最旧淘汰）
+  reviewed_store_max: 5000
   # 可选：覆盖默认通知目标 chat_id
   # chat_id: "123456789"
