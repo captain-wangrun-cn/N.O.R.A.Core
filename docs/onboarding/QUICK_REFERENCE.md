@@ -153,6 +153,23 @@ python tui.py
 
 ---
 
+## 6.1 标记速查（NEED_FOLLOW / NO_REPLY / SPLIT 延时）
+
+- `[NO_REPLY]`
+  - 含义：静默执行，本轮不向用户发送可见消息。
+  - 典型场景：只做后台操作、默默记录内部信息、避免重复回复。
+
+- `[NEED_FOLLOW]`
+  - 含义：请求对话延续模块更快跟进。
+  - 行为：首次 follow-up 延迟使用 `FOLLOWUP_NEED_FOLLOW_DELAY`（默认 15 秒）。
+
+- `[SPLIT]` / `[SPLIT:秒数]`
+  - 含义：将一条回复拆成多段发送。
+  - 延时语法：`[SPLIT:1.5]` 表示下一段前停顿 1.5 秒。
+  - 说明：`[SPLIT]` 为默认短停顿，`[SPLIT:秒数]` 为显式延时控制。
+
+---
+
 ## 7. 身份与记忆文件（Identity & Memory）
 
 | 文件 | 作用 | 修改方式 |

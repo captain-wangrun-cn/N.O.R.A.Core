@@ -56,10 +56,10 @@
 
 ## 4. 流式输出 / [SPLIT]
 
-### ⚠️ [SPLIT] 只在流式中生效
-- `[SPLIT]` 分段逻辑在 `controller.py` 的 `async for raw_chunk in stream` 循环中处理。
+### ⚠️ `[SPLIT]` 与 `[SPLIT:秒数]` 只在分段发送链路中生效
+- `[SPLIT]` 分段逻辑在发送链路中处理；`[SPLIT:秒数]` 会在段间增加显式延迟（例如 `1.5` 秒）。
 - 如果 LLM provider 走 legacy `str` 分支且未输出 `[SPLIT]` 标记，不会自动分段。
-- 要让模型输出 `[SPLIT]`，靠 `system.jinja` 中的"消息节奏协议"引导。
+- 要让模型输出 `[SPLIT]` 或 `[SPLIT:秒数]`，靠 `system.jinja` 中的“消息节奏协议”引导。
 
 ### ⚠️ 工具调用时清空缓冲
 - 检测到 `tool_call` 时会清空 `response_text_buffer`，避免"思考过程"泄漏给用户。
