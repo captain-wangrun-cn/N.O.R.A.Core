@@ -463,13 +463,24 @@ class SchedulerMixin:
             logger.error(f"[{chat_id}] 发送追话消息失败: {e}", exc_info=True)
 
     async def _send_split_response(self, chat_id: str, response: str) -> bool:
-        """按 [SPLIT] 分段发送"""
+        """按 [SPLIT] / [SPLIT:秒数] 分段发送。"""
         if self._SPLIT_MARKER_PATTERN.search(response):
             parts = self._SPLIT_MARKER_PATTERN.split(response)
-            for part in parts:
-                part = part.strip()
+
+            # parts 结构: [text, delay, text, delay, text, ...]
+            for i in range(0, len(parts), 2):
+                part = (parts[i] or "").strip()
                 if part:
                     await self.adapter.send_message(chat_id, part)
+
+                # 非最后一段时，尝试读取 delay
+                if i + 1 < len(parts) and parts[i + 1] is not None:
+                    try:
+                        delay_val = float(parts[i + 1])
+                        if delay_val > 0:
+                            await asyncio.sleep(delay_val)
+                    except (TypeError, ValueError):
+                        pass
             return True
 
         await self.adapter.send_message(chat_id, response)

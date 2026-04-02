@@ -22,6 +22,7 @@ N.O.R.A. 核心控制器 — 瘦身版。
 """
 
 import asyncio
+import inspect
 import logging
 import os
 import re
@@ -259,14 +260,30 @@ class NoraController(
         return bool(flag)
 
     def _chat_stream_wrapper(self, model_client, chat_id: str, **kwargs):
+        def _filter_kwargs(callable_obj, call_kwargs):
+            try:
+                sig = inspect.signature(callable_obj)
+            except (TypeError, ValueError):
+                return call_kwargs
+
+            # 若目标函数支持 **kwargs，则无需过滤
+            if any(p.kind == inspect.Parameter.VAR_KEYWORD for p in sig.parameters.values()):
+                return call_kwargs
+
+            allowed = set(sig.parameters.keys())
+            return {k: v for k, v in call_kwargs.items() if k in allowed}
+
         # 部分 provider 支持 non_stream 模式（返回一次性文本），用于特殊场景
         use_non_stream = self._should_use_non_stream(chat_id)
         if use_non_stream and hasattr(model_client, "chat"):
             async def _gen():
-                text = await model_client.chat(**kwargs)
+                safe_kwargs = _filter_kwargs(model_client.chat, kwargs)
+                text = await model_client.chat(**safe_kwargs)
                 yield {"type": "text", "content": text}
             return _gen()
-        return model_client.chat_stream(**kwargs)
+
+        safe_kwargs = _filter_kwargs(model_client.chat_stream, kwargs)
+        return model_client.chat_stream(**safe_kwargs)
 
     # ------------------------------------------------------------------
     # 通用辅助
