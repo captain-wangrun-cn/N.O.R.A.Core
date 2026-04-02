@@ -920,23 +920,30 @@ class BackBrainMixin:
                     reason_text = "，".join(reasons) or "未知原因"
                     await self._send_debug(
                         chat_id,
-                        f"⚠️ IMAGE_TAGS 异常（{reason_text}），重新请求完整标签（第 {retry_attempt}/{MAX_TAG_RETRY} 次）..."
+                        f"⚠️ IMAGE_TAGS 异常（{reason_text}），正在为您重新生成完整回复（第 {retry_attempt}/{MAX_TAG_RETRY} 次）..."
                     )
+                    
+                    # 重新生成整个回复：将错误输出作为 assistant 历史，然后发送 user 纠正
+                    retry_history = list(temp_history)
+                    retry_history.append({"role": "assistant", "content": source_text_for_tags})
                     retry_prompt = (
-                        "仅输出以下图片的 IMAGE_TAGS 块，不要输出其他任何文本或 OCR。\n"
-                        "为每个图片 ID 输出一组：[IMAGE_TAGS:ID]\n标签1, 标签2, ...（至少8个，2-8字关键词，必须使用英文逗号分隔）\n[/IMAGE_TAGS]\n"
-                        "禁止输出解释、编号或额外文字。\n"
+                        f"你上一次的输出存在格式问题/不完整：{reason_text}。\n"
+                        "请无视那次错误的输出，重新生成完整的回复。你的回复应该同时包括你想对我说的话（如果有），并在回复末尾附上所有图片的 [IMAGE_TAGS:ID] 块。\n"
+                        "要求：为下面列表中的每一张图片提取至少8个细节相关的关键词，必须使用英文逗号分隔。\n"
                         "图片 ID 列表：\n" + "\n".join(f"- {mid}" for mid in expected_ids)
                     )
+                    
                     retry_stream = self._chat_stream_wrapper(
-                        self.image_llm,
+                        self.image_llm if multimodal_images else self.coder_llm,
                         chat_id,
                         system_prompt=system_prompt,
                         user_prompt=retry_prompt,
-                        history=temp_history,
+                        history=retry_history,
                         tools=[],
                         multimodal_images=multimodal_images,
+                        temperature=0.7
                     )
+                    
                     retry_buffer = ""
                     async for raw_chunk in retry_stream:
                         chunk = cast(Dict[str, Any], raw_chunk) if isinstance(raw_chunk, dict) else raw_chunk
@@ -945,36 +952,45 @@ class BackBrainMixin:
                         elif isinstance(chunk, str):
                             retry_buffer += chunk
 
-                    new_tags: Dict[str, str] = {}
-                    retry_order = list(expected_ids)
-                    for m in self._IMAGE_TAGS_PATTERN.finditer(retry_buffer):
+                    final_response_buffer = retry_buffer
+                    if multimodal_images:
+                        last_image_raw_output = retry_buffer
+                    
+                    image_tags_extracted.clear()
+                    image_ocr_extracted.clear()
+                    parsed_tag_blocks.clear()
+                    parsed_ocr_blocks.clear()
+                    
+                    source_text_for_tags = final_response_buffer
+                    for m in self._IMAGE_TAGS_PATTERN.finditer(source_text_for_tags):
                         img_id = m.group(1).strip()
                         tags_text = m.group(2).strip()
-                        if not img_id or not tags_text:
-                            continue
-                        mapped_id: Optional[str]
-                        if img_id in expected_set and img_id not in new_tags:
-                            mapped_id = img_id
-                        else:
-                            mapped_id = None
-                            while retry_order and (retry_order[0] in new_tags):
-                                retry_order.pop(0)
-                            if retry_order:
-                                mapped_id = retry_order.pop(0)
-                                logger.warning(
-                                    f"[{chat_id}] IMAGE_TAGS 重新请求时检测到占位符或重复 ID，已按顺序映射: {img_id} -> {mapped_id}"
-                                )
-                        if mapped_id:
-                            new_tags[mapped_id] = tags_text
+                        if img_id and tags_text:
+                            image_tags_extracted[img_id] = tags_text
+                            parsed_tag_blocks.append((img_id, tags_text))
+                    for m in self._IMAGE_OCR_PATTERN.finditer(source_text_for_tags):
+                        img_id = m.group(1).strip()
+                        ocr_text = m.group(2).strip()
+                        if img_id and ocr_text and ocr_text != "（无文字）":
+                            image_ocr_extracted[img_id] = ocr_text
+                            parsed_ocr_blocks.append((img_id, ocr_text))
 
-                    if new_tags:
-                        image_tags_extracted = new_tags
-                        source_text_for_tags = retry_buffer
-
+                    # LLM 可能输出占位符/错误 image_id
+                    if parsed_tag_blocks:
+                        for idx, expected_id in enumerate(expected_ids):
+                            if expected_id in image_tags_extracted:
+                                continue
+                            if idx >= len(parsed_tag_blocks):
+                                break
+                            parsed_id, parsed_tags = parsed_tag_blocks[idx]
+                            if parsed_id not in expected_set and parsed_tags:
+                                image_tags_extracted[expected_id] = parsed_tags
+                                logger.warning(f"[{chat_id}] [重试后] IMAGE_TAGS image_id 不匹配，重映射: {parsed_id} -> {expected_id}")
+                    
                     missing_tag_ids, bad_comma_ids = _find_tag_issues()
-                    tag_structure_invalid = _detect_tag_structure_issue(retry_buffer)
+                    tag_structure_invalid = _detect_tag_structure_issue(source_text_for_tags)
                     no_tags_generated = bool(expected_ids) and not image_tags_extracted
-                    image_output_empty = False
+                    image_output_empty = bool(multimodal_images and not source_text_for_tags.strip())
                     need_tag_retry = bool(missing_tag_ids or bad_comma_ids or tag_structure_invalid or no_tags_generated or image_output_empty)
 
                 if need_tag_retry:
@@ -982,8 +998,9 @@ class BackBrainMixin:
                         f"[{chat_id}] 重新请求后仍有缺失/结构问题的 IMAGE_TAGS，缺失 {missing_tag_ids}，格式异常 {bad_comma_ids}，结构异常={tag_structure_invalid}, 未生成标签={no_tags_generated}"
                     )
                     await self._send_debug(chat_id, "❌ 仍未获得有效的 IMAGE_TAGS，建议稍后重试。")
-                    # 避免向用户发送包含残缺标签的响应
-                    final_response_buffer = re.sub(r"\[/?IMAGE_TAGS[^\]]*", "", final_response_buffer or "", flags=re.IGNORECASE)
+                    # 避免向用户发送包含残缺标签或残缺聊天的响应
+                    final_response_buffer = ""
+                    last_image_raw_output = ""
                     image_tags_failed = True
                 elif retry_attempt:
                     logger.info(f"[{chat_id}] 重新请求后已补齐全部 IMAGE_TAGS。")
