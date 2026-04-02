@@ -369,6 +369,7 @@ class BackBrainMixin:
             # 若上游要求强制使用图片模型，保持标记直到 crop_image_for_llm 首轮输出
             force_image_model_until_crop_done = bool(force_image_model_until_crop_done)
             in_polling_mode = context.get("_in_polling_loop", False)
+            no_reply = context.get("no_reply", False)
             # 记录最后一次 image 回合的原始输出，便于检测空输出/标签结构异常
             last_image_raw_output: Optional[str] = None
             
@@ -757,7 +758,6 @@ class BackBrainMixin:
             
             # --- 4. 发送响应 ---
             in_polling = context.get("_in_polling_loop", False)
-            no_reply = context.get("no_reply", False)
             image_tags_failed = False
             
             # 先提取图片标签（在任何清理之前），供后续存储
