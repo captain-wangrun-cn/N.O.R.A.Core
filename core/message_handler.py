@@ -370,14 +370,7 @@ class MessageHandlerMixin:
 
         if send_front_reply:
             # 使用 [SPLIT] 分段发送
-            parts = self._SPLIT_MARKER_PATTERN.split(user_reply)
-            sent_message_ids = []
-            for part in parts:
-                part = part.strip()
-                if part:
-                    msg_id = await self.adapter.send_message(chat_id, part)
-                    if msg_id:
-                        sent_message_ids.append(str(msg_id))
+            sent_message_ids = await self._send_split_message(chat_id, user_reply)
 
             # 保存前脑回复到数据库，记录来源与平台 message_id
             metadata = {"source": "front"}
@@ -699,16 +692,26 @@ class MessageHandlerMixin:
         return decision, reply
 
     async def _send_split_message(self, chat_id: str, text: str) -> list[str]:
-        """按 [SPLIT] 规则发送消息，返回平台消息 ID 列表。"""
+        """按 [SPLIT] 或 [SPLIT:delay] 规则发送消息，返回平台消息 ID 列表。"""
         sent_message_ids: list[str] = []
+        # _SPLIT_MARKER_PATTERN 现在返回 [text_part, delay_str, text_part, ...]
         parts = self._SPLIT_MARKER_PATTERN.split(text)
-        for part in parts:
-            part = part.strip()
-            if not part:
-                continue
-            msg_id = await self.adapter.send_message(chat_id, part)
-            if msg_id:
-                sent_message_ids.append(str(msg_id))
+        
+        for i in range(0, len(parts), 2):
+            part = parts[i].strip()
+            if part:
+                msg_id = await self.adapter.send_message(chat_id, part)
+                if msg_id:
+                    sent_message_ids.append(str(msg_id))
+            
+            # 如果后面还有 delay，则执行停顿（最后一个 part 后面没有 delay 所以用 i+1 检查）
+            if i + 1 < len(parts) and parts[i+1] is not None:
+                try:
+                    delay_val = float(parts[i+1])
+                    if delay_val > 0:
+                        await asyncio.sleep(delay_val)
+                except ValueError:
+                    pass
         return sent_message_ids
 
     # ------------------------------------------------------------------
@@ -987,16 +990,16 @@ class MessageHandlerMixin:
             await self.adapter.send_message(chat_id, f"❌ 设置失败: {e}")
 
     async def _cmd_undo(self, chat_id: str, chat_type: str, user_id: str):
-        """撤销前脑上一条已发送的消息（仅 assistant / front 来源）。"""
+        """撤销上一条已发送的 assistant 消息。"""
         storage_id = chat_id if chat_type != "private" else user_id
         try:
             removed = self.message_history.delete_last_assistant_message(
                 platform="telegram",
                 chat_id=storage_id,
-                source="front",
+                source=None,
             )
             if removed is None:
-                await self.adapter.send_message(chat_id, "❌ 没有可撤销的前脑消息。")
+                await self.adapter.send_message(chat_id, "❌ 没有可撤销的消息。")
                 return
 
             # 内存会话历史同步删除最近一条 assistant（不连带用户）
@@ -1026,11 +1029,11 @@ class MessageHandlerMixin:
 
             if delete_attempted:
                 if delete_ok:
-                    await self.adapter.send_message(chat_id, "✅ 已撤销上一条前脑消息（聊天界面已删除）。")
+                    await self.adapter.send_message(chat_id, "✅ 已撤销上一条 AI 消息（聊天界面已删除）。")
                 else:
                     await self.adapter.send_message(chat_id, "✅ 已撤销存档；⚠️ 平台消息删除失败或权限不足。")
             else:
-                await self.adapter.send_message(chat_id, "✅ 已撤销上一条前脑消息（仅存档层面）。")
+                await self.adapter.send_message(chat_id, "✅ 已撤销上一条 AI 消息（仅存档层面）。")
         except Exception as e:
             logger.error(f"[{chat_id}] /undo 执行失败: {e}", exc_info=True)
             await self.adapter.send_message(chat_id, f"❌ 撤销失败: {e}")

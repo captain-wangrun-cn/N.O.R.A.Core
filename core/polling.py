@@ -152,14 +152,12 @@ class PollingMixin:
                 review_reply = review_result.get("user_reply", "")
                 task_instruction = review_result.get("task_instruction", "")
                 should_reply = review_result.get("should_reply", True)
+                if context.get("no_reply"):
+                    should_reply = False
                 
                 # 发送前脑审查回复给用户（如果有实质内容）
                 if review_reply and should_reply:
-                    parts = self._SPLIT_MARKER_PATTERN.split(review_reply)
-                    for part in parts:
-                        part = part.strip()
-                        if part:
-                            await self.adapter.send_message(chat_id, part)
+                    sent_ids = await self._send_split_message(chat_id, review_reply)
                     
                     # 保存到数据库
                     self.message_history.add_message(
@@ -168,6 +166,7 @@ class PollingMixin:
                         role="assistant",
                         content=review_reply,
                         user_id="assistant",
+                        metadata={"source": "polling_review", "platform_message_ids": sent_ids}
                     )
                     # 同步到 session history
                     session_history = session.setdefault("history", [])

@@ -270,13 +270,16 @@ class BackBrainMixin:
             if multimodal_images:
                 image_id_lines = []
                 for img in multimodal_images:
-                    image_id_lines.append(f"- 图片 ID: {img['image_id']}  文件: {os.path.basename(img['path'])}")
-                image_hint = "\n\n" + render_template(
-                    'image_tags.jinja',
-                    'image_tags_prompt',
-                    image_id_lines="\n".join(image_id_lines)
-                )
-                full_user_prompt = full_user_prompt + image_hint
+                    if not img.get("from_tool"):
+                        image_id_lines.append(f"- 图片 ID: {img['image_id']}  文件: {os.path.basename(img['path'])}")
+                
+                if image_id_lines:
+                    image_hint = "\n\n" + render_template(
+                        'image_tags.jinja',
+                        'image_tags_prompt',
+                        image_id_lines="\n".join(image_id_lines)
+                    )
+                    full_user_prompt = full_user_prompt + image_hint
             
             # Check for salvaged context from previous interruption
             pending_text = session.get("pending_text", "")
@@ -448,7 +451,7 @@ class BackBrainMixin:
                                         text_to_send
                                     ):
                                         # 轮询模式下不直接发送，由前脑统一转述
-                                        if not in_polling_mode:
+                                        if not in_polling_mode and not no_reply:
                                             msg_id = await self.adapter.send_message(chat_id, text_to_send)
                                             if msg_id:
                                                 response_platform_ids.append(str(msg_id))
@@ -615,7 +618,7 @@ class BackBrainMixin:
                     if tool_name == "report_progress" and isinstance(tool_args, dict):
                         progress_msg = str(tool_args.get("message", "")).strip()
                         in_polling = context.get("_in_polling_loop", False)
-                        if progress_msg and not in_polling:
+                        if progress_msg and not in_polling and not no_reply:
                             try:
                                 await self.adapter.send_message(chat_id, f"⏳ {progress_msg}", parse_media=False)
                                 self.message_history.add_message(
@@ -754,6 +757,7 @@ class BackBrainMixin:
             
             # --- 4. 发送响应 ---
             in_polling = context.get("_in_polling_loop", False)
+            no_reply = context.get("no_reply", False)
             image_tags_failed = False
             
             # 先提取图片标签（在任何清理之前），供后续存储
@@ -761,7 +765,11 @@ class BackBrainMixin:
             image_ocr_extracted: Dict[str, str] = {}
             parsed_tag_blocks: List[tuple[str, str]] = []
             parsed_ocr_blocks: List[tuple[str, str]] = []
-            if multimodal_images:
+            
+            # 若有新图片才要求tags，由搜索查找到的历史图片不需要生成标签
+            expected_ids = [img["image_id"] for img in multimodal_images if not img.get("from_tool")]
+            
+            if expected_ids or multimodal_images:
                 source_text_for_tags = final_response_buffer or last_image_raw_output or ""
                 for m in self._IMAGE_TAGS_PATTERN.finditer(source_text_for_tags):
                     img_id = m.group(1).strip()
@@ -778,7 +786,8 @@ class BackBrainMixin:
 
                 # LLM 可能输出占位符/错误 image_id（如 img_xxxxxxxx）。
                 # 若出现这种情况，按图片顺序重映射到本轮真实 image_id，避免标签丢失回退为文件名。
-                expected_ids = [img["image_id"] for img in multimodal_images]
+                # 仅重映射新图片，跳过历史工具图片 (from_tool)
+                expected_ids = [img["image_id"] for img in multimodal_images if not img.get("from_tool")]
                 expected_set = set(expected_ids)
 
                 if parsed_tag_blocks:
@@ -948,7 +957,7 @@ class BackBrainMixin:
                     final_response_buffer = re.sub(r"\[/?IMAGE_TAGS[^\]]*", "", final_response_buffer or "", flags=re.IGNORECASE)
 
             if image_tags_failed:
-                if not in_polling:
+                if not in_polling and not no_reply:
                     await self.adapter.send_message(chat_id, "图片输出异常，已自动重试失败，请稍后重试。")
                 else:
                     logger.info(f"[{chat_id}] [轮询模式] 图片输出异常，已自动重试失败，前脑稍后重试。")
@@ -963,7 +972,7 @@ class BackBrainMixin:
                 clean_response = self._strip_thinking_content(clean_response)
                 clean_response = self._strip_timestamp_markers(clean_response)
                 if clean_response:
-                    if not in_polling:
+                    if not in_polling and not no_reply:
                         await self.adapter.send_message(chat_id, self._strip_timestamp_markers(clean_response))
                     else:
                         logger.info(f"[{chat_id}] [轮询模式] 后脑回复已缓存，等待前脑审查 ({len(clean_response)} 字符)")
@@ -992,13 +1001,13 @@ class BackBrainMixin:
                 final_response_buffer = self._strip_thinking_content(final_response_buffer)
                 final_response_buffer = self._strip_timestamp_markers(final_response_buffer)
                 if final_response_buffer:
-                    if not in_polling:
+                    if not in_polling and not no_reply:
                         msg_id = await self.adapter.send_message(chat_id, self._strip_timestamp_markers(final_response_buffer))
                         if msg_id:
                             response_platform_ids.append(str(msg_id))
                 else:
                     final_response_buffer = "任务已完成。"
-                    if not in_polling:
+                    if not in_polling and not no_reply:
                         msg_id = await self.adapter.send_message(chat_id, self._strip_timestamp_markers(final_response_buffer))
                         if msg_id:
                             response_platform_ids.append(str(msg_id))
@@ -1026,11 +1035,11 @@ class BackBrainMixin:
                 final_response_buffer = self._strip_thinking_content(final_response_buffer)
                 final_response_buffer = self._strip_timestamp_markers(final_response_buffer)
                 if final_response_buffer:
-                    if not in_polling:
+                    if not in_polling and not no_reply:
                         await self.adapter.send_message(chat_id, self._strip_timestamp_markers(final_response_buffer))
                 else:
                     final_response_buffer = "任务已完成。"
-                    if not in_polling:
+                    if not in_polling and not no_reply:
                         await self.adapter.send_message(chat_id, self._strip_timestamp_markers(final_response_buffer))
             
             # --- 4.5 保存助手回复到数据库 ---

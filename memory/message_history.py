@@ -255,12 +255,12 @@ class MessageHistory:
         self,
         platform: str,
         chat_id: str,
-        source: str = "front",
+        source: Optional[str] = None,
     ) -> Optional[Dict[str, Any]]:
         """
-        删除最近一条指定来源的 assistant 消息（未归档且未置顶）。
+        删除最近一条 assistant 消息（未归档且未置顶）。
 
-        仅用于前脑撤销：匹配 metadata.source == source (默认 front)。
+        如果提供了 source，则仅匹配 metadata.source == source，否则删除最新的一条 assistant 消息。
         返回包含 message_id 与 metadata 的字典；若未找到则返回 None。
         """
         conn = sqlite3.connect(str(self.db_path))
@@ -283,7 +283,7 @@ class MessageHistory:
             for row in rows:
                 md_raw = row["metadata"]
                 md = json.loads(md_raw) if md_raw else {}
-                if md.get("source") == source:
+                if source is None or md.get("source") == source:
                     target_id = int(row["id"])
                     target_md = md
                     break

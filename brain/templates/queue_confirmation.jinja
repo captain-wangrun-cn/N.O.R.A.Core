@@ -12,7 +12,7 @@
 2) 展示当前队列情况（如果有）；
 3) 明确询问用户是否确认把新请求加入队列；
 4) 语气自然口语化，不使用 Markdown。
-输出仅为给用户看的聊天文本。{% endblock %}
+输出仅为给用户看的聊天文本，如果有多个段落，请使用 [SPLIT] 或 [SPLIT:秒数] 分隔以便模拟人类打字的停顿。{% endblock %}
 
 {% block ask_user %}请基于以下信息生成一条“二次确认入队”消息：
 
@@ -63,6 +63,7 @@ DECISION:<confirm|cancel|unclear|ignore> | REPLY:<给用户的一句话>
 
 输出格式必须是：
 DECISION:<confirm|cancel|unclear|ignore> | REPLY:<一句自然口语回复>
+或者如果完全静音不进行回复，只静默操作，可在 REPLY 后追加 `[NO_REPLY]`。
 
 其中 REPLY 要求：
 - confirm: 简短确认已加入排队（1句话即可）。

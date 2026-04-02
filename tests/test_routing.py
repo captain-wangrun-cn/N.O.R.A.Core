@@ -63,3 +63,18 @@ def test_front_brain_backend_signal_mid_text():
     assert "好的" in result["user_reply"]
     assert "让我来看看" in result["user_reply"]
     assert "[NEED_BACKEND]" not in result["user_reply"]
+
+
+def test_front_brain_no_reply_signal_silences_user_reply():
+    result = parse_front_brain_response("收到，我去处理一下 [NO_REPLY]")
+    assert result["should_reply"] is False
+    assert result["user_reply"] == ""
+
+
+def test_front_brain_review_no_reply_signal_silences_user_reply():
+    from core.routing import parse_front_brain_review
+
+    result = parse_front_brain_review("处理完成啦 [TASK_DONE] [NO_REPLY]")
+    assert result["action"] == "done"
+    assert result["should_reply"] is False
+    assert result["user_reply"] == ""
