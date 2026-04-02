@@ -30,6 +30,7 @@ class EmailTrigger(BaseTrigger):
         self._poll_task: asyncio.Task | None = None
         self._seen_uids: set[str] = set()
         self._warned_missing_config = False
+        self._poll_round = 0
 
     @property
     def trigger_name(self) -> str:
@@ -58,13 +59,23 @@ class EmailTrigger(BaseTrigger):
 
     async def _poll_loop(self) -> None:
         poll_interval = int(self.cfg.get("poll_interval_sec", 60) or 60)
+        log_every = int(self.cfg.get("log_every_n_polls", 1) or 1)
+        log_every = max(1, log_every)
         logger.info(f"[trigger:email] 轮询已启动，interval={max(10, poll_interval)}s")
         while self.is_running:
             try:
+                self._poll_round += 1
                 emails = await asyncio.to_thread(self._fetch_recent_emails)
-                logger.debug(f"[trigger:email] 本轮拉取邮件数量: {len(emails)}")
+                notified_count = 0
                 for item in emails:
-                    await self._handle_email(item)
+                    should_notify = await self._handle_email(item)
+                    if should_notify:
+                        notified_count += 1
+
+                if self._poll_round % log_every == 0:
+                    logger.info(
+                        f"[trigger:email] 心跳 round={self._poll_round}, fetched={len(emails)}, notified={notified_count}, seen_uids={len(self._seen_uids)}"
+                    )
             except Exception as exc:
                 logger.error(f"[trigger:email] 轮询失败: {exc}", exc_info=True)
 
@@ -142,7 +153,7 @@ class EmailTrigger(BaseTrigger):
 
         return parsed
 
-    async def _handle_email(self, email_data: Dict[str, str]) -> None:
+    async def _handle_email(self, email_data: Dict[str, str]) -> bool:
         system_prompt = render_template("trigger_email.jinja", "email_filter_system")
         user_prompt = render_template(
             "trigger_email.jinja",
@@ -165,7 +176,7 @@ class EmailTrigger(BaseTrigger):
             f"[trigger:email] 过滤判定: decision={decision.get('decision')}, subject={email_data.get('subject', '')[:60]}"
         )
         if decision["decision"] != "NOTIFY":
-            return
+            return False
 
         sender = email_data.get("from", "(未知发件人)")
         subject = email_data.get("subject", "(无主题)")
@@ -182,6 +193,7 @@ class EmailTrigger(BaseTrigger):
         )
         logger.info(f"[trigger:email] 命中通知规则，准备分发事件: subject={subject[:80]}")
         await self.dispatch_event(event)
+        return True
 
     @staticmethod
     def _extract_uid(fetch_data: List[Any]) -> str:
