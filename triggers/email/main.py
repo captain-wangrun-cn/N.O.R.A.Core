@@ -14,7 +14,7 @@ from email.header import decode_header
 from email.message import Message
 from typing import Any, Dict, List
 
-from brain.prompts import render_template
+from brain.prompts import render_template, get_soul_prompt, _read_file_safe, WORKSPACE_USER_FILE
 from triggers.base import BaseTrigger, TriggerEvent, TriggerFeatures
 
 logger = logging.getLogger(__name__)
@@ -155,6 +155,25 @@ class EmailTrigger(BaseTrigger):
 
     async def _handle_email(self, email_data: Dict[str, str]) -> bool:
         system_prompt = render_template("trigger_email.jinja", "email_filter_system")
+        try:
+            soul_prompt = get_soul_prompt()
+            user_profile = _read_file_safe(WORKSPACE_USER_FILE, max_chars=2000)
+
+            context_blocks: List[str] = []
+            if soul_prompt:
+                context_blocks.append(f"<soul>\n{soul_prompt}\n</soul>")
+            if user_profile:
+                context_blocks.append(f"<user_profile>\n{user_profile}\n</user_profile>")
+
+            if context_blocks:
+                system_prompt = (
+                    system_prompt
+                    + "\n\n【审查上下文】以下为 Nora 的人设与用户信息，请据此判断邮件提醒优先级。\n"
+                    + "\n\n".join(context_blocks)
+                )
+        except Exception as exc:
+            logger.warning(f"[trigger:email] 注入 SOUL/USER 上下文失败，将使用基础规则审查: {exc}")
+
         user_prompt = render_template(
             "trigger_email.jinja",
             "email_filter_user",
