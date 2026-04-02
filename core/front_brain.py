@@ -202,10 +202,10 @@ class FrontBrainMixin:
             except Exception:
                 logger.warning(f"[{chat_id}] 前脑 RAG 检索失败，已降级继续。", exc_info=True)
 
-        # --- 加载对话历史（轻量，仅用于上下文连贯） ---
+        # --- 加载对话历史 ---
         db_context = self.message_history.get_context_messages("telegram", storage_id)
-        # 只取最近的消息，前脑不需要太多历史
-        if len(db_context) > 20:
+        # 常规前脑仅保留最近 20 条；trigger/proactive 场景使用完整上下文
+        if (not proactive_mode) and len(db_context) > 20:
             db_context = db_context[-20:]
         
         # 去掉最后一条 user 消息（避免和 user_prompt 重复）

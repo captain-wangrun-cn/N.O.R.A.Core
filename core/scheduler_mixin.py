@@ -621,11 +621,11 @@ class SchedulerMixin:
         now = datetime.now(ZoneInfo(tz_str))
         current_time = now.strftime('%H:%M')
 
-        # 触发前先提取最近对话摘要，确保 trigger 消息基于已有上下文继续生成
+        # 触发前提取完整对话线索，确保 trigger 消息基于完整上下文继续生成
         recent_hint = ""
         try:
             db_context = self.message_history.get_context_messages("telegram", chat_id)
-            recent_msgs = db_context[-6:] if db_context else []
+            recent_msgs = db_context if db_context else []
             hint_lines = []
             for m in recent_msgs:
                 role = m.get("role")
@@ -635,10 +635,10 @@ class SchedulerMixin:
                 if not content:
                     continue
                 speaker = "用户" if role == "user" else "AI"
-                hint_lines.append(f"{speaker}: {content[:100]}")
+                hint_lines.append(f"{speaker}: {content}")
             recent_hint = "\n".join(hint_lines)
         except Exception as e:
-            logger.warning(f"[{chat_id}] 构建 trigger 最近对话摘要失败: {e}")
+            logger.warning(f"[{chat_id}] 构建 trigger 完整对话上下文失败: {e}")
 
         # 构造前脑上下文与元数据
         proactive_meta = {
