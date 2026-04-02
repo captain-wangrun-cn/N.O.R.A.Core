@@ -87,15 +87,19 @@ class MessageHandlerMixin:
         )
         # 取消该 chat 已有的对话延续定时器（用户回来了）
         self._cancel_followup_timer(chat_id)
+
+        # 统一计算 storage id（私聊用 user_id，群聊用 chat_id）
+        storage_id_for_scheduler = chat_id if chat_type != "private" else user_id
+
         if self.scheduler:
             # 自动设置 default_chat_id（首次消息时）
             if not self.scheduler.default_chat_id:
-                storage_id_for_scheduler = chat_id if chat_type != "private" else user_id
                 self.scheduler.default_chat_id = storage_id_for_scheduler
                 logger.info(f"Scheduler default_chat_id 已设置: {storage_id_for_scheduler}")
-                if getattr(self, "trigger_manager", None) and not self.trigger_manager.default_chat_id:
-                    self.trigger_manager.default_chat_id = storage_id_for_scheduler
-                    logger.info(f"Trigger default_chat_id 已设置: {storage_id_for_scheduler}")
+
+        if getattr(self, "trigger_manager", None) and not self.trigger_manager.default_chat_id:
+            self.trigger_manager.default_chat_id = storage_id_for_scheduler
+            logger.info(f"Trigger default_chat_id 已设置: {storage_id_for_scheduler}")
         
         # ── 命令分发 ──
         stripped = text.strip()

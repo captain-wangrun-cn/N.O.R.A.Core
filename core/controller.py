@@ -214,6 +214,12 @@ class NoraController(
         if self.trigger_manager:
             if default_chat_id:
                 self.trigger_manager.default_chat_id = default_chat_id
+            elif not self.trigger_manager.default_chat_id and self.scheduler and self.scheduler.default_chat_id:
+                self.trigger_manager.default_chat_id = self.scheduler.default_chat_id
+
+            logger.info(
+                f"Trigger 启动参数: default_chat_id={'set' if self.trigger_manager.default_chat_id else 'empty'}"
+            )
             await self.trigger_manager.startup()
 
     async def stop_triggers(self):

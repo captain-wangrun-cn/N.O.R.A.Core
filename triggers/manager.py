@@ -53,10 +53,14 @@ class TriggerManager:
         if self._is_running:
             return
 
+        if not self._triggers:
+            logger.warning("TriggerManager 启动但没有可用触发器（请检查 enabled 配置）")
+
         for trigger in self._triggers:
             await trigger.startup()
             trigger.run(self._handle_event)
             await trigger.on_ready()
+            logger.info(f"Trigger 已就绪: {trigger.trigger_name}")
 
         self._is_running = True
         logger.info(f"TriggerManager 已启动，已注册 {len(self._triggers)} 个触发器")
@@ -80,6 +84,7 @@ class TriggerManager:
             return
 
         reason = event.reason.strip() if event.reason else f"trigger event: {event.event_type}"
+        logger.info(f"[{event.trigger_name}] 分发事件: event_type={event.event_type}, chat_id={chat_id}")
         await self._notify_callback(chat_id, reason, event.event_type)
 
     async def health_check(self) -> Dict[str, Any]:

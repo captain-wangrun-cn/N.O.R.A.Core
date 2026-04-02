@@ -29,6 +29,7 @@ class EmailTrigger(BaseTrigger):
         self.default_chat_id = default_chat_id
         self._poll_task: asyncio.Task | None = None
         self._seen_uids: set[str] = set()
+        self._warned_missing_config = False
 
     @property
     def trigger_name(self) -> str:
@@ -44,6 +45,7 @@ class EmailTrigger(BaseTrigger):
 
     def run(self, event_handler):
         self._event_handler = event_handler
+        logger.info("[trigger:email] 启动轮询任务")
         self._poll_task = asyncio.create_task(self._poll_loop())
 
     async def on_shutdown(self) -> None:
@@ -56,9 +58,11 @@ class EmailTrigger(BaseTrigger):
 
     async def _poll_loop(self) -> None:
         poll_interval = int(self.cfg.get("poll_interval_sec", 60) or 60)
+        logger.info(f"[trigger:email] 轮询已启动，interval={max(10, poll_interval)}s")
         while self.is_running:
             try:
                 emails = await asyncio.to_thread(self._fetch_recent_emails)
+                logger.debug(f"[trigger:email] 本轮拉取邮件数量: {len(emails)}")
                 for item in emails:
                     await self._handle_email(item)
             except Exception as exc:
@@ -77,7 +81,12 @@ class EmailTrigger(BaseTrigger):
         max_body_chars = int(self.cfg.get("max_body_chars", 1200) or 1200)
 
         if not host or not username or not password:
+            if not self._warned_missing_config:
+                logger.warning("[trigger:email] 配置不完整（host/username/password），轮询将跳过")
+                self._warned_missing_config = True
             return []
+
+        self._warned_missing_config = False
 
         criterion = "UNSEEN" if unseen_only else "ALL"
         parsed: List[Dict[str, str]] = []
@@ -152,6 +161,9 @@ class EmailTrigger(BaseTrigger):
         )
 
         decision = self._parse_filter_decision(decision_text)
+        logger.debug(
+            f"[trigger:email] 过滤判定: decision={decision.get('decision')}, subject={email_data.get('subject', '')[:60]}"
+        )
         if decision["decision"] != "NOTIFY":
             return
 
@@ -168,6 +180,7 @@ class EmailTrigger(BaseTrigger):
             payload=email_data,
             chat_id=(self.cfg.get("chat_id") or self.default_chat_id or None),
         )
+        logger.info(f"[trigger:email] 命中通知规则，准备分发事件: subject={subject[:80]}")
         await self.dispatch_event(event)
 
     @staticmethod
