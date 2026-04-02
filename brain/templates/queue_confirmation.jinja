@@ -44,9 +44,9 @@
 {% endif %}{% if identity_context %}{{ identity_context }}
 
 ---
-{% endif %}你是确认意图解析器。你只做一件事：判断用户是否确认将请求加入后脑队列。
+{% endif %}你是确认意图解析器。你只做一件事：判断用户是否确认将请求加入后脑队列，还是拒绝，或者无视了排队询问开始了新话题。
 你必须严格输出一行：
-DECISION:<confirm|cancel|unclear> | REPLY:<给用户的一句话>
+DECISION:<confirm|cancel|unclear|ignore> | REPLY:<给用户的一句话>
 不要输出任何其它内容。{% endblock %}
 
 {% block detect_user %}请判断用户这句话对“是否加入队列”的意图。
@@ -58,15 +58,17 @@ DECISION:<confirm|cancel|unclear> | REPLY:<给用户的一句话>
 判定规则：
 - 明确同意加入排队 => confirm
 - 明确拒绝/暂不排队 => cancel
-- 含糊不清、转移话题、无法确认 => unclear
+- 发送了与排队无关的新指令、或者重复发送了其它内容（无视了排队确认） => ignore
+- 含糊不清且还在回答排队问题 => unclear
 
 输出格式必须是：
-DECISION:<confirm|cancel|unclear> | REPLY:<一句自然口语回复>
+DECISION:<confirm|cancel|unclear|ignore> | REPLY:<一句自然口语回复>
 
 其中 REPLY 要求：
-- confirm: 确认已加入队列，并可简短说明会按顺序处理；
-- cancel: 确认暂不加入，表示理解；
-- unclear: 提醒用户回复“确认”或“取消”。{% endblock %}
+- confirm: 简短确认已加入排队（1句话即可）。
+- cancel: 简短确认暂不排队（如“好的，已取消排队”），态度自然，绝对不要给自己加戏或过度解释。
+- ignore: 必须留空（即不用生成任何回复文字），系统会自动放行。
+- unclear: 简明提醒用户只需回复“确认”或“取消”。{% endblock %}
 
 {% block confirm_fallback %}收到，我这就把这个新请求加入队列，等当前任务完成后按顺序处理。{% endblock %}
 {% block cancel_fallback %}好的，那我先不把这个请求加入队列。你想排队时随时告诉我。{% endblock %}

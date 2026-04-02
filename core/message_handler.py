@@ -30,7 +30,7 @@ class MessageHandlerMixin:
     """处理来自适配器的新消息 / 命令路由。"""
 
     _CONFIRM_DECISION_PATTERN = re.compile(
-        r"DECISION\s*:\s*(confirm|cancel|unclear)",
+        r"DECISION\s*:\s*(confirm|cancel|unclear|ignore)",
         re.IGNORECASE,
     )
     _CONFIRM_REPLY_PATTERN = re.compile(
@@ -310,11 +310,12 @@ class MessageHandlerMixin:
                 pass
 
         # --- 正常流程：后端空闲 ---
-        # 旧的抢占逻辑保留，以防万一有残留任务
-        if chat_id in self.generation_tasks:
-            logger.info(f"[{chat_id}] 抢占：取消正在进行的生成任务。")
-            self.generation_tasks[chat_id].cancel()
-            await asyncio.sleep(0.1)
+        # 仅在确保非忙碌的情况下，才执行旧的抢占逻辑，清理残留的“假死”任务
+        if not (status and status.busy):
+            if chat_id in self.generation_tasks:
+                logger.info(f"[{chat_id}] 抢占：清理可能残留的生成任务。")
+                self.generation_tasks[chat_id].cancel()
+                await asyncio.sleep(0.1)
 
         # 图片消息直接走后脑（需要 image 模型 + 工具能力）
         if image_input_detected:
@@ -365,9 +366,7 @@ class MessageHandlerMixin:
             # 避免后脑忙碌时重复回复：保留前脑回复供后脑参考，但不再发送给用户
             send_front_reply = False
 
-        # 后脑忙碌时，只要要给用户发消息，就附带当前队列详情
-        if send_front_reply and status and status.busy:
-            user_reply = self._append_busy_queue_summary(chat_id, user_reply)
+        # 去除了：后脑忙碌时，只要要给用户发消息，就附带当前队列详情（避免聊天时泄漏队列信息）
 
         if send_front_reply:
             # 使用 [SPLIT] 分段发送
@@ -500,6 +499,30 @@ class MessageHandlerMixin:
         if not pending:
             return False
 
+        decision, reply = await self._detect_enqueue_confirmation_decision(
+            chat_id=chat_id,
+            user_text=text,
+            pending_request_text=str(pending.get("pending_request_text", "")),
+            queue_summary=str(pending.get("queue_summary", "")),
+        )
+
+        if decision == "ignore":
+            session.pop("pending_backend_enqueue", None)
+            logger.info(f"[{chat_id}] 待确认入队取消：用户开始了新话题或拒绝（判断为 ignore）")
+            return False
+
+        decision, reply = await self._detect_enqueue_confirmation_decision(
+            chat_id=chat_id,
+            user_text=text,
+            pending_request_text=str(pending.get("pending_request_text", "")),
+            queue_summary=str(pending.get("queue_summary", "")),
+        )
+
+        if decision == "ignore":
+            session.pop("pending_backend_enqueue", None)
+            logger.info(f"[{chat_id}] 待确认入队取消：用户开始了新话题或拒绝（判断为 ignore）")
+            return False
+
         storage_id = chat_id if chat_type != "private" else user_id
         message_content = f"{user_name}: {text}" if chat_type != "private" else text
 
@@ -517,13 +540,6 @@ class MessageHandlerMixin:
             metadata=user_metadata or None,
         )
         context["_message_saved"] = True
-
-        decision, reply = await self._detect_enqueue_confirmation_decision(
-            chat_id=chat_id,
-            user_text=text,
-            pending_request_text=str(pending.get("pending_request_text", "")),
-            queue_summary=str(pending.get("queue_summary", "")),
-        )
 
         session_history = session.setdefault("history", [])
         session_history.append({"role": "user", "content": message_content})
