@@ -465,22 +465,7 @@ class SchedulerMixin:
     async def _send_split_response(self, chat_id: str, response: str) -> bool:
         """按 [SPLIT] / [SPLIT:秒数] 分段发送。"""
         if self._SPLIT_MARKER_PATTERN.search(response):
-            parts = self._SPLIT_MARKER_PATTERN.split(response)
-
-            # parts 结构: [text, delay, text, delay, text, ...]
-            for i in range(0, len(parts), 2):
-                part = (parts[i] or "").strip()
-                if part:
-                    await self.adapter.send_message(chat_id, part)
-
-                # 非最后一段时，尝试读取 delay
-                if i + 1 < len(parts) and parts[i + 1] is not None:
-                    try:
-                        delay_val = float(parts[i + 1])
-                        if delay_val > 0:
-                            await asyncio.sleep(delay_val)
-                    except (TypeError, ValueError):
-                        pass
+            await self._send_split_message(chat_id, response)
             return True
 
         await self.adapter.send_message(chat_id, response)
@@ -673,11 +658,7 @@ class SchedulerMixin:
 
         # 发送前脑回复
         if user_reply:
-            parts = self._SPLIT_MARKER_PATTERN.split(user_reply)
-            for part in parts:
-                part = part.strip()
-                if part:
-                    await self.adapter.send_message(chat_id, part)
+            await self._send_split_message(chat_id, user_reply)
 
             storage_id = chat_id
             self.message_history.add_message(
