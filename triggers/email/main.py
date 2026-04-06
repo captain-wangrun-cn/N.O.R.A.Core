@@ -20,6 +20,7 @@ from typing import Any, Dict, List
 from brain.prompts import render_template, get_soul_prompt, _read_file_safe, WORKSPACE_USER_FILE
 from triggers.base import BaseTrigger, TriggerEvent, TriggerFeatures
 from workspace_config import get_workspace_manager
+from memory.message_history import MessageHistory
 
 logger = logging.getLogger(__name__)
 
@@ -31,6 +32,19 @@ class EmailTrigger(BaseTrigger):
         super().__init__()
         self.cfg = cfg
         self.default_chat_id = default_chat_id
+        history_cfg = __import__("config").get_message_history_config()
+        self.message_history = MessageHistory(
+            db_path=history_cfg.get("db_path"),
+            raw_window=history_cfg.get("raw_window", 50),
+            compress_window=history_cfg.get("compress_window", 50),
+            compress_ratio=history_cfg.get("compress_ratio", 10),
+            archive_threshold=history_cfg.get("archive_threshold", 500),
+            timezone=history_cfg.get("timezone", "Asia/Shanghai"),
+            timestamp_format=history_cfg.get("timestamp_format", "%Y-%m-%d %H:%M:%S %A"),
+            mirror_db_path=history_cfg.get("mirror_db_path"),
+            context_db_path=history_cfg.get("context_db_path"),
+            long_message_threshold=history_cfg.get("long_message_threshold", 1200),
+        )
         self._poll_task: asyncio.Task | None = None
         self._reviewed_keys: set[str] = set()
         self._reviewed_order: List[str] = []
@@ -176,6 +190,24 @@ class EmailTrigger(BaseTrigger):
 
     async def _handle_email(self, email_data: Dict[str, str]) -> bool:
         system_prompt = render_template("trigger_email.jinja", "email_filter_system")
+        history: List[Dict[str, str]] = []
+
+        try:
+            review_chat_id = (self.cfg.get("chat_id") or self.default_chat_id or "").strip()
+            if review_chat_id:
+                db_context = self.message_history.get_context_messages("telegram", review_chat_id)
+                history = [
+                    {
+                        "role": str(msg.get("role", "")).strip(),
+                        "content": str(msg.get("content", "")).strip(),
+                    }
+                    for msg in db_context
+                    if str(msg.get("role", "")).strip() in ("user", "assistant")
+                    and str(msg.get("content", "")).strip()
+                ]
+        except Exception as exc:
+            logger.warning(f"[trigger:email] 加载前脑完整上下文失败，将使用空 history: {exc}")
+
         try:
             soul_prompt = get_soul_prompt()
             user_profile = _read_file_safe(WORKSPACE_USER_FILE, max_chars=2000)
@@ -208,7 +240,7 @@ class EmailTrigger(BaseTrigger):
             model_alias="fast",
             system_prompt=system_prompt,
             user_prompt=user_prompt,
-            history=[],
+            history=history,
         )
 
         decision = self._parse_filter_decision(decision_text)
