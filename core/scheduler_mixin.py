@@ -338,8 +338,8 @@ class SchedulerMixin:
         now = datetime.now(ZoneInfo(tz_str))
 
         storage_id = chat_id
-        db_context = self.message_history.get_context_messages("telegram", storage_id)
-        recent_msgs = db_context[-10:] if db_context else []
+        current_segment_msgs = self.message_history.get_current_segment_messages("telegram", storage_id)
+        recent_msgs = current_segment_msgs[-10:] if current_segment_msgs else []
         recent_conversation = "\n".join(
             f"{'用户' if m['role'] == 'user' else 'AI'}: {m['content']}"
             for m in recent_msgs
@@ -410,8 +410,8 @@ class SchedulerMixin:
         soul = get_soul_prompt()
 
         storage_id = chat_id
-        db_context = self.message_history.get_context_messages("telegram", storage_id)
-        recent_msgs = db_context[-10:] if db_context else []
+        current_segment_msgs = self.message_history.get_current_segment_messages("telegram", storage_id)
+        recent_msgs = current_segment_msgs[-10:] if current_segment_msgs else []
         recent_conversation = "\n".join(
             f"{'用户' if m['role'] == 'user' else 'AI'}: {m['content']}"
             for m in recent_msgs
@@ -478,8 +478,8 @@ class SchedulerMixin:
         count = get_followup_count(chat_id)
 
         storage_id = chat_id
-        db_context = self.message_history.get_context_messages("telegram", storage_id)
-        recent_msgs = db_context[-10:] if db_context else []
+        current_segment_msgs = self.message_history.get_current_segment_messages("telegram", storage_id)
+        recent_msgs = current_segment_msgs[-10:] if current_segment_msgs else []
         recent_conversation = "\n".join(
             f"{'用户' if m['role'] == 'user' else 'AI'}: {m['content']}"
             for m in recent_msgs

@@ -181,6 +181,8 @@ flowchart TB
 
 - **[双进程架构 (Dual-Process Architecture)](./dual-process-architecture.md)**
   - _Current State_: 实现了"脑口分离"，前端负责快响应/打断，后端负责深度思考。
+- **[多模型架构 (Multi-Model Architecture)](./multi-model-architecture.md)**
+  - 模型别名、provider 绑定、前后脑选模与故障回退策略。
 - **[消息抢占机制 (Preemption)](./preemption.md)**
   - _Legacy Context_: 早期打断逻辑的设计思路，现已整合进双进程架构中。
 - **[时间戳插入机制 (Timestamp Insertion)](./timestamp-insertion.md)**
