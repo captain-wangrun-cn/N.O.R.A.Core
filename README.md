@@ -64,6 +64,39 @@ N.O.R.A.Core 是一个主要 AI 助手框架，旨在提供个人陪伴和一点
    pip install tzdata
    ```
 
+### （可选但推荐）先启动 Docker 依赖服务
+
+本项目默认使用：
+- **Qdrant**（向量库）
+- **MongoDB**（图片记忆/元数据）
+
+在项目根目录执行：
+
+```bash
+docker compose up -d
+```
+
+检查容器状态：
+
+```bash
+docker compose ps
+```
+
+停止服务：
+
+```bash
+docker compose down
+```
+
+> 使用 Docker 后，配置时可以这样填：
+>
+> 1. Qdrant 地址（`memory.qdrant`）
+>    - `host: "localhost"`
+>    - `port: 6333`
+>
+> 2. MongoDB 地址（`memory.mongo.uri`）
+>    - `uri: "mongodb://nora:nora_password@localhost:27017/"`
+
 3. 配置 (使用 CLI 向导):
    ```bash
    python cli.py
