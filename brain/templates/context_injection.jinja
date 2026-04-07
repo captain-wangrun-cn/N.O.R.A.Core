@@ -5,6 +5,8 @@
 当前工作目录 (CWD): {{ workspace_root }}
 技能目录 (代码仓库内): {{ skills_dir }}
 下载目录: {{ downloads_dir }}/
+架构文档目录: {{ workspace_root }}/architecture/
+💡 `workspace/architecture/` 是你的基础与基本架构文档目录，你可以查看，阅读等，以便更好的了解你自己
 ⚠️ 禁止读取: config.yml, .env (含 API 密钥)
 💡 使用 list_dir 查看目录内容，不要用 exec_command ls
 💡 技能文件位于代码仓库的 skills/ 目录下，不在 workspace 目录中{% endblock %}

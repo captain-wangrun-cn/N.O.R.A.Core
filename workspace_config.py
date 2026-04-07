@@ -9,6 +9,7 @@ import os
 import json
 import shutil
 import re
+import filecmp
 from pathlib import Path
 from typing import Optional
 
@@ -71,6 +72,98 @@ class WorkspaceManager:
 
         # 启动时同步仓库预装技能到 workspace/skills：缺失则复制，低版本则升级覆盖
         self._sync_bundled_skills_by_version()
+        # 启动时同步架构文档到 workspace/architecture：缺失则复制，内容不一致时覆盖更新
+        self._sync_architecture_docs()
+
+    def _sync_dir_content(self, src_dir: str, dst_dir: str) -> dict:
+        """将 src_dir 镜像同步到 dst_dir（复制新增、覆盖变更、删除多余）。"""
+        stats = {
+            "created_dirs": 0,
+            "copied_files": 0,
+            "updated_files": 0,
+            "removed_files": 0,
+            "removed_dirs": 0,
+        }
+
+        if not os.path.isdir(src_dir):
+            return stats
+
+        os.makedirs(dst_dir, exist_ok=True)
+
+        # 1) 删除目标中源不存在的项，保证最终结构匹配
+        for item in os.listdir(dst_dir):
+            dst_item = os.path.join(dst_dir, item)
+            src_item = os.path.join(src_dir, item)
+            if os.path.exists(src_item):
+                continue
+            if os.path.isdir(dst_item):
+                shutil.rmtree(dst_item, ignore_errors=True)
+                stats["removed_dirs"] += 1
+            else:
+                try:
+                    os.remove(dst_item)
+                    stats["removed_files"] += 1
+                except OSError:
+                    pass
+
+        # 2) 复制新增/更新已有项
+        for item in os.listdir(src_dir):
+            src_item = os.path.join(src_dir, item)
+            dst_item = os.path.join(dst_dir, item)
+
+            if os.path.isdir(src_item):
+                if not os.path.exists(dst_item):
+                    os.makedirs(dst_item, exist_ok=True)
+                    stats["created_dirs"] += 1
+                child_stats = self._sync_dir_content(src_item, dst_item)
+                for key, value in child_stats.items():
+                    stats[key] += value
+                continue
+
+            if not os.path.exists(dst_item):
+                shutil.copy2(src_item, dst_item)
+                stats["copied_files"] += 1
+                continue
+
+            # 文件类型不一致时直接替换
+            if os.path.isdir(dst_item):
+                shutil.rmtree(dst_item, ignore_errors=True)
+                shutil.copy2(src_item, dst_item)
+                stats["updated_files"] += 1
+                continue
+
+            # 内容不一致才覆盖
+            if not filecmp.cmp(src_item, dst_item, shallow=False):
+                shutil.copy2(src_item, dst_item)
+                stats["updated_files"] += 1
+
+        return stats
+
+    def _sync_architecture_docs(self):
+        """同步 docs/architecture 到 workspace/architecture。"""
+        repo_root = os.path.dirname(os.path.abspath(__file__))
+        src_dir = os.path.join(repo_root, "docs", "architecture")
+        dst_dir = os.path.join(self.workspace_root, "architecture")
+
+        if not os.path.isdir(src_dir):
+            return
+
+        stats = self._sync_dir_content(src_dir, dst_dir)
+        if any(stats.values()):
+            logger = None
+            try:
+                import logging
+                logger = logging.getLogger(__name__)
+            except Exception:
+                logger = None
+
+            message = (
+                "architecture 文档已同步到 workspace/architecture "
+                f"(copied={stats['copied_files']}, updated={stats['updated_files']}, "
+                f"removed_files={stats['removed_files']}, removed_dirs={stats['removed_dirs']})"
+            )
+            if logger:
+                logger.info(message)
 
     def _parse_version_tuple(self, version_str: str) -> tuple:
         """将版本号转换为可比较的三段整数元组，非法值回退为 (0,0,0)。"""
