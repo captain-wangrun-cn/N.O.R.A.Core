@@ -48,118 +48,140 @@
 
 ```mermaid
 flowchart TB
-  %% ========== 入口层 ==========
-  subgraph Entry[入口与事件源]
+  %% ========== 入口与接入层 ==========
+  subgraph Entry[入口与接入层]
     U[用户消息]
     TG[Telegram Adapter\nadapters/telegram/main.py]
     AGG[MessageAggregator\nadapters/aggregator.py]
-    EXT[外部事件\nEmail/Webhook/Calendar]
-    TRIG[Trigger System\ntriggers/*]
+    EXT[外部事件源\nEmail/Webhook/Calendar]
+    TRM[TriggerManager\ntriggers/manager.py]
+    TRG[Trigger 实现\ntriggers/*]
   end
 
-  %% ========== 核心控制层 ==========
-  subgraph Core[核心编排层]
+  %% ========== 控制与编排层 ==========
+  subgraph Orchestrator[控制与编排层]
     CTRL[NoraController\ncore/controller.py]
-    MH[MessageHandler\ncore/message_handler.py]
-    INT[InterruptHandler\ncore/interrupt_handler.py]
-    WS[WorkerStatus\ncore/worker_status.py]
-    QUEUE[BackendTaskQueue\n后脑任务队列]
+    MH[MessageHandlerMixin\n消息入口/命令路由]
+    POLL[PollingMixin\n前后脑轮询协同]
+    INT[InterruptHandlerMixin\n忙碌中意图检测]
+    WS[WorkerStatus\n状态追踪]
+    Q[BackendTaskQueue\n后脑任务队列]
   end
 
-  %% ========== 前后脑 ==========
-  subgraph Brains[双脑执行层]
-    FB[Front Brain\ncore/front_brain.py\nfast_llm: 快响应+路由判断]
-    BB[Back Brain\ncore/back_brain.py\nsmart/coder/image: 深度执行]
-    REVIEW[Front Brain Review\nfront_brain_review.jinja\n后脑结果审查转述]
+  %% ========== 前脑层（细分） ==========
+  subgraph Front[前脑层（Front Brain）]
+    FG[前脑即时回复\n_generate_front_chat_response]
+    FR[前脑审查转述\n_front_brain_review]
+    IR[忙碌意图判断\n_detect_interrupt_intent_and_reply]
   end
 
-  %% ========== LLM 层 ==========
+  %% ========== 后脑层（细分） ==========
+  subgraph Back[后脑层（Back Brain）]
+    BG[_generate_response 主循环]
+    RAGSTEP[RAG 检索]
+    TOOLSTEP[工具/技能循环执行]
+    MODELSEL[后脑模型选择器\nimage 或 coder]
+    REPORT[后脑工作报告汇总\nfinal_response_buffer + tool_history]
+  end
+
+  %% ========== 模型与提示词层 ==========
   subgraph LLM[模型与提示词层]
-    PROMPTS[Prompt Builder\nbrain/prompts.py + templates/*.jinja]
-    CLIENT[LLM Client\nbrain/llm.py]
-    OPENAI[OpenAI Provider\nbrain/providers/openai.py]
-    GEMINI[Gemini Provider\nbrain/providers/gemini.py]
+    PROMPT[Prompt 组装\nbrain/prompts.py + templates/*.jinja]
+    FACTORY[get_llm_client\nbrain/llm.py]
+    ALIAS[模型别名\nsmart / coder / image / fast]
+    OPENAI[OpenAI Provider]
+    GEMINI[Gemini Provider]
   end
 
-  %% ========== 工具与技能 ==========
-  subgraph ToolsSkills[工具与技能执行层]
-    TOOLS[ToolManager\nbrain/tools.py]
-    SKLOADER[SkillLoader\nskills/loader.py]
-    SKILLS[Skills Runtime\nworkspace/skills + repo/skills]
-    WORKSPACE[WorkspaceManager\nworkspace_config.py]
+  %% ========== 工具与技能层 ==========
+  subgraph Tooling[工具与技能层]
+    TM[ToolManager\nbrain/tools.py]
+    SL[SkillLoader\nskills/loader.py]
+    SR[Skill Runtime\nexecute_skill]
+    WM[WorkspaceManager\nworkspace_config.py]
   end
 
-  %% ========== 记忆与数据 ==========
-  subgraph MemoryData[记忆与数据层]
-    HIST[MessageHistory\nmemory/message_history.py]
-    CSTORE[ContextStore\nmemory/context_store.py]
+  %% ========== 记忆与数据层 ==========
+  subgraph Data[记忆与数据层]
+    MHIST[MessageHistory]
+    CSTORE[ContextStore]
     RAG[memory/rag.py]
-    VDB[Qdrant / Vector\nmemory/vector.py]
-    IMG[Image Memory\nmemory/image_store.py]
+    VDB[Qdrant/Vector]
+    IMGS[ImageStore]
     SQL[(SQLite\nmessage_history.db\nmessage_log.db\ncontext_compression.db)]
     MONGO[(MongoDB\n图片元数据/OCR)]
   end
 
   %% ========== 调度与主动消息 ==========
-  subgraph Schedule[调度与主动消息]
-    SCH[ProactiveScheduler\ncore/scheduler.py]
-    SMX[SchedulerMixin\ncore/scheduler_mixin.py]
+  subgraph Scheduler[调度与主动消息]
+    SMX[SchedulerMixin]
+    SCH[ProactiveScheduler]
     PRES[AIPresence\nONLINE/SEMI_ONLINE]
   end
 
-  %% ========== 观测与成本 ==========
-  subgraph Ops[观测与运维]
-    LOG[Logging\nbrain/logging_config.py]
-    COST[CostTracker\ncore/cost_tracker.py]
-    CLI[CLI/TUI\ncli.py + tui.py]
+  %% ========== 运维观测层 ==========
+  subgraph Ops[运维观测层]
+    LOG[Logging]
+    COST[CostTracker]
+    CLI[CLI/TUI]
   end
 
-  %% 主链路
-  U --> TG --> AGG --> CTRL
-  CTRL --> MH
-  CTRL --> INT
-  MH --> FB
-  FB -->|无需后脑| TG
-  FB -->|NEED_BACKEND| BB
+  %% 入口主链路
+  U --> TG --> AGG --> CTRL --> MH
+  MH --> FG
+  FG -->|无需后脑| TG
+  FG -->|NEED_BACKEND| BG
 
-  %% 后脑执行与回传
-  BB --> WS
-  BB --> QUEUE
-  BB --> REVIEW
-  REVIEW --> TG
+  %% 忙碌中插话链路
+  U -->|后脑忙碌时新消息| INT --> IR
+  IR -->|queue| Q --> POLL --> BG
+  IR -->|stop/change| POLL
 
-  %% Trigger 主动链路
-  EXT --> TRIG --> CTRL
+  %% 后脑执行分解
+  BG --> RAGSTEP --> RAG
+  BG --> MODELSEL --> TOOLSTEP
+  TOOLSTEP --> TM --> SL --> SR
+  TM --> WM
+  BG --> REPORT --> FR --> TG
+  BG --> WS
+
+  %% 模型路由
+  FG --> PROMPT
+  FR --> PROMPT
+  IR --> PROMPT
+  BG --> PROMPT
+  PROMPT --> FACTORY --> ALIAS
+  ALIAS --> OPENAI
+  ALIAS --> GEMINI
+
+  %% 数据落盘
+  BG --> MHIST --> SQL
+  BG --> CSTORE --> SQL
+  BG --> IMGS --> MONGO
+  RAG --> VDB
+  IMGS --> VDB
+
+  %% Trigger/主动消息链路
+  EXT --> TRG --> TRM --> CTRL
   CTRL --> SMX --> SCH --> TG
   SCH --> PRES
 
-  %% Prompt + LLM
-  FB --> PROMPTS
-  BB --> PROMPTS
-  PROMPTS --> CLIENT --> OPENAI
-  PROMPTS --> CLIENT --> GEMINI
-
-  %% 工具技能
-  BB --> TOOLS
-  TOOLS --> SKLOADER --> SKILLS
-  TOOLS --> WORKSPACE
-
-  %% 记忆/RAG
-  BB --> RAG
-  RAG --> VDB
-  BB --> HIST --> SQL
-  BB --> CSTORE --> SQL
-  BB --> IMG --> MONGO
-  IMG --> VDB
-
-  %% 运维
+  %% 运维链路
   CTRL --> LOG
-  BB --> COST
+  BG --> COST
   CLI --> CTRL
   CLI --> SCH
 ```
 
 > 说明：这是“系统总览图”。各子系统细节请继续阅读下方索引文档（双脑、工具、技能、记忆、调度、触发器）。
+
+### 模型选择校正（基于当前实现）
+
+- **前脑主回复**（`_generate_front_chat_response`）当前调用 `self.llm`，即默认 `smart` 别名。
+- **前脑审查**（`_front_brain_review`）当前调用 `self.llm`，即默认 `smart` 别名。
+- **忙碌意图判断**（`_detect_interrupt_intent_and_reply`）当前也调用 `self.llm`（`smart`）。
+- **后脑主执行**（`_generate_response`）默认走 `coder`，当图片输入或 `use_image_model=true` 时走 `image`。
+- `fast_llm` 在控制器中已初始化（`model_alias="fast"`），但上述三个前脑关键路径当前实现并未直接调用它。
 
 ## 文档索引
 
