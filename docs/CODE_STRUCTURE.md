@@ -1,64 +1,109 @@
 # 代码结构概览
 
-> 仓库：N.O.R.A.Core（main 分支）
+> 仓库：`N.O.R.A.Core`（`main` 分支）
 
-## 顶层文件
-- `main.py` / `cli.py` / `tui.py` / `view_costs.py`：入口与命令行/终端 UI。
-- `config.py` / `config.example.yml` / `workspace_config.py`：配置加载与默认模板。
-- `requirements.txt` / `docker-compose.yml` / `LICENSE` / `README.md` / `DEV_BIBLE.md` / `STATE_SNAPSHOT.md`：依赖、部署与说明。
-- `tui.css`：终端 UI 样式。
-- `test_link_sanitize.py`：顶层独立测试。
+## 顶层结构
 
-## 核心目录
-- `core/`
-  - `controller.py`：主业务控制器，管理会话、LLM、工具、历史等（当前采用“前脑优先路由”：先前脑回复，再按需转后脑）。
-  - `routing.py`：路由辅助函数（媒体输入检测、前脑路由信号解析等）。
-  - `cost_tracker.py`：成本记录与价格查询。
-  - `__pycache__/`
+```text
+N.O.R.A.Core/
+├─ main.py / cli.py / tui.py / view_costs.py
+├─ config.py / config.example.yml / workspace_config.py
+├─ brain/
+├─ core/
+├─ adapters/
+├─ memory/
+├─ skills/
+├─ triggers/
+├─ tests/
+├─ docs/
+├─ locales/
+└─ LICENSE / README.md / requirements.txt ...
+```
 
-- `brain/`
-  - `interface.py`：LLM 接口定义。
-  - `llm.py`：LLM 客户端获取与调用。
-  - `logging_config.py`：日志配置。
-  - `multimodal.py`：多模态输入处理（图片标签提取、image_id 生成、二进制读取）。
-  - `prompts.py`：提示词模板。
-  - `tools.py`：工具注册与调用（含 `view_image` 图片检索、`crop_image_for_llm` 图片裁剪工具）。
-  - `providers/`：LLM 提供方适配（`gemini.py`、`openai.py`）。
-  - `templates/`：Jinja 模板（系统与 persona，含 `image_tags.jinja` 图片标签提示）。
+## 顶层文件说明
 
-- `adapters/`
-  - `base.py`：适配器基类（最小接口 + 生命周期/消息钩子 + 平台能力声明）。
-  - `aggregator.py`：聚合器。
-  - `ADAPTER_GUIDE.md`：新平台适配器开发指南。
-  - `telegram/`：Telegram 适配实现（`main.py`、`PROMPT.md`、`__init__.py`），媒体下载路径为 `workspace/data/telegram/`。
+- `main.py`：程序入口。
+- `cli.py`：配置向导与运维命令入口。
+- `tui.py` / `tui.css`：终端 UI。
+- `view_costs.py`：成本查询工具。
+- `config.py`：配置读取与访问器。
+- `workspace_config.py`：工作区管理与启动同步（如技能/架构文档同步）。
+- `config.example.yml`：配置模板。
 
-- `memory/`
-  - `message_history.py`：消息持久化、压缩、归档、上下文重建。
-  - `embed.py` / `vector.py` / `rag.py` / `message_history.py` / `__pycache__/`：向量化、RAG 与消息历史。
-  - `image_store.py`：图片记忆存储（MongoDB + Qdrant 双写），图片元数据管理与多模式检索。
-  - `message_history.py`（主要逻辑在此）。
+## 核心目录说明
 
-- `skills/`
-  - `loader.py`：技能加载。
-  - `web_search/`、`web_fetch/`、`skill_creator/`：技能实现与说明（`SKILL.md`、`main.py` 等）。
+### `core/`（控制与编排）
 
-- `locales/`
-  - `en_US.yml` / `zh_CN.yml`：多语言文案。
+- `controller.py`：`NoraController` 主控制器（组合各 Mixin）。
+- `message_handler.py`：消息入口路由、命令分发。
+- `front_brain.py`：前脑即时回复 + 后脑结果审查。
+- `back_brain.py`：后脑执行循环（RAG、工具/技能、生成）。
+- `interrupt_handler.py`：忙碌时意图检测（stop/change/queue）。
+- `polling.py`：前后脑轮询协同。
+- `scheduler.py` / `scheduler_mixin.py`：主动消息调度与状态管理。
+- `routing.py`：信号解析与辅助路由逻辑。
+- `worker_status.py`：后脑状态与队列结构。
+- `cost_tracker.py`：token 使用与成本记录。
 
-- `docs/`
-  - `HANDOVER.md`、`architecture/`（架构文档：message history/compression、timestamp、tool-loop、tools 等）。
+### `brain/`（模型与提示词）
 
-- `tests/`
-  - 各功能单测：`test_cli_price_display.py`、`test_context_pricing.py`、`test_cost_tracker.py`、`test_embedding.py`、`test_message_history.py`、`test_rag.py`、`test_schema_fix.py`、`test_timestamp.py`、`test_timezone.py`、`test_vector.py`。
+- `llm.py`：模型客户端工厂（按 alias/provider 获取）。
+- `providers/`：提供商实现（`gemini.py`、`openai.py`）。
+- `prompts.py`：系统提示词与身份上下文注入。
+- `templates/`：Jinja 模板（system/persona/schedule/front_brain 等）。
+- `tools.py`：内置工具注册、schema 生成与执行。
+- `multimodal.py`：图片输入解析与多模态辅助。
+- `logging_config.py`：日志配置。
 
-## 配置与数据
-- `config.yml`（需自行提供，示例见 `config.example.yml`）。
-- `workspace/data/memory/message_history.db`：SQLite 聊天记录与摘要存储（路径可配置）。
-- `workspace/data/telegram/`：Telegram 接收的图片/文档/贴纸落盘目录。
+### `adapters/`（平台适配）
+
+- `base.py`：平台适配器基类。
+- `aggregator.py`：连续消息聚合。
+- `telegram/`：Telegram 适配实现与平台提示。
+
+### `memory/`（记忆与数据）
+
+- `message_history.py`：消息持久化、压缩、分段与上下文重建。
+- `context_store.py`：消息镜像与段落压缩存储。
+- `rag.py` / `embed.py` / `vector.py`：检索增强与向量能力。
+- `image_store.py`：图片记忆（MongoDB + Qdrant 双写）。
+
+### `skills/`（技能系统）
+
+- `loader.py`：技能扫描与加载。
+- `skill_creator/`：技能脚手架创建相关能力。
+- `web_search/`、`web_fetch/`：内置示例技能。
+
+### `triggers/`（外部触发系统）
+
+- `base.py`：Trigger 基类。
+- `manager.py`：触发器管理器。
+- `factory.py`：按配置构建触发器。
+- `email/`：Email Trigger 实现。
+- `config.example.yml`：触发器配置模板。
+
+### `docs/`（文档）
+
+- `architecture/`：架构文档全集。
+- `onboarding/`：接手指南与约定。
+- `CLI_USAGE.md` / `HANDOVER.md`：使用与交接文档。
+
+### `tests/`（测试）
+
+- 覆盖 CLI、成本、记忆、RAG、工具、路由、时区、多模态、触发器等核心能力。
+
+## 配置与运行数据
+
+- `config.yml`：本地运行配置（由 `config.example.yml` 复制生成）。
+- 默认 workspace：`~/.nora/workspace`（可在 `config.yml -> workspace.root_path` 覆盖）。
+- 常见数据文件（位于 workspace 下）：
+  - `data/memory/message_history.db`
+  - `data/memory/message_log.db`
+  - `data/memory/context_compression.db`
 
 ## 运行要点
-- 入口：`main.py`（主流程）、`cli.py`（命令行工具）、`tui.py`（终端 UI）。
-- LLM 配置在 `config.yml` 的 `llm.*`；消息历史配置在 `memory.message_history.*`。
-- Telegram 适配器入口 `adapters/telegram/main.py`。
-- `view_image` 支持 `return_image=true`，会返回可解析的图片内容标签并触发下一轮 image 模型分析。
-- 路由策略：消息先进入前脑（fast 模型）做即时回复；若前脑回复中含 `[NEED_BACKEND]`，再启动后脑工具循环。
+
+- 主入口：`python main.py`
+- 配置向导：`python cli.py` 或 `python cli.py --configure`
+- 测试：`pytest`
+- 架构总览：`docs/architecture/README.md`

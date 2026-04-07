@@ -1,22 +1,41 @@
-# N.O.R.A. Core (Project Echo)
+# N.O.R.A.Core
 
-**N.O.R.A.** (Neural Optimized Responsive Assistant) Core 是一个主要用于自娱自乐的 AI 助手框架，旨在提供个人陪伴和一点点效率提升。虽然不敢说完美，但在长期记忆和拟人化交互方面做了一些微小的尝试。
+N.O.R.A.Core 是一个主要 AI 助手框架，旨在提供个人陪伴和一点点效率提升。虽然不敢说完美，但在长期记忆和拟人化交互方面做了一些微小的尝试。
 
-## 🏗 架构设计 (Architecture)
+> [!CAUTION]
+> 本项目为**VibeCoding**项目(氛围编程)(本人使用VSC+GithubCopilot)
+> **99%的代码为AI生成**，本人仅提供架构设计与部分指导
+> 如果阅读本项目的源码给你带来了包括*心跳加速*,*高血压*等不适，本人不负任何责任
+> **本项目为个人项目，本来只是个人用，代码内可能包括但不限于各种离谱设计，史山代码等，但是请手下留情，我只是想要自己用，不希望带来更多麻烦**
+> 个人的详细声明可以阅读[架构文档索引](docs/architecture/README.md)
+
+## 架构设计
 
 更多细节请查阅 [架构文档索引](docs/architecture/README.md)。
 
-### 💡 一些不成熟的想法 (Key Concepts)
+### 项目特点
 
-- **[双进程大脑 (Dual-Process Brain)](docs/architecture/dual-process-architecture.md)**: 尝试模仿了 "脑口分离" 的设计。用一个响应快的小模型来处理即时回复和打断（比如用户说"停"、"换一个"），后台再用大模型慢慢处理繁重的逻辑。
-- **[抢占与打断 (Preemption)](docs/architecture/preemption.md)**: 试图让机器人支持被随时打断。用户可以在它思考或做事时插嘴，它会尽量像真人一样由小模型接管并停下手中的活。
-- **[记忆增强 (Memory & RAG)](docs/architecture/message_history.md)**: 混合了一点 RAG 技术。结合 SiliconFlow Embeddings、Qdrant 向量库和本地 SQLite 存储，希望能让它记得更久一点。
-- **技能系统 (Skills)**: 支持热重载的 Python 工具（位于 `tools/` 目录）。可以在运行时动态生成或修改，虽然还在持续完善中。
-- **[内置工具系统文档 (Tools)](docs/architecture/tools.md)**: 汇总所有内置工具的参数、行为和安全约束，便于维护与扩展。
-- **交互接口**: 目前通过统一的 `BaseAdapter` 接口支持 Telegram Bot API。
+- **双脑协同（前脑 + 后脑）**：前脑负责即时回复与路由判断，后脑负责深度执行（工具/技能/RAG），兼顾响应速度与任务完成度。就算正在工作，也可以陪用户对话/聊天
+- **前后脑轮询审查**：后脑总结给前脑进行审查，不满意可以暂时告知用户再等一会并继续工作
+- **后脑可打断与可切换任务**：支持用户在执行中随时要求停止或加入新任务，更接近真人对话中的“插话”与“改需求”。
+- **长期记忆能力<font color="red">（RAG系统待完善）</font>**：RAG数据库，SOUL USER等markdown文档，按照消息段压缩上下文。能记住要点，重点内容
+- **主动消息/闹钟**：根据SCHEDULE内容，自动生成主动消息触发，可以主动发消息问候用户。同时也可以定闹钟提醒用户
+- **图片入库**：解决传统架构无法的图片仅存在当此请求的问题。收到的图片会生成标签，ocr文本等存入数据库。后续可以根据关键词等再次获取到图片，就像你让你朋友回去看之前发过的一张图片
+- **图片裁剪分析<font color="red">（自主性调用待完善）</font>**：AI能主动裁剪图片并再次分析，能够更好的查看细节
+- **技能<font color="red">（行业适配性待完善）</font>**：skills系统，可以从外部下载技能，或者让AI自己创作技能，自己学习成长
+- **触发器**：可扩展的trigger系统，触发AI的不一定是用户或主动消息，trigger系统提供一个可自定义扩展的触发器用于触发AI，顺便可以让AI主动提醒/处理事务。例如邮件触发
+- **适配器<font color="red">（扩展适配性待完善）</font>**：可扩展的adapter系统，实现跨平台对话
+- **多模型架构**：分为四个模型，对应的模型做对应的事情，兼顾速度与质量，以及性价比
 
-## 🚀 快速开始 (Setup)
+## ✅ 环境要求
 
+- Python 3.12+
+- 可访问的 LLM API（Gemini / OpenAI 或兼容 OpenAI 的网关）
+- Telegram Bot Token（若使用 Telegram 适配）
+
+> Windows 用户建议额外安装 `tzdata`，避免时区数据库缺失导致 `ZoneInfo` 报错。
+
+## 快速开始
 1. 克隆仓库:
 
    ```bash
@@ -25,22 +44,36 @@
    ```
 
 2. 安装依赖:
+   强烈建议使用虚拟环境
+   ```bash
+   python -m venv .venv
+   ```
 
+   Windows
+   ```bash
+   .venv\Scripts\activate
+   ```
+   Linux
+   ```bash
+   source .venv/bin/activate
+   ```
+
+   安装依赖
    ```bash
    pip install -r requirements.txt
+   pip install tzdata
    ```
 
 3. 配置 (使用 CLI 向导):
-
-   ```bash
-   python cli.py --configure
-   ```
-
-   或者使用交互式菜单:
-
    ```bash
    python cli.py
    ```
+   选择运行配置向导，根据提示填入
+   
+   - `fast`模型: 快速决策,判断是否追问,web_fetch总结等
+   - `smart`模型: 平常对话,前脑主模型
+   - `coder`模型: 专业决策,调用工具/技能,后脑主模型
+   - `summary`模型: 总结,压缩等
 
 4. 运行:
    ```bash
@@ -51,60 +84,86 @@
    python main.py --no-tui
    ```
 
-## 🛠 管理工具 (Management CLI)
+## 管理工具
 
 N.O.R.A. Core 包含一个简易的 CLI 工具 (`cli.py`) 用于配置和维护：
 
 ```bash
 # 交互式菜单
 python cli.py
-
-# 直接命令
-python cli.py wizard           # 运行配置向导
-python cli.py test-qdrant      # 测试 Qdrant 连接
-python cli.py test-rag         # 测试 RAG 系统
-python cli.py history          # 聊天记录管理
 ```
 
-> ⚠️ RAG 数据清理说明：
-> 在 CLI 菜单中执行“🧹 清理 RAG 数据”时，`clean_qdrant` / `clean_mongodb` 现已改为**清空所有 collections**（分别针对 Qdrant 与 MongoDB 的 `nora` 库），并包含**强警告 + 二次确认（输入 `DELETE ALL`）**。
-> 该操作不可恢复，请谨慎使用。
+## 目录结构
 
-详见 [CLI 使用指南](docs/CLI_USAGE.md)。
-
-## 💰 成本追踪 (Cost Tracking)
-
-为了防止 Token 用得太快心疼，内置了一个简单的计费追踪：
-
-- **自动定价**: 内置了 Gemini 和 OpenAI 的参考价格
-- **自定义定价**: 支持配置自定义模型价格
-- **统计查看**: 可以按时间、模型查看大概的花费
-
-```bash
-# 查看总花费
-python view_costs.py
-
-# 查看今日花费
-python view_costs.py --today
-
-# 查看特定提供商的花费
-python view_costs.py --provider gemini
-
-# 查看特定模型别名的花费
-python view_costs.py --alias smart
+```text
+N.O.R.A.Core/
+├─ main.py / cli.py / tui.py / view_costs.py
+├─ config.py / config.example.yml / workspace_config.py
+├─ brain/                 # 模型接入、提示词模板、工具定义
+│  ├─ providers/          # Gemini / OpenAI 适配
+│  └─ templates/          # Jinja 提示词模板
+├─ core/                  # 控制器、前后脑、轮询、调度
+├─ adapters/              # 平台适配（当前以 Telegram 为主）
+├─ memory/                # 历史消息、RAG、向量、图片记忆
+├─ skills/                # 仓库预装技能
+├─ triggers/              # 外部触发系统（Email 等）
+├─ docs/
+│  ├─ architecture/       # 架构设计文档
+│  └─ onboarding/         # 新会话接手文档
+├─ tests/                 # 单元测试
+└─ locales/               # 多语言文案
 ```
 
-成本数据存储在 `<workspace>/cost_tracker.db`。
+更详细目录与说明请查看：[`docs/CODE_STRUCTURE.md`](docs/CODE_STRUCTURE.md)
 
-## 📂 目录结构 (Structure)
+## 常见问题
 
-- `main.py`: 启动入口和 Bot 控制器。
-- `brain/`: LLM 路由策略与思考逻辑。
-- `core/`: 核心组件 (控制器、成本追踪)。
-- `memory/`: 记忆系统 (RAG 与 数据库连接)。
-- `skills/`: 动态技能脚本 (Tools)。
-- `utils/`: 通用工具类。
+- **`ZoneInfoNotFoundError`（Windows）**
+   - 执行：`pip install tzdata`
+- **启动提示找不到 `config.yml`**
+   - 先复制 `config.example.yml` 为 `config.yml`，再运行 `python cli.py --configure`
+- **想快速了解代码结构**
+   - 查看 `docs/CODE_STRUCTURE.md`
+- **如何让新AI接手此项目**
+   Agent模式下，在会话开头第一句话前面加上：`阅读onboarding内的文档`
+   如：
+   ```
+   阅读onboarding内的文档
 
-## 📝 许可证 (License)
+   编写一个新的trigger，用于......
+   ```
 
-仅供个人学习与自娱自乐使用 (Private / Personal Use Only)。
+## 许可证
+
+本项目采用 **BSD 3-Clause License**
+
+```text
+BSD 3-Clause License
+
+Copyright (c) 2026, WangRun(王润)
+
+Redistribution and use in source and binary forms, with or without
+modification, are permitted provided that the following conditions are met:
+
+1. Redistributions of source code must retain the above copyright notice, this
+   list of conditions and the following disclaimer.
+
+2. Redistributions in binary form must reproduce the above copyright notice,
+   this list of conditions and the following disclaimer in the documentation
+   and/or other materials provided with the distribution.
+
+3. Neither the name of the copyright holder nor the names of its
+   contributors may be used to endorse or promote products derived from
+   this software without specific prior written permission.
+
+THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
+AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
+IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
+DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE LIABLE
+FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
+DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR
+SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER
+CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY,
+OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
+OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+```

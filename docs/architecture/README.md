@@ -175,14 +175,6 @@ flowchart TB
 
 > 说明：这是“系统总览图”。各子系统细节请继续阅读下方索引文档（双脑、工具、技能、记忆、调度、触发器）。
 
-### 模型选择校正（基于当前实现）
-
-- **前脑主回复**（`_generate_front_chat_response`）当前调用 `self.llm`，即默认 `smart` 别名。
-- **前脑审查**（`_front_brain_review`）当前调用 `self.llm`，即默认 `smart` 别名。
-- **忙碌意图判断**（`_detect_interrupt_intent_and_reply`）当前也调用 `self.llm`（`smart`）。
-- **后脑主执行**（`_generate_response`）默认走 `coder`，当图片输入或 `use_image_model=true` 时走 `image`。
-- `fast_llm` 在控制器中已初始化（`model_alias="fast"`），但上述三个前脑关键路径当前实现并未直接调用它。
-
 ## 文档索引
 
 ### 🧠 核心与交互 (Core Interactions)
@@ -191,13 +183,19 @@ flowchart TB
   - _Current State_: 实现了"脑口分离"，前端负责快响应/打断，后端负责深度思考。
 - **[消息抢占机制 (Preemption)](./preemption.md)**
   - _Legacy Context_: 早期打断逻辑的设计思路，现已整合进双进程架构中。
+- **[时间戳插入机制 (Timestamp Insertion)](./timestamp-insertion.md)**
+  - 统一消息时间戳注入策略与上下文时间语义。
 
 ### 🧩 技能与执行 (Skills & Execution)
 
 - **[技能系统 (Skills)](./skills.md)**
   - 为什么我们需要让 AI "做事" 而不仅仅是聊天。
+- **[技能系统实现细节 (Skill System)](./skill-system.md)**
+  - 技能加载、执行协议与目录约定（`SKILL.md` + `main.py`）。
 - **[技能增强 (Skill Enhancement)](./skill-enhancement.md)**
   - 优化技能的发现与创建流程，避免低效的文件系统遍历。
+- **[动态技能机制 (Dynamic Skills)](./dynamic-skills.md)**
+  - 运行期创建/更新技能能力的设计。
 - **[工作区隔离 (Workspace Isolation)](./workspace.md)**
   - 限制 AI 的文件访问权限，防止误操作系统关键文件。
 - **[内置工具系统 (Tools)](./tools.md)**
@@ -230,10 +228,6 @@ flowchart TB
   - 防止 AI 陷入死循环的保护机制。
 - **CLI 清理策略更新（RAG 数据）**
   - `clean_qdrant` / `clean_mongodb` 已改为清空所有 collections，并加入强警告与二次确认（`DELETE ALL`）。
-
-- [工具循环控制](./tool-loop.md) - 防止 LLM 陷入死循环
-- [日志系统](./logging.md) - 分级、轮转、过滤策略
-- [工作区隔离](./workspace.md) - 安全边界与路径管理
 
 ## 核心理念
 
