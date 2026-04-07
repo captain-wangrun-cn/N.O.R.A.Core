@@ -44,6 +44,123 @@
 > **项目背景**  
 > 本项目是一个纯个人娱乐项目，初衷是想要一个能像真人一样的对话对象，而不是单纯"问一句答一句"的人工智能。所有思路和设计由作者提供并指导，99% 的代码由 AI 协助完成。看不顺眼也请受着 :)
 
+## 完整架构图
+
+```mermaid
+flowchart TB
+  %% ========== 入口层 ==========
+  subgraph Entry[入口与事件源]
+    U[用户消息]
+    TG[Telegram Adapter\nadapters/telegram/main.py]
+    AGG[MessageAggregator\nadapters/aggregator.py]
+    EXT[外部事件\nEmail/Webhook/Calendar]
+    TRIG[Trigger System\ntriggers/*]
+  end
+
+  %% ========== 核心控制层 ==========
+  subgraph Core[核心编排层]
+    CTRL[NoraController\ncore/controller.py]
+    MH[MessageHandler\ncore/message_handler.py]
+    INT[InterruptHandler\ncore/interrupt_handler.py]
+    WS[WorkerStatus\ncore/worker_status.py]
+    QUEUE[BackendTaskQueue\n后脑任务队列]
+  end
+
+  %% ========== 前后脑 ==========
+  subgraph Brains[双脑执行层]
+    FB[Front Brain\ncore/front_brain.py\nfast_llm: 快响应+路由判断]
+    BB[Back Brain\ncore/back_brain.py\nsmart/coder/image: 深度执行]
+    REVIEW[Front Brain Review\nfront_brain_review.jinja\n后脑结果审查转述]
+  end
+
+  %% ========== LLM 层 ==========
+  subgraph LLM[模型与提示词层]
+    PROMPTS[Prompt Builder\nbrain/prompts.py + templates/*.jinja]
+    CLIENT[LLM Client\nbrain/llm.py]
+    OPENAI[OpenAI Provider\nbrain/providers/openai.py]
+    GEMINI[Gemini Provider\nbrain/providers/gemini.py]
+  end
+
+  %% ========== 工具与技能 ==========
+  subgraph ToolsSkills[工具与技能执行层]
+    TOOLS[ToolManager\nbrain/tools.py]
+    SKLOADER[SkillLoader\nskills/loader.py]
+    SKILLS[Skills Runtime\nworkspace/skills + repo/skills]
+    WORKSPACE[WorkspaceManager\nworkspace_config.py]
+  end
+
+  %% ========== 记忆与数据 ==========
+  subgraph MemoryData[记忆与数据层]
+    HIST[MessageHistory\nmemory/message_history.py]
+    CSTORE[ContextStore\nmemory/context_store.py]
+    RAG[memory/rag.py]
+    VDB[Qdrant / Vector\nmemory/vector.py]
+    IMG[Image Memory\nmemory/image_store.py]
+    SQL[(SQLite\nmessage_history.db\nmessage_log.db\ncontext_compression.db)]
+    MONGO[(MongoDB\n图片元数据/OCR)]
+  end
+
+  %% ========== 调度与主动消息 ==========
+  subgraph Schedule[调度与主动消息]
+    SCH[ProactiveScheduler\ncore/scheduler.py]
+    SMX[SchedulerMixin\ncore/scheduler_mixin.py]
+    PRES[AIPresence\nONLINE/SEMI_ONLINE]
+  end
+
+  %% ========== 观测与成本 ==========
+  subgraph Ops[观测与运维]
+    LOG[Logging\nbrain/logging_config.py]
+    COST[CostTracker\ncore/cost_tracker.py]
+    CLI[CLI/TUI\ncli.py + tui.py]
+  end
+
+  %% 主链路
+  U --> TG --> AGG --> CTRL
+  CTRL --> MH
+  CTRL --> INT
+  MH --> FB
+  FB -->|无需后脑| TG
+  FB -->|NEED_BACKEND| BB
+
+  %% 后脑执行与回传
+  BB --> WS
+  BB --> QUEUE
+  BB --> REVIEW
+  REVIEW --> TG
+
+  %% Trigger 主动链路
+  EXT --> TRIG --> CTRL
+  CTRL --> SMX --> SCH --> TG
+  SCH --> PRES
+
+  %% Prompt + LLM
+  FB --> PROMPTS
+  BB --> PROMPTS
+  PROMPTS --> CLIENT --> OPENAI
+  PROMPTS --> CLIENT --> GEMINI
+
+  %% 工具技能
+  BB --> TOOLS
+  TOOLS --> SKLOADER --> SKILLS
+  TOOLS --> WORKSPACE
+
+  %% 记忆/RAG
+  BB --> RAG
+  RAG --> VDB
+  BB --> HIST --> SQL
+  BB --> CSTORE --> SQL
+  BB --> IMG --> MONGO
+  IMG --> VDB
+
+  %% 运维
+  CTRL --> LOG
+  BB --> COST
+  CLI --> CTRL
+  CLI --> SCH
+```
+
+> 说明：这是“系统总览图”。各子系统细节请继续阅读下方索引文档（双脑、工具、技能、记忆、调度、触发器）。
+
 ## 文档索引
 
 ### 🧠 核心与交互 (Core Interactions)
