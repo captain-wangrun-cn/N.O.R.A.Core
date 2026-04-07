@@ -22,10 +22,13 @@ N.O.R.A. 核心控制器 — 瘦身版。
 """
 
 import asyncio
+from datetime import datetime
 import inspect
 import logging
 import os
+import platform as py_platform
 import re
+import sys
 from typing import Dict, Any, Optional, Callable
 
 from adapters.base import BaseAdapter
@@ -77,6 +80,7 @@ class NoraController(
         r'\[IMAGE_OCR:([^\]\s]+)\](.*?)\[/IMAGE_OCR\]',
         re.IGNORECASE | re.DOTALL,
     )
+    _SYSTEM_ENV_MARKER = "【系统环境信息 (System Environment)】"
 
     # ------------------------------------------------------------------
     # 初始化
@@ -260,6 +264,15 @@ class NoraController(
         return bool(flag)
 
     def _chat_stream_wrapper(self, model_client, chat_id: str, **kwargs):
+        # 自动注入系统环境信息到 system_prompt（全链路生效）
+        system_prompt = kwargs.get("system_prompt")
+        if isinstance(system_prompt, str):
+            if self._SYSTEM_ENV_MARKER not in system_prompt:
+                kwargs = dict(kwargs)
+                kwargs["system_prompt"] = (
+                    f"{system_prompt}\n\n---\n{self._build_system_environment_context(chat_id)}"
+                )
+
         def _filter_kwargs(callable_obj, call_kwargs):
             try:
                 sig = inspect.signature(callable_obj)
@@ -284,6 +297,19 @@ class NoraController(
 
         safe_kwargs = _filter_kwargs(model_client.chat_stream, kwargs)
         return model_client.chat_stream(**safe_kwargs)
+
+    def _build_system_environment_context(self, chat_id: str) -> str:
+        """构建注入到 system prompt 的系统环境信息。"""
+        now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        adapter_platform = getattr(self.adapter, "platform_name", "unknown")
+        return (
+            f"{self._SYSTEM_ENV_MARKER}\n"
+            f"当前时间: {now}\n"
+            f"Chat ID: {chat_id}\n"
+            f"适配器平台: {adapter_platform}\n"
+            f"操作系统: {py_platform.system()} {py_platform.release()}\n"
+            f"Python: {sys.version.split()[0]}\n"
+        )
 
     # ------------------------------------------------------------------
     # 通用辅助
