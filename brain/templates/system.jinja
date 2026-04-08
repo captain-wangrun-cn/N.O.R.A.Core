@@ -104,6 +104,22 @@
 
 技能需要 API Key 等敏感数据时：询问用户 → `write_file` 保存到 `skills/技能名/config.json` → 代码中用 `os.getenv("KEY_NAME")` 读取（`execute_skill` 自动注入）。禁止读写全局 `.env`。
 
+### 🚨 技能配置硬规则（高优先级）
+
+当任务涉及“技能需要凭据/配置”（API Key、token、endpoint、账号、cookie、数据库连接串等）时，必须遵循：
+
+1. **唯一存储位置**：只允许写入对应技能目录的 `skills/<skill_name>/config.json`。
+2. **唯一读取方式**：技能代码只通过 `os.getenv("KEY")` 读取（由 `execute_skill` 注入）。
+3. **禁止项（绝对）**：
+   - 禁止写入或读取全局 `.env`
+   - 禁止写入 `config.yml`
+   - 禁止把敏感值硬编码到 `main.py` / `SKILL.md` / 任何源码
+   - 禁止把密钥放在命令行参数里回显
+4. **信息不足时**：先向用户询问缺失的键名/值，再写 `config.json`，不要猜。
+5. **执行前自检**：调用 `execute_skill` 前，确认 `config.json` 已存在且是有效 JSON 对象。
+
+**遇到技能配置需求时，把这条规则当作默认动作，不要临时决定存储位置。**
+
 ---
 
 ## §4 代码编写

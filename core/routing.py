@@ -55,6 +55,8 @@ _BACKEND_SIGNAL = "[NEED_BACKEND]"
 _FOLLOW_SIGNAL = "[NEED_FOLLOW]"
 # 可选：不向用户回复的标记
 _NO_REPLY_SIGNAL = "[NO_REPLY]"
+# 可选：立即进入半在线状态
+_SEMI_ONLINE_SIGNAL = "[SEMI_ONLINE]"
 # 可选：强制使用图片模型的标记
 _USE_IMAGE_MODEL_PATTERN = re.compile(r"\[USE_IMAGE_MODEL\]|use_image_model\s*[:=]\s*(true|1|yes)", re.IGNORECASE)
 # 可选：任务指示块
@@ -100,12 +102,14 @@ def parse_front_brain_response(response_text: str) -> dict:
             "should_reply": False,
             "use_image_model": False,
             "need_follow": False,
+            "force_semi_online": False,
         }
 
     needs_backend = _BACKEND_SIGNAL in response_text
     need_follow = _FOLLOW_SIGNAL in response_text
     force_image_model = bool(_USE_IMAGE_MODEL_PATTERN.search(response_text))
     should_reply = _NO_REPLY_SIGNAL not in response_text
+    force_semi_online = _SEMI_ONLINE_SIGNAL in response_text
 
     # 提取任务指示（可为空）
     task_instruction = ""
@@ -118,6 +122,7 @@ def parse_front_brain_response(response_text: str) -> dict:
     user_reply = user_reply.replace(_BACKEND_SIGNAL, "")
     user_reply = user_reply.replace(_FOLLOW_SIGNAL, "")
     user_reply = user_reply.replace(_NO_REPLY_SIGNAL, "")
+    user_reply = user_reply.replace(_SEMI_ONLINE_SIGNAL, "")
     user_reply = _USE_IMAGE_MODEL_PATTERN.sub("", user_reply)
     user_reply = _TASK_INSTRUCTION_PATTERN.sub("", user_reply)
     user_reply = user_reply.strip()
@@ -135,6 +140,7 @@ def parse_front_brain_response(response_text: str) -> dict:
         "should_reply": should_reply,
         "use_image_model": force_image_model,
         "need_follow": need_follow,
+        "force_semi_online": force_semi_online,
     }
 
 
@@ -161,6 +167,7 @@ def parse_front_brain_review(response_text: str) -> dict:
             "should_reply": False,
             "use_image_model": False,
             "need_follow": False,
+            "force_semi_online": False,
         }
 
     has_done = _TASK_DONE_SIGNAL in response_text
@@ -169,6 +176,7 @@ def parse_front_brain_review(response_text: str) -> dict:
     has_continue = bool(_CONTINUE_PATTERN.search(response_text)) or has_backend
     force_image_model = bool(_USE_IMAGE_MODEL_PATTERN.search(response_text))
     should_reply = _NO_REPLY_SIGNAL not in response_text
+    force_semi_online = _SEMI_ONLINE_SIGNAL in response_text
     task_instruction = ""
     task_match = _TASK_INSTRUCTION_PATTERN.search(response_text)
     if task_match:
@@ -180,6 +188,7 @@ def parse_front_brain_review(response_text: str) -> dict:
     user_reply = user_reply.replace(_BACKEND_SIGNAL, "")
     user_reply = user_reply.replace(_FOLLOW_SIGNAL, "")
     user_reply = user_reply.replace(_NO_REPLY_SIGNAL, "")
+    user_reply = user_reply.replace(_SEMI_ONLINE_SIGNAL, "")
     user_reply = _USE_IMAGE_MODEL_PATTERN.sub("", user_reply)
     # 清理 continue 标记文本，避免泄漏给用户
     user_reply = _CONTINUE_PATTERN.sub("", user_reply)
@@ -199,6 +208,7 @@ def parse_front_brain_review(response_text: str) -> dict:
             "should_reply": should_reply,
             "use_image_model": force_image_model,
             "need_follow": need_follow,
+            "force_semi_online": force_semi_online,
         }
     elif has_done:
         return {
@@ -208,6 +218,7 @@ def parse_front_brain_review(response_text: str) -> dict:
             "should_reply": should_reply,
             "use_image_model": force_image_model,
             "need_follow": need_follow,
+            "force_semi_online": force_semi_online,
         }
     else:
         # 无标记 = 纯聊天，也结束轮询
@@ -218,4 +229,5 @@ def parse_front_brain_review(response_text: str) -> dict:
             "should_reply": should_reply,
             "use_image_model": force_image_model,
             "need_follow": need_follow,
+            "force_semi_online": force_semi_online,
         }

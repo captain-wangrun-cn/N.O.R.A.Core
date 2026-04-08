@@ -176,6 +176,11 @@ class PollingMixin:
                 
                 logger.info(f"[{chat_id}] 轮询第 {polling_round} 轮审查结果: action={action}")
                 await self._send_debug(chat_id, f"🔍 审查结果: action={action}")
+
+                if review_result.get("force_semi_online"):
+                    logger.info(f"[{chat_id}] 轮询审查触发 [SEMI_ONLINE]，立即进入半在线状态。")
+                    self._transition_to_semi_online(chat_id)
+                    break
                 
                 if action == "continue":
                     # 需要后脑继续 — 构建新 context

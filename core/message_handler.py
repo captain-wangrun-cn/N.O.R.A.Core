@@ -401,6 +401,11 @@ class MessageHandlerMixin:
                 session["history"] = session_history[-20:]
 
         # 4) 根据路由信号决定是否启动后脑
+        if front_result.get("force_semi_online"):
+            logger.info(f"[{chat_id}] 前脑触发 [SEMI_ONLINE]，立即进入半在线状态。")
+            self._transition_to_semi_online(chat_id)
+            return
+
         followup_delay = self.FOLLOWUP_NEED_FOLLOW_DELAY if front_result.get("need_follow") else None
         if front_result["needs_backend"]:
             # 标记上下文：后脑应跳过用户消息保存（前脑已保存）
