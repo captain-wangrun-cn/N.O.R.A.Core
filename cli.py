@@ -1602,6 +1602,12 @@ def main():
 
     args = parser.parse_args()
 
+    # 无配置文件时给出友好引导（wizard 允许直接运行）
+    if args.command != "wizard" and not os.path.exists("config.yml"):
+        print("⚠️ 未检测到配置文件 config.yml。")
+        print("请先使用配置功能创建配置文件：")
+        return
+
     if args.command == "wizard":
         run_wizard()
     elif args.command == "status":
@@ -1626,4 +1632,13 @@ def main():
         main_menu()
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except FileNotFoundError as e:
+        # 兜底：防止遗漏路径触发原始异常堆栈
+        if "config.yml" in str(e):
+            print("⚠️ 未检测到配置文件 config.yml。")
+            print("请先使用配置功能创建配置文件：")
+            print("  python cli.py wizard")
+        else:
+            raise

@@ -2,6 +2,7 @@
 
 import os
 import json
+import asyncio
 import re
 import glob
 import subprocess
@@ -457,7 +458,6 @@ class ToolManager:
                 command.extend([f"--{key}", str(value)])
             
             # 使用 asyncio subprocess 避免阻塞事件循环
-            import asyncio
             proc = await asyncio.create_subprocess_exec(
                 *command,
                 stdout=asyncio.subprocess.PIPE,
