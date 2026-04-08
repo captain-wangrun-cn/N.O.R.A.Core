@@ -1,10 +1,60 @@
 # N.O.R.A. Core - Configuration Loader
 import yaml
 import os
+import logging
 
 CONFIG_FILE = "config.yml"
 TRIGGERS_CONFIG_FILE = os.path.join(os.path.dirname(__file__), "triggers", "config.yml")
 _config = None
+logger = logging.getLogger(__name__)
+
+
+def _clear_proxy_env():
+    """清理进程级代理环境变量，避免旧配置残留。"""
+    for key in (
+        "HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "NO_PROXY",
+        "http_proxy", "https_proxy", "all_proxy", "no_proxy",
+    ):
+        os.environ.pop(key, None)
+
+
+def _apply_proxy_env():
+    """根据配置应用全局代理到进程环境变量。"""
+    proxy_cfg = get_proxy_config()
+    enabled = bool(proxy_cfg.get("enabled", False))
+
+    # 每次加载都先清理，确保切换配置时行为可预期
+    _clear_proxy_env()
+
+    if not enabled:
+        return
+
+    http_proxy = proxy_cfg.get("http")
+    https_proxy = proxy_cfg.get("https")
+    all_proxy = proxy_cfg.get("all")
+    no_proxy = proxy_cfg.get("no_proxy")
+
+    # 单一 URL 快捷配置：未分协议时同时作为 http/https/all
+    url = proxy_cfg.get("url")
+    if url:
+        http_proxy = http_proxy or url
+        https_proxy = https_proxy or url
+        all_proxy = all_proxy or url
+
+    if http_proxy:
+        os.environ["HTTP_PROXY"] = str(http_proxy)
+        os.environ["http_proxy"] = str(http_proxy)
+    if https_proxy:
+        os.environ["HTTPS_PROXY"] = str(https_proxy)
+        os.environ["https_proxy"] = str(https_proxy)
+    if all_proxy:
+        os.environ["ALL_PROXY"] = str(all_proxy)
+        os.environ["all_proxy"] = str(all_proxy)
+    if no_proxy:
+        os.environ["NO_PROXY"] = str(no_proxy)
+        os.environ["no_proxy"] = str(no_proxy)
+
+    logger.info("已应用全局代理配置到环境变量")
 
 
 def _safe_config():
@@ -21,7 +71,8 @@ def load_config():
             "Please run 'python configure.py' to generate it."
         )
     with open(CONFIG_FILE, 'r') as f:
-        _config = yaml.safe_load(f)
+        _config = yaml.safe_load(f) or {}
+    _apply_proxy_env()
 
 def save_config(config_data: dict):
     """Save config dict to CONFIG_FILE and update cache."""
@@ -35,6 +86,20 @@ def get_config():
     if _config is None:
         load_config()
     return _config
+
+
+def get_proxy_config():
+    """获取全局代理配置（兼容新旧结构）。"""
+    cfg = _safe_config()
+
+    # 新结构：network.proxy
+    network_proxy = (cfg.get("network", {}) or {}).get("proxy", {}) or {}
+    if network_proxy:
+        return network_proxy
+
+    # 旧结构兼容：proxy
+    legacy_proxy = cfg.get("proxy", {}) or {}
+    return legacy_proxy
 
 # --- Helper accessors ---
 def get_telegram_token():

@@ -16,6 +16,18 @@ logging:
   retention_days: 7   # 日志保留天数，<=0 表示不自动清理
   dir: null             # 可选：自定义日志目录，默认使用 workspace/logs
 
+# 全局网络代理（启用后适配器/LLM/requests/httpx 等都会继承环境变量）
+network:
+  proxy:
+    enabled: false
+    # 快捷方式：单一代理地址（http/https/all 共用）
+    # url: "http://127.0.0.1:7890"
+    # 细分方式（可选，优先于 url）：
+    # http: "http://127.0.0.1:7890"
+    # https: "http://127.0.0.1:7890"
+    # all: "socks5://127.0.0.1:7890"
+    # no_proxy: "127.0.0.1,localhost,.local"
+
 telegram:
   bot_token: "YOUR_TELEGRAM_BOT_TOKEN"
 

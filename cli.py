@@ -338,6 +338,104 @@ class StepWorkspace(ConfigStep):
         self.state['workspace'] = {'root_path': workspace_path}
         return True
 
+
+class StepProxy(ConfigStep):
+    """全局代理配置步骤。"""
+
+    def run(self):
+        network_cfg = self.state.get('network', {}) or {}
+        proxy_cfg = network_cfg.get('proxy', {}) or self.state.get('proxy', {}) or {}
+
+        enabled = questionary.confirm(
+            "是否启用全局网络代理？",
+            default=bool(proxy_cfg.get('enabled', False))
+        ).ask()
+        if enabled is None:
+            return False
+
+        if not enabled:
+            self.state['network'] = {'proxy': {'enabled': False}}
+            return True
+
+        # 默认优先使用单一 URL（同时作用于 http/https/all）
+        default_url = (
+            proxy_cfg.get('url')
+            or proxy_cfg.get('http')
+            or proxy_cfg.get('https')
+            or proxy_cfg.get('all')
+            or "http://127.0.0.1:7890"
+        )
+        use_single_url = questionary.confirm(
+            "是否使用单一代理地址（推荐）？",
+            default=bool(proxy_cfg.get('url', True))
+        ).ask()
+        if use_single_url is None:
+            return False
+
+        next_proxy_cfg: Dict[str, Any] = {'enabled': True}
+
+        if use_single_url:
+            url = questionary.text(
+                "代理地址（示例: http://127.0.0.1:7890）:",
+                default=str(default_url)
+            ).ask()
+            if url is None:
+                return False
+            url = url.strip()
+            if not url:
+                questionary.print("代理地址不能为空。", style="bold red")
+                return False
+            next_proxy_cfg['url'] = url
+        else:
+            http_proxy = questionary.text(
+                "HTTP 代理（可留空）:",
+                default=str(proxy_cfg.get('http', ''))
+            ).ask()
+            if http_proxy is None:
+                return False
+
+            https_proxy = questionary.text(
+                "HTTPS 代理（可留空）:",
+                default=str(proxy_cfg.get('https', ''))
+            ).ask()
+            if https_proxy is None:
+                return False
+
+            all_proxy = questionary.text(
+                "ALL 代理（可留空，支持 socks5://）:",
+                default=str(proxy_cfg.get('all', ''))
+            ).ask()
+            if all_proxy is None:
+                return False
+
+            http_proxy = http_proxy.strip()
+            https_proxy = https_proxy.strip()
+            all_proxy = all_proxy.strip()
+
+            if http_proxy:
+                next_proxy_cfg['http'] = http_proxy
+            if https_proxy:
+                next_proxy_cfg['https'] = https_proxy
+            if all_proxy:
+                next_proxy_cfg['all'] = all_proxy
+
+            if not any([http_proxy, https_proxy, all_proxy]):
+                questionary.print("至少需要填写一个代理地址。", style="bold red")
+                return False
+
+        no_proxy = questionary.text(
+            "NO_PROXY（可留空，如 127.0.0.1,localhost,.local）:",
+            default=str(proxy_cfg.get('no_proxy', ''))
+        ).ask()
+        if no_proxy is None:
+            return False
+        no_proxy = no_proxy.strip()
+        if no_proxy:
+            next_proxy_cfg['no_proxy'] = no_proxy
+
+        self.state['network'] = {'proxy': next_proxy_cfg}
+        return True
+
 class StepProvider(ConfigStep):
     def _default_provider_name(self, provider_type: str, providers: Dict[str, Any]) -> str:
         base = provider_type
@@ -988,6 +1086,7 @@ def run_wizard():
             state = {
                 'telegram_token': cfg.get("telegram", {}).get("bot_token"),
                 'workspace': cfg.get("workspace", {}),
+                'network': cfg.get("network", {}) or ({'proxy': cfg.get('proxy', {})} if cfg.get('proxy') else {}),
                 'provider': provider_default,
                 'providers': providers,
                 'model_providers': llm_cfg.get("model_providers", {}) or {},
@@ -998,7 +1097,7 @@ def run_wizard():
                 'cost_tracking': cfg.get("cost_tracking", {'enabled': True})
             }
 
-    steps = [StepTelegram, StepWorkspace, StepProvider, StepAPIKeys, StepDatabase, StepEmbedding, StepTavily, StepTimezone, StepModels, StepOutputLimit, StepCostTracking]
+    steps = [StepTelegram, StepWorkspace, StepProxy, StepProvider, StepAPIKeys, StepDatabase, StepEmbedding, StepTavily, StepTimezone, StepModels, StepOutputLimit, StepCostTracking]
     current_step = 0
     
     while current_step < len(steps):
@@ -1019,6 +1118,7 @@ def run_wizard():
     # --- 确认保存 ---
     final_config: Dict[str, Any] = {
         'workspace': state.get('workspace', {'root_path': '~/.nora/workspace'}),
+        'network': state.get('network', {}),
         'telegram': {'bot_token': state.get('telegram_token')},
         'llm': {
             'provider': state.get('provider'),
