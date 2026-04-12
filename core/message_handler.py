@@ -154,7 +154,10 @@ class MessageHandlerMixin:
 
         # --- 前后端分离逻辑 ---
         status = self.worker_status.get(chat_id)
-        if status and status.busy:
+        queue = self.task_queues.get(chat_id)
+        backend_busy_or_queued = bool((status and status.busy) or (queue and queue.size() > 0))
+
+        if backend_busy_or_queued:
             # 后端忙碌：允许前脑继续生成，不强制回复“在忙”。
             # 仅在有图片时直接排队，其他情况交由前脑处理并按需打断/切换。
             storage_id = chat_id if chat_type != "private" else user_id
@@ -369,7 +372,9 @@ class MessageHandlerMixin:
         should_reply = front_result.get("should_reply", True)
         send_front_reply = user_reply and should_reply
         status = self.worker_status.get(chat_id)
-        if status and status.busy and front_result.get("needs_backend"):
+        queue = self.task_queues.get(chat_id)
+        backend_busy_or_queued = bool((status and status.busy) or (queue and queue.size() > 0))
+        if backend_busy_or_queued and front_result.get("needs_backend"):
             # 避免后脑忙碌时重复回复：保留前脑回复供后脑参考，但不再发送给用户
             send_front_reply = False
 
@@ -419,7 +424,9 @@ class MessageHandlerMixin:
                 backend_context["_followup_initial_delay"] = followup_delay
 
             status = self.worker_status.get(chat_id)
-            if status and status.busy:
+            queue = self.task_queues.get(chat_id)
+            backend_busy_or_queued = bool((status and status.busy) or (queue and queue.size() > 0))
+            if backend_busy_or_queued:
                 logger.info(f"[{chat_id}] 前脑判定需要后脑，但后脑忙碌，进入二次确认入队流程")
                 await self._prepare_backend_enqueue_confirmation(
                     chat_id=chat_id,
