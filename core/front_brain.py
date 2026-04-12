@@ -32,6 +32,13 @@ class FrontBrainMixin:
     _BLOCK_TAG_PAIRS = [
         ("[TASK_INSTRUCTION]", "[/TASK_INSTRUCTION]"),
     ]
+    _API_ERROR_HINTS = (
+        "sorry, an error occurred during streaming",
+        "sorry, i encountered an issue processing your request with the openai api",
+        "openai api stream error",
+        "gemini api stream error",
+        "抱歉，处理请求时遇到问题",
+    )
 
     @classmethod
     def _strip_timestamp_markers(cls, text: str) -> str:
@@ -64,6 +71,15 @@ class FrontBrainMixin:
             elif tail_cnt > head_cnt:
                 cleaned = cleaned.replace(tail, "")
         return cleaned
+
+    @classmethod
+    def _looks_like_api_error_reply(cls, text: str) -> bool:
+        if not text:
+            return False
+        lower_text = text.strip().lower()
+        if not lower_text:
+            return False
+        return any(hint in lower_text for hint in cls._API_ERROR_HINTS)
 
     async def _generate_front_chat_response(
         self,
@@ -229,19 +245,15 @@ class FrontBrainMixin:
         async def _run_with_retries(system_prompt_candidate: str):
             response_text_local = ""
             usage_data_local = None
-            max_attempts = 2
+            max_attempts = 3
             for attempt in range(max_attempts):
                 response_text_local = ""
                 usage_data_local = None
                 try:
-                    retry_system_prompt = system_prompt_candidate
-                    if attempt > 0:
-                        retry_system_prompt += "\n\n【重试】确保所有成对标签完整闭合，特别是 [TASK_INSTRUCTION] ... [/TASK_INSTRUCTION]。不要输出缺失闭合的标签。"
-
                     stream = self._chat_stream_wrapper(
                         self.llm,
                         chat_id,
-                        system_prompt=retry_system_prompt,
+                        system_prompt=system_prompt_candidate,
                         user_prompt=user_prompt,
                         history=history,
                         tools=None,  # 前脑不使用工具
@@ -259,11 +271,28 @@ class FrontBrainMixin:
                         elif isinstance(chunk, str):
                             response_text_local += chunk
                 except Exception as e:
-                    logger.error(f"[{chat_id}] 前脑生成失败: {e}", exc_info=True)
+                    logger.warning(
+                        f"[{chat_id}] 前脑请求异常，第 {attempt+1}/{max_attempts} 次尝试失败，准备重试: {e}",
+                        exc_info=True,
+                    )
+                    if attempt < max_attempts - 1:
+                        continue
                     raise
 
                 # 清理思考标签
                 response_text_local = self._strip_thinking_content(response_text_local)
+
+                # API 异常保护：空输出或 provider 错误占位文本，视为请求异常并重试
+                is_empty_output = not response_text_local.strip()
+                is_api_error_reply = self._looks_like_api_error_reply(response_text_local)
+                if is_empty_output or is_api_error_reply:
+                    logger.warning(
+                        f"[{chat_id}] 前脑疑似 API 异常（empty={is_empty_output}, api_error={is_api_error_reply}），"
+                        f"第 {attempt+1}/{max_attempts} 次尝试重试。"
+                    )
+                    if attempt < max_attempts - 1:
+                        continue
+                    raise RuntimeError("front brain failed after retries due to empty/api-error output")
 
                 issues = self._find_unclosed_block_tags(response_text_local)
                 if issues:
@@ -314,6 +343,24 @@ class FrontBrainMixin:
                 parsed = parse_front_brain_response(response_text)
             except Exception:
                 return {"needs_backend": True, "user_reply": "", "raw_response": ""}
+
+        # API 异常补救：若无需后脑且应回复，但出现空输出/错误占位文本，重试一次
+        if (
+            not parsed.get("needs_backend")
+            and parsed.get("should_reply", True)
+            and not str(parsed.get("user_reply", "")).strip()
+            and (
+                not str(response_text).strip()
+                or self._looks_like_api_error_reply(str(response_text))
+            )
+        ):
+            logger.warning(f"[{chat_id}] 前脑疑似 API 异常导致空回复，触发补救重试。")
+            await self._send_debug(chat_id, "⚠️ 前脑请求疑似失败（空输出/错误占位），正在自动重试。")
+            try:
+                response_text, usage_data = await _run_with_retries(system_prompt)
+                parsed = parse_front_brain_response(response_text)
+            except Exception:
+                logger.warning(f"[{chat_id}] 前脑 API 异常补救重试失败，保持原流程。", exc_info=True)
         logger.info(
             f"[{chat_id}] 前脑结果: needs_backend={parsed['needs_backend']}, "
             f"should_reply={parsed.get('should_reply')}, "
