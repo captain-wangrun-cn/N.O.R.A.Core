@@ -108,3 +108,24 @@ def test_supplement_meanings_for_text_matches_lazy_terms(tmp_path: Path) -> None
     stats = manager.stats()
     assert stats["lazy_files_loaded"] == 1
     assert stats["lazy_hit_count"] == 2
+
+
+def test_dict_custom_prompt_can_be_included_in_blocks(tmp_path: Path) -> None:
+    _write(
+        tmp_path / "always" / "common.dict",
+        "@prompt: 这些是常见网络缩写，优先按口语语境解释\nYYDS: 永远的神\n",
+    )
+    _write(
+        tmp_path / "lazy" / "game.dict",
+        "@prompt: 游戏术语，解释时可结合对局场景\n红温: 情绪激动\n",
+    )
+
+    manager = LexiconManager(base_dir=tmp_path)
+
+    system_block = manager.build_always_system_prompt_block()
+    assert "常见网络缩写" in system_block
+    assert "YYDS: 永远的神" in system_block
+
+    user_block = manager.build_lazy_user_prompt_block("我这把红温了")
+    assert "游戏术语" in user_block
+    assert "红温: 情绪激动" in user_block

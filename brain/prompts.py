@@ -15,6 +15,7 @@ from typing import Optional, Dict, Any, Iterable, List
 
 from workspace_config import get_workspace_manager
 import config
+from lexicon import LexiconManager
 
 logger = logging.getLogger(__name__)
 
@@ -79,6 +80,7 @@ LEGACY_SECRET_FILE = os.path.join(PROJECT_ROOT, "SECRET.md")
 
 # 注入到 system prompt 的最大字符数（防止 token 爆炸）
 BOOTSTRAP_MAX_CHARS = 20000
+_LEXICON_MANAGER: Optional[LexiconManager] = None
 
 
 def _read_file_safe(path: str, max_chars: int = BOOTSTRAP_MAX_CHARS) -> str:
@@ -240,6 +242,47 @@ def should_inject_custom(scope: str, scopes_override: Optional[Iterable[str]] = 
 from typing import List
 
 
+def get_lexicon_manager() -> Optional[LexiconManager]:
+    """懒初始化词库管理器。"""
+    global _LEXICON_MANAGER
+    if _LEXICON_MANAGER is not None:
+        return _LEXICON_MANAGER
+
+    try:
+        _LEXICON_MANAGER = LexiconManager()
+    except Exception:
+        logger.warning("词库管理器初始化失败，已降级忽略。", exc_info=True)
+        _LEXICON_MANAGER = None
+
+    return _LEXICON_MANAGER
+
+
+def get_always_lexicon_system_prompt_block() -> str:
+    """返回注入到 system prompt 的常加载词库块。"""
+    manager = get_lexicon_manager()
+    if manager is None:
+        return ""
+
+    try:
+        return manager.build_always_system_prompt_block()
+    except Exception:
+        logger.warning("构建常加载词库 system 注入块失败，已忽略。", exc_info=True)
+        return ""
+
+
+def get_lazy_lexicon_user_prompt_block(user_text: str, limit: int = 10) -> str:
+    """根据用户输入返回懒加载词库命中注入块（用于 user prompt）。"""
+    manager = get_lexicon_manager()
+    if manager is None:
+        return ""
+
+    try:
+        return manager.build_lazy_user_prompt_block(user_text, limit=limit)
+    except Exception:
+        logger.warning("构建懒加载词库 user 注入块失败，已忽略。", exc_info=True)
+        return ""
+
+
 def get_system_prompt(
     instructions: Optional[List[str]] = None,
     platform: Optional[str] = None,
@@ -284,6 +327,9 @@ def get_system_prompt(
     if identity_context:
         # 身份上下文放在 instructions 最前面
         all_instructions.insert(0, identity_context)
+    lexicon_system_block = get_always_lexicon_system_prompt_block()
+    if lexicon_system_block:
+        all_instructions.insert(0, lexicon_system_block)
 
     system_template = env.get_template('system.jinja')
     return system_template.render(

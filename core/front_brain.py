@@ -17,6 +17,7 @@ from brain.prompts import (
     _read_file_safe,
     WORKSPACE_SCHEDULE_FILE,
     should_inject_custom,
+    get_lazy_lexicon_user_prompt_block,
 )
 from skills.loader import SkillLoader
 from core.routing import parse_front_brain_response, parse_front_brain_review
@@ -203,6 +204,11 @@ class FrontBrainMixin:
             user_prompt = render_template('front_brain.jinja', 'proactive_user', proactive_user_message=proactive_user_message)
         else:
             user_prompt = render_template('front_brain.jinja', 'user', user_message=text)
+
+        # 懒加载词库命中：仅命中词条注入 user prompt
+        lazy_lexicon_block = get_lazy_lexicon_user_prompt_block(text)
+        if lazy_lexicon_block:
+            user_prompt = f"{user_prompt}\n\n{lazy_lexicon_block}"
 
         # --- 前脑也接入 RAG 记忆检索 ---
         if self.rag.enabled:

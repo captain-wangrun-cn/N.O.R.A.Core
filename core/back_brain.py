@@ -13,7 +13,13 @@ import time
 import traceback
 from typing import Dict, Any, List, Optional, cast
 
-from brain.prompts import get_system_prompt, render_template, load_custom_prompt, should_inject_custom
+from brain.prompts import (
+    get_system_prompt,
+    render_template,
+    load_custom_prompt,
+    should_inject_custom,
+    get_lazy_lexicon_user_prompt_block,
+)
 from brain.multimodal import extract_image_payloads
 from core.worker_status import WorkerStatus
 import config
@@ -295,6 +301,11 @@ class BackBrainMixin:
                 # Clear buffers after consumption
                 session["pending_text"] = ""
                 session["interrupted_thought"] = ""
+
+            # 懒加载词库命中：仅命中词条注入 user prompt
+            lazy_lexicon_block = get_lazy_lexicon_user_prompt_block(text)
+            if lazy_lexicon_block:
+                full_user_prompt = f"{full_user_prompt}\n\n{lazy_lexicon_block}"
             
             # --- 前脑上下文注入（告知后脑前脑的回复） ---
             if front_brain_handled:
