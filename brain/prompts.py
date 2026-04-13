@@ -71,6 +71,7 @@ WORKSPACE_MEMORY_FILE = os.path.join(WORKSPACE_MEMORY_DIR, "MEMORY.md")
 WORKSPACE_SCHEDULE_FILE = os.path.join(WORKSPACE_ROOT, "SCHEDULE.md")
 WORKSPACE_CUSTOM_FILE = os.path.join(WORKSPACE_ROOT, "CUSTOM.md")
 WORKSPACE_SECRET_FILE = os.path.join(WORKSPACE_ROOT, "SECRET.md")
+LEXICON_GLOBAL_PROMPT_FILE = os.path.join(PROJECT_ROOT, "lexicon", "PROMPT.md")
 LEGACY_SOUL_FILE = os.path.join(PROJECT_ROOT, "SOUL.md")
 LEGACY_USER_FILE = os.path.join(PROJECT_ROOT, "USER.md")
 LEGACY_MEMORY_FILE = os.path.join(PROJECT_ROOT, "MEMORY.md")
@@ -239,9 +240,6 @@ def should_inject_custom(scope: str, scopes_override: Optional[Iterable[str]] = 
     return scope_value in scopes
 
 
-from typing import List
-
-
 def get_lexicon_manager() -> Optional[LexiconManager]:
     """懒初始化词库管理器。"""
     global _LEXICON_MANAGER
@@ -268,6 +266,19 @@ def get_always_lexicon_system_prompt_block() -> str:
     except Exception:
         logger.warning("构建常加载词库 system 注入块失败，已忽略。", exc_info=True)
         return ""
+
+
+def load_lexicon_global_prompt() -> str:
+    """读取词库全局用途说明（lexicon/PROMPT.md）。"""
+    return _read_file_safe(LEXICON_GLOBAL_PROMPT_FILE, max_chars=6000)
+
+
+def get_lexicon_global_system_prompt_block() -> str:
+    """返回用于全链路 system prompt 注入的词库全局说明块。"""
+    global_prompt = load_lexicon_global_prompt().strip()
+    if not global_prompt:
+        return ""
+    return f"【词库全局说明 (Lexicon Global Prompt)】\n{global_prompt}"
 
 
 def get_lazy_lexicon_user_prompt_block(user_text: str, limit: int = 10) -> str:

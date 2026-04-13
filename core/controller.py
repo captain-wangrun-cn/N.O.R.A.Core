@@ -33,6 +33,7 @@ from typing import Dict, Any, Optional, Callable
 
 from adapters.base import BaseAdapter
 from brain.llm import llm_client, get_llm_client
+from brain.prompts import get_lexicon_global_system_prompt_block
 from brain.tools import ToolManager
 from memory.rag import RAGEngine
 from memory.image_store import ImageStore
@@ -81,6 +82,7 @@ class NoraController(
         re.IGNORECASE | re.DOTALL,
     )
     _SYSTEM_ENV_MARKER = "【系统环境信息 (System Environment)】"
+    _LEXICON_GLOBAL_MARKER = "【词库全局说明 (Lexicon Global Prompt)】"
 
     # ------------------------------------------------------------------
     # 初始化
@@ -264,9 +266,16 @@ class NoraController(
         return bool(flag)
 
     def _chat_stream_wrapper(self, model_client, chat_id: str, **kwargs):
-        # 自动注入系统环境信息到 system_prompt（全链路生效）
+        # 自动注入词库全局说明 + 系统环境信息到 system_prompt（全链路生效）
         system_prompt = kwargs.get("system_prompt")
         if isinstance(system_prompt, str):
+            if self._LEXICON_GLOBAL_MARKER not in system_prompt:
+                lexicon_global_block = get_lexicon_global_system_prompt_block()
+                if lexicon_global_block:
+                    kwargs = dict(kwargs)
+                    kwargs["system_prompt"] = f"{system_prompt}\n\n---\n{lexicon_global_block}"
+                    system_prompt = kwargs["system_prompt"]
+
             if self._SYSTEM_ENV_MARKER not in system_prompt:
                 kwargs = dict(kwargs)
                 kwargs["system_prompt"] = (
