@@ -215,6 +215,8 @@ flowchart TB
   - 图片 ID 分配、LLM 标签提取、MongoDB + Qdrant 双写、语义检索与 `view_image` 工具。
 - **[身份与记忆文件一览](./identity_files.md)**
   - SOUL/USER/MEMORY/SCHEDULE/CUSTOM/SECRET 文件的角色、边界、专用工具与 openclaw 启发说明。
+- **[词库系统 (Lexicon System)](./lexicon-system.md)**
+  - 轻量“词:含义”检索系统，支持常加载与懒加载双层词库。
 
 ### 🛡️ 监控与运维 (Ops & Monitoring)
 
