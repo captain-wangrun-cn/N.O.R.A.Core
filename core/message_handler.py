@@ -370,13 +370,10 @@ class MessageHandlerMixin:
         # 3) 发送前脑回复给用户（如果有的话）
         user_reply = front_result.get("user_reply", "")
         should_reply = front_result.get("should_reply", True)
-        send_front_reply = user_reply and should_reply
+        send_front_reply = bool(user_reply and should_reply)
         status = self.worker_status.get(chat_id)
         queue = self.task_queues.get(chat_id)
         backend_busy_or_queued = bool((status and status.busy) or (queue and queue.size() > 0))
-        if backend_busy_or_queued and front_result.get("needs_backend"):
-            # 避免后脑忙碌时重复回复：保留前脑回复供后脑参考，但不再发送给用户
-            send_front_reply = False
 
         # 去除了：后脑忙碌时，只要要给用户发消息，就附带当前队列详情（避免聊天时泄漏队列信息）
 
@@ -434,6 +431,7 @@ class MessageHandlerMixin:
                     user_message_content=message_content,
                     backend_context=backend_context,
                     pending_request_text=text,
+                    front_reply=user_reply if send_front_reply else "",
                 )
                 return
 
@@ -452,6 +450,7 @@ class MessageHandlerMixin:
         user_message_content: str,
         backend_context: Dict[str, Any],
         pending_request_text: str,
+        front_reply: str = "",
     ) -> None:
         """后脑忙碌时，先缓存待入队任务并向用户发起二次确认。"""
         session = self.sessions.setdefault(chat_id, {"history": [], "interrupted_thought": "", "pending_text": ""})
@@ -475,6 +474,24 @@ class MessageHandlerMixin:
             progress_summary=progress_summary,
         )
 
+        session_history = session.setdefault("history", [])
+        session_history.append({"role": "user", "content": user_message_content})
+
+        if front_reply:
+            front_sent_ids = await self._send_split_message(chat_id, front_reply)
+            front_metadata = {"source": "front", "stage": "busy_chat"}
+            if front_sent_ids:
+                front_metadata["platform_message_ids"] = front_sent_ids
+            self.message_history.add_message(
+                platform="telegram",
+                chat_id=storage_id,
+                role="assistant",
+                content=front_reply,
+                user_id="assistant",
+                metadata=front_metadata,
+            )
+            session_history.append({"role": "assistant", "content": front_reply})
+
         if confirm_reply:
             sent_ids = await self._send_split_message(chat_id, confirm_reply)
             metadata = {"source": "front", "stage": "queue_confirm"}
@@ -489,12 +506,10 @@ class MessageHandlerMixin:
                 user_id="assistant",
                 metadata=metadata,
             )
-
-            session_history = session.setdefault("history", [])
-            session_history.append({"role": "user", "content": user_message_content})
             session_history.append({"role": "assistant", "content": confirm_reply})
-            if len(session_history) > 20:
-                session["history"] = session_history[-20:]
+
+        if len(session_history) > 20:
+            session["history"] = session_history[-20:]
 
     async def _try_handle_pending_backend_enqueue(
         self,

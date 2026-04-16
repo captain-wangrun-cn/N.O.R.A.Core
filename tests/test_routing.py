@@ -1,3 +1,10 @@
+'''
+Author: WR(captain-wangrun-cn)
+Date: 2026-03-07 01:10:30
+LastEditors: WR(captain-wangrun-cn)
+LastEditTime: 2026-04-16 13:39:03
+FilePath: \N.O.R.A.Core\tests\test_routing.py
+'''
 from core.routing import parse_route_decision_response, has_image_input, parse_front_brain_response
 
 
@@ -69,6 +76,30 @@ def test_front_brain_no_reply_signal_silences_user_reply():
     result = parse_front_brain_response("收到，我去处理一下 [NO_REPLY]")
     assert result["should_reply"] is False
     assert result["user_reply"] == ""
+
+
+def test_front_brain_backend_signal_without_task_instruction_does_not_escalate():
+    result = parse_front_brain_response("嗯嗯 [NEED_BACKEND]")
+    assert result["needs_backend"] is False
+    assert result["user_reply"] == "嗯嗯"
+
+
+def test_front_brain_backend_signal_with_task_instruction_still_escalates():
+    result = parse_front_brain_response(
+        "我记住了。[TASK_INSTRUCTION]把这次耳痛情况记录到今日记忆中[/TASK_INSTRUCTION] [NEED_BACKEND]"
+    )
+    assert result["needs_backend"] is True
+    assert result["task_instruction"] == "把这次耳痛情况记录到今日记忆中"
+    assert result["user_reply"] == "我记住了。"
+
+
+def test_front_brain_busy_chat_reply_is_preserved_even_with_backend_task():
+    result = parse_front_brain_response(
+        "先抱抱你，我在呢。[TASK_INSTRUCTION]把这次左耳疼的情况记录下来[/TASK_INSTRUCTION] [NEED_BACKEND]"
+    )
+    assert result["needs_backend"] is True
+    assert result["user_reply"] == "先抱抱你，我在呢。"
+    assert result["should_reply"] is True
 
 
 def test_front_brain_review_no_reply_signal_silences_user_reply():

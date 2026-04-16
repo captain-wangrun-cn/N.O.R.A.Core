@@ -117,6 +117,11 @@ def parse_front_brain_response(response_text: str) -> dict:
     if task_match:
         task_instruction = task_match.group(1).strip()
 
+    # 仅有后脑标记、却没有明确任务指示时，默认视为普通聊天，避免把
+    # “嗯嗯/好的/收到/晚安” 这类轻量回复误升级为后脑任务。
+    if needs_backend and not task_instruction:
+        needs_backend = False
+
     # 清理标记，生成用户可见文本
     user_reply = response_text
     user_reply = user_reply.replace(_BACKEND_SIGNAL, "")
