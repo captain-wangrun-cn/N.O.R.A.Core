@@ -203,6 +203,7 @@ class InterruptHandlerMixin:
                 await asyncio.wait_for(asyncio.shield(task), timeout=1.0)
             except (asyncio.CancelledError, asyncio.TimeoutError, Exception):
                 pass
+        self.generation_tasks.pop(chat_id, None)
         
         # 2. 清理状态
         status = self.worker_status.get(chat_id)
@@ -213,6 +214,8 @@ class InterruptHandlerMixin:
         queue = self.task_queues.get(chat_id)
         if queue:
             await queue.clear()
+
+        self._cancel_followup_timer(chat_id)
         
         # 4. 根据 reason 决定下一步（如果调用方已回复，则跳过）
         if skip_reply:

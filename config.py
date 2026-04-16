@@ -80,6 +80,29 @@ def save_config(config_data: dict):
     with open(CONFIG_FILE, 'w', encoding='utf-8') as f:
         yaml.safe_dump(config_data, f, allow_unicode=True, sort_keys=False)
     _config = config_data
+    _apply_proxy_env()
+
+
+def set_custom_injection_scopes(scopes):
+    """标准化并持久化 CUSTOM.md 注入范围配置。"""
+    cfg = dict(_safe_config())
+    normalized = []
+    for scope in scopes or []:
+        value = str(scope).strip().lower()
+        if value:
+            normalized.append(value)
+
+    # 去重并保持顺序
+    normalized = list(dict.fromkeys(normalized))
+
+    if any(s in ("none", "off") for s in normalized):
+        normalized = ["none"]
+
+    custom_injection = dict((cfg.get("custom_injection", {}) or {}))
+    custom_injection["scopes"] = normalized
+    cfg["custom_injection"] = custom_injection
+    save_config(cfg)
+    return normalized
 
 def get_config():
     """Returns the loaded configuration dictionary."""

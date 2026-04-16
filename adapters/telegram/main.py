@@ -1181,9 +1181,7 @@ class TelegramAdapter(BaseAdapter):
         return scopes
 
     def _save_custom_scopes(self, scopes: list):
-        cfg = config.get_config() or {}
-        cfg.setdefault("custom_injection", {})["scopes"] = scopes
-        config.save_config(cfg)
+        config.set_custom_injection_scopes(scopes)
 
     def _render_custom_scope_text(self, scopes: list) -> str:
         if any(s in ("none", "off") for s in scopes):
