@@ -37,11 +37,8 @@ import config
 logger = logging.getLogger(__name__)
 
 
-def _load_recent_daily_summaries(days: int = 2) -> str:
-    """读取最近若干天的每日总结，按时间倒序拼接。"""
-    if days <= 0:
-        return ""
-
+def _load_yesterday_daily_summary() -> str:
+    """仅读取昨天的每日总结。"""
     try:
         ws = get_workspace_manager()
         summary_dir = Path(ws.data_dir) / "memory"
@@ -52,26 +49,25 @@ def _load_recent_daily_summaries(days: int = 2) -> str:
     if not summary_dir.exists():
         return ""
 
-    collected: List[str] = []
-    for offset in range(1, days + 1):
-        target_date = datetime.now() .date() - timedelta(days=offset)
-        summary_path = summary_dir / f"{target_date.isoformat()}.md"
-        if not summary_path.exists():
-            continue
-        try:
-            raw_text = summary_path.read_text(encoding="utf-8").strip()
-        except Exception as e:
-            logger.warning(f"读取每日总结失败 {summary_path.name}: {e}")
-            continue
+    target_date = datetime.now().date() - timedelta(days=1)
+    summary_path = summary_dir / f"{target_date.isoformat()}.md"
+    if not summary_path.exists():
+        return ""
 
-        if not raw_text:
-            continue
+    try:
+        raw_text = summary_path.read_text(encoding="utf-8").strip()
+    except Exception as e:
+        logger.warning(f"读取每日总结失败 {summary_path.name}: {e}")
+        return ""
 
-        normalized = re.sub(r"^#\s*Daily Summary\s+.*$", "", raw_text, flags=re.MULTILINE).strip()
-        if normalized:
-            collected.append(f"## {target_date.isoformat()}\n{normalized}")
+    if not raw_text:
+        return ""
 
-    return "\n\n".join(collected)
+    normalized = re.sub(r"^#\s*Daily Summary\s+.*$", "", raw_text, flags=re.MULTILINE).strip()
+    if not normalized:
+        return ""
+
+    return f"## {target_date.isoformat()}\n{normalized}"
 
 
 class SchedulerMixin:
@@ -654,7 +650,7 @@ class SchedulerMixin:
         tz_str = config.get_message_history_config().get("timezone", "Asia/Shanghai")
         now = datetime.now(ZoneInfo(tz_str))
         current_time = now.strftime('%H:%M')
-        recent_daily_summaries = _load_recent_daily_summaries(days=2)
+        recent_daily_summaries = _load_yesterday_daily_summary()
 
         # 触发前提取完整对话线索，确保 trigger 消息基于完整上下文继续生成
         recent_hint = ""

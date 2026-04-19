@@ -39,6 +39,10 @@
 {% block rag %}【相关回忆/背景知识】(请参考以下历史记忆来回答):
 {{ rag_context }}{% endblock %}
 
+{# 昨日 daily memory 注入 #}
+{% block yesterday_memory %}【昨天的每日记忆总结】
+{{ memory_content }}{% endblock %}
+
 {# 多行消息提示 #}
 {% block multiline %}请仔细阅读并依次回答以下所有问题，不要遗漏。{% endblock %}
 

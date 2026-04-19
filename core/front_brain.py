@@ -162,6 +162,7 @@ class FrontBrainMixin:
         # 主动触发上下文
         proactive_context = ""
         proactive_user_message = ""
+        yesterday_memory_block = ""
         if proactive_mode:
             event_type = proactive_meta.get("event_type", "proactive")
             reason = proactive_meta.get("reason", "")
@@ -189,6 +190,14 @@ class FrontBrainMixin:
                 "请生成一条自然的主动消息，必要时说明你要去执行的后台任务或查询。"
             )
 
+        yesterday_memory = proactive_meta.get("recent_daily_summaries", "") if proactive_mode else ""
+        if yesterday_memory:
+            yesterday_memory_block = render_template(
+                'context_injection.jinja',
+                'yesterday_memory',
+                memory_content=yesterday_memory,
+            )
+
         system_prompt = render_template(
             'front_brain.jinja',
             'system',
@@ -200,6 +209,8 @@ class FrontBrainMixin:
             skill_intro_block=skill_intro_block,
             proactive_context=proactive_context,
         )
+        if yesterday_memory_block:
+            system_prompt = system_prompt + "\n\n---\n" + yesterday_memory_block
         if proactive_mode:
             user_prompt = render_template('front_brain.jinja', 'proactive_user', proactive_user_message=proactive_user_message)
         else:
