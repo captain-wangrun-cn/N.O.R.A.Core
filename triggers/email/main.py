@@ -98,7 +98,7 @@ class EmailTrigger(BaseTrigger):
                         self._mark_reviewed(review_key)
 
                 if self._poll_round % log_every == 0:
-                    logger.info(
+                    logger.debug(
                         f"[trigger:email] 心跳 round={self._poll_round}, fetched={len(emails)}, notified={notified_count}, reviewed={len(self._reviewed_keys)}"
                     )
             except Exception as exc:
