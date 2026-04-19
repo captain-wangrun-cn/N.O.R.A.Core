@@ -10,6 +10,7 @@ Copyright © WR（captain-wangrun-cn） All rights reserved
 import asyncio
 import json
 import logging
+import re
 from typing import Dict, Any, List
 
 from brain.prompts import get_soul_prompt, render_template, _read_file_safe, WORKSPACE_SCHEDULE_FILE, WORKSPACE_SOUL_FILE, WORKSPACE_USER_FILE, WORKSPACE_MEMORY_FILE, _resolve_memory_file, load_custom_prompt, should_inject_custom
@@ -34,6 +35,43 @@ import os
 import config
 
 logger = logging.getLogger(__name__)
+
+
+def _load_recent_daily_summaries(days: int = 2) -> str:
+    """读取最近若干天的每日总结，按时间倒序拼接。"""
+    if days <= 0:
+        return ""
+
+    try:
+        ws = get_workspace_manager()
+        summary_dir = Path(ws.data_dir) / "memory"
+    except Exception as e:
+        logger.warning(f"读取每日总结目录失败: {e}")
+        return ""
+
+    if not summary_dir.exists():
+        return ""
+
+    collected: List[str] = []
+    for offset in range(1, days + 1):
+        target_date = datetime.now() .date() - timedelta(days=offset)
+        summary_path = summary_dir / f"{target_date.isoformat()}.md"
+        if not summary_path.exists():
+            continue
+        try:
+            raw_text = summary_path.read_text(encoding="utf-8").strip()
+        except Exception as e:
+            logger.warning(f"读取每日总结失败 {summary_path.name}: {e}")
+            continue
+
+        if not raw_text:
+            continue
+
+        normalized = re.sub(r"^#\s*Daily Summary\s+.*$", "", raw_text, flags=re.MULTILINE).strip()
+        if normalized:
+            collected.append(f"## {target_date.isoformat()}\n{normalized}")
+
+    return "\n\n".join(collected)
 
 
 class SchedulerMixin:
@@ -616,6 +654,7 @@ class SchedulerMixin:
         tz_str = config.get_message_history_config().get("timezone", "Asia/Shanghai")
         now = datetime.now(ZoneInfo(tz_str))
         current_time = now.strftime('%H:%M')
+        recent_daily_summaries = _load_recent_daily_summaries(days=2)
 
         # 触发前提取完整对话线索，确保 trigger 消息基于完整上下文继续生成
         recent_hint = ""
@@ -643,6 +682,7 @@ class SchedulerMixin:
             "current_time": current_time,
             "trigger_from": "scheduler",
             "recent_hint": recent_hint,
+            "recent_daily_summaries": recent_daily_summaries,
         }
         front_context = {
             "chat_id": chat_id,
@@ -656,6 +696,9 @@ class SchedulerMixin:
         user_reply = front_result.get("user_reply", "")
         raw_front_reply = front_result.get("raw_response", "")
 
+        if isinstance(user_reply, str):
+            user_reply = user_reply.strip()
+
         # 发送前脑回复
         if user_reply:
             await self._send_split_message(chat_id, user_reply)
@@ -668,6 +711,8 @@ class SchedulerMixin:
                 content=user_reply,
                 user_id="assistant",
             )
+        else:
+            logger.info(f"[{chat_id}] 主动消息生成为空，跳过发送")
 
         # 记录到 session 历史（含触发标记）
         session = self.sessions.setdefault(chat_id, {"history": [], "interrupted_thought": "", "pending_text": ""})
