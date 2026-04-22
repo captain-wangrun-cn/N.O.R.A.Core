@@ -324,7 +324,9 @@ class SchedulerMixin:
                     await asyncio.sleep(self.FOLLOWUP_RECHECK_INTERVAL)
 
                 elif decision == "END":
-                    if count > 0:
+                    # 只有当 AI 确实追话过且用户没回时，才发 wrapup 收尾；
+                    # 若 count==0 说明 AI 前脑已经自然告别、无需再发一遍
+                    if count >= 2:
                         await self._send_wrapup_message(chat_id)
                     self._transition_to_semi_online(chat_id)
                     return
