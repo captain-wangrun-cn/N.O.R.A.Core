@@ -37,6 +37,10 @@ class MessageHandlerMixin:
         r"REPLY\s*:\s*(.*)",
         re.IGNORECASE | re.DOTALL,
     )
+    _AUTO_ENQUEUE_DECISION_PATTERN = re.compile(
+        r"DECISION\s*:\s*(enqueue|skip)",
+        re.IGNORECASE,
+    )
 
     def _append_busy_queue_summary(self, chat_id: str, reply: str) -> str:
         """后脑忙碌时，在给用户的回复后附带当前队列详情。"""
@@ -148,10 +152,6 @@ class MessageHandlerMixin:
             await self._cmd_set_stream(chat_id, chat_type, user_id, stripped)
             return
 
-        # 若存在“待确认入队”请求，优先处理确认结果
-        if await self._try_handle_pending_backend_enqueue(context, text, chat_type, user_id, user_name):
-            return
-
         # --- 前后端分离逻辑 ---
         status = self.worker_status.get(chat_id)
         queue = self.task_queues.get(chat_id)
@@ -175,10 +175,7 @@ class MessageHandlerMixin:
                     "context": context,
                     "text": text,
                 })
-                busy_reply = self._append_busy_queue_summary(
-                    chat_id,
-                    "后端忙碌，已把图片需求排队，稍后处理哦～",
-                )
+                busy_reply = "后端忙碌，已把图片需求排队，稍后处理哦～"
                 busy_msg_id = await self.adapter.send_message(chat_id, busy_reply)
                 busy_md = {}
                 if busy_msg_id:
@@ -233,7 +230,6 @@ class MessageHandlerMixin:
             if action in {"stop", "change"}:
                 session_history.append({"role": "user", "content": message_content})
                 if reply:
-                    reply = self._append_busy_queue_summary(chat_id, reply)
                     msg_id = await self.adapter.send_message(chat_id, reply)
                     md = {"source": "interrupt"}
                     if msg_id:
@@ -278,7 +274,6 @@ class MessageHandlerMixin:
                     else:
                         logger.warning(f"[{chat_id}] 取消排队任务 #{param} 失败（序号无效或队列已空）")
                 if reply:
-                    reply = self._append_busy_queue_summary(chat_id, reply)
                     msg_id = await self.adapter.send_message(chat_id, reply)
                     md = {"source": "queue_cancel"}
                     if msg_id:
@@ -300,7 +295,6 @@ class MessageHandlerMixin:
                     await queue.clear()
                     logger.info(f"[{chat_id}] 已清空所有排队任务")
                 if reply:
-                    reply = self._append_busy_queue_summary(chat_id, reply)
                     msg_id = await self.adapter.send_message(chat_id, reply)
                     md = {"source": "queue_clear"}
                     if msg_id:
@@ -424,15 +418,28 @@ class MessageHandlerMixin:
             queue = self.task_queues.get(chat_id)
             backend_busy_or_queued = bool((status and status.busy) or (queue and queue.size() > 0))
             if backend_busy_or_queued:
-                logger.info(f"[{chat_id}] 前脑判定需要后脑，但后脑忙碌，进入二次确认入队流程")
-                await self._prepare_backend_enqueue_confirmation(
+                queue_summary = queue.get_queue_summary() if queue else ""
+                progress_summary = status.get_summary() if status else ""
+                should_enqueue = await self._auto_confirm_backend_enqueue(
                     chat_id=chat_id,
-                    storage_id=storage_id,
-                    user_message_content=message_content,
-                    backend_context=backend_context,
                     pending_request_text=text,
                     front_reply=user_reply if send_front_reply else "",
+                    task_instruction=front_result.get("task_instruction", ""),
+                    queue_summary=queue_summary,
+                    progress_summary=progress_summary,
                 )
+
+                if not should_enqueue:
+                    logger.info(f"[{chat_id}] 前脑内部判定本轮暂不入队，跳过排队")
+                    return
+
+                logger.info(f"[{chat_id}] 前脑判定需要后脑，且内部确认通过，自动加入队列")
+                queue = self.task_queues.setdefault(chat_id, BackendTaskQueue())
+                await queue.enqueue({
+                    "context": backend_context,
+                    "text": backend_context.get("text", ""),
+                })
+                logger.info(f"[{chat_id}] 任务已自动入队 (队列长度 {queue.size()})")
                 return
 
             logger.info(f"[{chat_id}] 前脑判定需要后脑，启动轮询循环...")
@@ -442,6 +449,63 @@ class MessageHandlerMixin:
             logger.info(f"[{chat_id}] 前脑判定纯聊天，无需后脑。")
             # 纯聊天完成后，也需要标记空闲并启动 followup 计时
             self._mark_scheduler_idle(chat_id, initial_delay=followup_delay)
+
+    async def _auto_confirm_backend_enqueue(
+        self,
+        chat_id: str,
+        pending_request_text: str,
+        front_reply: str,
+        task_instruction: str,
+        queue_summary: str,
+        progress_summary: str,
+    ) -> bool:
+        """前脑内部二次确认：判断本轮是否应自动加入后脑队列（不向用户发确认）。"""
+        soul = get_soul_prompt()
+        identity_context = load_identity_context(include_schedule=False)
+
+        system_prompt = render_template(
+            "queue_confirmation.jinja",
+            "auto_decide_system",
+            soul=soul,
+            identity_context=identity_context,
+        )
+        user_prompt = render_template(
+            "queue_confirmation.jinja",
+            "auto_decide_user",
+            pending_request_text=pending_request_text,
+            front_reply=front_reply,
+            task_instruction=task_instruction,
+            queue_summary=queue_summary,
+            progress_summary=progress_summary,
+        )
+
+        response = ""
+        try:
+            stream = self._chat_stream_wrapper(
+                self.fast_llm,
+                chat_id,
+                system_prompt=system_prompt,
+                user_prompt=user_prompt,
+                history=[],
+                tools=None,
+            )
+            async for chunk in stream:
+                if isinstance(chunk, dict) and chunk.get("type") == "text":
+                    response += str(chunk.get("content", ""))
+                elif isinstance(chunk, str):
+                    response += chunk
+        except Exception:
+            logger.warning(f"[{chat_id}] 前脑内部入队确认失败，默认 enqueue", exc_info=True)
+            return True
+
+        response = response.strip()
+        m = self._AUTO_ENQUEUE_DECISION_PATTERN.search(response)
+        decision = m.group(1).lower() if m else "enqueue"
+        should_enqueue = decision == "enqueue"
+        logger.info(
+            f"[{chat_id}] 前脑内部入队确认: decision={decision}, raw='{response[:120]}'"
+        )
+        return should_enqueue
 
     async def _prepare_backend_enqueue_confirmation(
         self,

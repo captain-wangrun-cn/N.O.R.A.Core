@@ -986,7 +986,9 @@ class BackBrainMixin:
                 clean_response = self._strip_timestamp_markers(clean_response)
                 if clean_response:
                     if not in_polling and not no_reply:
-                        await self.adapter.send_message(chat_id, self._strip_timestamp_markers(clean_response))
+                        sent_ids = await self._send_split_message(chat_id, self._strip_timestamp_markers(clean_response))
+                        if sent_ids:
+                            response_platform_ids.extend(sent_ids)
                     else:
                         logger.info(f"[{chat_id}] [轮询模式] 后脑回复已缓存，等待前脑审查 ({len(clean_response)} 字符)")
                 elif latest_meaningful_output:
@@ -1015,15 +1017,15 @@ class BackBrainMixin:
                 final_response_buffer = self._strip_timestamp_markers(final_response_buffer)
                 if final_response_buffer:
                     if not in_polling and not no_reply:
-                        msg_id = await self.adapter.send_message(chat_id, self._strip_timestamp_markers(final_response_buffer))
-                        if msg_id:
-                            response_platform_ids.append(str(msg_id))
+                        sent_ids = await self._send_split_message(chat_id, self._strip_timestamp_markers(final_response_buffer))
+                        if sent_ids:
+                            response_platform_ids.extend(sent_ids)
                 else:
                     final_response_buffer = "任务已完成。"
                     if not in_polling and not no_reply:
-                        msg_id = await self.adapter.send_message(chat_id, self._strip_timestamp_markers(final_response_buffer))
-                        if msg_id:
-                            response_platform_ids.append(str(msg_id))
+                        sent_ids = await self._send_split_message(chat_id, self._strip_timestamp_markers(final_response_buffer))
+                        if sent_ids:
+                            response_platform_ids.extend(sent_ids)
             elif latest_tool_output:
                 temp_history.append({
                     "role": "user",
@@ -1049,11 +1051,15 @@ class BackBrainMixin:
                 final_response_buffer = self._strip_timestamp_markers(final_response_buffer)
                 if final_response_buffer:
                     if not in_polling and not no_reply:
-                        await self.adapter.send_message(chat_id, self._strip_timestamp_markers(final_response_buffer))
+                        sent_ids = await self._send_split_message(chat_id, self._strip_timestamp_markers(final_response_buffer))
+                        if sent_ids:
+                            response_platform_ids.extend(sent_ids)
                 else:
                     final_response_buffer = "任务已完成。"
                     if not in_polling and not no_reply:
-                        await self.adapter.send_message(chat_id, self._strip_timestamp_markers(final_response_buffer))
+                        sent_ids = await self._send_split_message(chat_id, self._strip_timestamp_markers(final_response_buffer))
+                        if sent_ids:
+                            response_platform_ids.extend(sent_ids)
             
             # --- 4.5 保存助手回复到数据库 ---
             if final_response_buffer:

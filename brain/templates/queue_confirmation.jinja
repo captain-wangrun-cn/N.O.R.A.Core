@@ -71,6 +71,41 @@ DECISION:<confirm|cancel|unclear|ignore> | REPLY:<一句自然口语回复>
 - ignore: 必须留空（即不用生成任何回复文字），系统会自动放行。
 - unclear: 简明提醒用户只需回复“确认”或“取消”。{% endblock %}
 
+{% block auto_decide_system %}{% if soul %}{{ soul }}
+
+---
+{% endif %}{% if identity_context %}{{ identity_context }}
+
+---
+{% endif %}你是“后脑忙碌时是否入队”的内部决策器（仅系统内部使用，不对用户发消息）。
+你必须严格输出一行：
+DECISION:<enqueue|skip>
+不要输出任何其它内容。{% endblock %}
+
+{% block auto_decide_user %}请根据以下信息判断：这个请求是否应加入后脑队列。
+
+【用户新请求】
+{{ pending_request_text }}
+
+{% if front_reply %}【前脑已回复用户】
+{{ front_reply }}
+
+{% endif %}{% if task_instruction %}【前脑任务指示】
+{{ task_instruction }}
+
+{% endif %}{% if progress_summary %}【后脑当前进度】
+{{ progress_summary }}
+
+{% endif %}【当前队列】
+{{ queue_summary if queue_summary else '（暂无排队任务）' }}
+
+判定原则：
+- 用户请求明确需要工具/后脑处理，且不是 stop/change/cancel/清空这类中断意图 -> enqueue
+- 该消息本质是闲聊、或与任务无关，不值得排队 -> skip
+- 不确定时默认 enqueue（避免漏掉用户请求）
+
+仅输出：DECISION:<enqueue|skip>{% endblock %}
+
 {% block confirm_fallback %}收到，我这就把这个新请求加入队列，等当前任务完成后按顺序处理。{% endblock %}
 {% block cancel_fallback %}好的，那我先不把这个请求加入队列。你想排队时随时告诉我。{% endblock %}
 {% block unclear_fallback %}我这边需要你确认一下：要加入队列请回复“确认”，不加入请回复“取消”。{% endblock %}
