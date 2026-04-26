@@ -438,6 +438,7 @@ class BackBrainMixin:
                 tool_call = None
                 usage_data = None  # 用于收集 token 使用数据
                 in_think_block = False
+                deferred_split_parts_emitted = False
                 
                 async for raw_chunk in stream:
                     chunk = cast(Dict[str, Any], raw_chunk) if isinstance(raw_chunk, dict) else raw_chunk
@@ -469,6 +470,12 @@ class BackBrainMixin:
                                             msg_id = await self.adapter.send_message(chat_id, text_to_send)
                                             if msg_id:
                                                 response_platform_ids.append(str(msg_id))
+                                        elif defer_user_send_until_image_tags_ready and not in_polling_mode and not no_reply:
+                                            # 图片标签校验期间延迟发送：保留 SPLIT 边界，避免最终被拼成整段
+                                            if final_response_buffer:
+                                                final_response_buffer += "[SPLIT]"
+                                            final_response_buffer += text_to_send
+                                            deferred_split_parts_emitted = True
                                         else:
                                             # 将分段汇总到最终结果，后续统一发送（或由前脑审查）
                                             if final_response_buffer:
@@ -524,6 +531,14 @@ class BackBrainMixin:
                 
                 # Append text to final buffer (visible to user)
                 if response_text_buffer:
+                    if (
+                        defer_user_send_until_image_tags_ready
+                        and not in_polling_mode
+                        and not no_reply
+                        and deferred_split_parts_emitted
+                        and final_response_buffer
+                    ):
+                        final_response_buffer += "[SPLIT]"
                     final_response_buffer += response_text_buffer
                 
                 # If tool call detected

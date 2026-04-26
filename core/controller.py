@@ -70,7 +70,7 @@ class NoraController(
     # ------------------------------------------------------------------
     # 类级正则常量
     # ------------------------------------------------------------------
-    _SPLIT_MARKER_PATTERN = re.compile(r"\[(?:SPLIT|SPILIT)(?:[:：]([0-9.]+))?\]", re.IGNORECASE)
+    _SPLIT_MARKER_PATTERN = re.compile(r"\[SPLIT(?::([0-9.]+))?\]", re.IGNORECASE)
     _THINK_BLOCK_PATTERN = re.compile(r"<think>[\s\S]*?</think>", re.IGNORECASE)
     _THINK_INLINE_PATTERN = re.compile(r"</?think>", re.IGNORECASE)
     _IMAGE_TAGS_PATTERN = re.compile(

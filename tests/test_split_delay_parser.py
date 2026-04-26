@@ -1,7 +1,7 @@
 import re
 
 
-_SPLIT_MARKER_PATTERN = re.compile(r"\[(?:SPLIT|SPILIT)(?:[:：]([0-9.]+))?\]", re.IGNORECASE)
+_SPLIT_MARKER_PATTERN = re.compile(r"\[SPLIT(?::([0-9.]+))?\]", re.IGNORECASE)
 
 
 def _simulate_scheduler_split_messages(text: str):
@@ -31,7 +31,7 @@ def test_multiple_split_delay_tokens_not_sent():
     assert sent == ["A", "B", "C"]
 
 
-def test_spilit_typo_with_delay_token_not_sent():
-    text = "甲[SPILIT:1.2]乙[SPILIT：0.5]丙"
+def test_non_standard_split_tokens_are_not_parsed():
+    text = "甲[SPILIT:1.2]乙[SPLIT：0.5]丙"
     sent = _simulate_scheduler_split_messages(text)
-    assert sent == ["甲", "乙", "丙"]
+    assert sent == ["甲[SPILIT:1.2]乙[SPLIT：0.5]丙"]

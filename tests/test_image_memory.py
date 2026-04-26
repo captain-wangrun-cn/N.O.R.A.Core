@@ -64,7 +64,7 @@ _IMAGE_TAGS_PATTERN = re.compile(
 )
 _THINK_BLOCK_PATTERN = re.compile(r"<think>[\s\S]*?</think>", re.IGNORECASE)
 _THINK_INLINE_PATTERN = re.compile(r"</?think>", re.IGNORECASE)
-_SPLIT_MARKER_PATTERN = re.compile(r"\[(?:SPLIT|SPILIT)(?:[:：]([0-9.]+))?\]", re.IGNORECASE)
+_SPLIT_MARKER_PATTERN = re.compile(r"\[SPLIT(?::([0-9.]+))?\]", re.IGNORECASE)
 
 
 def _strip_thinking_and_tags(text: str) -> str:
@@ -201,9 +201,9 @@ def test_strip_thinking_content_removes_image_tags():
     assert "这是回复正文" in cleaned
 
 
-def test_split_marker_supports_spilit_typo():
-    """应兼容常见拼写错误 [SPILIT]，避免整段不分发。"""
-    buf = "第一段[SPILIT]第二段[SPLIT]第三段"
+def test_split_marker_parsing_standard_tokens():
+    """仅标准 [SPLIT] 标记应触发分段。"""
+    buf = "第一段[SPLIT]第二段[SPLIT]第三段"
     ready, remaining, in_think = _extract_split_ready_parts(buf, False)
 
     assert ready == ["第一段", "第二段"]
@@ -211,9 +211,9 @@ def test_split_marker_supports_spilit_typo():
     assert in_think is False
 
 
-def test_split_marker_supports_spilit_delay_variants():
-    """应兼容 [SPILIT:秒数]/[SPILIT：秒数]，确保图片模型输出可分段。"""
-    buf = "第一段[SPILIT:1.2]第二段[SPILIT：0.8]第三段"
+def test_split_marker_supports_standard_delay_variant():
+    """标准 [SPLIT:秒数] 应可被识别。"""
+    buf = "第一段[SPLIT:1.2]第二段[SPLIT]第三段"
     ready, remaining, in_think = _extract_split_ready_parts(buf, False)
 
     assert ready == ["第一段", "第二段"]
@@ -226,7 +226,7 @@ def test_stream_split_does_not_leak_fragmented_think_content():
     in_think = False
 
     # 第 1 批：只到 <think> 开头，且遇到 [SPLIT]
-    buf = "给你结论：<think>先想一想[SPILIT]"
+    buf = "给你结论：<think>先想一想[SPLIT]"
     ready, remaining, in_think = _extract_split_ready_parts(buf, in_think)
     assert ready == ["给你结论："]
     assert remaining == ""
@@ -238,6 +238,31 @@ def test_stream_split_does_not_leak_fragmented_think_content():
     assert ready == ["最终答案是 42"]
     assert remaining == "尾巴"
     assert in_think is False
+
+
+def test_deferred_image_send_preserves_split_boundaries():
+    """模拟图片标签待校验时的延迟发送：应保留 [SPLIT] 边界，避免最后并成一段。"""
+    final_response_buffer = ""
+    deferred_split_parts_emitted = False
+
+    # 模拟流式阶段识别到一个完整分段
+    ready_parts = ["第一段"]
+    response_text_buffer = "第二段"
+    for part in ready_parts:
+        text_to_send = part.strip()
+        if text_to_send:
+            if final_response_buffer:
+                final_response_buffer += "[SPLIT]"
+            final_response_buffer += text_to_send
+            deferred_split_parts_emitted = True
+
+    # 模拟 turn 末尾追加剩余缓冲
+    if response_text_buffer:
+        if deferred_split_parts_emitted and final_response_buffer:
+            final_response_buffer += "[SPLIT]"
+        final_response_buffer += response_text_buffer
+
+    assert final_response_buffer == "第一段[SPLIT]第二段"
 
 
 # ---------------------------------------------------------------------------
