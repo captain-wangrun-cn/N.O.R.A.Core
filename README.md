@@ -163,10 +163,10 @@ N.O.R.A.Core/
 - **想快速了解代码结构**
    - 查看 `docs/CODE_STRUCTURE.md`
 - **如何让新AI接手此项目**
-   Agent模式下，在会话开头第一句话前面加上：`阅读onboarding内的文档`
+   Agent模式下，在会话开头第一句话前面加上：`阅读onboarding文件夹内的文档，继续接手工作`
    如：
    ```
-   阅读onboarding内的文档
+   阅读onboarding文件夹内的文档，继续接手工作
 
    编写一个新的trigger，用于......
    ```
