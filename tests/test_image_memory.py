@@ -64,7 +64,7 @@ _IMAGE_TAGS_PATTERN = re.compile(
 )
 _THINK_BLOCK_PATTERN = re.compile(r"<think>[\s\S]*?</think>", re.IGNORECASE)
 _THINK_INLINE_PATTERN = re.compile(r"</?think>", re.IGNORECASE)
-_SPLIT_MARKER_PATTERN = re.compile(r"\[(?:SPLIT|SPILIT)\]", re.IGNORECASE)
+_SPLIT_MARKER_PATTERN = re.compile(r"\[(?:SPLIT|SPILIT)(?:[:：]([0-9.]+))?\]", re.IGNORECASE)
 
 
 def _strip_thinking_and_tags(text: str) -> str:
@@ -204,6 +204,16 @@ def test_strip_thinking_content_removes_image_tags():
 def test_split_marker_supports_spilit_typo():
     """应兼容常见拼写错误 [SPILIT]，避免整段不分发。"""
     buf = "第一段[SPILIT]第二段[SPLIT]第三段"
+    ready, remaining, in_think = _extract_split_ready_parts(buf, False)
+
+    assert ready == ["第一段", "第二段"]
+    assert remaining == "第三段"
+    assert in_think is False
+
+
+def test_split_marker_supports_spilit_delay_variants():
+    """应兼容 [SPILIT:秒数]/[SPILIT：秒数]，确保图片模型输出可分段。"""
+    buf = "第一段[SPILIT:1.2]第二段[SPILIT：0.8]第三段"
     ready, remaining, in_think = _extract_split_ready_parts(buf, False)
 
     assert ready == ["第一段", "第二段"]

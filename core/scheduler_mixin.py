@@ -328,6 +328,7 @@ class SchedulerMixin:
                     # 若 count==0 说明 AI 前脑已经自然告别、无需再发一遍
                     if count >= 2:
                         await self._send_wrapup_message(chat_id)
+                        await asyncio.sleep(self.FOLLOWUP_END_GRACE_SECONDS)
                     self._transition_to_semi_online(chat_id)
                     return
 

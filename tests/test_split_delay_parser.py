@@ -1,19 +1,7 @@
-'''
-Author: WR(captain-wangrun-cn)
-Date: 2026-04-06 22:21:51
-LastEditors: WR(captain-wangrun-cn)
-LastEditTime: 2026-04-06 22:21:59
-FilePath: \N.O.R.A.Core\tests\test_split_delay_parser.py
-'''
-'''
-author:        captain-wangrun-cn <wangrun114514@foxmail.com>
-date:          2026-04-06 22:21:51
-Copyright © WR（captain-wangrun-cn） All rights reserved
-'''
 import re
 
 
-_SPLIT_MARKER_PATTERN = re.compile(r"\[SPLIT(?::([0-9.]+))?\]", re.IGNORECASE)
+_SPLIT_MARKER_PATTERN = re.compile(r"\[(?:SPLIT|SPILIT)(?:[:：]([0-9.]+))?\]", re.IGNORECASE)
 
 
 def _simulate_scheduler_split_messages(text: str):
@@ -41,3 +29,9 @@ def test_multiple_split_delay_tokens_not_sent():
     text = "A[SPLIT:2]B[SPLIT:0.3]C"
     sent = _simulate_scheduler_split_messages(text)
     assert sent == ["A", "B", "C"]
+
+
+def test_spilit_typo_with_delay_token_not_sent():
+    text = "甲[SPILIT:1.2]乙[SPILIT：0.5]丙"
+    sent = _simulate_scheduler_split_messages(text)
+    assert sent == ["甲", "乙", "丙"]
