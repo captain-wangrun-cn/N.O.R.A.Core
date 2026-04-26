@@ -146,6 +146,7 @@ class TelegramAdapter(BaseAdapter):
 
     DEBUG_CLEANUP_COMMAND = "/debug_cleanup"
     MODEL_COMMAND = "/model"
+    NORA_PREFS_COMMAND = "/nora_prefs"
     _cleanup_confirm_tokens: Dict[str, float] = {}
     _cleanup_lock = asyncio.Lock()
 
@@ -330,6 +331,7 @@ class TelegramAdapter(BaseAdapter):
         regenerate_proactive_handler = CommandHandler('regenerate_proactive', self._regenerate_proactive_command)
         schedule_today_handler = CommandHandler('schedule_today', self._schedule_today_command)
         custom_scope_handler = CommandHandler('custom_scope', self._custom_scope_command)
+        nora_prefs_handler = CommandHandler('nora_prefs', self._nora_prefs_command)
         set_stream_handler = CommandHandler('set_stream', self._set_stream_command)
         legacy_nonstream_handler = CommandHandler('nonstream', self._set_stream_command)
         debug_cleanup_handler = CommandHandler('debug_cleanup', self._debug_cleanup_command)
@@ -348,6 +350,7 @@ class TelegramAdapter(BaseAdapter):
         self.application.add_handler(regenerate_proactive_handler)
         self.application.add_handler(schedule_today_handler)
         self.application.add_handler(custom_scope_handler)
+        self.application.add_handler(nora_prefs_handler)
         self.application.add_handler(set_stream_handler)
         self.application.add_handler(legacy_nonstream_handler)
         self.application.add_handler(debug_cleanup_handler)
@@ -704,6 +707,24 @@ class TelegramAdapter(BaseAdapter):
             if update.message:
                 await update.message.reply_text("❌ 无法加载按钮。")
 
+    async def _nora_prefs_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """展示 Nora 偏好设置按钮。"""
+        if not update.effective_chat:
+            return
+        chat_id = str(update.effective_chat.id)
+
+        try:
+            prefs = self._load_nora_preferences()
+            if update.message:
+                await update.message.reply_text(
+                    self._render_nora_prefs_text(prefs),
+                    reply_markup=self._render_nora_prefs_keyboard(prefs),
+                )
+        except Exception:
+            logger.error(f"[{chat_id}] /nora_prefs 按钮初始化失败", exc_info=True)
+            if update.message:
+                await update.message.reply_text("❌ 无法加载 Nora 偏好设置。")
+
     async def _set_stream_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """切换当前会话的输出模式。用法：/set_stream on|off，或点击按钮选择。"""
         if not update.effective_chat:
@@ -1017,6 +1038,10 @@ class TelegramAdapter(BaseAdapter):
             await self._handle_custom_scope_callback(query, callback_data)
             return
 
+        if callback_data and callback_data.startswith("nora_prefs:"):
+            await self._handle_nora_prefs_callback(query, callback_data)
+            return
+
         if callback_data and callback_data.startswith("set_stream:"):
             await self._handle_set_stream_callback(query, callback_data)
             return
@@ -1213,6 +1238,111 @@ class TelegramAdapter(BaseAdapter):
             ],
             [InlineKeyboardButton(f"{none_mark}关闭全部", callback_data="custom_scope:none")],
             [InlineKeyboardButton("取消", callback_data="custom_scope:close")],
+        ]
+        return InlineKeyboardMarkup(rows)
+
+    async def _handle_nora_prefs_callback(self, query, callback_data: str):
+        """处理 Nora 偏好按钮回调。"""
+        if not query or not query.message:
+            return
+        chat_id = str(query.message.chat.id)
+        action = callback_data.split(":", 1)[1]
+
+        if action == "close":
+            prefs = self._load_nora_preferences()
+            await query.edit_message_text(self._render_nora_prefs_text(prefs))
+            return
+
+        editable = {
+            "nora_followup_probability",
+            "proactive_message_probability",
+            "split_reply_probability",
+            "short_reply_preference",
+            "verbosity_preference",
+            "pause_between_splits_seconds",
+            "warmth_level",
+            "playfulness_level",
+            "emotional_expressiveness",
+            "assertiveness_level",
+        }
+        if action not in editable:
+            await query.edit_message_text("❌ 无效偏好项。")
+            return
+
+        try:
+            prefs = self._load_nora_preferences()
+            prefs[action] = self._next_nora_pref_value(action, prefs.get(action))
+            self._save_nora_preferences(prefs)
+            prefs = self._load_nora_preferences()
+            await query.edit_message_text(
+                self._render_nora_prefs_text(prefs),
+                reply_markup=self._render_nora_prefs_keyboard(prefs),
+            )
+        except Exception as e:
+            logger.error(f"[{chat_id}] nora_prefs 回调失败: {e}", exc_info=True)
+            await query.edit_message_text(f"❌ 失败: {e}")
+
+    def _load_nora_preferences(self) -> dict:
+        return dict(config.get_nora_preferences())
+
+    def _save_nora_preferences(self, prefs: dict):
+        config.set_nora_preferences(prefs)
+
+    def _format_nora_pref_value(self, key: str, value: Any) -> str:
+        if key == "pause_between_splits_seconds":
+            return f"{float(value):.1f}s"
+        return f"{float(value):.2f}"
+
+    def _next_nora_pref_value(self, key: str, current: Any) -> float:
+        try:
+            value = float(current)
+        except (TypeError, ValueError):
+            value = 0.0
+
+        if key == "pause_between_splits_seconds":
+            choices = [0.3, 0.6, 1.0, 1.4, 1.8, 2.2]
+        else:
+            choices = [0.0, 0.25, 0.5, 0.75, 1.0]
+
+        rounded = round(value, 1 if key == "pause_between_splits_seconds" else 2)
+        for idx, candidate in enumerate(choices):
+            if abs(candidate - rounded) < 1e-6:
+                return choices[(idx + 1) % len(choices)]
+        return choices[0]
+
+    def _render_nora_prefs_text(self, prefs: dict) -> str:
+        lines = [
+            "🎛️ Nora 偏好设置",
+            "点击按钮循环切换数值，修改会立即保存到 `config.yml`。",
+            "",
+            f"- followup 概率: {self._format_nora_pref_value('nora_followup_probability', prefs.get('nora_followup_probability', 1.0))}",
+            f"- 自主主动消息概率: {self._format_nora_pref_value('proactive_message_probability', prefs.get('proactive_message_probability', 1.0))}",
+            f"- 分段聊天倾向: {self._format_nora_pref_value('split_reply_probability', prefs.get('split_reply_probability', 0.7))}",
+            f"- 短回复偏好: {self._format_nora_pref_value('short_reply_preference', prefs.get('short_reply_preference', 0.5))}",
+            f"- 详细解释偏好: {self._format_nora_pref_value('verbosity_preference', prefs.get('verbosity_preference', 0.5))}",
+            f"- 默认分段停顿: {self._format_nora_pref_value('pause_between_splits_seconds', prefs.get('pause_between_splits_seconds', 1.0))}",
+            f"- 温柔度: {self._format_nora_pref_value('warmth_level', prefs.get('warmth_level', 0.7))}",
+            f"- 俏皮度: {self._format_nora_pref_value('playfulness_level', prefs.get('playfulness_level', 0.4))}",
+            f"- 情绪表达: {self._format_nora_pref_value('emotional_expressiveness', prefs.get('emotional_expressiveness', 0.6))}",
+            f"- 主张程度: {self._format_nora_pref_value('assertiveness_level', prefs.get('assertiveness_level', 0.5))}",
+        ]
+        return "\n".join(lines)
+
+    def _render_nora_prefs_keyboard(self, prefs: dict) -> InlineKeyboardMarkup:
+        def button(label: str, key: str) -> InlineKeyboardButton:
+            return InlineKeyboardButton(
+                f"{label}: {self._format_nora_pref_value(key, prefs.get(key))}",
+                callback_data=f"nora_prefs:{key}",
+            )
+
+        rows = [
+            [button("Followup", "nora_followup_probability")],
+            [button("Proactive", "proactive_message_probability")],
+            [button("Split", "split_reply_probability"), button("Pause", "pause_between_splits_seconds")],
+            [button("Short", "short_reply_preference"), button("Verbose", "verbosity_preference")],
+            [button("Warmth", "warmth_level"), button("Playful", "playfulness_level")],
+            [button("Emotion", "emotional_expressiveness"), button("Assertive", "assertiveness_level")],
+            [InlineKeyboardButton("关闭", callback_data="nora_prefs:close")],
         ]
         return InlineKeyboardMarkup(rows)
 

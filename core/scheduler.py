@@ -175,12 +175,14 @@ class ScheduledEvent:
         trigger_time: datetime,
         reason: str = "",
         event_type: str = "proactive",  # "proactive" | "alarm"
+        message_kind: str = "autonomous",  # "autonomous" | "explicit"
         event_id: str = "",
         chat_id: str = "",
     ):
         self.trigger_time = trigger_time
         self.reason = reason
         self.event_type = event_type
+        self.message_kind = message_kind
         self.event_id = event_id or f"{event_type}_{int(trigger_time.timestamp())}_{id(self)}"
         self.chat_id = chat_id
         self.fired = False
@@ -190,6 +192,7 @@ class ScheduledEvent:
             "trigger_time": self.trigger_time.isoformat(),
             "reason": self.reason,
             "event_type": self.event_type,
+            "message_kind": self.message_kind,
             "event_id": self.event_id,
             "chat_id": self.chat_id,
             "fired": self.fired,
@@ -204,6 +207,7 @@ class ScheduledEvent:
             trigger_time=trigger_time,
             reason=d.get("reason", ""),
             event_type=d.get("event_type", "alarm"),
+            message_kind=d.get("message_kind", "explicit" if d.get("event_type", "alarm") == "alarm" else "autonomous"),
             event_id=d.get("event_id", ""),
             chat_id=d.get("chat_id", ""),
         )
@@ -499,6 +503,9 @@ class ProactiveScheduler:
             for item in plan_items:
                 time_str = item.get("time", "")
                 reason = item.get("reason", "")  # reason 可选
+                message_kind = str(item.get("message_kind", "autonomous") or "autonomous").strip().lower()
+                if message_kind not in {"autonomous", "explicit"}:
+                    message_kind = "autonomous"
                 if not time_str:
                     continue
                 try:
@@ -508,6 +515,7 @@ class ProactiveScheduler:
                             trigger_time=trigger_dt,
                             reason=reason,
                             event_type="proactive",
+                            message_kind=message_kind,
                             chat_id=self.default_chat_id,
                         )
                         self._daily_events.append(event)

@@ -13,9 +13,13 @@
 3. 深夜时段通常少安排；若有明确理由可适度保留
 4. 工作/学习时段可降低打扰频率
 5. 触发点数量可灵活（一般 2-6 个），以“不过度打扰”为优先
+6. 每个计划项都必须包含 `message_kind` 字段，只能是：
+   - `explicit`：用户明确要求你在固定时间提醒/督促/通知的消息
+   - `autonomous`：你自主决定的关心、问候、延续话题类消息
+7. 只要是用户明确交代“每天某时提醒我”的内容，就标记为 `explicit`
 
-请严格按照 JSON 数组格式返回，每个元素必须包含 time 字段，reason 字段可选。
-示例: [{"time": "08:15", "reason": "早安问候"}, {"time": "12:30"}, {"time": "18:00", "reason": "下班关怀"}]
+请严格按照 JSON 数组格式返回，每个元素必须包含 `time` 和 `message_kind` 字段，`reason` 字段可选。
+示例: [{"time": "08:15", "message_kind": "explicit", "reason": "吃药提醒"}, {"time": "12:30", "message_kind": "autonomous", "reason": "午间问候"}, {"time": "18:00", "message_kind": "autonomous", "reason": "下班关怀"}]
 只返回 JSON 数组，不要其他内容。{% endblock %}
 
 {% block daily_plan_user %}今天是 {{ date_display }}，当前时间 {{ current_time }}。
@@ -62,6 +66,7 @@
 - 如果近期对话里用户提到了什么有意思的事，可以顺着聊
 - 如果你注意到用户的作息/习惯和你记忆中的不一样，可以自然地关心一下
 - 消息长短随意，自然就好。你可以使用 `[SPLIT]` 或 `[SPLIT:秒数]` 分段发送消息以便模拟打字停顿。避免提到"主动消息""触发"等系统术语
+- 当你决定分段时，优先显式使用 `[SPLIT:秒数]`，让停顿更自然，不要机械地只写裸 `[SPLIT]`
 - 如果结合上下文后判断现在不适合主动打扰，可以返回空字符串，不发送任何消息。{% endblock %}
 
 {% block proactive_user %}当前时间: {{ current_time }}{% if reason %}，触发缘由: {{ reason }}{% else %}（定时触发，无特定缘由）{% endif %}

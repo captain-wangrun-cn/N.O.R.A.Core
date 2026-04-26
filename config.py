@@ -256,3 +256,38 @@ def get_logging_config():
     cfg = _safe_config()
     return cfg.get("logging", {}) or {}
 
+
+def get_nora_preferences() -> dict:
+    """获取 Nora 偏好设置，并补齐默认值。"""
+    cfg = _safe_config()
+    raw = (cfg.get("nora_preferences", {}) or {})
+
+    defaults = {
+        "nora_followup_probability": 1.0,
+        "proactive_message_probability": 1.0,
+        "split_reply_probability": 0.7,
+        "short_reply_preference": 0.5,
+        "verbosity_preference": 0.5,
+        "pause_between_splits_seconds": 1.0,
+        "warmth_level": 0.7,
+        "playfulness_level": 0.4,
+        "emotional_expressiveness": 0.6,
+        "assertiveness_level": 0.5,
+        "followup_skip_end_after": 3,
+    }
+
+    merged = dict(defaults)
+    if isinstance(raw, dict):
+        merged.update(raw)
+    return merged
+
+
+def set_nora_preferences(preferences: dict) -> dict:
+    """持久化 Nora 偏好设置，自动保留默认值与未知字段。"""
+    cfg = dict(_safe_config())
+    current = get_nora_preferences()
+    current.update(preferences or {})
+    cfg["nora_preferences"] = current
+    save_config(cfg)
+    return current
+

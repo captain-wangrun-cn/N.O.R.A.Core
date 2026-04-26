@@ -215,6 +215,8 @@ flowchart TB
   - 图片 ID 分配、LLM 标签提取、MongoDB + Qdrant 双写、语义检索与 `view_image` 工具。
 - **[身份与记忆文件一览](./identity_files.md)**
   - SOUL/USER/MEMORY/SCHEDULE/CUSTOM/SECRET 文件的角色、边界、专用工具与 openclaw 启发说明。
+- **[Nora 偏好系统 (Nora Preferences)](./nora-preferences.md)**
+  - 偏好配置结构、follow-up / proactive 概率逻辑、prompt 注入分层、Telegram `/nora_prefs` 调整入口。
 - **[词库系统 (Lexicon System)](./lexicon-system.md)**
   - 轻量“词:含义”检索系统，支持常加载与懒加载双层词库。
 
@@ -222,6 +224,7 @@ flowchart TB
 
 - **[主动消息调度 (Proactive Scheduler)](./schedule-system.md)**
   - 每日主动消息计划生成、动态闹钟、在线状态管理。
+  - 现已包含 `nora_preferences`、follow-up / autonomous proactive 概率控制、`explicit/autonomous` 计划分类、`/nora_prefs` Telegram 配置入口。
 - **[外部触发系统 (Trigger System)](./trigger-system.md)**
   - 非 IM 渠道事件（如 Email）接入、模型过滤判定、通知链路复用。
 - **[Trigger 开发指南 (Trigger Development Guide)](./trigger-development.md)**

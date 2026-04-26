@@ -5,6 +5,38 @@
 
 ## 近期关键改动（截至 2026-04-26）
 
+### 🎛️ Nora 偏好设置 + Follow-up / Proactive 概率控制 — 2026-04-26
+
+- 新增独立 `nora_preferences` 配置块，用于集中管理 Nora 的行为与风格偏好：
+   - 行为层：`nora_followup_probability`、`proactive_message_probability`
+   - 风格层：`split_reply_probability`、`short_reply_preference`、`verbosity_preference`、`pause_between_splits_seconds`
+   - 语气层：`warmth_level`、`playfulness_level`、`emotional_expressiveness`、`assertiveness_level`
+- 新增 `brain/templates/user_preferences.jinja`，由 `brain/prompts.py` 单独注入到 prompt 链路，不再把偏好描述硬塞进 `system.jinja`。
+- 对话延续（follow-up）逻辑改为：
+   - 先照常检测 `FOLLOWUP / WAIT / END`
+   - 若检测结果为 `FOLLOWUP`，再按 `nora_followup_probability` 决定是否真正发送
+   - 当概率未命中时，不继续维持强 follow-up 候选状态，而是按 `WAIT` 处理；连续若干次未命中后直接 `END`
+- 主动消息计划新增 `message_kind`：
+   - `explicit`：用户明确要求的定时提醒/固定督促
+   - `autonomous`：Nora 自主决定的陪伴型主动消息
+- `proactive_message_probability` 仅作用于 `autonomous`，不会随机跳过 `explicit` 或 `alarm`。
+- Telegram 新增 `/nora_prefs` 指令，使用 inline keyboard 直接调整上述偏好，并实时写回 `config.yml`。
+- `/schedule_today` 现在会展示计划项类型（明确提醒 / 自主消息）。
+
+**涉及文件：**
+- `config.py`
+- `config.example.yml`
+- `brain/prompts.py`
+- `brain/templates/user_preferences.jinja`
+- `brain/templates/system.jinja`
+- `brain/templates/schedule.jinja`
+- `core/scheduler.py`
+- `core/scheduler_mixin.py`
+- `core/message_handler.py`
+- `adapters/telegram/main.py`
+- `tests/test_nora_preferences.py`
+- `tests/test_nora_prefs_telegram.py`
+
 ### 📚 词库系统正式接入（System/User 双通道）— 2026-04-26
 
 - 词库能力已从“模块可用”升级到“提示词链路正式接入”：

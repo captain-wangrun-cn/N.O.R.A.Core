@@ -121,6 +121,20 @@ custom_injection:
     - image
     - coder
 
+# Nora 偏好设置
+nora_preferences:
+  nora_followup_probability: 1.0      # follow-up 检测为 FOLLOWUP 后，实际发送的概率
+  proactive_message_probability: 1.0  # 自主型主动消息（autonomous）的实际发送概率
+  split_reply_probability: 0.7        # 倾向用 [SPLIT] / [SPLIT:秒数] 分段聊天的强度
+  short_reply_preference: 0.5         # 越高越偏短句
+  verbosity_preference: 0.5           # 越高越愿意补充解释
+  pause_between_splits_seconds: 1.0   # 默认建议分段停顿秒数
+  warmth_level: 0.7                   # 温柔/亲近感强度
+  playfulness_level: 0.4              # 俏皮程度
+  emotional_expressiveness: 0.6       # 情绪表达强度
+  assertiveness_level: 0.5            # 主张/建议强度
+  followup_skip_end_after: 3          # 连续若干次 FOLLOWUP 因概率未发送后，直接 END
+
 # Tavily 网络搜索 API (可选)
 tavily:
   api_key: "YOUR_TAVILY_API_KEY" # 从 https://tavily.com/ 获取

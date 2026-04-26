@@ -17,12 +17,12 @@
   ↓
 凌晨触发 → 读取 SCHEDULE.md + SOUL.md + USER.md + MEMORY.md
   ↓
-LLM 生成今日触发计划 [{"time": "08:00", "reason": "早安"}, {"time": "12:30"}, ...]
-  ↓                    （reason 可选）
+LLM 生成今日触发计划 [{"time": "08:00", "message_kind": "explicit", "reason": "吃药提醒"}, ...]
+  ↓                    （reason 可选，message_kind 必填）
 每个触发点注册独立的 DateTrigger Job → 精准到时回调
   ↓
 到达触发时间 → 检查在线状态
-  ├─ 在线/忙碌 → proactive 延迟重试一次（+5min）/ alarm 仍触发
+  ├─ 在线/忙碌 → proactive 直接跳过本次 / alarm 仍触发
   └─ 离线/半在线 → LLM 生成主动消息 → 发送
 ```
 
@@ -60,7 +60,9 @@ LLM 生成今日触发计划 [{"time": "08:00", "reason": "早安"}, {"time": "1
 保持 ONLINE + 启动对话延续定时器
   ↓ (等待 120s)
 fast_llm 分析上下文 → 判断用户为什么停下来
-  ├─ FOLLOWUP → 正常模型生成追话（1-2句自然追问）→ 写入聊天记录 → 60s 后再检测
+  ├─ FOLLOWUP → 先过 `nora_followup_probability`
+  │    ├─ 命中 → 正常模型生成追话（1-2句自然追问）→ 写入聊天记录 → 60s 后再检测
+  │    └─ 未命中 → 按 WAIT 处理；连续多次未命中后直接 END
   ├─ WAIT → 暂时不追话 → 60s 后再检测
   └─ END → 生成友好结束消息 → 写入聊天记录 → 进入 SEMI_ONLINE
 ```
@@ -71,11 +73,13 @@ fast_llm 分析上下文 → 判断用户为什么停下来
 | `FOLLOWUP_INITIAL_DELAY` | 120s | 首次检测等待时间（2分钟） |
 | `FOLLOWUP_RECHECK_INTERVAL` | 60s | 每次复查间隔（1分钟） |
 | `FOLLOWUP_MAX_COUNT` | 3 | 最大连续追话次数 |
+| `nora_preferences.followup_skip_end_after` | 3 | FOLLOWUP 因概率未发送连续达到该次数后直接 END |
 
 关键设计:
 - **所有追话消息和结束消息都会写入 MessageHistory + session history**，保持上下文连续性
 - 用户任何时候发消息都会**立即取消**延续定时器并重置追话计数
 - fast 模型仅用于轻量判断（FOLLOWUP/WAIT/END），生成内容用正常模型
+- FOLLOWUP 概率只控制“是否真的发出”，不影响检测链路本身，避免状态机失真
 
 ---
 
@@ -94,10 +98,23 @@ fast_llm 分析上下文 → 判断用户为什么停下来
 凌晨 00:00 由 CronTrigger 触发，调用 `_generate_daily_plan_via_llm()`：
 - Prompt 模板: `brain/templates/schedule.jinja` (block: `daily_plan_system`, `daily_plan_user`)
 - 输入: SCHEDULE.md + SOUL.md + USER.md + MEMORY.md + 当前日期
-- 输出: JSON 数组 `[{"time": "HH:MM", "reason": "..."}, {"time": "HH:MM"}, ...]`
-- `reason` 字段可选，LLM 可以只返回 `time`
+- 输出: JSON 数组 `[{"time": "HH:MM", "message_kind": "explicit|autonomous", "reason": "..."}, ...]`
+- `message_kind` 必填：
+  - `explicit`：用户明确要求的固定提醒/固定督促
+  - `autonomous`：Nora 自主安排的陪伴型主动消息
+- `reason` 字段可选
 - 每个时间点注册为独立的 DateTrigger Job
 - 缓存到 `cache/daily_plan.json`（重启不丢失）
+
+### 3.2.1 自主 vs 明确型主动消息
+
+系统在**计划生成阶段**就区分消息类型，而不是在发送时靠文案临时猜测：
+
+| 类型 | 含义 | 是否受概率控制 |
+|------|------|----------------|
+| `explicit` | 用户明确要求在某个时间提醒、督促、通知 | ❌ 不受 `proactive_message_probability` 控制 |
+| `autonomous` | Nora 自主生成的问候、关心、延续话题 | ✅ 受 `proactive_message_probability` 控制 |
+| `alarm` | 工具设置的闹钟/倒计时 | ❌ 不受概率控制 |
 
 ### 3.3 动态闹钟 (Alarm Tools)
 
@@ -121,7 +138,7 @@ AI 可通过内置工具实时设置闹钟:
 - 后端忙碌 (`is_backend_busy`)
 
 **注意**: alarm 类型不受在线状态影响，始终触发。
-**注意**: proactive 在在线/忙碌时会延迟 5 分钟重试一次，而不是直接丢弃。
+**注意**: `autonomous` 还会在发送前再过一次 `proactive_message_probability`。
 
 ### 3.5 Prompt 模板
 
@@ -142,6 +159,8 @@ AI 可通过内置工具实时设置闹钟:
 | `wrapup_message_system` | 结束对话消息 — system prompt |
 | `wrapup_message_user` | 结束对话消息 — user prompt |
 
+此外，回复风格偏好由 `brain/templates/user_preferences.jinja` 单独注入，不放在调度模板中硬编码。
+
 ### 3.6 手动重新生成指令
 
 通过 adapter 命令手动触发当天计划重建：
@@ -158,6 +177,7 @@ AI 可通过内置工具实时设置闹钟:
 
 返回内容包含：
 - 触发时间（HH:MM）
+- 计划类型（明确提醒 / 自主消息）
 - reason（若为空则显示“无缘由”）
 - 今日未触发计划总数
 
@@ -195,14 +215,24 @@ AI 可通过内置工具实时设置闹钟:
 
 - 新增 `/regenerate_proactive` 指令
 - 新增 `/schedule_today` 指令
+- 新增 `/nora_prefs` 指令：使用 Telegram inline keyboard 实时调整 `nora_preferences`
 - 指令透传到 `NoraController.handle_new_message()`
 - 由 controller 调用 `scheduler.regenerate_today_plan()` 执行重建
 
 ### 4.3 Prompts (`brain/templates/schedule.jinja`)
 
 - 所有调度相关 prompt 集中在 Jinja2 模板中，通过 `render_template()` 渲染
+- `daily_plan_system` 现在强制输出 `message_kind`
+- 调度消息生成 prompt 强化了 `[SPLIT:秒数]` 的优先使用规则
 - `brain/prompts.py` 中 `SCHEDULE.md` 加入首次复制列表
 - `load_identity_context()` 注入 `<schedule>` 块到 system prompt
+
+### 4.6 偏好配置 (`config.py` / `brain/prompts.py`)
+
+- `config.get_nora_preferences()` 统一提供偏好默认值与读取入口
+- `config.set_nora_preferences()` 负责写回 `config.yml`
+- `brain/prompts.py` 会把 `user_preferences.jinja` 渲染结果作为独立 instruction 注入
+- 风格偏好影响输出语气与分段习惯；行为偏好影响 follow-up 与自主主动消息是否真正发出
 
 ### 4.4 main.py
 

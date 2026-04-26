@@ -294,6 +294,12 @@ def get_lazy_lexicon_user_prompt_block(user_text: str, limit: int = 10) -> str:
         return ""
 
 
+def get_user_preferences_prompt_block() -> str:
+    """返回基于配置生成的用户偏好 prompt 注入块。"""
+    prefs = config.get_nora_preferences()
+    return render_template("user_preferences.jinja", "user_preferences_block", preferences=prefs)
+
+
 def get_system_prompt(
     instructions: Optional[List[str]] = None,
     platform: Optional[str] = None,
@@ -341,6 +347,9 @@ def get_system_prompt(
     lexicon_system_block = get_always_lexicon_system_prompt_block()
     if lexicon_system_block:
         all_instructions.insert(0, lexicon_system_block)
+    user_preferences_block = get_user_preferences_prompt_block()
+    if user_preferences_block:
+        all_instructions.insert(0, user_preferences_block)
 
     system_template = env.get_template('system.jinja')
     return system_template.render(

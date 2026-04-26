@@ -8,6 +8,7 @@ Copyright © WR（captain-wangrun-cn） All rights reserved
 # pyright: reportAttributeAccessIssue=false
 
 import asyncio
+import random
 import json
 import logging
 import re
@@ -256,6 +257,17 @@ class SchedulerMixin:
         self._followup_timers[chat_id] = task
         logger.debug(f"[{chat_id}] 对话延续定时器已启动（{delay}s 后首次检测）")
 
+    def _get_nora_preferences(self) -> dict:
+        return config.get_nora_preferences()
+
+    def _should_pass_probability(self, value: float) -> bool:
+        try:
+            numeric = float(value)
+        except (TypeError, ValueError):
+            numeric = 1.0
+        numeric = max(0.0, min(1.0, numeric))
+        return random.random() <= numeric
+
     def _cancel_followup_timer(self, chat_id: str):
         """取消对话延续定时器。"""
         self._followup_delay_override.pop(chat_id, None)
@@ -280,6 +292,7 @@ class SchedulerMixin:
             await asyncio.sleep(delay)
 
             wait_loops = 0  # 连续 WAIT 轮数（用于超时收尾）
+            skipped_followups = 0  # FOLLOWUP 命中但因概率未发送的次数
 
             while True:
                 if get_ai_presence() != AIPresence.ONLINE:
@@ -307,9 +320,29 @@ class SchedulerMixin:
 
                 if decision == "FOLLOWUP":
                     wait_loops = 0  # 重置 WAIT 计数
-                    await self._send_followup_message(chat_id, idle_secs)
-                    record_ai_followup(chat_id)
-                    await asyncio.sleep(self.FOLLOWUP_RECHECK_INTERVAL)
+                    prefs = self._get_nora_preferences()
+                    followup_probability = prefs.get("nora_followup_probability", 1.0)
+                    skip_end_after = int(prefs.get("followup_skip_end_after", 3) or 3)
+
+                    if self._should_pass_probability(followup_probability):
+                        skipped_followups = 0
+                        await self._send_followup_message(chat_id, idle_secs)
+                        record_ai_followup(chat_id)
+                        await asyncio.sleep(self.FOLLOWUP_RECHECK_INTERVAL)
+                    else:
+                        skipped_followups += 1
+                        logger.info(
+                            f"[{chat_id}] FOLLOWUP 命中但未通过发送概率，转 WAIT (skip={skipped_followups}, idle={idle_secs:.0f}s)"
+                        )
+                        if skipped_followups >= max(1, skip_end_after):
+                            logger.info(f"[{chat_id}] FOLLOWUP 连续跳过达到上限，直接 END")
+                            if count >= 2:
+                                await self._send_wrapup_message(chat_id)
+                                await asyncio.sleep(self.FOLLOWUP_END_GRACE_SECONDS)
+                            self._transition_to_semi_online(chat_id)
+                            return
+                        wait_loops += 1
+                        await asyncio.sleep(self.FOLLOWUP_RECHECK_INTERVAL)
 
                 elif decision == "WAIT":
                     wait_loops += 1
@@ -627,8 +660,18 @@ class SchedulerMixin:
             
             plan = json.loads(response)
             if isinstance(plan, list):
+                normalized_plan = []
+                for item in plan:
+                    if not isinstance(item, dict):
+                        continue
+                    normalized = dict(item)
+                    kind = str(item.get("message_kind", "autonomous") or "autonomous").strip().lower()
+                    if kind not in {"autonomous", "explicit"}:
+                        kind = "autonomous"
+                    normalized["message_kind"] = kind
+                    normalized_plan.append(normalized)
                 logger.info(f"LLM 生成了 {len(plan)} 个触发计划")
-                return plan
+                return normalized_plan
             else:
                 logger.warning(f"LLM 返回了非数组: {type(plan)}")
                 return []
@@ -640,12 +683,20 @@ class SchedulerMixin:
             logger.error(f"LLM 生成今日计划异常: {e}", exc_info=True)
             return []
 
-    async def _send_proactive_message(self, chat_id: str, reason: str, event_type: str = "proactive"):
+    async def _send_proactive_message(self, chat_id: str, reason: str, event_type: str = "proactive", message_kind: str = "autonomous"):
         """
         Scheduler 回调：到达触发时间后，用 LLM 生成主动消息并发送。
         """
+        message_kind = (message_kind or "autonomous").strip().lower()
+        if event_type != "alarm" and message_kind == "autonomous":
+            prefs = self._get_nora_preferences()
+            probability = prefs.get("proactive_message_probability", 1.0)
+            if not self._should_pass_probability(probability):
+                logger.info(f"[{chat_id}] 自主型主动消息被概率跳过: type={event_type}, reason={reason}")
+                return
+
         reason_display = reason if reason else "(无缘由)"
-        logger.info(f"[{chat_id}] 触发主动消息: type={event_type}, reason={reason_display}")
+        logger.info(f"[{chat_id}] 触发主动消息: type={event_type}, kind={message_kind}, reason={reason_display}")
 
         from datetime import datetime
         from zoneinfo import ZoneInfo
@@ -677,6 +728,7 @@ class SchedulerMixin:
         # 构造前脑上下文与元数据
         proactive_meta = {
             "event_type": event_type,
+            "message_kind": message_kind,
             "reason": reason,
             "current_time": current_time,
             "trigger_from": "scheduler",
@@ -688,7 +740,7 @@ class SchedulerMixin:
             "user_id": chat_id,
             "chat_type": "private",
             "user_name": "User",
-            "text": f"[proactive:{event_type}] {reason_display}",
+            "text": f"[proactive:{event_type}:{message_kind}] {reason_display}",
         }
 
         front_result = await self._generate_front_chat_response(front_context, proactive_meta=proactive_meta)
@@ -716,7 +768,7 @@ class SchedulerMixin:
         # 记录到 session 历史（含触发标记）
         session = self.sessions.setdefault(chat_id, {"history": [], "interrupted_thought": "", "pending_text": ""})
         session_history = session.setdefault("history", [])
-        trigger_note = f"[proactive:{event_type}] {reason}" if reason else f"[proactive:{event_type}]"
+        trigger_note = f"[proactive:{event_type}:{message_kind}] {reason}" if reason else f"[proactive:{event_type}:{message_kind}]"
         session_history.append({"role": "system", "content": trigger_note})
         if user_reply:
             session_history.append({"role": "assistant", "content": user_reply})
@@ -726,7 +778,7 @@ class SchedulerMixin:
         # 如需后脑则启动轮询，否则标记空闲
         if front_result.get("needs_backend"):
             backend_instruction = (
-                f"主动消息触发（类型: {event_type}, 时间: {current_time}, 缘由: {reason_display}）。"
+                f"主动消息触发（类型: {event_type}, 分类: {message_kind}, 时间: {current_time}, 缘由: {reason_display}）。"
                 "请完成前脑提到的需要后台处理的任务，生成最终要发送给用户的结果。"
             )
             if user_reply:

@@ -933,7 +933,9 @@ class MessageHandlerMixin:
                 trigger_time = item.get("trigger_time", "")
                 hhmm = trigger_time[11:16] if len(trigger_time) >= 16 else trigger_time
                 reason = item.get("reason", "") or "(无缘由)"
-                lines.append(f"{i}. {hhmm} - {reason}")
+                kind = item.get("message_kind", "autonomous")
+                kind_label = "明确提醒" if kind == "explicit" else "自主消息"
+                lines.append(f"{i}. {hhmm} [{kind_label}] - {reason}")
             lines.append(f"\n共 {len(sorted_plan)} 条")
             await self.adapter.send_message(chat_id, "\n".join(lines))
         except Exception as e:
