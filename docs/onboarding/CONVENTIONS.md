@@ -24,6 +24,7 @@
 | `adapters/` | 平台适配 | 每个平台一个子目录 |
 | `memory/` | 记忆/存储 | 消息历史、向量、RAG |
 | `skills/` | 技能插件 | 每个技能一个子目录（`main.py` + `SKILL.md`） |
+| `lexicon/` | 轻量词库 | `.dict` 每行 `词: 含义`，支持 `@prompt: 用途说明` |
 | `tests/` | 测试 | 文件名 `test_*.py`，pytest 兼容 |
 | `docs/` | 文档 | 架构设计、交接、引导 |
 | `locales/` | 多语言 | YAML 格式 |
@@ -78,6 +79,11 @@
 - **新增子系统时**：在 `docs/architecture/` 添加设计文档并更新 `README.md` 索引
 - **接手/交接时**：阅读并更新 `docs/onboarding/` 下的引导文档
 - 使用中文撰写文档（与项目主语言一致）
+
+### 词库维护约定
+- 常加载词库：`lexicon/always/`（面向 system 注入）
+- 懒加载词库：`lexicon/lazy/`（命中后注入 user prompt）
+- 全局词库用途说明：`lexicon/PROMPT.md`
 
 ---
 

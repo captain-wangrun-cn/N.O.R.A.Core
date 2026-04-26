@@ -57,6 +57,12 @@ core/controller.py            NoraController.handle_message()
 - `get_llm_client(model_alias)` — 获取 LLM 客户端实例
 - `chat_stream(system_prompt, user_prompt, history, tools)` — 流式对话
 
+### `lexicon/manager.py`
+- `LexiconManager` — 轻量词库管理器
+  - `build_always_system_prompt_block()`：常加载词库注入 system prompt
+  - `build_lazy_user_prompt_block(text)`：懒加载命中后注入 user prompt
+  - `.dict` 支持 `@prompt:` 元数据（词库用途提示）
+
 ### `brain/tools.py`
 - `ToolManager` — 工具注册、schema 生成、执行
   - 内置工具：`create_new_skill`, `execute_skill`, `execute_tool_plan`, `read_file`, `search`, `write_file`, `edit_file`, `list_dir`, `get_available_skills`, `exec_command`, `view_image`, `crop_image_for_llm`, `set_alarm`, `list_alarms`, `cancel_alarm`
@@ -149,6 +155,7 @@ python tui.py
 | `memory/cost_tracking.db` | 成本记录 |
 | `memory/vector.db` | 向量数据库（Qdrant） |
 | `data/memory/YYYY-MM-DD.md` | 每日对话总结：每日 00:00 生成上一日摘要；若文件已存在则带入旧内容融合输出，默认使用 `scheduler.default_chat_id`（无则回落首个 session），平台默认 `telegram` |
+| `lexicon/PROMPT.md` | 词库全局说明：通过统一链路注入 system prompt，约束词库使用方式 |
 
 ---
 

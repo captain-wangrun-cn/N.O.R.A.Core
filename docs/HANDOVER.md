@@ -3,25 +3,54 @@
 - 目标：多平台智能体内核，包含 LLM 适配、工具/技能体系、成本追踪、记忆/RAG。
 - 当前状态：可运行，自测通过；已完成图片记忆链路（入库/检索/回查再分析）、`view_image` 工具增强、CLI 高危清理保护。
 
-## 近期关键改动（截至 2026-03-25）
+## 近期关键改动（截至 2026-04-26）
 
-### � 轻量词库系统（常加载 / 懒加载）— 2026-04-13
+### 📚 词库系统正式接入（System/User 双通道）— 2026-04-26
 
-   - `lexicon/always/`：常加载（启动即加载，如网络用语/缩写/口语）
-   - `lexicon/lazy/`：懒加载（首次命中时按文件加载）
-   - `get(term)`：精确查询（常加载 -> 已加载懒词库 -> 按文件懒加载）
-   - `search(keyword, limit)`：模糊检索（在已加载词条中匹配）
-   - `stats()`：加载状态与懒加载命中统计
+- 词库能力已从“模块可用”升级到“提示词链路正式接入”：
+  - **常加载词库**注入 `system prompt`（基础语义背景）。
+  - **懒加载词库**按用户输入命中后注入 `user prompt`（仅补命中词含义）。
+- 新增词库全局说明文件 `lexicon/PROMPT.md`，作为统一行为约束与用途说明；通过 controller 的统一 LLM 调用封装全链路注入。
+- `.dict` 文件新增 `@prompt:` 元数据能力，可在词库文件内写“该词库用途/解释风格提示”。
+- 懒加载命中机制升级为 `manifest(term -> file)`，不再逐文件遍历，按命中词定位对应词库文件再加载。
+
+**当前词库行为（关键约束）：**
+- `supplement_meanings_for_text(...)` 仅匹配懒加载词条（不包含常加载词条）。
+- 某词命中后仅补该词对应含义；可附带该懒词库文件的 `@prompt` 用途提示。
 
 **涉及文件：**
+- `lexicon/manager.py`
+- `lexicon/PROMPT.md`
+- `lexicon/README.md`
+- `lexicon/always/*.dict` / `lexicon/lazy/*.dict`
+- `brain/prompts.py`
+- `core/controller.py`
+- `core/front_brain.py`
+- `core/back_brain.py`
+- `tests/test_lexicon_manager.py`
+- `tests/test_lexicon_global_prompt.py`
 
-### �🔔 外部 Trigger 子系统 + Email 触发器 — 2026-04-02
+**验证：**
+- 词库相关测试通过（`test_lexicon_manager.py` + `test_lexicon_global_prompt.py`）。
 
+### 🔔 外部 Trigger 子系统 + Email 触发器 — 2026-04-02
+
+- 新增独立 `triggers/` 子系统（与 `adapters/` 解耦），用于接入非 IM 外部触发源。
+- 新增 `BaseTrigger` 基类，风格对齐 `BaseAdapter`：生命周期 + hooks + health_check。
+- 新增 `TriggerManager`：统一注册/启动/事件分发，并提供 trigger 内临时模型调用能力。
+- 新增 `EmailTrigger`（IMAP 轮询）：
    - 拉取新邮件摘要
    - 使用 `fast` 模型 + `brain/templates/trigger_email.jinja` 判定 `NOTIFY/SKIP`
    - 命中后通过 controller 复用 `_send_proactive_message` 链路通知 Nora。
 
 **涉及文件：**
+- `triggers/base.py` / `triggers/manager.py` / `triggers/factory.py`
+- `triggers/email/main.py` / `triggers/email/PROMPT.md`
+- `core/controller.py` / `core/message_handler.py` / `main.py`
+- `brain/templates/trigger_email.jinja`
+- `config.py` / `config.example.yml`
+- `docs/architecture/trigger-system.md` / `docs/architecture/README.md`
+- `docs/onboarding/README.md` / `docs/onboarding/QUICK_REFERENCE.md`
 
 ### 🧾 后脑忙碌时的二次确认入队 — 2026-03-25
 

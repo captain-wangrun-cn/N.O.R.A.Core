@@ -8,6 +8,7 @@
 N.O.R.A.Core/
 ├─ main.py / cli.py / tui.py / view_costs.py
 ├─ config.py / config.example.yml / workspace_config.py
+├─ lexicon/
 ├─ brain/
 ├─ core/
 ├─ adapters/
@@ -67,6 +68,13 @@ N.O.R.A.Core/
 - `context_store.py`：消息镜像与段落压缩存储。
 - `rag.py` / `embed.py` / `vector.py`：检索增强与向量能力。
 - `image_store.py`：图片记忆（MongoDB + Qdrant 双写）。
+
+### `lexicon/`（轻量词库）
+
+- `manager.py`：词库加载与检索管理器（常加载 + 懒加载 manifest）。
+- `always/`：常加载词库（注入 system prompt）。
+- `lazy/`：懒加载词库（命中后注入 user prompt）。
+- `PROMPT.md`：词库全局用途说明（全链路注入 system prompt）。
 
 ### `skills/`（技能系统）
 

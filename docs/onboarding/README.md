@@ -67,6 +67,7 @@
 | 外部触发器系统 | `triggers/` |
 | 技能加载 | `skills/loader.py` |
 | 成本跟踪 | `core/cost_tracker.py`, `view_costs.py` |
+| 词库系统 | `lexicon/manager.py`, `lexicon/PROMPT.md` |
 | 配置 | `config.py`, `config.example.yml` |
 
 ---
@@ -101,6 +102,7 @@ python view_costs.py --today
 - [ ] 读完本文件 + `HANDOVER.md`
 - [ ] 了解 `core/controller.py` 的消息处理流程
 - [ ] 了解 `brain/templates/system.jinja` 中的行为约定
+- [ ] 了解 `lexicon/manager.py` 的词库注入策略（always->system, lazy->user）
 - [ ] 确认 `config.yml` 存在且配置正确
 - [ ] 确认 `data/memory/message_history.db` 是否存在（有则说明有历史数据）
 - [ ] 运行 `pytest` 确认测试状态
