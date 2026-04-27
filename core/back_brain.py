@@ -160,7 +160,11 @@ class BackBrainMixin:
         # --- 初始化后端状态追踪 ---
         MAX_TURNS = 30
         status = self.worker_status.setdefault(chat_id, WorkerStatus())
-        status.start(query=text, max_turns=MAX_TURNS)
+        status.start(
+            query=text,
+            max_turns=MAX_TURNS,
+            task_instruction=context.get("task_instruction", ""),
+        )
         
         # 通知 scheduler: 后端开始忙碌
         self._update_scheduler_state(chat_id, busy=True)

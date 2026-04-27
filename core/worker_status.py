@@ -45,9 +45,10 @@ class WorkerStatus:
         self.max_turns: int = 0
         self.started_at: float = 0.0
         self.original_query: str = ""  # 用户最初问的问题
+        self.task_instruction: str = ""  # 前脑下达给后脑的任务指示（供前脑下轮上下文比对，避免重复触发）
         self.next_action: str = ""     # 预告：下一步准备做什么
 
-    def start(self, query: str, max_turns: int = 30):
+    def start(self, query: str, max_turns: int = 30, task_instruction: str = ""):
         self.busy = True
         self.phase = "初始化"
         self.detail = "正在准备处理请求..."
@@ -58,6 +59,7 @@ class WorkerStatus:
         self.max_turns = max_turns
         self.started_at = time.time()
         self.original_query = query
+        self.task_instruction = task_instruction or ""
         self.next_action = ""
 
     def update(self, phase: str, detail: str = ""):
@@ -126,6 +128,8 @@ class WorkerStatus:
             f"📌 正在处理: \"{self.original_query[:80]}\"",
             f"⏱ 已用时 {elapsed} 秒 | 阶段: {self.phase}",
         ]
+        if self.task_instruction:
+            lines.append(f"📝 任务指示: {self.task_instruction[:160]}")
         if self.detail:
             lines.append(f"🔧 {self.detail}")
         if self.next_action:
@@ -193,7 +197,13 @@ class BackendTaskQueue:
         for i, item in enumerate(self._items, 1):
             text_preview = item["text"][:60]
             wait_secs = int(time.time() - item["enqueued_at"])
-            lines.append(f"  {i}. \"{text_preview}\" (等待 {wait_secs}s)")
+            ctx = item.get("context") or {}
+            instr = str(ctx.get("task_instruction", "")).strip()
+            line = f"  {i}. \"{text_preview}\" (等待 {wait_secs}s)"
+            if instr:
+                # 任务指示是前脑给后脑的执行说明，让后脑/前脑判定时能比对
+                line += f"\n     指示: {instr[:120]}"
+            lines.append(line)
         return "\n".join(lines)
 
     async def remove_by_index(self, index: int) -> Optional[str]:

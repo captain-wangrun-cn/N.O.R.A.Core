@@ -5,6 +5,55 @@
 
 ## 近期关键改动（截至 2026-04-27）
 
+### 🛡️ 后脑忙碌时的"重复任务"防护 — 2026-04-27
+
+**背景**：用户反馈，第一条消息（如 "明天早上英语..."）触发后脑后，第二条简单承接（如 "嗯嗯"）在后脑仍忙碌时，被前脑误判为 `[NEED_BACKEND]`，并通过 `_auto_confirm_backend_enqueue` 入队，导致后脑重复执行同一组工具（read_file MEMORY.md 等），白白消耗 token 与时间。
+
+**根因**：`task_instruction` 只通过运行时 `context` 传给后脑，**从未持久化进 `message_history`**。前脑下一轮重建上下文时只看得到清洗后的纯文本回复，看不到自己刚下达过的任务指示，也不知道后脑当前正在做什么——于是面对承接语时再次误标 `[NEED_BACKEND]`，且 `_auto_confirm_backend_enqueue` 的 prompt 既没传当前任务指示也没指引"重复对比"，默认 enqueue。
+
+**修复（不引入硬编码黑名单，全部基于上下文驱动）：**
+
+1. **持久化前脑路由元信息**（`core/message_handler.py`）
+   - 保存前脑 assistant 消息时，把本轮 `task_instruction` + `needs_backend` 写入 `metadata.routing`。
+
+2. **重建上下文时回填路由备注**（`core/front_brain.py`）
+   - 新增 `_inject_routing_notes(history, db_context)`：对带 `metadata.routing` 的 assistant 消息，按位置对齐后在 content 末尾追加一行**仅模型可见**的内部备注（"已下达后脑任务指示: ..."）。
+   - `_generate_front_chat_response` 与 `_front_brain_review` 都用上。
+   - 这样下一轮前脑/审查能从上下文里看到"自己上一轮已经下过哪些后脑任务"。
+
+3. **运行时后脑状态注入前脑 system prompt**（`core/front_brain.py`）
+   - 新增 `_build_backend_status_block(chat_id)`：基于 `worker_status` + `task_queues` 实时构造一段块（仅在 busy 或 queue 非空时注入），告诉前脑"现在正在做 X、已排队 Y"，并提示"承接语不要再 NEED_BACKEND"。
+   - 不写死任何承接词清单——靠上下文比对让模型自己判断。
+
+4. **WorkerStatus 增加 `task_instruction` 字段**（`core/worker_status.py`）
+   - `start(query, max_turns, task_instruction="")` 新增可选参数；`get_summary()` 与 `BackendTaskQueue.get_queue_summary()` 都展示任务指示。
+   - `core/back_brain.py` 启动时把 `context["task_instruction"]` 透传进来。
+
+5. **`_auto_confirm_backend_enqueue` 接受当前任务上下文**（`core/message_handler.py`）
+   - 新增 `current_original_query` / `current_task_instruction` 参数（默认空，向后兼容现有测试），来自 `worker_status`。
+   - 同时透传给 `queue_confirmation.jinja` → `auto_decide_user`。
+
+6. **重写 auto_decide_user 模板**（`brain/templates/queue_confirmation.jinja`）
+   - 新增字段：`【后脑当前正在处理的请求】` / `【后脑当前正在执行的任务指示】`。
+   - 判定方法改为基于上下文比对的四步：① 对比新请求 vs 当前/排队任务（语义实质等价 → skip）② 承接 / 闲聊检测（强调"长度不是关键，有没有新可执行目标才是"）③ 新任务 → enqueue ④ 不确定 → enqueue。
+   - **不再使用任何硬编码示例**，全部靠模型基于运行时上下文判断。
+
+**验证：**
+- `python -m py_compile` 通过。
+- `queue_confirmation.jinja:auto_decide_user` 渲染验证：新增 `current_original_query` / `current_task_instruction` 字段正常输出。
+- `routing.parse_front_brain_response` 兜底逻辑（NEED_BACKEND 但无 TASK_INSTRUCTION → 降级）测试通过。
+- `tests/test_message_handler_ack.py` 现有用例使用旧签名调用（新参数有默认值），向后兼容。
+- 本地 `pytest` / 部分依赖（google-generativeai 等）未安装，全量测试套件无法在当前环境跑。
+
+**涉及文件：**
+- `core/message_handler.py`（保存 metadata.routing；扩展 `_auto_confirm_backend_enqueue` 入参）
+- `core/front_brain.py`（新增 `_inject_routing_notes` / `_build_backend_status_block`，并在生成与审查路径调用）
+- `core/back_brain.py`（透传 task_instruction 给 worker_status）
+- `core/worker_status.py`（新增 `task_instruction` 字段；queue summary 展示任务指示）
+- `brain/templates/queue_confirmation.jinja`（重写 auto_decide_user 模板，基于上下文比对）
+
+> ⚠️ 历史回顾：本任务最初尝试用硬编码正则（`_LIGHTWEIGHT_ACK_PATTERN`）做承接语短路，被指出违背"上下文驱动"原则后已移除。现行方案完全不依赖任何关键词清单。
+
 ### ♻️ 消息压缩失败持久化重试队列（方案 B）— 2026-04-27
 
 - 为消息级压缩、归档总结、对话段摘要、段压缩刷新新增统一的**持久化重试队列**：`compression_retry_queue`。

@@ -82,29 +82,44 @@ DECISION:<confirm|cancel|unclear|ignore> | REPLY:<一句自然口语回复>
 DECISION:<enqueue|skip>
 不要输出任何其它内容。{% endblock %}
 
-{% block auto_decide_user %}请根据以下信息判断：这个请求是否应加入后脑队列。
+{% block auto_decide_user %}请根据以下上下文判断：用户这条新消息是否应作为新的后脑任务加入队列。
 
-【用户新请求】
+【用户新消息（待入队的请求文本）】
 {{ pending_request_text }}
 
-{% if front_reply %}【前脑已回复用户】
+{% if front_reply %}【前脑刚刚给用户的回复】
 {{ front_reply }}
 
-{% endif %}{% if task_instruction %}【前脑任务指示】
+{% endif %}{% if task_instruction %}【前脑本轮想下达给后脑的新任务指示】
 {{ task_instruction }}
 
-{% endif %}{% if progress_summary %}【后脑当前进度】
+{% endif %}{% if current_original_query %}【后脑当前正在处理的请求（original_query）】
+{{ current_original_query }}
+
+{% endif %}{% if current_task_instruction %}【后脑当前正在执行的任务指示】
+{{ current_task_instruction }}
+
+{% endif %}{% if progress_summary %}【后脑当前进度详情】
 {{ progress_summary }}
 
 {% endif %}【当前队列】
 {{ queue_summary if queue_summary else '（暂无排队任务）' }}
 
-判定原则：
-- 用户请求明确需要工具/后脑处理，且不是 stop/change/cancel/清空这类中断意图 -> enqueue
-- 该消息本质是闲聊、或与任务无关，不值得排队 -> skip
-- 不确定时默认 enqueue（避免漏掉用户请求）
+判定方法（按顺序判断，命中即返回）：
 
-仅输出：DECISION:<enqueue|skip>{% endblock %}
+1. **重复检测**：把【用户新消息】与【前脑本轮新任务指示】跟【后脑当前正在执行的任务指示】、【当前队列】里的已有指示做语义对比。
+   - 若目标对象、操作意图、写入文件、记录内容**实质等价**（无论措辞、是否带"再/还/补充"等修饰词）→ DECISION:skip
+   - 后脑会把当前任务做完，没必要让它把同样的事再做一遍。
+
+2. **承接 / 闲聊检测**：判断【用户新消息】本身是否是一句**对前脑刚刚回复的确认、附和、感叹、情绪反应、寒暄**，而不是提出新的可执行任务。
+   - 注意：长度短不是关键，**有没有提出新的可执行目标**才是关键。一句话即使很短，只要含新指令也是新任务；反之"我考虑一下"再长也不是新任务。
+   - 是承接/闲聊 → DECISION:skip
+
+3. **新任务检测**：【用户新消息】明确提出了一个与当前正在做/已排队的任务**不同**的新目标（新文件/新内容/新方向/新查询）→ DECISION:enqueue
+
+4. **不确定**：既不是承接也未发现与现有任务重复，但能解读为新任务 → DECISION:enqueue
+
+仅输出一行：DECISION:<enqueue|skip>{% endblock %}
 
 {% block confirm_fallback %}收到，我这就把这个新请求加入队列，等当前任务完成后按顺序处理。{% endblock %}
 {% block cancel_fallback %}好的，那我先不把这个请求加入队列。你想排队时随时告诉我。{% endblock %}

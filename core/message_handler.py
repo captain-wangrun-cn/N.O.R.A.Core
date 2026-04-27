@@ -376,9 +376,18 @@ class MessageHandlerMixin:
             sent_message_ids = await self._send_split_message(chat_id, user_reply)
 
             # 保存前脑回复到数据库，记录来源与平台 message_id
-            metadata = {"source": "front"}
+            metadata: Dict[str, Any] = {"source": "front"}
             if sent_message_ids:
                 metadata["platform_message_ids"] = sent_message_ids
+            # 把本轮前脑下达给后脑的任务指示一同存档，
+            # 让下一轮前脑能从上下文里看到"自己刚才下过这个任务"，
+            # 避免对用户的简单承接语（如"嗯嗯/好的"）误升级为重复后脑任务。
+            front_task_instruction = front_result.get("task_instruction", "")
+            if front_result.get("needs_backend") or front_task_instruction:
+                metadata["routing"] = {
+                    "needs_backend": bool(front_result.get("needs_backend")),
+                    "task_instruction": front_task_instruction,
+                }
             self.message_history.add_message(
                 platform="telegram",
                 chat_id=storage_id,
@@ -420,6 +429,10 @@ class MessageHandlerMixin:
             if backend_busy_or_queued:
                 queue_summary = queue.get_queue_summary() if queue else ""
                 progress_summary = status.get_summary() if status else ""
+                # 把后脑当前正在处理的 query / task_instruction 一并给到入队判定，
+                # 让 fast_llm 能基于"现在已经在做什么"判断是否实质重复，而不是凭空决定。
+                current_original_query = status.original_query if status else ""
+                current_task_instruction = status.task_instruction if status else ""
                 should_enqueue = await self._auto_confirm_backend_enqueue(
                     chat_id=chat_id,
                     pending_request_text=text,
@@ -427,6 +440,8 @@ class MessageHandlerMixin:
                     task_instruction=front_result.get("task_instruction", ""),
                     queue_summary=queue_summary,
                     progress_summary=progress_summary,
+                    current_original_query=current_original_query,
+                    current_task_instruction=current_task_instruction,
                 )
 
                 if not should_enqueue:
@@ -458,6 +473,8 @@ class MessageHandlerMixin:
         task_instruction: str,
         queue_summary: str,
         progress_summary: str,
+        current_original_query: str = "",
+        current_task_instruction: str = "",
     ) -> bool:
         """前脑内部二次确认：判断本轮是否应自动加入后脑队列（不向用户发确认）。"""
         soul = get_soul_prompt()
@@ -477,6 +494,8 @@ class MessageHandlerMixin:
             task_instruction=task_instruction,
             queue_summary=queue_summary,
             progress_summary=progress_summary,
+            current_original_query=current_original_query,
+            current_task_instruction=current_task_instruction,
         )
 
         response = ""

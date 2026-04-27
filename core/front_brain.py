@@ -82,6 +82,106 @@ class FrontBrainMixin:
             return False
         return any(hint in lower_text for hint in cls._API_ERROR_HINTS)
 
+    def _build_backend_status_block(self, chat_id: str) -> str:
+        """构造"后脑当前状态"上下文块。
+
+        信息来自运行时对象（worker_status / task_queues），不是硬编码示例：
+        - 当前正在处理的请求 + 任务指示
+        - 已经在排队的请求 + 任务指示
+
+        若后脑空闲且队列为空，返回空字符串（不注入），避免无谓 token。
+        前脑收到这一块后，自然能识别"刚才那件事还在做"，
+        从而对用户的简单承接（嗯/好的/收到）回复 SEMI_ONLINE 而非重复 NEED_BACKEND。
+        """
+        try:
+            worker_status_map = getattr(self, "worker_status", None) or {}
+            queues_map = getattr(self, "task_queues", None) or {}
+            status = worker_status_map.get(chat_id) if isinstance(worker_status_map, dict) else None
+            queue = queues_map.get(chat_id) if isinstance(queues_map, dict) else None
+        except Exception:
+            return ""
+
+        busy = bool(status and getattr(status, "busy", False))
+        queue_size = queue.size() if queue else 0
+        if not busy and queue_size == 0:
+            return ""
+
+        lines: List[str] = ["【后脑运行时状态（仅供你判断是否需要再次触发后脑）】"]
+
+        if busy:
+            lines.append(f"- 后脑正在执行: {getattr(status, 'original_query', '')[:120]}")
+            instr = (getattr(status, "task_instruction", "") or "").strip()
+            if instr:
+                lines.append(f"  任务指示: {instr[:240]}")
+            phase = getattr(status, "phase", "") or ""
+            if phase:
+                lines.append(f"  当前阶段: {phase}")
+
+        if queue_size > 0 and queue is not None:
+            lines.append(f"- 已排队任务数: {queue_size}")
+            try:
+                summary = queue.get_queue_summary()
+            except Exception:
+                summary = ""
+            if summary:
+                lines.append(summary)
+
+        lines.append(
+            "判断要点："
+            "用户本轮消息若只是对你上一轮的承接、确认、附和（如简单回应、情绪表达、表情），"
+            "且没有提出与上述【正在执行】或【已排队】任务**不同**的新可执行目标，"
+            "就**不要**再加 [NEED_BACKEND]——后脑会把当前任务做完，重复触发只会让它把同一件事再做一遍。"
+            "应当根据语境收尾或进入 [SEMI_ONLINE]。"
+        )
+        return "\n".join(lines)
+
+    @staticmethod
+    def _inject_routing_notes(
+        history: List[Dict[str, Any]],
+        db_context: List[Dict[str, Any]],
+    ) -> List[Dict[str, Any]]:
+        """把数据库 metadata 里的路由信息（task_instruction / needs_backend）回填到 assistant 消息文本末尾。
+
+        目的：保证下一轮前脑能从上下文里看到"自己上一轮已经下发过哪些后脑任务指示"。
+        否则前脑只会看到清洗后的纯回复（任务指示标记已被移除），无法判断"是否已经下达过"。
+
+        实现：按时间戳/序号位置一一对齐 history 与 db_context；只增强 assistant 消息，
+        且仅追加一行内部备注（用户不可见，因为它只存在于发给模型的 history 里）。
+        """
+        if not history:
+            return history
+
+        # 取出 db_context 里 role 为 user/assistant 的子列表，与 history 顺序对齐
+        aligned_db = [m for m in db_context if m.get("role") in ("user", "assistant")]
+        if len(aligned_db) != len(history):
+            # 长度不一致就保守不增强，避免错位污染
+            return history
+
+        enhanced: List[Dict[str, Any]] = []
+        for msg, db_msg in zip(history, aligned_db):
+            if msg.get("role") != "assistant":
+                enhanced.append(msg)
+                continue
+            md = db_msg.get("metadata") or {}
+            routing = md.get("routing") or {}
+            instr = str(routing.get("task_instruction", "")).strip()
+            needs_backend = bool(routing.get("needs_backend"))
+            if not instr and not needs_backend:
+                enhanced.append(msg)
+                continue
+            note_lines = []
+            if needs_backend:
+                note_lines.append("已触发后脑接管处理。")
+            if instr:
+                # 截断防止超长指示淹没上下文
+                note_lines.append(f"已下达后脑任务指示: {instr[:240]}")
+            note = "\n".join(note_lines)
+            enhanced.append({
+                "role": "assistant",
+                "content": f"{msg['content']}\n\n[内部备注·上一轮路由记录]\n{note}",
+            })
+        return enhanced
+
     async def _generate_front_chat_response(
         self,
         context: Dict[str, Any],
@@ -211,6 +311,14 @@ class FrontBrainMixin:
         )
         if yesterday_memory_block:
             system_prompt = system_prompt + "\n\n---\n" + yesterday_memory_block
+
+        # 后脑忙碌或队列非空时，把"正在处理什么 + 已排队什么"作为运行时上下文块注入前脑系统提示，
+        # 让前脑天然知道"刚才下达过哪些任务、现在还在做"，从而避免对用户的简单承接（嗯/好的/收到）
+        # 误升级为重复后脑任务。这一块来自上下文，不是硬编码示例。
+        backend_status_block = self._build_backend_status_block(chat_id)
+        if backend_status_block:
+            system_prompt = system_prompt + "\n\n---\n" + backend_status_block
+
         if proactive_mode:
             user_prompt = render_template('front_brain.jinja', 'proactive_user', proactive_user_message=proactive_user_message)
         else:
@@ -258,6 +366,11 @@ class FrontBrainMixin:
             if msg["role"] in ("user", "assistant")
         ]
 
+        # 上下文增强：把前脑历史回复中携带的 routing 元信息（task_instruction / needs_backend）
+        # 以"内部备注"形式回填到 assistant 消息末尾，这样下一轮前脑生成时就能看到
+        # "自己上一轮已经下达过哪些任务"，避免对用户的简单承接（嗯/好的/收到）误升级为
+        # 重复的后脑任务。该备注仅给模型阅读，不会发送给用户。
+        history = self._inject_routing_notes(history, db_context)
         # --- 调用 smart 模型生成回复（流式收集完整文本，检测标签闭合） ---
         async def _run_with_retries(system_prompt_candidate: str):
             response_text_local = ""
@@ -491,6 +604,8 @@ class FrontBrainMixin:
             for msg in db_context
             if msg.get("role") in ("user", "assistant")
         ]
+        # 同步注入历史路由备注，避免审查阶段误判任务是否已下达
+        current_session_msgs = self._inject_routing_notes(current_session_msgs, db_context)
 
         # 将后脑报告与新用户消息显式放入上下文，便于审查模型完整感知
         backend_report = backend_result.strip()
