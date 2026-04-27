@@ -1,4 +1,4 @@
-'''
+r'''
 Author: WR(captain-wangrun-cn)
 Date: 2026-04-26 21:51:02
 LastEditors: WR(captain-wangrun-cn)
@@ -33,3 +33,17 @@ def test_next_pause_pref_value_cycles():
 def test_format_pause_pref_value():
     adapter = _DummyAdapter()
     assert adapter._format_nora_pref_value("pause_between_splits_seconds", 1.4) == "1.4s"
+
+
+def test_next_pref_value_uses_default_when_current_missing(monkeypatch):
+    adapter = _DummyAdapter()
+    monkeypatch.setattr(
+        "config.get_nora_preferences",
+        lambda: {
+            "warmth_level": 0.7,
+            "pause_between_splits_seconds": 1.0,
+        },
+    )
+
+    assert adapter._next_nora_pref_value("warmth_level", None) == 0.75
+    assert adapter._next_nora_pref_value("pause_between_splits_seconds", None) == 1.4

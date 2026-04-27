@@ -1294,10 +1294,11 @@ class TelegramAdapter(BaseAdapter):
         return f"{float(value):.2f}"
 
     def _next_nora_pref_value(self, key: str, current: Any) -> float:
+        defaults = config.get_nora_preferences()
         try:
             value = float(current)
         except (TypeError, ValueError):
-            value = 0.0
+            value = float(defaults.get(key, 0.0))
 
         if key == "pause_between_splits_seconds":
             choices = [0.3, 0.6, 1.0, 1.4, 1.8, 2.2]
@@ -1308,6 +1309,9 @@ class TelegramAdapter(BaseAdapter):
         for idx, candidate in enumerate(choices):
             if abs(candidate - rounded) < 1e-6:
                 return choices[(idx + 1) % len(choices)]
+        higher = [candidate for candidate in choices if candidate > rounded]
+        if higher:
+            return higher[0]
         return choices[0]
 
     def _render_nora_prefs_text(self, prefs: dict) -> str:
