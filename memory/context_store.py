@@ -9,7 +9,7 @@ import sqlite3
 import asyncio
 from datetime import datetime
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Callable, Any
 
 from workspace_config import get_workspace_manager
 from brain.prompts import render_template
@@ -162,6 +162,8 @@ class ContextCompressor:
         summary_max_retries: int = 3,
         summary_retry_base_delay: float = 0.8,
         summary_min_chars: int = 80,
+        retry_callback: Optional[Callable[[str, str, str, Optional[Dict[str, Any]], Optional[str]], None]] = None,
+        success_callback: Optional[Callable[[str, str, str, Optional[Dict[str, Any]]], None]] = None,
     ):
         self.message_log = message_log
         self.db_path = Path(db_path) if db_path else get_default_context_db()
@@ -171,6 +173,8 @@ class ContextCompressor:
         self.summary_max_retries = max(1, int(summary_max_retries))
         self.summary_retry_base_delay = max(0.1, float(summary_retry_base_delay))
         self.summary_min_chars = max(20, int(summary_min_chars))
+        self.retry_callback = retry_callback
+        self.success_callback = success_callback
         self._summarizer = None
         self._init_db()
 
@@ -205,32 +209,63 @@ class ContextCompressor:
 
     async def refresh_context(self, platform: str, chat_id: str) -> None:
         """按对话段落(session)重新生成压缩上下文。"""
-        if not self.history_db_path:
-            logger.warning("ContextCompressor 未配置 history_db_path，跳过段压缩")
-            return
+        try:
+            if not self.history_db_path:
+                logger.warning("ContextCompressor 未配置 history_db_path，跳过段压缩")
+                return
 
-        segment_refs = self._get_recent_segment_refs(platform, chat_id, limit=10)
-        if not segment_refs:
-            return
+            segment_refs = self._get_recent_segment_refs(platform, chat_id, limit=10)
+            if not segment_refs:
+                self._mark_refresh_success(platform, chat_id)
+                return
 
-        existing = self._load_existing(platform, chat_id)
-        slots: List[Dict] = []
+            existing = self._load_existing(platform, chat_id)
+            slots: List[Dict] = []
 
-        for idx, seg_ref in enumerate(segment_refs):
-            slot = idx + 1
-            if slot > 10:
-                break
+            for idx, seg_ref in enumerate(segment_refs):
+                slot = idx + 1
+                if slot > 10:
+                    break
 
-            seg_text, message_count = self._build_segment_text(platform, chat_id, seg_ref)
-            if not seg_text:
-                continue
+                seg_text, message_count = self._build_segment_text(platform, chat_id, seg_ref)
+                if not seg_text:
+                    continue
 
-            seg_role = "system"
-            seg_ts = float(seg_ref.get("source_timestamp", datetime.now().timestamp()))
-            source_keys = [str(seg_ref.get("source_key", ""))]
+                seg_role = "system"
+                seg_ts = float(seg_ref.get("source_timestamp", datetime.now().timestamp()))
+                source_keys = [str(seg_ref.get("source_key", ""))]
 
-            if slot <= 3:
-                if len(seg_text) > self.long_message_threshold:
+                if slot <= 3:
+                    if len(seg_text) > self.long_message_threshold:
+                        content = await self._summarize_single(
+                            seg_text,
+                            seg_role,
+                            existing.get(slot),
+                            source_keys,
+                            min_chars=self._get_required_min_chars(message_count),
+                        )
+                        slots.append(
+                            {
+                                "slot": slot,
+                                "segment_type": "compressed_recent_segment",
+                                "role": "system",
+                                "content": f"[最近长段摘要#{slot}] {content}",
+                                "source_keys": source_keys,
+                                "source_timestamp": seg_ts,
+                            }
+                        )
+                    else:
+                        slots.append(
+                            {
+                                "slot": slot,
+                                "segment_type": "raw_recent_segment",
+                                "role": "system",
+                                "content": f"[最近段#{slot}]\n{seg_text}",
+                                "source_keys": source_keys,
+                                "source_timestamp": seg_ts,
+                            }
+                        )
+                elif slot <= 6:
                     content = await self._summarize_single(
                         seg_text,
                         seg_role,
@@ -241,73 +276,56 @@ class ContextCompressor:
                     slots.append(
                         {
                             "slot": slot,
-                            "segment_type": "compressed_recent_segment",
+                            "segment_type": "compressed_single_segment",
                             "role": "system",
-                            "content": f"[最近长段摘要#{slot}] {content}",
+                            "content": f"[压缩段#{slot}] {content}",
                             "source_keys": source_keys,
                             "source_timestamp": seg_ts,
                         }
                     )
-                else:
+                elif slot == 7:
+                    group_refs = segment_refs[6:10]
+                    if not group_refs:
+                        break
+                    group_data = [self._build_segment_text(platform, chat_id, r) for r in group_refs]
+                    group_texts = [t for t, c in group_data if t]
+                    group_counts = [c for t, c in group_data if t]
+                    if not group_texts:
+                        break
+                    total_group_messages = sum(group_counts)
+                    group_keys = [str(r.get("source_key", "")) for r in group_refs]
+                    last_ts = max(float(r.get("source_timestamp", seg_ts)) for r in group_refs)
+                    content = await self._summarize_group(
+                        group_texts,
+                        existing.get(slot),
+                        group_keys,
+                        min_chars=self._get_required_min_chars(total_group_messages),
+                    )
                     slots.append(
                         {
                             "slot": slot,
-                            "segment_type": "raw_recent_segment",
+                            "segment_type": "compressed_group_segments",
                             "role": "system",
-                            "content": f"[最近段#{slot}]\n{seg_text}",
-                            "source_keys": source_keys,
-                            "source_timestamp": seg_ts,
+                            "content": f"[合并摘要段7-10] {content}",
+                            "source_keys": group_keys,
+                            "source_timestamp": last_ts,
                         }
                     )
-            elif slot <= 6:
-                content = await self._summarize_single(
-                    seg_text,
-                    seg_role,
-                    existing.get(slot),
-                    source_keys,
-                    min_chars=self._get_required_min_chars(message_count),
-                )
-                slots.append(
-                    {
-                        "slot": slot,
-                        "segment_type": "compressed_single_segment",
-                        "role": "system",
-                        "content": f"[压缩段#{slot}] {content}",
-                        "source_keys": source_keys,
-                        "source_timestamp": seg_ts,
-                    }
-                )
-            elif slot == 7:
-                group_refs = segment_refs[6:10]
-                if not group_refs:
                     break
-                group_data = [self._build_segment_text(platform, chat_id, r) for r in group_refs]
-                group_texts = [t for t, c in group_data if t]
-                group_counts = [c for t, c in group_data if t]
-                if not group_texts:
-                    break
-                total_group_messages = sum(group_counts)
-                group_keys = [str(r.get("source_key", "")) for r in group_refs]
-                last_ts = max(float(r.get("source_timestamp", seg_ts)) for r in group_refs)
-                content = await self._summarize_group(
-                    group_texts,
-                    existing.get(slot),
-                    group_keys,
-                    min_chars=self._get_required_min_chars(total_group_messages),
-                )
-                slots.append(
-                    {
-                        "slot": slot,
-                        "segment_type": "compressed_group_segments",
-                        "role": "system",
-                        "content": f"[合并摘要段7-10] {content}",
-                        "source_keys": group_keys,
-                        "source_timestamp": last_ts,
-                    }
-                )
-                break
 
-        self._persist_segments(platform, chat_id, slots)
+            self._persist_segments(platform, chat_id, slots)
+            self._mark_refresh_success(platform, chat_id)
+        except Exception as e:
+            self._enqueue_refresh_retry(platform, chat_id, e)
+            raise
+
+    def _enqueue_refresh_retry(self, platform: str, chat_id: str, error: Exception) -> None:
+        if self.retry_callback:
+            self.retry_callback("context_refresh", platform, chat_id, None, str(error))
+
+    def _mark_refresh_success(self, platform: str, chat_id: str) -> None:
+        if self.success_callback:
+            self.success_callback("context_refresh", platform, chat_id, None)
 
     def _get_recent_segment_refs(self, platform: str, chat_id: str, limit: int = 10) -> List[Dict]:
         """获取最近对话段（含当前活跃段）引用，按最新在前返回。"""

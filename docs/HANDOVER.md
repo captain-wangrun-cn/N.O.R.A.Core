@@ -3,7 +3,38 @@
 - 目标：多平台智能体内核，包含 LLM 适配、工具/技能体系、成本追踪、记忆/RAG。
 - 当前状态：可运行，自测通过；已完成图片记忆链路（入库/检索/回查再分析）、`view_image` 工具增强、CLI 高危清理保护。
 
-## 近期关键改动（截至 2026-04-26）
+## 近期关键改动（截至 2026-04-27）
+
+### ♻️ 消息压缩失败持久化重试队列（方案 B）— 2026-04-27
+
+- 为消息级压缩、归档总结、对话段摘要、段压缩刷新新增统一的**持久化重试队列**：`compression_retry_queue`。
+- 压缩/总结请求失败时，不再只打日志等待“下次碰巧触发”，而是将失败任务落库，记录：
+   - `platform` / `chat_id`
+   - `task_type`（`compress` / `archive` / `session_summary` / `context_refresh`）
+   - `payload`
+   - `attempts`
+   - `next_retry_at`
+   - `last_error`
+   - `status`（`pending` / `dead`）
+- `MessageHistory` 新增后台补偿 worker：
+   - 启动时在事件循环中自动启动
+   - 周期扫描到期任务并补跑
+   - 成功后自动出队
+   - 达到最大尝试次数后标记为 `dead`，避免无限刷日志/刷 API
+- `ContextCompressor` 已接入统一回调：段压缩刷新失败也会进入同一套重试队列，而不是静默丢失。
+- 当前默认策略：基础延迟 60 秒，指数退避，最大 8 次，扫描间隔 300 秒。
+
+**涉及文件：**
+- `memory/message_history.py`
+- `memory/context_store.py`
+- `core/controller.py`
+- `tests/test_message_history_retry_queue.py`
+- `docs/architecture/message_history.md`
+- `docs/architecture/message-compression.md`
+
+**当前状态 / 注意：**
+- 已完成代码接入与静态检查。
+- 本地终端环境下 `pytest` 命令不可用（未识别），所以新增测试暂未在当前会话内实际执行通过。
 
 ### 🎛️ Nora 偏好设置 + Follow-up / Proactive 概率控制 — 2026-04-26
 

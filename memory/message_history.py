@@ -6,6 +6,7 @@ from zoneinfo import ZoneInfo
 from typing import List, Dict, Optional, Tuple, Any
 from pathlib import Path
 import logging
+from contextlib import suppress
 
 from workspace_config import get_workspace_manager
 from brain.prompts import render_template
@@ -45,6 +46,9 @@ class MessageHistory:
         mirror_db_path: Optional[str] = None,  # 原文镜像库（独立）
         context_db_path: Optional[str] = None,  # 压缩上下文库（独立）
     long_message_threshold: int = 1600,  # 判定“过长”后提前压缩的阈值，放宽减少过早截断
+    retry_base_delay_seconds: float = 60.0,
+    retry_max_attempts: int = 8,
+    retry_scan_interval_seconds: float = 300.0,
     ):
         self.db_path = Path(db_path) if db_path else get_default_message_history_db()
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
@@ -66,6 +70,11 @@ class MessageHistory:
         self._init_db()
         self._summarizer = None  # 延迟加载
         self._last_compress_log_count: Dict[Tuple[str, str], int] = {}
+        self.retry_base_delay_seconds = max(5.0, float(retry_base_delay_seconds))
+        self.retry_max_attempts = max(1, int(retry_max_attempts))
+        self.retry_scan_interval_seconds = max(10.0, float(retry_scan_interval_seconds))
+        self._retry_worker_task: Optional[asyncio.Task] = None
+        self._retry_worker_started = False
 
         # 独立的原文镜像库 & 压缩上下文库
         self.message_log = MessageLog(db_path=mirror_db_path)
@@ -74,7 +83,11 @@ class MessageHistory:
             db_path=context_db_path,
             long_message_threshold=long_message_threshold,
             history_db_path=str(self.db_path),
+            retry_callback=self._enqueue_retry,
+            success_callback=self._mark_retry_success,
         )
+
+        self.start_retry_worker()
     
     def _init_db(self):
         """初始化数据库表"""
@@ -154,6 +167,26 @@ class MessageHistory:
         cursor.execute("""
             CREATE INDEX IF NOT EXISTS idx_sessions_chat 
             ON conversation_sessions(platform, chat_id, started_at)
+        """)
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS compression_retry_queue (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                platform TEXT NOT NULL,
+                chat_id TEXT NOT NULL,
+                task_type TEXT NOT NULL,
+                payload TEXT,
+                attempts INTEGER DEFAULT 0,
+                next_retry_at REAL NOT NULL,
+                last_error TEXT,
+                status TEXT DEFAULT 'pending',
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                UNIQUE(platform, chat_id, task_type, payload)
+            )
+        """)
+        cursor.execute("""
+            CREATE INDEX IF NOT EXISTS idx_retry_queue_due
+            ON compression_retry_queue(status, next_retry_at)
         """)
         
         # --- 数据库迁移：为旧数据库添加新字段 ---
@@ -322,6 +355,197 @@ class MessageHistory:
                 asyncio.run(coro)
             except Exception as e:  # pragma: no cover
                 logger.error(f"后台任务执行失败: {e}")
+
+    def start_retry_worker(self):
+        """启动压缩失败补偿 worker；若当前无事件循环则在首次可用时再启动。"""
+        if self._retry_worker_started:
+            return
+        self._retry_worker_started = True
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            logger.debug("当前无事件循环，压缩重试 worker 将在后续异步调用时启动")
+            self._retry_worker_started = False
+            return
+        self._retry_worker_task = loop.create_task(self._retry_worker_loop())
+
+    async def stop_retry_worker(self):
+        """停止后台重试 worker。"""
+        task = self._retry_worker_task
+        self._retry_worker_task = None
+        self._retry_worker_started = False
+        if task:
+            task.cancel()
+            with suppress(asyncio.CancelledError):
+                await task
+
+    async def _retry_worker_loop(self):
+        """周期性扫描并执行到期的压缩重试任务。"""
+        logger.info("压缩重试 worker 已启动")
+        try:
+            while True:
+                try:
+                    await self.process_pending_retries()
+                except Exception:
+                    logger.error("处理压缩重试任务失败", exc_info=True)
+                await asyncio.sleep(self.retry_scan_interval_seconds)
+        except asyncio.CancelledError:
+            logger.debug("压缩重试 worker 已停止")
+            raise
+
+    def _serialize_retry_payload(self, payload: Optional[Dict[str, Any]]) -> str:
+        normalized = payload or {}
+        return json.dumps(normalized, ensure_ascii=False, sort_keys=True)
+
+    def _deserialize_retry_payload(self, payload: Optional[str]) -> Dict[str, Any]:
+        if not payload:
+            return {}
+        try:
+            data = json.loads(payload)
+            return data if isinstance(data, dict) else {}
+        except Exception:
+            return {}
+
+    def _compute_next_retry_at(self, attempts: int) -> float:
+        delay = self.retry_base_delay_seconds * (2 ** max(0, attempts - 1))
+        capped_delay = min(delay, 6 * 60 * 60)
+        return datetime.now().timestamp() + capped_delay
+
+    def _enqueue_retry(
+        self,
+        task_type: str,
+        platform: str,
+        chat_id: str,
+        payload: Optional[Dict[str, Any]] = None,
+        error: Optional[str] = None,
+    ) -> None:
+        payload_json = self._serialize_retry_payload(payload)
+        conn = sqlite3.connect(str(self.db_path))
+        cursor = conn.cursor()
+        try:
+            cursor.execute(
+                """
+                SELECT id, attempts FROM compression_retry_queue
+                WHERE platform = ? AND chat_id = ? AND task_type = ? AND payload = ?
+                """,
+                (platform, chat_id, task_type, payload_json),
+            )
+            row = cursor.fetchone()
+            now_ts = datetime.now().timestamp()
+            if row:
+                retry_id, attempts = int(row[0]), int(row[1] or 0) + 1
+                status = "dead" if attempts >= self.retry_max_attempts else "pending"
+                next_retry_at = self._compute_next_retry_at(attempts)
+                cursor.execute(
+                    """
+                    UPDATE compression_retry_queue
+                    SET attempts = ?, next_retry_at = ?, last_error = ?, status = ?, updated_at = CURRENT_TIMESTAMP
+                    WHERE id = ?
+                    """,
+                    (attempts, next_retry_at, error, status, retry_id),
+                )
+            else:
+                attempts = 1
+                status = "dead" if attempts >= self.retry_max_attempts else "pending"
+                next_retry_at = now_ts if status == "dead" else self._compute_next_retry_at(attempts)
+                cursor.execute(
+                    """
+                    INSERT INTO compression_retry_queue
+                        (platform, chat_id, task_type, payload, attempts, next_retry_at, last_error, status)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (platform, chat_id, task_type, payload_json, attempts, next_retry_at, error, status),
+                )
+            conn.commit()
+        finally:
+            conn.close()
+
+    def _mark_retry_success(
+        self,
+        task_type: str,
+        platform: str,
+        chat_id: str,
+        payload: Optional[Dict[str, Any]] = None,
+    ) -> None:
+        payload_json = self._serialize_retry_payload(payload)
+        conn = sqlite3.connect(str(self.db_path))
+        cursor = conn.cursor()
+        try:
+            cursor.execute(
+                """
+                DELETE FROM compression_retry_queue
+                WHERE platform = ? AND chat_id = ? AND task_type = ? AND payload = ?
+                """,
+                (platform, chat_id, task_type, payload_json),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+    def get_retry_queue_status(self) -> List[Dict[str, Any]]:
+        """返回当前压缩重试队列状态，便于调试或测试。"""
+        conn = sqlite3.connect(str(self.db_path))
+        conn.row_factory = sqlite3.Row
+        cursor = conn.cursor()
+        cursor.execute(
+            """
+            SELECT * FROM compression_retry_queue
+            ORDER BY next_retry_at ASC, id ASC
+            """
+        )
+        rows = [dict(row) for row in cursor.fetchall()]
+        conn.close()
+        return rows
+
+    async def process_pending_retries(self) -> int:
+        """执行所有已到期的重试任务，返回本轮处理数量。"""
+        conn = sqlite3.connect(str(self.db_path))
+        conn.row_factory = sqlite3.Row
+        cursor = conn.cursor()
+        cursor.execute(
+            """
+            SELECT * FROM compression_retry_queue
+            WHERE status = 'pending' AND next_retry_at <= ?
+            ORDER BY next_retry_at ASC, id ASC
+            """,
+            (datetime.now().timestamp(),),
+        )
+        due_rows = [dict(row) for row in cursor.fetchall()]
+        conn.close()
+
+        processed = 0
+        for row in due_rows:
+            payload = self._deserialize_retry_payload(row.get("payload"))
+            await self._execute_retry_task(
+                task_type=row["task_type"],
+                platform=row["platform"],
+                chat_id=row["chat_id"],
+                payload=payload,
+            )
+            processed += 1
+        return processed
+
+    async def _execute_retry_task(
+        self,
+        task_type: str,
+        platform: str,
+        chat_id: str,
+        payload: Optional[Dict[str, Any]] = None,
+    ) -> None:
+        payload = payload or {}
+        if task_type == "compress":
+            await self._perform_compression(platform, chat_id)
+        elif task_type == "archive":
+            await self._create_archive_summary(platform, chat_id)
+        elif task_type == "session_summary":
+            session_id = int(payload.get("session_id", 0) or 0)
+            if session_id > 0:
+                await self._generate_session_summary(platform, chat_id, session_id)
+        elif task_type == "context_refresh":
+            if self.context_compressor:
+                await self.context_compressor.refresh_context(platform, chat_id)
+        else:
+            logger.warning("未知压缩重试任务类型: %s", task_type)
     
     def get_context_messages(
         self,
@@ -530,6 +754,7 @@ class MessageHistory:
     
     async def _perform_compression(self, platform: str, chat_id: str):
         """执行消息压缩"""
+        self.start_retry_worker()
         if self._summarizer is None:
             from brain.llm import get_llm_client
             self._summarizer = get_llm_client(model_alias="summary")
@@ -586,17 +811,20 @@ class MessageHistory:
             """, (start_id, end_id, platform, chat_id))
             
             conn.commit()
+            self._mark_retry_success("compress", platform, chat_id)
             logger.info(f"[{platform}/{chat_id}] 压缩完成: {len(messages_to_compress)} 条消息 -> 1 条总结")
         
         except Exception as e:
             logger.error(f"消息压缩失败: {e}", exc_info=True)
             conn.rollback()
+            self._enqueue_retry("compress", platform, chat_id, error=str(e))
         
         finally:
             conn.close()
     
     async def _create_archive_summary(self, platform: str, chat_id: str):
         """创建归档总结（二级压缩）"""
+        self.start_retry_worker()
         if self._summarizer is None:
             from brain.llm import get_llm_client
             self._summarizer = get_llm_client(model_alias="summary")
@@ -654,11 +882,13 @@ class MessageHistory:
             [platform, chat_id] + [s["id"] for s in level1_summaries])
             
             conn.commit()
+            self._mark_retry_success("archive", platform, chat_id)
             logger.info(f"[{platform}/{chat_id}] 创建归档总结: {len(level1_summaries)} 段总结 -> 1 条归档")
         
         except Exception as e:
             logger.error(f"归档总结失败: {e}", exc_info=True)
             conn.rollback()
+            self._enqueue_retry("archive", platform, chat_id, error=str(e))
         
         finally:
             conn.close()
@@ -769,6 +999,7 @@ class MessageHistory:
 
     async def _generate_session_summary(self, platform: str, chat_id: str, session_id: int):
         """异步为已关闭的对话段落生成摘要。"""
+        self.start_retry_worker()
         try:
             if self._summarizer is None:
                 from brain.llm import get_llm_client
@@ -813,10 +1044,24 @@ class MessageHistory:
             conn.commit()
             conn.close()
 
+            self._mark_retry_success(
+                "session_summary",
+                platform,
+                chat_id,
+                payload={"session_id": int(session_id)},
+            )
+
             logger.info(f"[{platform}/{chat_id}] 段落 #{session_id} 摘要已生成 ({len(summary)} chars)")
 
         except Exception as e:
             logger.error(f"[{platform}/{chat_id}] 生成段落摘要失败: {e}", exc_info=True)
+            self._enqueue_retry(
+                "session_summary",
+                platform,
+                chat_id,
+                payload={"session_id": int(session_id)},
+                error=str(e),
+            )
 
     def get_session_messages(
         self,

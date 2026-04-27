@@ -160,6 +160,22 @@ AI 进入 SEMI_ONLINE 状态
 | trigger_type  | TEXT                | 触发来源: 'user', 'proactive', 'alarm'         |
 | metadata      | TEXT                | JSON 格式额外信息                              |
 
+### compression_retry_queue 表（压缩失败重试队列）
+
+| 字段            | 类型                | 说明 |
+| --------------- | ------------------- | ---- |
+| id              | INTEGER PRIMARY KEY | 自增主键 |
+| platform        | TEXT                | 平台标识 |
+| chat_id         | TEXT                | 聊天 ID |
+| task_type       | TEXT                | 任务类型：`compress` / `archive` / `session_summary` / `context_refresh` |
+| payload         | TEXT                | JSON 参数；例如 `session_summary` 会记录 `session_id` |
+| attempts        | INTEGER             | 当前已尝试次数 |
+| next_retry_at   | REAL                | 下一次补偿执行时间戳 |
+| last_error      | TEXT                | 最近一次失败原因 |
+| status          | TEXT                | `pending` / `dead` |
+| created_at      | TIMESTAMP           | 创建时间 |
+| updated_at      | TIMESTAMP           | 最近更新时间 |
+
 ## 🔄 压缩算法
 
 ### 一级压缩 (Level 1 Compression，兼容回退路径)
@@ -186,6 +202,55 @@ AI 进入 SEMI_ONLINE 状态
 4. 保存归档总结到 `summaries` 表 (level=3)
 5. 删除已归档的一级总结
 
+## ♻️ 压缩失败补偿机制（方案 B）
+
+### 目标
+
+避免“压缩请求失败后只能等用户再说一句，才有机会顺带重试”的问题。
+
+现在的策略是：**失败任务持久化落库 + 后台 worker 周期补偿**。
+
+### 覆盖的失败任务类型
+
+1. `compress`：旧消息级一级压缩失败
+2. `archive`：旧消息级归档总结失败
+3. `session_summary`：对话段摘要生成失败
+4. `context_refresh`：段级滑动压缩刷新失败
+
+### 失败时会发生什么
+
+当上述任务任一失败时：
+
+1. 在 `compression_retry_queue` 中插入或更新一条记录
+2. `attempts += 1`
+3. 根据指数退避计算 `next_retry_at`
+4. 若达到最大尝试次数，则标记为 `dead`
+
+### 成功时会发生什么
+
+对应任务成功后，会自动删除该条重试记录（出队）。
+
+### 后台 worker 行为
+
+- `MessageHistory` 在有事件循环时会启动后台 worker
+- worker 按固定间隔扫描 `compression_retry_queue`
+- 所有 `status='pending'` 且 `next_retry_at <= now` 的任务都会被重新执行
+- 因为重试记录在 `message_history.db` 中持久化，所以**重启后仍可继续补偿**
+
+### 退避策略
+
+默认：
+
+- 基础延迟：60 秒
+- 退避方式：指数退避
+- 最大尝试次数：8 次
+- 扫描间隔：300 秒
+
+### 设计取舍
+
+- 优点：失败不会丢，重启后能续跑，不依赖“下一条消息碰巧触发”
+- 缺点：增加一张表和一个后台任务，且 `dead` 任务需要人工关注日志或后续补充管理入口
+
 ## 🔍 上下文构建逻辑
 
 获取上下文时的消息优先级和顺序:
@@ -208,6 +273,14 @@ AI 进入 SEMI_ONLINE 状态
 | `compress_ratio`    | 10     | 每N条消息压缩为1条总结 |
 | `archive_threshold` | 500    | 超过此数量创建归档总结 |
 | `long_message_threshold` | 1200 | 段级压缩中判定“过长”的字符阈值 |
+
+代码中还存在以下内部默认值（当前未暴露到 `config.yml`）：
+
+| 参数 | 默认值 | 说明 |
+|---|---:|---|
+| `retry_base_delay_seconds` | `60` | 重试基础延迟 |
+| `retry_max_attempts` | `8` | 单任务最大重试次数 |
+| `retry_scan_interval_seconds` | `300` | 后台扫描待补偿任务的间隔 |
 
 同时需要在 `llm.models` 下配置 `summary` 模型（推荐使用快速模型以降低成本）。
 
@@ -279,6 +352,13 @@ AI 进入 SEMI_ONLINE 状态
 - 使用 `pin_message()` 标记重要消息
 - 增大 `raw_window`
 - 检查总结提示词是否强调保留关键信息
+
+### 问题: 压缩一直没补成功
+
+- 检查 `compression_retry_queue` 中是否已有对应任务且状态变为 `dead`
+- 检查 `summary` 模型是否持续不可用
+- 检查后台 worker 是否已在运行（需有事件循环）
+- 若是 `context_refresh`，同时检查 `context_compression.db` 是否可写
 
 ---
 

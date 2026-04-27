@@ -206,6 +206,7 @@ class NoraController(
             logger.info("Trigger 系统已禁用")
         
         self.tool_manager = ToolManager(adapter, image_store=self.image_store, scheduler=self.scheduler)
+        self.message_history.start_retry_worker()
         
         logger.info(
             f"NoraController 已初始化。RAG: {'Online' if self.rag.enabled else 'Offline'}, "
