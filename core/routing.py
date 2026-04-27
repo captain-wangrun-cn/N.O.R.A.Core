@@ -122,6 +122,11 @@ def parse_front_brain_response(response_text: str) -> dict:
     if needs_backend and not task_instruction:
         needs_backend = False
 
+    # SEMI_ONLINE 与 NEED_FOLLOW 语义互斥：进入半在线就不应再触发对话延续。
+    # prompt 已声明互斥，但模型偶尔会同时输出，这里做兜底。
+    if force_semi_online and need_follow:
+        need_follow = False
+
     # 清理标记，生成用户可见文本
     user_reply = response_text
     user_reply = user_reply.replace(_BACKEND_SIGNAL, "")
@@ -186,6 +191,13 @@ def parse_front_brain_review(response_text: str) -> dict:
     task_match = _TASK_INSTRUCTION_PATTERN.search(response_text)
     if task_match:
         task_instruction = task_match.group(1).strip()
+
+    # 互斥兜底：进入半在线就不应再触发 follow-up，也不应继续后脑追跑。
+    if force_semi_online:
+        if need_follow:
+            need_follow = False
+        if has_continue:
+            has_continue = False
 
     # 清理标记，生成用户可见文本
     user_reply = response_text

@@ -5,6 +5,34 @@
 
 ## 近期关键改动（截至 2026-04-27）
 
+### 🌙 SEMI_ONLINE 自觉性提升 — 2026-04-27
+
+**背景**：用户反馈 Nora 进入 `[SEMI_ONLINE]` 的自觉性不高。检查发现 prompt 里 SEMI_ONLINE 段位置靠后、夹在多条并列规则里，且示例存在自相矛盾（"晚安"示例没带 `[SEMI_ONLINE]` 与上方"必须加"规则冲突），同时审查阶段缺"任务完成默认收尾"的明确表述，路由层也没做 SEMI_ONLINE 与 NEED_FOLLOW 的互斥兜底。
+
+**修复：**
+
+1. **`brain/templates/front_brain.jinja`**
+   - 在"你的职责"段新增第 3 条核心原则："不黏人，知道何时安静"——把 SEMI_ONLINE 提升为行为基调而非细则。
+   - 重写 SEMI_ONLINE 段：开头先点明"默认就该收尾，不该追问"；分四类清单（必须用 / 倾向用 / 不要用 / 使用约束），明确写出"任务交给后脑后默认收尾""仅承接消散应收尾"等场景。
+   - 修复矛盾示例："晚安" 示例补上 `[SEMI_ONLINE]`；新增"任务交给后脑后用户回承接语 → SEMI_ONLINE"示例。
+
+2. **`brain/templates/front_brain_review.jinja`**
+   - 重写"立即进入半在线"段，开头明示默认行为；强调"任务完成且无需追问 → 直接 `[TASK_DONE][SEMI_ONLINE]`"，避免任务完成后还触发 follow-up。
+   - 明确与 `[NEED_FOLLOW]` 互斥、可与 `[NO_REPLY]` / `[TASK_DONE]` 组合。
+
+3. **`core/routing.py`**
+   - 在 `parse_front_brain_response` 与 `parse_front_brain_review` 中加互斥兜底：当 `force_semi_online=True` 时，强制把 `need_follow` 与 `has_continue` 压回 False，避免模型偶发同时输出冲突标记导致逻辑错乱。
+
+**验证：**
+- `python -m py_compile core/routing.py` 通过。
+- 单元手测互斥兜底：`[NEED_FOLLOW][SEMI_ONLINE]` → need_follow=False, force_semi_online=True；`action: continue [SEMI_ONLINE]` → action 回退为 chat 而非 continue。
+- `front_brain.jinja` / `front_brain_review.jinja` 渲染正常，关键短语 "不黏人，知道何时安静" / "默认就该收尾" / "[TASK_DONE][SEMI_ONLINE]" / "晚安哦 主人～好梦 (˘ω˘)♡ [SEMI_ONLINE]" 都在。
+
+**涉及文件：**
+- `brain/templates/front_brain.jinja`
+- `brain/templates/front_brain_review.jinja`
+- `core/routing.py`
+
 ### 🛡️ 后脑忙碌时的"重复任务"防护 — 2026-04-27
 
 **背景**：用户反馈，第一条消息（如 "明天早上英语..."）触发后脑后，第二条简单承接（如 "嗯嗯"）在后脑仍忙碌时，被前脑误判为 `[NEED_BACKEND]`，并通过 `_auto_confirm_backend_enqueue` 入队，导致后脑重复执行同一组工具（read_file MEMORY.md 等），白白消耗 token 与时间。
