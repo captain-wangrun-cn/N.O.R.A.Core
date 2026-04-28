@@ -15,6 +15,7 @@ status - 查看状态
 stop - 停止所有任务
 undo - 撤销上一条消息
 model - 选择模型
+nora_prefs - 修改nora偏好
 reload_models - 热应用选定模型
 regenerate_proactive - 覆盖重建日程系统
 schedule_today - 查看今日日程计划
