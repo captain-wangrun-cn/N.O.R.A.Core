@@ -370,7 +370,10 @@ class EmailTrigger(BaseTrigger):
         for text, charset in parts:
             if isinstance(text, bytes):
                 enc = charset or "utf-8"
-                out.append(text.decode(enc, errors="ignore"))
+                try:
+                    out.append(text.decode(enc, errors="ignore"))
+                except (LookupError, UnicodeDecodeError):
+                    out.append(text.decode("utf-8", errors="ignore"))
             else:
                 out.append(text)
         return "".join(out).strip()
