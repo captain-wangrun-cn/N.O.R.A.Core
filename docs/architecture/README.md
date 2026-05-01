@@ -185,8 +185,6 @@ flowchart TB
   - 模型别名、provider 绑定、前后脑选模与故障回退策略。
 - **[消息抢占机制 (Preemption)](./preemption.md)**
   - _Legacy Context_: 早期打断逻辑的设计思路，现已整合进双进程架构中。
-- **[时间戳插入机制 (Timestamp Insertion)](./timestamp-insertion.md)**
-  - 统一消息时间戳注入策略与上下文时间语义。
 
 ### 🧩 技能与执行 (Skills & Execution)
 
@@ -233,8 +231,6 @@ flowchart TB
   - 结构化日志设计，区分用户可见与调试信息。
 - **[工具循环控制 (Tool Loop Detection)](./tool-loop.md)**
   - 防止 AI 陷入死循环的保护机制。
-- **CLI 清理策略更新（RAG 数据）**
-  - `clean_qdrant` / `clean_mongodb` 已改为清空所有 collections，并加入强警告与二次确认（`DELETE ALL`）。
 
 ## 核心理念
 

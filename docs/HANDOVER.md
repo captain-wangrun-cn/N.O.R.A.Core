@@ -3,6 +3,44 @@
 - 目标：多平台智能体内核，包含 LLM 适配、工具/技能体系、成本追踪、记忆/RAG。
 - 当前状态：可运行，自测通过；已完成图片记忆链路（入库/检索/回查再分析）、`view_image` 工具增强、CLI 高危清理保护。
 
+## 近期关键改动（截至 2026-05-02）
+
+### 🔇 NO_REPLY 升级为常规决策 + SEMI_ONLINE 自觉性再加固 — 2026-05-02
+
+**背景**：用户反馈 ① 后脑工作完成后的前脑审查应基于上下文判断"是否值得打扰用户"，并允许直接 `[NO_REPLY]` 静默收尾；② Nora 应当在任意合适场景主动使用 `[NO_REPLY]`，而不仅限于"内部备注/任务指示"；③ `[SEMI_ONLINE]` 主动输出的自觉性仍偏弱。
+
+**修复（纯 prompt 调整，未改动 Python 逻辑——routing.py 已支持解析）：**
+
+1. **`brain/templates/front_brain_review.jinja`**
+   - 在"你的职责"段新增第 2 条核心：**"基于上下文判断是否值得打扰用户"**——把它提升为审查阶段的核心决策项，而不是兜底。
+   - 新增 **🌟 上下文驱动的"打扰判断"** 整段：列出"倾向 `[NO_REPLY]` 的典型场景"（任务结果对用户无感知价值 / 结果已被前脑预告 / 用户已离开 / 用户消息只是承接 / 失败但用户没追问 / 重复信息）、"仍应该发声的典型场景"，以及"判断流程（短版）"四步法。
+   - 把"决策信号 / 可选：不向用户回复"重写为 **🔇 主要决策：`[NO_REPLY]` — 静默不打扰**，并明确"这是常用决策，不是兜底"。
+   - SEMI_ONLINE 段加上"它是你的主动权——只要审查判断对话该收尾了，直接加上即可，不需要等用户开口"。
+   - 新增四个示例：静默写入 USER 偏好、SECRET 内部吐槽、SCHEDULE 后台同步、用户已离开时的失败结果——全部 `[NO_REPLY][TASK_DONE][SEMI_ONLINE]` 收尾。
+
+2. **`brain/templates/front_brain.jinja`**
+   - "你的职责"第 3 条"不黏人，知道何时安静"扩写为**每轮发言前的内部自检三问**（对话是否消散 → SEMI_ONLINE / 内容是否噪音 → NO_REPLY / 用户是否离开 → SEMI_ONLINE），强调"输出 SEMI_ONLINE 不需要任何特殊触发条件"。
+   - 重写"🚨 优先规则：`[NO_REPLY]` 静默工作"段：明确"这是常用工具不是兜底"，列举 7 类应该使用的场景（包含"任何你判断'此刻发声 = 噪音'的时刻"），并给出与 `[NEED_BACKEND]` / `[SEMI_ONLINE]` 的组合用法。
+   - SEMI_ONLINE 段开头加上"它是你的主动权"措辞。
+   - 删除原来重复的"### 可选：不向用户回复"段（已被优先规则段覆盖）。
+   - 新增三个示例：用户偏好静默落盘 `[NO_REPLY][NEED_BACKEND]`、用户长时间沉默后简单回应 → `[NO_REPLY][SEMI_ONLINE]`。
+
+**未改动**：
+- `core/routing.py`：已具备 `[NO_REPLY]` / `[SEMI_ONLINE]` 解析与互斥兜底（2026-04-27 已完成），本轮无需修改。
+- `core/polling.py`：已读取 `should_reply`/`force_semi_online` 字段，本轮无需修改。
+- 其他 Python 逻辑：无变更。
+
+**验证**：
+- `front_brain.jinja` system block 渲染：长度 6415，关键短语 `NO_REPLY` / `SEMI_ONLINE` / `该闭嘴` / `主动权` 全部命中。
+- `front_brain_review.jinja` system block 渲染：长度 4810，关键短语 `NO_REPLY` / `上下文驱动` / `主动权` / `静默后台` 全部命中。
+- 当前环境 pytest 未安装，但本轮纯文本/模板修改，不影响既有解析与流程。
+
+**涉及文件**：
+- `brain/templates/front_brain.jinja`
+- `brain/templates/front_brain_review.jinja`
+
+---
+
 ## 近期关键改动（截至 2026-04-27）
 
 ### 🌙 SEMI_ONLINE 自觉性提升 — 2026-04-27
