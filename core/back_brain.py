@@ -172,9 +172,8 @@ class BackBrainMixin:
 
         response_platform_ids: List[str] = []
 
-        # 根据输入类型选择模型：图片消息优先走 image 模型，其余走 coder 模型
-        force_image_model_until_crop_done = bool(context.get("use_image_model", False))
-        base_model_alias = "image" if (multimodal_images or force_image_model_until_crop_done) else "coder"
+        # 根据输入类型选择模型：只有当前轮真正携带图片字节时走 image 模型，其余走 coder 模型
+        base_model_alias = "image" if multimodal_images else "coder"
         active_llm = self.image_llm if base_model_alias == "image" else self.coder_llm
 
         try:
@@ -389,8 +388,6 @@ class BackBrainMixin:
             )
             # 工具回查图片（view_image return_image=true）注入到下一轮多模态输入
             pending_tool_multimodal_images: List[Dict[str, Any]] = []
-            # 若上游要求强制使用图片模型，保持标记直到 crop_image_for_llm 首轮输出
-            force_image_model_until_crop_done = bool(force_image_model_until_crop_done)
             in_polling_mode = context.get("_in_polling_loop", False)
             no_reply = context.get("no_reply", False)
             # 记录最后一次 image 回合的原始输出，便于检测空输出/标签结构异常
@@ -409,11 +406,7 @@ class BackBrainMixin:
                 await self._send_debug(chat_id, f"💭 开始第 {current_turn}/{MAX_TURNS} 轮推理...")
                 
                 turn_multimodal_images = multimodal_images if current_turn == 1 else pending_tool_multimodal_images
-                # 如果上游工具要求使用 image 模型，则强制切换（直到 crop 轮返回首个响应后清除）
-                if force_image_model_until_crop_done:
-                    turn_model_alias = "image"
-                else:
-                    turn_model_alias = "image" if turn_multimodal_images else base_model_alias
+                turn_model_alias = "image" if turn_multimodal_images else base_model_alias
                 turn_llm = self.image_llm if turn_model_alias == "image" else self.coder_llm
                 last_turn_model_alias = turn_model_alias
                 last_turn_llm = turn_llm
@@ -421,7 +414,15 @@ class BackBrainMixin:
                 # 构造本轮 user_prompt：工具返回图片时追加提示（这些是回查的旧图，不要生成 IMAGE_TAGS）
                 turn_user_prompt = full_user_prompt if current_turn == 1 else " (Continue processing tool outputs...)"
                 if current_turn > 1 and turn_multimodal_images and any(ti.get("from_tool") for ti in turn_multimodal_images):
-                    turn_user_prompt += "\n\n（注意：以下图片是通过 view_image 工具回查的已有图片，**不要**生成 [IMAGE_TAGS] 标签，直接分析图片内容即可。）"
+                    tool_image_question = ""
+                    for ti in turn_multimodal_images:
+                        if ti.get("from_tool") and str(ti.get("question", "")).strip():
+                            tool_image_question = str(ti.get("question", "")).strip()
+                            break
+                    turn_user_prompt += "\n\n（注意：以下图片是通过 view_image 工具回查的已有图片，**不要**生成 [IMAGE_TAGS] 标签，直接分析图片内容即可。"
+                    if tool_image_question:
+                        turn_user_prompt += f"请只围绕这个问题观察并回答：{tool_image_question}"
+                    turn_user_prompt += "）"
                 stream = self._chat_stream_wrapper(
                     turn_llm,
                     chat_id,
@@ -688,28 +689,12 @@ class BackBrainMixin:
                             if tool_images:
                                 for ti in tool_images:
                                     ti["from_tool"] = True
+                                    if tool_name == "view_image" and str(tool_args.get("question", "")).strip():
+                                        ti["question"] = str(tool_args.get("question", "")).strip()
                                 pending_tool_multimodal_images = tool_images
                                 logger.info(f"[{chat_id}] {tool_name} 返回 {len(tool_images)} 张图片，下一轮切换 image 模型进行分析。")
                         except Exception:
                             logger.warning(f"[{chat_id}] 解析 {tool_name} 返回图片失败，已跳过多模态注入。", exc_info=True)
-
-                    # 如果工具要求强制使用 image 模型，则标记，直到 crop_image_for_llm 第一轮输出后清除
-                    if tool_name == "view_image" and isinstance(tool_args, dict) and bool(tool_args.get("use_image_model", False)):
-                        force_image_model_until_crop_done = True
-                        # 如果返回了 MediaTag，已在上方提取；若未提取到但有 file_path，可直接注入
-                        if not pending_tool_multimodal_images and isinstance(tool_result, str):
-                            try:
-                                _, inferred_images = extract_image_payloads(tool_result)
-                                if inferred_images:
-                                    for ti in inferred_images:
-                                        ti["from_tool"] = True
-                                    pending_tool_multimodal_images = inferred_images
-                            except Exception:
-                                logger.debug(f"[{chat_id}] use_image_model 标记下未能注入图片，多模态输入保持为空。", exc_info=True)
-
-                    # 在 crop_image_for_llm 回合的首个文本输出后，解除强制 image 模型
-                    if force_image_model_until_crop_done and tool_name == "crop_image_for_llm":
-                        force_image_model_until_crop_done = False
                     status.update("处理结果", f"{tool_name} 执行完毕，正在分析结果...")
                     # --- 抢占检查点：工具执行后检查取消 ---
                     await asyncio.sleep(0)

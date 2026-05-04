@@ -30,7 +30,7 @@ TOOL_INTROS = {
     "list_dir": "列出目录内容，查看文件和子目录，适合确认路径。",
     "get_available_skills": "列出 workspace/skills 下当前可用技能清单，便于选择技能。",
     "exec_command": "执行受限的系统命令，作为无法用高层工具时的兜底；默认工作目录为 workspace 根目录。",
-    "view_image": "仅用于检索用户之前发送给 AI 的历史图片（图片记忆库），支持标签语义与 OCR 文本模糊搜索，不用于搜索或生成新图。",
+    "view_image": "读取本地图片或检索用户之前发送给 AI 的历史图片；可用 question 参数指定希望图片模型围绕图片回答的问题。",
     "crop_image_for_llm": "裁剪图片以便模型分析，用户要求仔细观察图片某个部分时可调用。",
     "report_progress": "向用户发送阶段性进度汇报，适合长任务中途更新。",
     "set_alarm": "设置提醒或倒计时闹钟，适合提醒/日程。",
@@ -965,12 +965,12 @@ class ToolManager:
         image_id: str = "",
         keyword: str = "",
         text_query: str = "",
+        question: str = "",
         start_time: str = "",
         end_time: str = "",
         user_id: str = "",
         limit: int = 10,
         return_image: bool = True,
-        use_image_model: bool = False,
         local_path: str = "",
     ) -> str:
         """
@@ -979,27 +979,22 @@ class ToolManager:
         2. By keyword: semantic/text search on image tags (e.g. '猫咪', 'sunset beach')
         3. By text_query: fuzzy search on OCR text extracted from images (e.g. 'Hello World', '购物清单'). Supports search-engine-like fuzzy matching — partial matches, case-insensitive, multi-keyword AND logic.
         4. By time range: filter by Unix timestamp (start_time/end_time)
-        5. If no parameters given: returns the most recent images.
+        5. By local_path: read a local image directly (workspace-relative or absolute) and return a MediaTag for image-model analysis.
+        6. If no parameters given: returns the most recent images.
         text_query and keyword can be used together for combined results.
         :param image_id: Exact image ID to look up (e.g. 'img_a1b2c3d4').
         :param keyword: Keyword or description for semantic/text search on image tags.
         :param text_query: Search text content (OCR) extracted from images. Supports fuzzy matching, case-insensitive, multi-keyword AND logic (space-separated). E.g. 'error message', '购物 清单'.
+    :param question: Optional question/prompt for the next image-model round. Use this when you need the image model to answer a specific question about the returned image(s). If provided, return_image is forced to true.
         :param start_time: Start of time range as Unix timestamp string (e.g. '1709856000').
         :param end_time: End of time range as Unix timestamp string (e.g. '1709942400').
         :param user_id: Filter by user ID. If empty, searches all users.
         :param limit: Maximum number of results (1-50, default 10).
         :param return_image: When true, the tool returns image references via `[image: abs_path]`
             MediaTags，供多模态管线自动读取图片内容。Default: True.
-        :param use_image_model: When true, downstream should switch to the image model
-            for subsequent reasoning until a crop_image_for_llm round finishes.
         :param local_path: Optional local file path to view directly (workspace-relative or absolute).
             When provided, bypasses DB search and returns the file with MediaTag if exists.
         """
-        if not self.image_store:
-            return "Error: Image memory system is not available (ImageStore not initialized)."
-        if not self.image_store.enabled:
-            return "Error: Image memory system is offline (MongoDB/Qdrant/Embedding not ready)."
-
         try:
             limit = max(1, min(int(limit), 50))
             s_time = float(start_time) if start_time else None
@@ -1016,10 +1011,15 @@ class ToolManager:
                 "image_id": image_id or os.path.basename(resolved_local),
                 "file_path": resolved_local,
                 "tags": keyword or "(local file)",
+                "ocr_text": text_query or "",
                 "user_id": user_id or "",
                 "timestamp": time.time(),
             }]
         else:
+            if not self.image_store:
+                return "Error: Image memory system is not available (ImageStore not initialized). Use local_path to view a local image directly."
+            if not self.image_store.enabled:
+                return "Error: Image memory system is offline (MongoDB/Qdrant/Embedding not ready). Use local_path to view a local image directly."
             results = self.image_store.search_images(
                 image_id=image_id,
                 keyword=keyword,
@@ -1033,16 +1033,16 @@ class ToolManager:
         if not results:
             return "No images found matching the criteria."
 
-        # 如果开启 use_image_model，强制 return_image 为 True 以便注入 MediaTag
-        if use_image_model:
+        # 如果提出了具体视觉问题，必须返回 MediaTag，供下一轮 image 模型读取真实图片。
+        if question:
             return_image = True
 
         # Format results for LLM consumption
         output_lines = [f"Found {len(results)} image(s):\n"]
         if return_image:
             output_lines.append("[Mode] return_image=true: output includes MediaTag lines [image: abs_path] for downstream multimodal ingestion.\n")
-        if use_image_model:
-            output_lines.append("[Hint] use_image_model=true: downstream should switch to the image model until crop_image_for_llm completes.\n")
+        if question:
+            output_lines.append(f"[Question] {question}\n")
         for i, img in enumerate(results, 1):
             output_lines.append(f"--- Image {i} ---")
             output_lines.append(f"  ID: {img.get('image_id', 'N/A')}")

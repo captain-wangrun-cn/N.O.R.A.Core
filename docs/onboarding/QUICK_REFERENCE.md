@@ -66,7 +66,7 @@ core/controller.py            NoraController.handle_message()
 ### `brain/tools.py`
 - `ToolManager` — 工具注册、schema 生成、执行
   - 内置工具：`create_new_skill`, `execute_skill`, `execute_tool_plan`, `read_file`, `search`, `write_file`, `edit_file`, `list_dir`, `get_available_skills`, `exec_command`, `view_image`, `crop_image_for_llm`, `set_alarm`, `list_alarms`, `cancel_alarm`
-  - `view_image`: 默认 `return_image=true`，输出 `[image: abs_path]` MediaTag，后脑会自动读取图片并送入 image 模型；`use_image_model=true` 时强制切换 image 模型，直到下一次 `crop_image_for_llm` 返回首个响应后解除。
+  - `view_image`: 默认 `return_image=true`，输出 `[image: abs_path]` MediaTag，后脑下一轮会读取真实图片并临时使用 image 模型；可用 `question` 参数指定对图片要问的问题，且 `question` 非空时会自动强制 `return_image=true`。只查元数据/标签/OCR 时可设 `return_image=false`。已移除 `use_image_model=true` 持续强制 image 模型直到 crop 的规则。
   - IMAGE_TAGS 质量兜底：缺失标签或标签未使用英文逗号分隔时，会触发一次仅请求 `IMAGE_TAGS` 的补齐重试。
   - 详细说明：`docs/architecture/tools.md`
 

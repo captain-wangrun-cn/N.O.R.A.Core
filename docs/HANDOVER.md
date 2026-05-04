@@ -5,6 +5,40 @@
 
 ## 近期关键改动（截至 2026-05-04）
 
+### 🖼️ view_image 提问参数 + 移除持续强制 image 模型规则 — 2026-05-04
+
+**背景**：旧设计里 `view_image(use_image_model=true)` 或上游 `[USE_IMAGE_MODEL]` 会让后脑持续使用 image 模型，直到 `crop_image_for_llm` 输出后才解除。用户希望删除这个持续规则，改为让 `view_image` 自带“提问参数”，由后脑对特定图片发起一次性图片模型分析。
+
+**修复：**
+- `core/back_brain.py`
+   - 删除 `force_image_model_until_crop_done` 状态机。
+   - 后脑模型路由改为：只有当前轮真正携带 `multimodal_images` 图片字节时才使用 `image` 模型，否则回到 `coder`。
+   - `view_image` / `crop_image_for_llm` 返回 `MediaTag` 时，下一轮注入图片并临时走 image 模型；该批图片消费后不再持续强制 image。
+   - 若 `view_image(question=...)` 返回图片，下一轮 image prompt 会注入该问题，要求只围绕该问题观察回答。
+- `brain/tools.py`
+   - `view_image` 新增 `question: str = ""` 参数。
+   - `question` 非空时自动强制 `return_image=true`，确保下一轮 image 模型能读取真实图片；`return_image=false` 仅用于元数据/标签/OCR 检索。
+   - 移除 `use_image_model` 参数与输出提示。
+   - `local_path` 直读本地图片现在不再依赖 ImageStore 初始化；无图片记忆库时也可用于手动识别本地图片。
+- `brain/templates/system.jinja` / `brain/templates/front_brain.jinja`
+   - 更新工具使用规则：需要图片模型回答具体问题时使用 `view_image(question=...)`，不要再使用持续强制模型标记。
+- `docs/onboarding/QUICK_REFERENCE.md`
+   - 更新 `view_image` 速查说明。
+
+**验证：**
+- `python -m py_compile core/back_brain.py brain/tools.py core/routing.py` 通过。
+- `pytest tests/test_image_memory.py tests/test_multimodal_input.py -q` → 34 passed。
+
+**涉及文件**：
+- `core/back_brain.py`
+- `brain/tools.py`
+- `brain/templates/system.jinja`
+- `brain/templates/front_brain.jinja`
+- `docs/onboarding/QUICK_REFERENCE.md`
+- `tests/test_image_memory.py`
+
+---
+
 ### 🖼️ 用户回复历史图片不再误报 + followup 告别后绝不再发问候 — 2026-05-04
 
 **背景**：用户反馈两个问题：

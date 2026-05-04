@@ -653,6 +653,67 @@ def test_view_image_tool_schema_has_text_query():
     assert "text_query" in view_image_schema["parameters"]["properties"]
 
 
+def test_view_image_tool_schema_has_question():
+    """view_image schema 应包含 question 参数"""
+    from unittest.mock import MagicMock
+    from brain.tools import ToolManager
+
+    mock_adapter = MagicMock()
+    mock_adapter.platform_features = MagicMock()
+    tm = ToolManager(mock_adapter, image_store=None)
+
+    schemas = tm.get_tool_schemas()
+    view_image_schema = next(s for s in schemas if s["name"] == "view_image")
+    assert "question" in view_image_schema["parameters"]["properties"]
+
+
+def test_view_image_local_path_without_image_store(tmp_path):
+    """没有 ImageStore 时，view_image 仍应支持通过 local_path 读取本地图片"""
+    from unittest.mock import MagicMock
+    from PIL import Image
+    from brain.tools import ToolManager
+
+    img_path = tmp_path / "local.png"
+    Image.new("RGB", (16, 16), color=(0, 0, 255)).save(img_path)
+
+    mock_adapter = MagicMock()
+    mock_adapter.platform_features = MagicMock()
+    tm = ToolManager(mock_adapter, image_store=None)
+
+    result = tm.view_image(local_path=str(img_path), question="这张图是什么颜色？")
+
+    assert "Found 1 image" in result
+    assert "[Question] 这张图是什么颜色？" in result
+    assert "MediaTag: [image:" in result
+    assert str(img_path) in result
+
+
+def test_view_image_question_forces_return_image():
+    """question 非空时，即使 return_image=False 也应强制返回 MediaTag"""
+    from unittest.mock import MagicMock
+    from brain.tools import ToolManager
+
+    mock_adapter = MagicMock()
+    mock_adapter.platform_features = MagicMock()
+    mock_store = MagicMock()
+    mock_store.enabled = True
+    mock_store.search_images.return_value = [
+        {
+            "image_id": "img_question",
+            "file_path": "/tmp/question.png",
+            "tags": "截图, 按钮",
+            "timestamp": 1709856000.0,
+            "user_id": "user123",
+        }
+    ]
+
+    tm = ToolManager(mock_adapter, image_store=mock_store)
+    result = tm.view_image(keyword="按钮", question="按钮是否可见？", return_image=False)
+
+    assert "[Question] 按钮是否可见？" in result
+    assert "MediaTag: [image:" in result
+
+
 # ---------------------------------------------------------------------------
 # 6. ImageStore search_by_ocr_text (unit test with mock MongoDB)
 # ---------------------------------------------------------------------------
