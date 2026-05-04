@@ -14,6 +14,7 @@ from typing import Dict, Any, Optional
 from brain.multimodal import extract_image_payloads
 from brain.prompts import render_template, get_soul_prompt, load_identity_context
 from core.routing import has_image_input
+from core.default_chat_id_store import save_default_chat_id
 from core.scheduler import (
     AIPresence,
     set_ai_presence,
@@ -116,10 +117,12 @@ class MessageHandlerMixin:
             # 自动设置 default_chat_id（首次消息时）
             if not self.scheduler.default_chat_id:
                 self.scheduler.default_chat_id = storage_id_for_scheduler
+                save_default_chat_id(storage_id_for_scheduler)
                 logger.info(f"Scheduler default_chat_id 已设置: {storage_id_for_scheduler}")
 
         if getattr(self, "trigger_manager", None) and not self.trigger_manager.default_chat_id:
             self.trigger_manager.default_chat_id = storage_id_for_scheduler
+            save_default_chat_id(storage_id_for_scheduler)
             logger.info(f"Trigger default_chat_id 已设置: {storage_id_for_scheduler}")
         
         # ── 命令分发 ──

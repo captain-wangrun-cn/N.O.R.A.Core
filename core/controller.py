@@ -42,6 +42,7 @@ from skills.loader import SkillLoader
 from core.cost_tracker import get_cost_tracker
 from core.worker_status import WorkerStatus, BackendTaskQueue
 from core.scheduler import ProactiveScheduler
+from core.default_chat_id_store import load_default_chat_id
 from triggers import TriggerManager
 from triggers.factory import build_triggers
 import config
@@ -176,6 +177,7 @@ class NoraController(
         schedule_cfg = (config.get_config() or {}).get("schedule", {})
         schedule_enabled = schedule_cfg.get("enabled", True)
         scheduler_tz = history_cfg.get("timezone", "Asia/Shanghai")
+        persisted_default_chat_id = load_default_chat_id()
         
         if schedule_enabled:
             self.scheduler = ProactiveScheduler(
@@ -185,6 +187,8 @@ class NoraController(
                 send_proactive_callback=self._send_proactive_message,
                 daily_summary_callback=self._generate_daily_summary,
             )
+            if persisted_default_chat_id:
+                self.scheduler.default_chat_id = persisted_default_chat_id
             logger.info("主动消息调度器已初始化")
         else:
             self.scheduler = None
@@ -192,7 +196,7 @@ class NoraController(
 
         trigger_cfg = config.get_triggers_config()
         trigger_enabled = trigger_cfg.get("enabled", False)
-        trigger_default_chat_id = trigger_cfg.get("default_chat_id", "")
+        trigger_default_chat_id = trigger_cfg.get("default_chat_id", "") or persisted_default_chat_id
         if trigger_enabled:
             self.trigger_manager = TriggerManager(
                 notify_callback=self._handle_trigger_notification,
@@ -269,20 +273,19 @@ class NoraController(
 
     def _chat_stream_wrapper(self, model_client, chat_id: str, **kwargs):
         # 自动注入词库全局说明 + 系统环境信息到 system_prompt（全链路生效）
-        system_prompt = kwargs.get("system_prompt")
-        if isinstance(system_prompt, str):
-            if self._LEXICON_GLOBAL_MARKER not in system_prompt:
-                lexicon_global_block = get_lexicon_global_system_prompt_block()
-                if lexicon_global_block:
-                    kwargs = dict(kwargs)
-                    kwargs["system_prompt"] = f"{system_prompt}\n\n---\n{lexicon_global_block}"
-                    system_prompt = kwargs["system_prompt"]
-
-            if self._SYSTEM_ENV_MARKER not in system_prompt:
+        system_prompt = kwargs.get("system_prompt") or ""
+        if self._LEXICON_GLOBAL_MARKER not in system_prompt:
+            lexicon_global_block = get_lexicon_global_system_prompt_block()
+            if lexicon_global_block:
                 kwargs = dict(kwargs)
-                kwargs["system_prompt"] = (
-                    f"{system_prompt}\n\n---\n{self._build_system_environment_context(chat_id)}"
-                )
+                kwargs["system_prompt"] = f"{system_prompt}\n\n---\n{lexicon_global_block}"
+                system_prompt = kwargs["system_prompt"]
+
+        if self._SYSTEM_ENV_MARKER not in system_prompt:
+            kwargs = dict(kwargs)
+            kwargs["system_prompt"] = (
+                f"{system_prompt}\n\n---\n{self._build_system_environment_context(chat_id)}"
+            )
 
         def _filter_kwargs(callable_obj, call_kwargs):
             try:
