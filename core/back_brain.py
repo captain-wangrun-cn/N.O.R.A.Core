@@ -133,9 +133,10 @@ class BackBrainMixin:
         multimodal_images = provided_images or extracted_images
         if clean_text:
             text = clean_text
+        historical_reply_image_direct = "[NORA_HISTORICAL_REPLY_IMAGE_DIRECT]" in text
 
         # 图片先占位入库（无标签，不写向量），待模型回复后再补标签
-        if multimodal_images and self.image_store.enabled:
+        if multimodal_images and self.image_store.enabled and not historical_reply_image_direct:
             for img in multimodal_images:
                 if img.get("from_tool"):
                     continue
@@ -276,8 +277,10 @@ class BackBrainMixin:
 
             full_user_prompt = text
             
-            # 如果有图片，将图片 ID 信息注入到用户 prompt 中，并告知 LLM 返回图片标签
-            if multimodal_images:
+            # 如果有新图片，将图片 ID 信息注入到用户 prompt 中，并告知 LLM 返回图片标签。
+            # 但用户 reply 的历史图片已经作为真实视觉输入直送 image 模型，不需要再让 Nora 输出/解析
+            # image_id 或 IMAGE_TAGS/IMAGE_OCR 标签，直接根据图片内容回答即可。
+            if multimodal_images and not historical_reply_image_direct:
                 image_id_lines = []
                 for img in multimodal_images:
                     if not img.get("from_tool"):
@@ -380,7 +383,10 @@ class BackBrainMixin:
             # Typing 状态跟踪（在所有 turns 中保持）
             typing_started = False
             # 若本轮包含“新图片”（非工具回查图片），先缓存文本，待 IMAGE_TAGS 校验/重试完成后再统一发送
-            defer_user_send_until_image_tags_ready = any(not img.get("from_tool") for img in multimodal_images)
+            defer_user_send_until_image_tags_ready = (
+                any(not img.get("from_tool") for img in multimodal_images)
+                and not historical_reply_image_direct
+            )
             # 工具回查图片（view_image return_image=true）注入到下一轮多模态输入
             pending_tool_multimodal_images: List[Dict[str, Any]] = []
             # 若上游要求强制使用图片模型，保持标记直到 crop_image_for_llm 首轮输出
@@ -799,9 +805,9 @@ class BackBrainMixin:
             parsed_ocr_blocks: List[tuple[str, str]] = []
             
             # 若有新图片才要求tags，由搜索查找到的历史图片不需要生成标签
-            expected_ids = [img["image_id"] for img in multimodal_images if not img.get("from_tool")]
+            expected_ids = [] if historical_reply_image_direct else [img["image_id"] for img in multimodal_images if not img.get("from_tool")]
             
-            if expected_ids or multimodal_images:
+            if (expected_ids or multimodal_images) and not historical_reply_image_direct:
                 source_text_for_tags = final_response_buffer or last_image_raw_output or ""
                 for m in self._IMAGE_TAGS_PATTERN.finditer(source_text_for_tags):
                     img_id = m.group(1).strip()

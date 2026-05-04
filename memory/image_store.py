@@ -384,6 +384,30 @@ class ImageStore:
             logger.error(f"按 ID 查询图片失败: {e}")
             return None
 
+    def get_by_platform_message_id(
+        self,
+        platform: str,
+        platform_message_id: str,
+    ) -> Optional[Dict[str, Any]]:
+        """
+        按平台消息 ID 反查图片元数据。
+
+        使用场景：用户在 Telegram 里 reply 一张历史图片，message_history 没找到对应消息
+        （可能 raw_window 已滑出），但图片入库时记录了 platform_message_id，
+        此时仍能通过该方法把 image_id 找回来。
+        """
+        if self.mongo_col is None or not platform_message_id:
+            return None
+        try:
+            query: Dict[str, Any] = {"platform_message_id": str(platform_message_id)}
+            if platform:
+                query["platform"] = platform
+            doc = self.mongo_col.find_one(query, {"_id": 0})
+            return doc
+        except Exception as e:
+            logger.error(f"按 platform_message_id 查询图片失败: {e}")
+            return None
+
     def search_by_time_range(
         self,
         user_id: str,

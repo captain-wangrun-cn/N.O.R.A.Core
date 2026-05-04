@@ -324,6 +324,19 @@ class FrontBrainMixin:
         else:
             user_prompt = render_template('front_brain.jinja', 'user', user_message=text)
 
+        # 图片加载失败提示：用户文本里出现了 [image: ...] 等图片标记，但系统没能成功加载图片字节
+        # （网络下载失败 / 路径无效 / 引用历史图片但本轮未重传 等）。
+        # 必须把这一事实告诉模型，避免它凭空臆想图片内容。
+        if context.get("image_load_failed"):
+            user_prompt += (
+                "\n\n[系统备注] 用户消息里出现了图片相关标记，但本轮系统并没有真正接收到图片数据"
+                "（可能是网络下载失败、原图丢失、或用户只是引用了一张历史图片）。\n"
+                "→ 你绝对不能假装看到图片或编造图片内容。\n"
+                "→ 也不要硬邦邦地说 \"没读到图片，请重发原图\" 这种系统化的话；自然地表达即可，"
+                "比如轻松地说 \"诶？图片好像没传过来欸\" / \"这边没看到图片哦\"，"
+                "或者根据上下文判断是否调用 view_image 找历史图。"
+            )
+
         # 懒加载词库命中：仅命中词条注入 user prompt
         lazy_lexicon_block = get_lazy_lexicon_user_prompt_block(text)
         if lazy_lexicon_block:

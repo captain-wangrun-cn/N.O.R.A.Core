@@ -69,7 +69,16 @@ class MessageHandlerMixin:
 
         # 解析多模态输入：从 [image: ...] 中提取真实图片内容
         clean_text, multimodal_images = extract_image_payloads(text)
-        image_input_detected = bool(multimodal_images) or has_image_input(text)
+        # has_image_input 用来探测"用户文本里疑似带图片标记/链接"，
+        # multimodal_images 是真正成功加载的图片字节。两者要分开使用：
+        #  - has_image_marker: 判断文本里是否出现图片相关标记（用于上下文提示）
+        #  - has_real_image: 真的有图片字节（用于决定是否走后脑 image 模型）
+        has_image_marker = has_image_input(text)
+        has_real_image = bool(multimodal_images)
+        # 仅当真的拿到了图片字节，才把它当作"图片输入"来路由到后脑。
+        # 文本里出现 [image: xxx] 但加载失败时，按普通文本处理，让模型基于上下文回应，
+        # 而不是直接弹"没读取到图片"硬编码消息（也避免模型臆想图片内容）。
+        image_input_detected = has_real_image
         if clean_text:
             text = clean_text
 
@@ -77,6 +86,14 @@ class MessageHandlerMixin:
         context["text"] = text
         if multimodal_images:
             context["multimodal_images"] = multimodal_images
+        # 如果探测到图片标记但实际未加载到图片字节，记录到 context，
+        # 让后续模型 prompt 知道"用户疑似发了图但没真正收到"，从而避免凭空想象图片内容。
+        if has_image_marker and not has_real_image:
+            context["image_load_failed"] = True
+            logger.warning(
+                f"[{chat_id}] 检测到图片标记但未加载到图片字节，按文本流程继续。"
+                f" 原始文本片段: {text[:120]}"
+            )
 
         logger.debug(f"[{chat_id}] 收到新聚合消息: '{text[:50]}...'")
         
@@ -163,7 +180,7 @@ class MessageHandlerMixin:
             storage_id = chat_id if chat_type != "private" else user_id
             message_content = f"{user_name}: {text}" if chat_type != "private" else text
 
-            # 若包含图片输入，直接入队，避免图片丢失
+            # 若包含真实图片输入（已成功加载图片字节），直接入队，避免图片丢失
             if image_input_detected:
                 user_metadata = {}
                 platform_msg_id = context.get("platform_message_id")
@@ -322,12 +339,10 @@ class MessageHandlerMixin:
                 await asyncio.sleep(0.1)
 
         # 图片消息直接走后脑（需要 image 模型 + 工具能力）
+        # 注意：此处 image_input_detected 已经只在"真的拿到了图片字节"时为 True；
+        # 如果用户文本里出现 [image: ...] 但加载失败，会走下方前脑流程，
+        # 由模型基于 context["image_load_failed"] 标记自然回应（不再硬编码"没读到图片"）。
         if image_input_detected:
-            if not multimodal_images:
-                warn = "没有读取到图片内容，可能文件路径或下载失败了，能再发一次原图吗？"
-                await self.adapter.send_message(chat_id, warn)
-                logger.warning(f"[{chat_id}] 检测到图片标记但未能加载图片，已提示用户重发。原始文本: {text[:100]}")
-                return
             logger.info(f"[{chat_id}] 检测到图片输入，直接启动后脑。")
             # 将解析后的干净文本放入 context，避免后脑重复清洗
             context = dict(context)

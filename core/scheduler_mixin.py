@@ -276,6 +276,79 @@ class SchedulerMixin:
             task.cancel()
             logger.debug(f"[{chat_id}] 对话延续定时器已取消")
 
+    # 告别/收尾词正则（确定性短路用）：
+    # 当 AI 最近一条消息或用户最后一条消息匹配下面任一关键短语时，
+    # 直接判定本段对话已自然收尾，followup_loop 不再发任何消息。
+    _GOODBYE_PATTERNS = [
+        re.compile(r"晚安", re.IGNORECASE),
+        re.compile(r"再见", re.IGNORECASE),
+        re.compile(r"拜拜|88|byebye|bye[\s\-_~!.。\?？]*$|see\s*you", re.IGNORECASE),
+        re.compile(r"早点睡|早些睡|早点休息|去睡吧|睡个好觉|做个好梦|好梦"),
+        re.compile(r"先这样(?:吧|啦|哦)?[\s。.~!！]*$"),
+        re.compile(r"先(?:不|别)聊了"),
+        re.compile(r"先下了|下线|下播|溜了|去忙(?:了|吧|啦)"),
+        re.compile(r"有空再(?:聊|说|找你)"),
+        re.compile(r"不打扰你了|你先忙"),
+        re.compile(r"\[SEMI_ONLINE\]"),
+        re.compile(r"\[TASK_DONE\]"),
+        re.compile(r"^\s*good\s*night", re.IGNORECASE),
+    ]
+
+    def _looks_like_farewell(self, content: str) -> bool:
+        """启发式判断一段消息是否已是告别/收尾基调。"""
+        if not content:
+            return False
+        text = content.strip()
+        if not text:
+            return False
+        # 仅检查最后 80 字符，避免大段无关文本干扰
+        tail = text[-160:]
+        for pat in self._GOODBYE_PATTERNS:
+            if pat.search(tail):
+                return True
+        return False
+
+    def _conversation_already_closed(self, chat_id: str) -> bool:
+        """
+        检查当前消息段最后几条消息是否已经互相告别/收尾。
+
+        判定逻辑：
+          - 取最近 6 条 user/assistant 消息
+          - 若其中存在用户告别 + AI 告别 任一组合，视为已收尾
+          - 或 AI 的最后一条消息直接是收尾性质（晚安/拜拜/有空再聊/[SEMI_ONLINE] 等）
+        """
+        try:
+            msgs = self.message_history.get_current_segment_messages("telegram", chat_id) or []
+        except Exception as e:
+            logger.debug(f"[{chat_id}] 读取当前段消息失败，无法做告别短路: {e}")
+            return False
+        recent = [m for m in msgs[-6:] if m.get("role") in ("user", "assistant") and m.get("content")]
+        if not recent:
+            return False
+
+        last = recent[-1]
+        last_role = last.get("role")
+        last_content = str(last.get("content") or "")
+
+        # 1) AI 最后一条已是收尾
+        if last_role == "assistant" and self._looks_like_farewell(last_content):
+            return True
+
+        # 2) 用户告别 + AI 已回复（即 AI 最后一条紧跟在用户告别之后）
+        if last_role == "assistant":
+            # 找用户的最后一条
+            for m in reversed(recent[:-1]):
+                if m.get("role") == "user":
+                    if self._looks_like_farewell(str(m.get("content") or "")):
+                        return True
+                    break
+
+        # 3) 用户最后一条就是告别（AI 还没回，但马上就要回；followup 不该插队）
+        if last_role == "user" and self._looks_like_farewell(last_content):
+            return True
+
+        return False
+
     async def _followup_loop(self, chat_id: str):
         """
         对话延续循环。
@@ -290,6 +363,13 @@ class SchedulerMixin:
         try:
             delay = self._followup_delay_override.pop(chat_id, self.FOLLOWUP_INITIAL_DELAY)
             await asyncio.sleep(delay)
+
+            # 🛡️ 启动后第一道闸：若上一段对话已经互相告别（或 AI 最后一条本身已是收尾），
+            # 直接静默进入 SEMI_ONLINE，不再发任何追话/wrapup 消息。
+            if self._conversation_already_closed(chat_id):
+                logger.info(f"[{chat_id}] 检测到对话已自然告别，followup_loop 静默退出，不发任何消息")
+                self._transition_to_semi_online(chat_id)
+                return
 
             wait_loops = 0  # 连续 WAIT 轮数（用于超时收尾）
             skipped_followups = 0  # FOLLOWUP 命中但因概率未发送的次数
@@ -318,6 +398,16 @@ class SchedulerMixin:
                 decision = await self._detect_followup_intent(chat_id, idle_secs, count)
                 logger.info(f"[{chat_id}] 对话延续检测结果: {decision} (idle={idle_secs:.0f}s, count={count})")
 
+                # 🛡️ 第二道闸：每次 decision 出来后，再次确认对话是否已经互相告别。
+                # fast 模型有时会在已告别场景误判 FOLLOWUP/WAIT；这里用确定性正则兜底，
+                # 一旦命中告别词就静默收尾，绝不再发任何消息。
+                if self._conversation_already_closed(chat_id):
+                    logger.info(
+                        f"[{chat_id}] 决策={decision} 但检测到对话已自然告别，强制静默退出 followup_loop"
+                    )
+                    self._transition_to_semi_online(chat_id)
+                    return
+
                 if decision == "FOLLOWUP":
                     wait_loops = 0  # 重置 WAIT 计数
                     prefs = self._get_nora_preferences()
@@ -336,7 +426,8 @@ class SchedulerMixin:
                         )
                         if skipped_followups >= max(1, skip_end_after):
                             logger.info(f"[{chat_id}] FOLLOWUP 连续跳过达到上限，直接 END")
-                            if count >= 2:
+                            # 仅当 AI 真的追话过且用户没回，才发 wrapup；其余静默收尾
+                            if count >= 2 and not self._conversation_already_closed(chat_id):
                                 await self._send_wrapup_message(chat_id)
                                 await asyncio.sleep(self.FOLLOWUP_END_GRACE_SECONDS)
                             self._transition_to_semi_online(chat_id)
@@ -351,17 +442,23 @@ class SchedulerMixin:
                         logger.info(
                             f"[{chat_id}] WAIT 超时收尾: idle={idle_secs:.0f}s, wait_loops={wait_loops}, count={count}"
                         )
-                        await self._send_wrapup_message(chat_id)
+                        # 仅当 AI 真的追话过（count>=2）且不是已告别的场景，才发 wrapup；
+                        # 其余情况（包括 count==0 + 已自然告别）一律静默退出。
+                        if count >= 2 and not self._conversation_already_closed(chat_id):
+                            await self._send_wrapup_message(chat_id)
                         self._transition_to_semi_online(chat_id)
                         return
                     await asyncio.sleep(self.FOLLOWUP_RECHECK_INTERVAL)
 
                 elif decision == "END":
-                    # 只有当 AI 确实追话过且用户没回时，才发 wrapup 收尾；
-                    # 若 count==0 说明 AI 前脑已经自然告别、无需再发一遍
+                    # END 决策：fast 模型已经判定本段对话该结束。
+                    # 只有 AI 真的追话过（count>=2）才需要补一句温和的收尾；
+                    # 若 count==0/1 说明 AI 前脑已经自然告别（或一直没追话），不需要再发任何消息。
                     if count >= 2:
-                        await self._send_wrapup_message(chat_id)
-                        await asyncio.sleep(self.FOLLOWUP_END_GRACE_SECONDS)
+                        # 二次安全闸：若已检测到对话本身已自然告别，仍跳过 wrapup
+                        if not self._conversation_already_closed(chat_id):
+                            await self._send_wrapup_message(chat_id)
+                            await asyncio.sleep(self.FOLLOWUP_END_GRACE_SECONDS)
                     self._transition_to_semi_online(chat_id)
                     return
 

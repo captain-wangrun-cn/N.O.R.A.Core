@@ -3,6 +3,56 @@
 - 目标：多平台智能体内核，包含 LLM 适配、工具/技能体系、成本追踪、记忆/RAG。
 - 当前状态：可运行，自测通过；已完成图片记忆链路（入库/检索/回查再分析）、`view_image` 工具增强、CLI 高危清理保护。
 
+## 近期关键改动（截至 2026-05-04）
+
+### 🖼️ 用户回复历史图片不再误报 + followup 告别后绝不再发问候 — 2026-05-04
+
+**背景**：用户反馈两个问题：
+1. 当用户在 Telegram **reply** 一张历史图片消息时，系统总是冒出硬编码提示 "没有读取到图片内容，可能文件路径或下载失败了，能再发一次原图吗？"，体验非常机械；同时担心图片接收失败时模型会凭空想象图片内容。
+2. 用户和 Nora 告别后（如 "晚安"/"拜拜"），followup 循环还会再发一两条问候才真正结束对话。
+
+**修复 1：reply_photo 占位符不再触发硬编码"图片缺失"消息**
+
+- `adapters/telegram/main.py :: _extract_reply_info`：
+  - 历史中没找到对应消息时，回退分支不再返回 `[image: reply_photo]`（这个伪路径会触发上游 `has_image_input` 但又永远加载失败）。
+  - 改为返回纯描述文本 `"(用户引用了一张历史图片，但本轮未重新附带图片内容)"`，让模型从语义上理解。
+- `core/message_handler.py :: handle_new_message`：
+  - 把图片检测拆成两个语义清晰的标志：`has_image_marker`（文本里疑似带图片标记）vs `has_real_image`（真的成功加载到图片字节）。
+  - **`image_input_detected` 现在只在真有图片字节时为 True**——也就是只有真正能交给后脑 image 模型处理的输入才会走 image 分支。
+  - 当出现"标记但没字节"时，不再硬编码弹 `"没有读取到图片内容…"`，而是在 `context["image_load_failed"] = True` 标记后，让消息走正常的前脑流程，由模型基于上下文自然回应。
+  - 后端忙碌时图片入队的判断也同步收紧为"真有图片字节才入队"。
+- `core/front_brain.py :: _generate_front_chat_response`：
+  - 当 `context["image_load_failed"]` 为真时，向 user_prompt 追加一段系统备注，告诉模型 "本轮系统没真正接收到图片数据"，**绝对不能假装看到图片或编造图片内容**，并给出更自然的语气示例。
+- `brain/templates/system.jinja §9 富媒体发送`：
+  - 新增 **🚫 图片/媒体接收的诚实底线** 段，统一覆盖前脑/后脑：网络/系统问题导致没收到图片时，不许编造视觉细节、不许臆想内容；可调用 `view_image` 检索历史图片；宁可如实说"图片好像没传过来"也不要瞎编。
+
+**修复 2：followup_loop 在双方告别后不再发任何收尾消息**
+
+- `core/scheduler_mixin.py`：新增告别检测三件套
+  - `_GOODBYE_PATTERNS`：晚安 / 再见 / 拜拜 / 早点睡 / 先这样 / 先不聊了 / 下线 / 有空再聊 / 不打扰你了 / `[SEMI_ONLINE]` / `[TASK_DONE]` / `good night` 等。
+  - `_looks_like_farewell(content)`：检查文本尾部是否命中任一告别短语。
+  - `_conversation_already_closed(chat_id)`：基于当前消息段最近 6 条 user/assistant 消息，判断是否已自然告别（AI 末条已是收尾 / 用户告别且 AI 已回 / 用户最后一条就是告别）。
+- `_followup_loop` 加两道安全闸：
+  1. **入口闸**：定时器到期、初次 sleep 醒来后，如果检测到对话已自然告别 → 直接 `_transition_to_semi_online`，**不发任何消息**。
+  2. **每轮决策后闸**：每次 `_detect_followup_intent` 给出 `FOLLOWUP/WAIT/END` 后，再用 `_conversation_already_closed` 兜底，命中即静默退出。
+- 修复 `WAIT` 超时分支：以前**总是**发 `_send_wrapup_message`，现在只在 `count >= 2`（AI 真的追话过且无回应）且没检测到告别时才发，否则静默收尾。
+- 修复 `FOLLOWUP` 概率连续跳过 → END 的兜底：同样加上 `_conversation_already_closed` 检查。
+- 保留 END 分支原有的"`count >= 2` 才发 wrapup + grace delay"语义（仍能通过 `tests/test_followup_end_grace_delay.py` 的正则断言）。
+
+**验证**：
+- `python -m py_compile` 所有改动文件通过。
+- `pytest tests/test_followup_end_grace_delay.py tests/test_message_handler_ack.py tests/test_multimodal_input.py tests/test_image_memory.py tests/test_message_history.py tests/test_lexicon_manager.py tests/test_lexicon_global_prompt.py tests/test_email_trigger_filter.py tests/test_link_sanitize.py tests/test_split_delay_parser.py tests/test_search_tool.py tests/test_tool_plan.py tests/test_schema_fix.py` → 59 passed, 1 skipped。
+- 其他若干测试因本地 `config.yml` 解析错误（与本轮改动无关）无法 collect，已跳过。
+
+**涉及文件**：
+- `adapters/telegram/main.py`
+- `core/message_handler.py`
+- `core/front_brain.py`
+- `core/scheduler_mixin.py`
+- `brain/templates/system.jinja`
+
+---
+
 ## 近期关键改动（截至 2026-05-02）
 
 ### 🔇 NO_REPLY 升级为常规决策 + SEMI_ONLINE 自觉性再加固 — 2026-05-02
