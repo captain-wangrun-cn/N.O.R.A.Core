@@ -268,7 +268,14 @@ class OpenAIProvider(BaseLLM):
                     "input_tokens": response.usage.prompt_tokens,
                     "output_tokens": response.usage.completion_tokens
                 }
-            return self.strip_think_content(response.choices[0].message.content or "")
+            # 防御：choices 可能为空、message 可能缺失（部分 provider 返回空体或被内容过滤拦截）
+            choices = getattr(response, "choices", None) or []
+            if not choices:
+                logger.error(f"OpenAI chat() empty choices: {response}")
+                return "Sorry, I encountered an issue processing your request with the OpenAI API."
+            message = getattr(choices[0], "message", None)
+            content = getattr(message, "content", None) if message else None
+            return self.strip_think_content(content or "")
         except Exception as e:
             logger.error(f"OpenAI API Error: {e}", exc_info=True)
             return "Sorry, I encountered an issue processing your request with the OpenAI API."
