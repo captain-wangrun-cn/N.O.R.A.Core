@@ -57,6 +57,11 @@ _FOLLOW_SIGNAL = "[NEED_FOLLOW]"
 _NO_REPLY_SIGNAL = "[NO_REPLY]"
 # 可选：立即进入半在线状态
 _SEMI_ONLINE_SIGNAL = "[SEMI_ONLINE]"
+# 可选：允许当前消息段暂不闭合，并暂停 followup detect，直到下次长时间沉默
+_KEEP_SEGMENT_OPEN_SIGNAL = "[KEEP_SEGMENT_OPEN]"
+# 可选：撤回历史某条 assistant 消息
+_RETRACT_MESSAGE_PATTERN = re.compile(r"\[RETRACT_MESSAGE(?::([^\]]+))?\]", re.IGNORECASE)
+_RETRACT_INT_PATTERN = re.compile(r"^-?\d+$")
 # 可选：强制使用图片模型的标记
 _USE_IMAGE_MODEL_PATTERN = re.compile(r"\[USE_IMAGE_MODEL\]|use_image_model\s*[:=]\s*(true|1|yes)", re.IGNORECASE)
 # 可选：任务指示块
@@ -103,6 +108,8 @@ def parse_front_brain_response(response_text: str) -> dict:
             "use_image_model": False,
             "need_follow": False,
             "force_semi_online": False,
+            "keep_segment_open": False,
+            "retract_message_target": "",
         }
 
     needs_backend = _BACKEND_SIGNAL in response_text
@@ -110,6 +117,15 @@ def parse_front_brain_response(response_text: str) -> dict:
     force_image_model = bool(_USE_IMAGE_MODEL_PATTERN.search(response_text))
     should_reply = _NO_REPLY_SIGNAL not in response_text
     force_semi_online = _SEMI_ONLINE_SIGNAL in response_text
+    keep_segment_open = _KEEP_SEGMENT_OPEN_SIGNAL in response_text
+    retract_target = ""
+    retract_match = _RETRACT_MESSAGE_PATTERN.search(response_text)
+    if retract_match:
+        raw_target = (retract_match.group(1) or "last").strip() or "last"
+        if _RETRACT_INT_PATTERN.match(raw_target):
+            retract_target = raw_target
+        else:
+            retract_target = raw_target
 
     # 提取任务指示（可为空）
     task_instruction = ""
@@ -127,12 +143,19 @@ def parse_front_brain_response(response_text: str) -> dict:
     if force_semi_online and need_follow:
         need_follow = False
 
+    # 不闭段意味着本轮先不要进入 followup detect。
+    if keep_segment_open:
+        need_follow = False
+        force_semi_online = False
+
     # 清理标记，生成用户可见文本
     user_reply = response_text
     user_reply = user_reply.replace(_BACKEND_SIGNAL, "")
     user_reply = user_reply.replace(_FOLLOW_SIGNAL, "")
     user_reply = user_reply.replace(_NO_REPLY_SIGNAL, "")
     user_reply = user_reply.replace(_SEMI_ONLINE_SIGNAL, "")
+    user_reply = user_reply.replace(_KEEP_SEGMENT_OPEN_SIGNAL, "")
+    user_reply = _RETRACT_MESSAGE_PATTERN.sub("", user_reply)
     user_reply = _USE_IMAGE_MODEL_PATTERN.sub("", user_reply)
     user_reply = _TASK_INSTRUCTION_PATTERN.sub("", user_reply)
     user_reply = user_reply.strip()
@@ -151,6 +174,8 @@ def parse_front_brain_response(response_text: str) -> dict:
         "use_image_model": force_image_model,
         "need_follow": need_follow,
         "force_semi_online": force_semi_online,
+        "keep_segment_open": keep_segment_open,
+        "retract_message_target": retract_target,
     }
 
 
@@ -178,6 +203,8 @@ def parse_front_brain_review(response_text: str) -> dict:
             "use_image_model": False,
             "need_follow": False,
             "force_semi_online": False,
+            "keep_segment_open": False,
+            "retract_message_target": "",
         }
 
     has_done = _TASK_DONE_SIGNAL in response_text
@@ -187,6 +214,15 @@ def parse_front_brain_review(response_text: str) -> dict:
     force_image_model = bool(_USE_IMAGE_MODEL_PATTERN.search(response_text))
     should_reply = _NO_REPLY_SIGNAL not in response_text
     force_semi_online = _SEMI_ONLINE_SIGNAL in response_text
+    keep_segment_open = _KEEP_SEGMENT_OPEN_SIGNAL in response_text
+    retract_target = ""
+    retract_match = _RETRACT_MESSAGE_PATTERN.search(response_text)
+    if retract_match:
+        raw_target = (retract_match.group(1) or "last").strip() or "last"
+        if _RETRACT_INT_PATTERN.match(raw_target):
+            retract_target = raw_target
+        else:
+            retract_target = raw_target
     task_instruction = ""
     task_match = _TASK_INSTRUCTION_PATTERN.search(response_text)
     if task_match:
@@ -198,6 +234,9 @@ def parse_front_brain_review(response_text: str) -> dict:
             need_follow = False
         if has_continue:
             has_continue = False
+    if keep_segment_open:
+        need_follow = False
+        force_semi_online = False
 
     # 清理标记，生成用户可见文本
     user_reply = response_text
@@ -206,6 +245,8 @@ def parse_front_brain_review(response_text: str) -> dict:
     user_reply = user_reply.replace(_FOLLOW_SIGNAL, "")
     user_reply = user_reply.replace(_NO_REPLY_SIGNAL, "")
     user_reply = user_reply.replace(_SEMI_ONLINE_SIGNAL, "")
+    user_reply = user_reply.replace(_KEEP_SEGMENT_OPEN_SIGNAL, "")
+    user_reply = _RETRACT_MESSAGE_PATTERN.sub("", user_reply)
     user_reply = _USE_IMAGE_MODEL_PATTERN.sub("", user_reply)
     # 清理 continue 标记文本，避免泄漏给用户
     user_reply = _CONTINUE_PATTERN.sub("", user_reply)
@@ -226,6 +267,8 @@ def parse_front_brain_review(response_text: str) -> dict:
             "use_image_model": force_image_model,
             "need_follow": need_follow,
             "force_semi_online": force_semi_online,
+            "keep_segment_open": keep_segment_open,
+            "retract_message_target": retract_target,
         }
     elif has_done:
         return {
@@ -236,6 +279,8 @@ def parse_front_brain_review(response_text: str) -> dict:
             "use_image_model": force_image_model,
             "need_follow": need_follow,
             "force_semi_online": force_semi_online,
+            "keep_segment_open": keep_segment_open,
+            "retract_message_target": retract_target,
         }
     else:
         # 无标记 = 纯聊天，也结束轮询
@@ -247,4 +292,6 @@ def parse_front_brain_review(response_text: str) -> dict:
             "use_image_model": force_image_model,
             "need_follow": need_follow,
             "force_semi_online": force_semi_online,
+            "keep_segment_open": keep_segment_open,
+            "retract_message_target": retract_target,
         }

@@ -516,6 +516,8 @@ class FrontBrainMixin:
             f"should_reply={parsed.get('should_reply')}\n"
             f"任务指示: {parsed.get('task_instruction', '')[:200]}\n"
             f"need_follow={parsed.get('need_follow')}\n"
+            f"keep_segment_open={parsed.get('keep_segment_open')}\n"
+            f"retract_message_target={parsed.get('retract_message_target', '')}\n"
             f"回复: {parsed['user_reply'][:200]}"
         )
 
@@ -526,6 +528,8 @@ class FrontBrainMixin:
             "should_reply": parsed.get("should_reply", True),
             "use_image_model": parsed.get("use_image_model", False),
             "need_follow": parsed.get("need_follow", False),
+            "keep_segment_open": parsed.get("keep_segment_open", False),
+            "retract_message_target": parsed.get("retract_message_target", ""),
             "raw_response": response_text,
         }
 

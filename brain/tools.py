@@ -11,6 +11,7 @@ import inspect
 import uuid
 import time
 import time
+import shlex
 from cryptography.fernet import Fernet
 from typing import List, Dict, Callable, Any, Optional
 from adapters.base import BaseAdapter
@@ -898,6 +899,7 @@ class ToolManager:
         WARNING: Do NOT use this for tasks that a high-level tool can do.
         Use 'list_dir' to list directories instead of 'ls'. Use 'read_file' to read files instead of 'cat'.
         NEVER use this to run skill scripts — use 'execute_skill' instead.
+        On Linux/macOS, commands run via the default `bash`. On Windows, commands run via PowerShell.
         For long-running commands (e.g., apt install, pip install), set timeout to a higher value (e.g., 300).
         :param command: The shell command to execute.
         :param timeout: Maximum execution time in seconds (default: 60, max: 600). Use higher values for package installs.
@@ -928,8 +930,20 @@ class ToolManager:
         try:
             # 使用 asyncio subprocess 避免阻塞事件循环
             import asyncio
-            proc = await asyncio.create_subprocess_shell(
-                command,
+            if os.name == "nt":
+                shell_cmd = [
+                    "powershell.exe",
+                    "-NoProfile",
+                    "-NonInteractive",
+                    "-ExecutionPolicy",
+                    "Bypass",
+                    "-Command",
+                    command,
+                ]
+            else:
+                shell_cmd = ["/bin/bash", "-lc", command]
+            proc = await asyncio.create_subprocess_exec(
+                *shell_cmd,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
                 cwd=str(WORKSPACE_ROOT),

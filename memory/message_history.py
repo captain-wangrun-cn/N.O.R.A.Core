@@ -289,13 +289,16 @@ class MessageHistory:
         platform: str,
         chat_id: str,
         source: Optional[str] = None,
+        nth: int = 1,
     ) -> Optional[Dict[str, Any]]:
         """
         删除最近一条 assistant 消息（未归档且未置顶）。
 
         如果提供了 source，则仅匹配 metadata.source == source，否则删除最新的一条 assistant 消息。
+        nth=1 表示最近一条，nth=2 表示倒数第二条，以此类推。
         返回包含 message_id 与 metadata 的字典；若未找到则返回 None。
         """
+        nth = max(1, int(nth or 1))
         conn = sqlite3.connect(str(self.db_path))
         conn.row_factory = sqlite3.Row
         cursor = conn.cursor()
@@ -313,13 +316,16 @@ class MessageHistory:
             rows = cursor.fetchall()
             target_id: Optional[int] = None
             target_md: Dict[str, Any] = {}
+            matched_count = 0
             for row in rows:
                 md_raw = row["metadata"]
                 md = json.loads(md_raw) if md_raw else {}
                 if source is None or md.get("source") == source:
-                    target_id = int(row["id"])
-                    target_md = md
-                    break
+                    matched_count += 1
+                    if matched_count == nth:
+                        target_id = int(row["id"])
+                        target_md = md
+                        break
             if target_id is None:
                 return None
             cursor.execute("DELETE FROM messages WHERE id = ?", (target_id,))

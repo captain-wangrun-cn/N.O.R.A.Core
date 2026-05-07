@@ -80,3 +80,27 @@ async def test_auto_confirm_backend_enqueue_fallback_to_enqueue_on_error(monkeyp
     )
 
     assert result is True
+
+
+def test_delete_last_assistant_message_supports_nth(tmp_path):
+    from memory.message_history import MessageHistory
+
+    db_path = tmp_path / "history.db"
+    mirror_db_path = tmp_path / "mirror.db"
+    context_db_path = tmp_path / "context.db"
+    history = MessageHistory(
+        db_path=str(db_path),
+        mirror_db_path=str(mirror_db_path),
+        context_db_path=str(context_db_path),
+    )
+
+    history.add_message("telegram", "chat-1", "assistant", "第一条", "assistant", metadata={"source": "front"})
+    history.add_message("telegram", "chat-1", "assistant", "第二条", "assistant", metadata={"source": "front"})
+    history.add_message("telegram", "chat-1", "assistant", "第三条", "assistant", metadata={"source": "front"})
+
+    deleted = history.delete_last_assistant_message("telegram", "chat-1", nth=2)
+    assert deleted is not None
+
+    latest = history.delete_last_assistant_message("telegram", "chat-1")
+    assert latest is not None
+    assert latest["message_id"] != deleted["message_id"]

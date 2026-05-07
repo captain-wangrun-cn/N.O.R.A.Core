@@ -109,3 +109,23 @@ def test_front_brain_review_no_reply_signal_silences_user_reply():
     assert result["action"] == "done"
     assert result["should_reply"] is False
     assert result["user_reply"] == ""
+
+
+def test_front_brain_keep_segment_open_signal_is_parsed():
+    result = parse_front_brain_response("你想改哪个文件呀？ [KEEP_SEGMENT_OPEN]")
+    assert result["keep_segment_open"] is True
+    assert result["need_follow"] is False
+    assert result["force_semi_online"] is False
+    assert result["user_reply"] == "你想改哪个文件呀？"
+
+
+def test_front_brain_retract_message_signal_is_parsed():
+    result = parse_front_brain_response("我上一条说重了，我重说一下。 [RETRACT_MESSAGE]")
+    assert result["retract_message_target"] == "last"
+    assert result["user_reply"] == "我上一条说重了，我重说一下。"
+
+
+def test_front_brain_retract_message_signal_supports_nth_from_end():
+    result = parse_front_brain_response("我把前两条收一下。[RETRACT_MESSAGE:-2]")
+    assert result["retract_message_target"] == "-2"
+    assert result["user_reply"] == "我把前两条收一下。"

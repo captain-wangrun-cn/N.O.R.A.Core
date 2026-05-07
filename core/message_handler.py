@@ -418,18 +418,26 @@ class MessageHandlerMixin:
             # 同步到 session history
             session = self.sessions.setdefault(chat_id, {"history": [], "interrupted_thought": "", "pending_text": ""})
             session_history = session.setdefault("history", [])
-            session_history.append({"role": "user", "content": message_content})
+            if not session_history or session_history[-1] != {"role": "user", "content": message_content}:
+                session_history.append({"role": "user", "content": message_content})
             session_history.append({"role": "assistant", "content": user_reply})
             if len(session_history) > 20:
                 session["history"] = session_history[-20:]
 
         # 4) 根据路由信号决定是否启动后脑
+        retract_target = str(front_result.get("retract_message_target", "") or "").strip()
+        if retract_target:
+            await self._handle_retract_signal(chat_id, chat_type, user_id, retract_target)
+
         if front_result.get("force_semi_online"):
             logger.info(f"[{chat_id}] 前脑触发 [SEMI_ONLINE]，立即进入半在线状态。")
             self._transition_to_semi_online(chat_id)
             return
 
         followup_delay = self.FOLLOWUP_NEED_FOLLOW_DELAY if front_result.get("need_follow") else None
+        if front_result.get("keep_segment_open"):
+            self._suspend_followup_until_idle(chat_id)
+            followup_delay = None
         if front_result["needs_backend"]:
             # 标记上下文：后脑应跳过用户消息保存（前脑已保存）
             backend_context = context.copy()
@@ -482,6 +490,40 @@ class MessageHandlerMixin:
             logger.info(f"[{chat_id}] 前脑判定纯聊天，无需后脑。")
             # 纯聊天完成后，也需要标记空闲并启动 followup 计时
             self._mark_scheduler_idle(chat_id, initial_delay=followup_delay)
+
+    async def _handle_retract_signal(self, chat_id: str, chat_type: str, user_id: str, target: str) -> None:
+        """处理前脑发出的撤回标记。支持撤回最近一条或倒数第 N 条 assistant 消息。"""
+        storage_id = chat_id if chat_type != "private" else user_id
+        normalized = target.strip().lower() if target else "last"
+        source = None
+        nth = 1
+        if normalized not in {"", "last", "latest", "上一条", "最近一条"}:
+            try:
+                value = int(normalized)
+                nth = abs(value) if value != 0 else 1
+            except (TypeError, ValueError):
+                logger.info(f"[{chat_id}] 撤回标记目标暂不支持: {target}，按 last 处理。")
+                nth = 1
+        try:
+            undo_result = self.message_history.delete_last_assistant_message(
+                "telegram",
+                storage_id,
+                source=source,
+                nth=nth,
+            )
+            if not undo_result:
+                return
+            md = undo_result.get("metadata") or {}
+            platform_ids = md.get("platform_message_ids") or []
+            feats = getattr(self.adapter, "platform_features", None)
+            if getattr(feats, "supports_delete_message", False):
+                for pid in platform_ids:
+                    try:
+                        await self.adapter.delete_message(chat_id, str(pid))
+                    except Exception:
+                        logger.debug(f"[{chat_id}] 撤回平台消息失败: {pid}", exc_info=True)
+        except Exception:
+            logger.warning(f"[{chat_id}] 处理撤回标记失败。", exc_info=True)
 
     async def _auto_confirm_backend_enqueue(
         self,

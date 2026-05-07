@@ -44,7 +44,7 @@ def read_file(path: str, start_line: Optional[int] = None, end_line: Optional[in
 
 
 def exec_command(command: str, timeout: int = 60) -> str:
-    """Executes a shell command."""
+    """Executes a shell command via PowerShell on Windows or bash on Linux/macOS."""
     pass
 
 

@@ -241,6 +241,9 @@ class SchedulerMixin:
             f"[{chat_id}] 进入空闲跟进状态: presence={state['presence']}, "
             f"generating={state['is_generating']}, backend_busy={state['is_backend_busy']}"
         )
+        if self._followup_suspended_until_idle.pop(chat_id, False):
+            logger.info(f"[{chat_id}] 当前消息段标记为 KEEP_SEGMENT_OPEN，暂不启动 followup 定时器。")
+            return
         self._start_followup_timer(chat_id, initial_delay=initial_delay)
 
     # ------------------------------------------------------------------
@@ -275,6 +278,12 @@ class SchedulerMixin:
         if task and not task.done():
             task.cancel()
             logger.debug(f"[{chat_id}] 对话延续定时器已取消")
+
+    def _suspend_followup_until_idle(self, chat_id: str):
+        """本轮允许消息段不闭合：暂停 followup，直到下一次用户长时间不回复再恢复。"""
+        self._cancel_followup_timer(chat_id)
+        self._followup_suspended_until_idle[chat_id] = True
+        logger.info(f"[{chat_id}] followup detect 已暂停，等待后续真正空闲时恢复。")
 
     # 告别/收尾词正则（确定性短路用）：
     # 当 AI 最近一条消息或用户最后一条消息匹配下面任一关键短语时，
