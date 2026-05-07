@@ -384,6 +384,23 @@ class FrontBrainMixin:
         # "自己上一轮已经下达过哪些任务"，避免对用户的简单承接（嗯/好的/收到）误升级为
         # 重复的后脑任务。该备注仅给模型阅读，不会发送给用户。
         history = self._inject_routing_notes(history, db_context)
+
+        # 聚合器语义：如果上一次前脑生成被新消息打断且留下了"未发出的草稿"，
+        # 把草稿作为系统备注交给模型，让它在重新生成时参考（而不是丢弃从零开始）。
+        # 草稿仅给模型看，不会发送给用户。
+        prior_partial = ""
+        try:
+            prior_partial = (self.front_brain_partial.pop(chat_id, "") or "").strip()
+        except Exception:
+            prior_partial = ""
+        if prior_partial:
+            user_prompt += (
+                "\n\n[系统备注] 上一次回复在生成途中被用户的新消息打断，以下是当时已经生成但**尚未发送**给用户的草稿："
+                f"\n---\n{prior_partial}\n---\n"
+                "请综合这段草稿和上面的新消息重新组织本轮回复："
+                "如果草稿与新消息能自然续写，可以延用草稿语气与已表达的部分；"
+                "如果新消息让草稿不再合适，请直接重写。无论如何不要再向用户重复发送这段草稿原文。"
+            )
         # --- 调用 smart 模型生成回复（流式收集完整文本，检测标签闭合） ---
         async def _run_with_retries(system_prompt_candidate: str):
             response_text_local = ""
@@ -392,6 +409,8 @@ class FrontBrainMixin:
             for attempt in range(max_attempts):
                 response_text_local = ""
                 usage_data_local = None
+                # 重置本轮的实时缓冲，让外层"被打断"分支只看到本轮已生成内容
+                self.front_brain_partial[chat_id] = ""
                 try:
                     stream = self._chat_stream_wrapper(
                         self.llm,
@@ -406,6 +425,8 @@ class FrontBrainMixin:
                         if isinstance(chunk, dict):
                             if chunk["type"] == "text":
                                 response_text_local += chunk["content"]
+                                # 同步到 controller 上的实时缓冲，方便被 cancel 时读取草稿
+                                self.front_brain_partial[chat_id] = response_text_local
                             elif chunk["type"] == "usage":
                                 usage_data_local = {
                                     "input_tokens": chunk.get("input_tokens", 0),
@@ -413,6 +434,7 @@ class FrontBrainMixin:
                                 }
                         elif isinstance(chunk, str):
                             response_text_local += chunk
+                            self.front_brain_partial[chat_id] = response_text_local
                 except Exception as e:
                     logger.warning(
                         f"[{chat_id}] 前脑请求异常，第 {attempt+1}/{max_attempts} 次尝试失败，准备重试: {e}",
@@ -451,7 +473,11 @@ class FrontBrainMixin:
             response_text, usage_data = await _run_with_retries(system_prompt)
         except Exception:
             # 前脑失败时回退到后脑
+            self.front_brain_partial.pop(chat_id, None)
             return {"needs_backend": True, "user_reply": "", "raw_response": ""}
+
+        # 成功生成完整回复，清掉实时草稿
+        self.front_brain_partial.pop(chat_id, None)
 
         # 记录成本
         if self.cost_tracking_enabled and self.cost_tracker and usage_data:

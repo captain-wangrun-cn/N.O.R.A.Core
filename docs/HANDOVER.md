@@ -3,6 +3,47 @@
 - 目标：多平台智能体内核，包含 LLM 适配、工具/技能体系、成本追踪、记忆/RAG。
 - 当前状态：可运行，自测通过；已完成图片记忆链路（入库/检索/回查再分析）、`view_image` 工具增强、CLI 高危清理保护。
 
+## 近期关键改动（截至 2026-05-07）
+
+### 🛠️ 七项修复 — 2026-05-07
+
+1. **`AttributeError: _followup_suspended_until_idle` 崩溃修复**
+   - `core/controller.py`：在 `__init__` 中初始化 `self._followup_suspended_until_idle: Dict[str, bool] = {}`，scheduler_mixin._mark_scheduler_idle 不再 AttributeError。
+
+2. **default_chat_id 兜底注入 trigger / scheduler**
+   - `core/scheduler_mixin.py::start_scheduler`、`core/controller.py::start_triggers`：启动时若 `default_chat_id` 为空，再次从 `default_chat_id_store.load_default_chat_id()` 读取持久化值，并把 `TriggerManager.default_chat_id` 同步给 `_triggers` 列表中已注册的子 trigger（如 EmailTrigger）。
+   - `core/message_handler.py`：首次用户消息触发持久化时，同样把 `storage_id_for_scheduler` 同步到子 trigger 实例。
+
+3. **/model 返回按钮真正返回上一级**
+   - `adapters/telegram/main.py`：抽出 `_build_model_alias_menu`；provider 选择菜单的"取消"旁加 `⬅ 返回 → model_pick:back`，`_handle_model_pick_callback` 处理 back 重渲染顶层 alias 菜单；模型分页菜单的取消按钮替换为 `⬅ 返回 → model_pick:{alias}`（回到 provider 列表）+ 取消。
+
+4. **prompt：后脑非静默操作必须告知用户**
+   - `brain/templates/front_brain_review.jinja`：在"上下文驱动的打扰判断"段顶部新增"底线规则"，明确：非静默操作（即非 SECRET/MEMORY/USER/SCHEDULE 等内部记录或后台同步）必须给用户回执；只有静默后台任务或上下文已完整覆盖时才允许 `[NO_REPLY]`。
+
+5. **回复历史图片不再重新生成 IMAGE_TAGS**
+   - `core/back_brain.py`：把图片标签校验入口从 `(expected_ids or multimodal_images)` 收紧为仅 `expected_ids`（即必须存在"非工具回查"的新用户图）；`from_tool=True` 的库内图片不会再触发标签生成 + 校验 + 失败重试链路。
+
+6. **前脑生成阶段允许新消息打断重做（聚合器语义）**
+   - `core/controller.py`：新增 `self.front_brain_tasks: Dict[str, asyncio.Task]` + `self.front_brain_partial: Dict[str, str]`（流式实时缓冲）。
+   - `core/front_brain.py`：`_run_with_retries` 在每次流式 chunk 写入 response_text 时同步写入 `self.front_brain_partial[chat_id]`；成功完成或异常退出时清理。生成开始处会读取并注入 `prior_partial`（上一次被打断时未发出的草稿），作为"仅模型可见的系统备注"附加到 `user_prompt` 末尾，让模型基于草稿 + 新消息重新组织回复。
+   - `core/message_handler.py`：handle_new_message 入口若发现前脑任务仍在生成，则 `cancel + wait`，**故意不清理 `front_brain_partial[chat_id]`**——这样下一次前脑生成时能拿到这段草稿；前脑调用本身改用 `asyncio.create_task` 跟踪，CancelledError 静默丢弃本轮结果。
+   - 行为对齐聚合器：① 前脑还未输出任何文本时被打断 → 草稿为空字符串，新消息从零开始（等价于聚合后的合并）；② 前脑已生成部分文本时被打断 → 草稿被带入下一轮，模型综合草稿与新消息重新生成。
+
+7. **/status 提供更细粒度状态**
+   - `core/message_handler.py::_cmd_status`：前脑分支区分 🟡 正在生成 / 正在审查 / 正在轮询 / 🟢 空闲，并展示活跃 followup 定时器数量。
+
+**涉及文件**：
+- `core/controller.py`
+- `core/scheduler_mixin.py`
+- `core/message_handler.py`
+- `core/back_brain.py`
+- `adapters/telegram/main.py`
+- `brain/templates/front_brain_review.jinja`
+
+**验证**：`python -m py_compile core/controller.py core/scheduler_mixin.py core/message_handler.py core/back_brain.py core/front_brain.py adapters/telegram/main.py` 通过。
+
+---
+
 ## 近期关键改动（截至 2026-05-04）
 
 ### 🖼️ view_image 提问参数 + 移除持续强制 image 模型规则 — 2026-05-04

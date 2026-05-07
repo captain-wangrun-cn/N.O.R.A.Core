@@ -110,6 +110,12 @@ class NoraController(
         self._followup_timers: Dict[str, asyncio.Task] = {}
         # 对话延迟覆盖：per-chat 首次延迟（例如 NEED_FOLLOW 提示）
         self._followup_delay_override: Dict[str, float] = {}
+        # 当前消息段标记为 KEEP_SEGMENT_OPEN 时暂停 followup 定时器
+        self._followup_suspended_until_idle: Dict[str, bool] = {}
+        # 前脑生成任务：per-chat asyncio.Task；新消息到来时可被打断
+        self.front_brain_tasks: Dict[str, asyncio.Task] = {}
+        # 前脑流式生成的"实时缓冲"：per-chat 字符串，被打断时作为草稿带入下轮
+        self.front_brain_partial: Dict[str, str] = {}
 
         # 是否启用非流式输出（per-chat，可被命令切换）
         interaction_cfg = (config.get_config() or {}).get("interaction", {})
@@ -227,11 +233,26 @@ class NoraController(
         if self.trigger_manager:
             if default_chat_id:
                 self.trigger_manager.default_chat_id = default_chat_id
-            elif not self.trigger_manager.default_chat_id and self.scheduler and self.scheduler.default_chat_id:
-                self.trigger_manager.default_chat_id = self.scheduler.default_chat_id
+            if not self.trigger_manager.default_chat_id:
+                # 兜底：先从 scheduler 同步，再从持久化文件兜底
+                if self.scheduler and self.scheduler.default_chat_id:
+                    self.trigger_manager.default_chat_id = self.scheduler.default_chat_id
+                else:
+                    try:
+                        persisted = load_default_chat_id()
+                        if persisted:
+                            self.trigger_manager.default_chat_id = persisted
+                    except Exception as e:
+                        logger.warning(f"start_triggers 兜底读取 default_chat_id 失败: {e}")
+
+            # 同步 Trigger 内已构建的子 trigger 的 default_chat_id（如 EmailTrigger）
+            if self.trigger_manager.default_chat_id:
+                for trig in getattr(self.trigger_manager, "_triggers", []) or []:
+                    if hasattr(trig, "default_chat_id") and not trig.default_chat_id:
+                        trig.default_chat_id = self.trigger_manager.default_chat_id
 
             logger.info(
-                f"Trigger 启动参数: default_chat_id={'set' if self.trigger_manager.default_chat_id else 'empty'}"
+                f"Trigger 启动参数: default_chat_id={self.trigger_manager.default_chat_id or '(empty)'}"
             )
             await self.trigger_manager.startup()
 

@@ -566,6 +566,11 @@ class TelegramAdapter(BaseAdapter):
         if not update.effective_chat or not update.message:
             return
 
+        text, markup = self._build_model_alias_menu()
+        await update.message.reply_text(text, reply_markup=markup, parse_mode=ParseMode.HTML)
+
+    def _build_model_alias_menu(self):
+        """构造 /model 顶层 alias 选择菜单。"""
         cfg = config.get_config() or {}
         llm_cfg = cfg.get("llm", {}) or {}
         models_cfg = llm_cfg.get("models", {}) or {}
@@ -582,7 +587,7 @@ class TelegramAdapter(BaseAdapter):
             "点击要修改的模型别名，然后输入新的模型名称。\n"
             "将立即保存到 config.yml。"
         )
-        await update.message.reply_text(text, reply_markup=InlineKeyboardMarkup(buttons), parse_mode=ParseMode.HTML)
+        return text, InlineKeyboardMarkup(buttons)
 
     def _get_provider_for_alias(self, cfg: Dict[str, Any], alias: str) -> str:
         llm_cfg = cfg.get("llm", {}) or {}
@@ -1360,6 +1365,11 @@ class TelegramAdapter(BaseAdapter):
             await query.edit_message_text("已关闭模型切换。")
             return
 
+        if alias == "back":
+            text, markup = self._build_model_alias_menu()
+            await query.edit_message_text(text, reply_markup=markup, parse_mode=ParseMode.HTML)
+            return
+
         cfg = config.get_config() or {}
         llm_cfg = cfg.get("llm", {}) or {}
         providers_cfg = llm_cfg.get("providers", {}) or {}
@@ -1374,7 +1384,10 @@ class TelegramAdapter(BaseAdapter):
             provider_type = (providers_cfg.get(provider_name, {}) or {}).get("type", provider_name)
             label = f"{provider_name} ({provider_type})"
             buttons.append([InlineKeyboardButton(label, callback_data=f"model_provider:{alias}:{provider_name}")])
-        buttons.append([InlineKeyboardButton("取消", callback_data="model_pick:cancel")])
+        buttons.append([
+            InlineKeyboardButton("⬅ 返回", callback_data="model_pick:back"),
+            InlineKeyboardButton("取消", callback_data="model_pick:cancel"),
+        ])
 
         await query.edit_message_text(
             f"请选择 {alias} 的 Provider：",
@@ -1562,7 +1575,10 @@ class TelegramAdapter(BaseAdapter):
 
         if nav_buttons:
             buttons.append(nav_buttons)
-        buttons.append([InlineKeyboardButton("取消", callback_data="model_pick:cancel")])
+        buttons.append([
+            InlineKeyboardButton("⬅ 返回", callback_data=f"model_pick:{alias}"),
+            InlineKeyboardButton("取消", callback_data="model_pick:cancel"),
+        ])
 
         await query.edit_message_text(
             f"选择 {alias} 的模型（来源: {provider_name}）：",

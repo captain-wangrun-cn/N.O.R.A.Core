@@ -791,8 +791,10 @@ class BackBrainMixin:
             
             # 若有新图片才要求tags，由搜索查找到的历史图片不需要生成标签
             expected_ids = [] if historical_reply_image_direct else [img["image_id"] for img in multimodal_images if not img.get("from_tool")]
-            
-            if (expected_ids or multimodal_images) and not historical_reply_image_direct:
+
+            # 仅当存在“新用户图片”（非工具回查/历史回复图片）时才校验/重试 IMAGE_TAGS。
+            # 用户从图库找回并回发图片（from_tool=True）属于纯展示场景，不需要再生标签。
+            if expected_ids and not historical_reply_image_direct:
                 source_text_for_tags = final_response_buffer or last_image_raw_output or ""
                 for m in self._IMAGE_TAGS_PATTERN.finditer(source_text_for_tags):
                     img_id = m.group(1).strip()

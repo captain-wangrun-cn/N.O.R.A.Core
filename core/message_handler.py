@@ -110,6 +110,27 @@ class MessageHandlerMixin:
         # 取消该 chat 已有的对话延续定时器（用户回来了）
         self._cancel_followup_timer(chat_id)
 
+        # 用户在前脑还在生成时又发了一条消息：取消前脑的当前生成，按聚合器语义合并：
+        #   - 如果前脑还没输出任何文本：直接 cancel，DB 里已经存有上一条用户消息，
+        #     新消息走正常流程时会从历史读到上一条 user 消息，相当于"未输出阶段合并消息"。
+        #   - 如果前脑已经生成了部分文本：cancel 后保留 self.front_brain_partial[chat_id]，
+        #     下一次前脑生成时会把这段草稿作为系统备注（仅模型可见）注入，
+        #     让模型基于已生成内容 + 新消息重新组织回复，而不是从零开始。
+        prev_front_task = self.front_brain_tasks.get(chat_id)
+        if prev_front_task and not prev_front_task.done():
+            partial_len = len((self.front_brain_partial.get(chat_id) or ""))
+            logger.info(
+                f"[{chat_id}] 检测到前脑仍在生成回复（已生成 {partial_len} 字），新消息到达，"
+                f"取消前脑任务并合并新消息。"
+            )
+            prev_front_task.cancel()
+            try:
+                await asyncio.wait_for(asyncio.shield(prev_front_task), timeout=1.0)
+            except (asyncio.CancelledError, asyncio.TimeoutError, Exception):
+                pass
+            self.front_brain_tasks.pop(chat_id, None)
+            # 注意：故意 *不* 清理 self.front_brain_partial[chat_id]，让下一次前脑能看到草稿。
+
         # 统一计算 storage id（私聊用 user_id，群聊用 chat_id）
         storage_id_for_scheduler = chat_id if chat_type != "private" else user_id
 
@@ -123,6 +144,10 @@ class MessageHandlerMixin:
         if getattr(self, "trigger_manager", None) and not self.trigger_manager.default_chat_id:
             self.trigger_manager.default_chat_id = storage_id_for_scheduler
             save_default_chat_id(storage_id_for_scheduler)
+            # 同步给已注册的 sub-trigger（如 EmailTrigger 在初始化时拿到的是空字符串）
+            for trig in getattr(self.trigger_manager, "_triggers", []) or []:
+                if hasattr(trig, "default_chat_id") and not trig.default_chat_id:
+                    trig.default_chat_id = storage_id_for_scheduler
             logger.info(f"Trigger default_chat_id 已设置: {storage_id_for_scheduler}")
         
         # ── 命令分发 ──
@@ -376,8 +401,18 @@ class MessageHandlerMixin:
             )
             context["_message_saved"] = True
 
-        # 2) 前脑生成即时回复 + 路由判断
-        front_result = await self._generate_front_chat_response(context)
+        # 2) 前脑生成即时回复 + 路由判断（包成 task 以便后续到达的新消息能打断它）
+        front_task = asyncio.create_task(self._generate_front_chat_response(context))
+        self.front_brain_tasks[chat_id] = front_task
+        try:
+            front_result = await front_task
+        except asyncio.CancelledError:
+            logger.info(f"[{chat_id}] 前脑生成已被新消息打断，丢弃本轮结果。")
+            return
+        finally:
+            # 仅在仍指向当前 task 时清理
+            if self.front_brain_tasks.get(chat_id) is front_task:
+                self.front_brain_tasks.pop(chat_id, None)
 
         # 3) 发送前脑回复给用户（如果有的话）
         user_reply = front_result.get("user_reply", "")
@@ -1046,7 +1081,23 @@ class MessageHandlerMixin:
             
             # 前脑信息
             lines.append("")
-            lines.append("⚡ 前脑 (Fast Brain): 🟢 就绪")
+            front_task = self.front_brain_tasks.get(chat_id) if hasattr(self, "front_brain_tasks") else None
+            front_busy = bool(front_task and not front_task.done())
+            review_active = bool(getattr(self, "_in_review_loop", {}).get(chat_id, False))
+            polling_active = bool(getattr(self, "_polling_active", {}).get(chat_id, False))
+            if front_busy:
+                lines.append("⚡ 前脑 (Fast Brain): 🟡 正在生成回复")
+            elif review_active:
+                lines.append("⚡ 前脑 (Fast Brain): 🟡 正在审查后脑结果")
+            elif polling_active:
+                lines.append("⚡ 前脑 (Fast Brain): 🟡 正在轮询后脑")
+            else:
+                lines.append("⚡ 前脑 (Fast Brain): 🟢 空闲")
+
+            # 待处理 / 已注册 followup
+            pending_followups = [cid for cid, t in (getattr(self, "_followup_timers", {}) or {}).items() if t and not t.done()]
+            if pending_followups:
+                lines.append(f"  followup 定时器: {len(pending_followups)} 个活跃")
 
             # 全局在线状态
             lines.append("")

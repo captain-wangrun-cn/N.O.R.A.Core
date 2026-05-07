@@ -208,8 +208,19 @@ class SchedulerMixin:
         if self.scheduler:
             if default_chat_id:
                 self.scheduler.default_chat_id = default_chat_id
+            elif not self.scheduler.default_chat_id:
+                # 兜底：再次尝试从持久化文件读取（init 时可能 workspace 还未就绪）
+                try:
+                    from core.default_chat_id_store import load_default_chat_id
+                    persisted = load_default_chat_id()
+                    if persisted:
+                        self.scheduler.default_chat_id = persisted
+                except Exception as e:
+                    logger.warning(f"start_scheduler 兜底读取 default_chat_id 失败: {e}")
             self.scheduler.start()
-            logger.info(f"Scheduler 已启动, default_chat_id={default_chat_id}")
+            logger.info(
+                f"Scheduler 已启动, default_chat_id={self.scheduler.default_chat_id or '(empty)'}"
+            )
 
     def stop_scheduler(self):
         """停止调度器。"""
