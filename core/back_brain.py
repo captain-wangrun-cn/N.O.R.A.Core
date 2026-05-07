@@ -135,6 +135,14 @@ class BackBrainMixin:
             text = clean_text
         historical_reply_image_direct = "[NORA_HISTORICAL_REPLY_IMAGE_DIRECT]" in text
 
+        # 记录本次后脑任务的输入快照：被"新图片到达"打断重启时需要把旧图+新图合并
+        self.back_brain_input_context[chat_id] = {
+            "text": text,
+            "multimodal_images": list(multimodal_images),
+        }
+        # 初始化本次后脑流式缓冲（被打断时作为草稿带入合并重启）
+        self.back_brain_partial[chat_id] = ""
+
         # 图片先占位入库（无标签，不写向量），待模型回复后再补标签
         if multimodal_images and self.image_store.enabled and not historical_reply_image_direct:
             for img in multimodal_images:
@@ -312,6 +320,17 @@ class BackBrainMixin:
             lazy_lexicon_block = get_lazy_lexicon_user_prompt_block(text)
             if lazy_lexicon_block:
                 full_user_prompt = f"{full_user_prompt}\n\n{lazy_lexicon_block}"
+
+            # 聚合器语义：上一次后脑被新图片打断时留下的草稿（合并重启时由上层注入到 context）
+            prior_back_partial = (context.get("_back_brain_prior_partial", "") or "").strip()
+            if prior_back_partial:
+                full_user_prompt += (
+                    "\n\n[系统备注] 上一次后脑生成被用户新发的图片打断，以下是当时已经生成但**尚未完成**的草稿：\n"
+                    f"---\n{prior_back_partial}\n---\n"
+                    "本轮已经把旧图与新图合并交给你；请基于这段草稿和新图重新组织回复——"
+                    "如果草稿仍然合理，可以延用语气和已表达的内容；如果新图改变了观察方向，请直接重写。"
+                    "无论如何不要把这段草稿原样再发给用户。"
+                )
             
             # --- 前脑上下文注入（告知后脑前脑的回复） ---
             if front_brain_handled:
@@ -457,8 +476,12 @@ class BackBrainMixin:
                     if isinstance(chunk, dict):
                         if chunk["type"] == "text":
                             content = chunk["content"]
-                            
+
                             response_text_buffer += content
+                            # 同步到 controller 的实时缓冲，方便被新图片打断时拿到草稿
+                            self.back_brain_partial[chat_id] = (
+                                self.back_brain_partial.get(chat_id, "") + content
+                            )
                             if image_turn_raw_parts is not None:
                                 image_turn_raw_parts.append(content)
                             
@@ -1176,6 +1199,10 @@ class BackBrainMixin:
             self._mark_scheduler_idle(chat_id, initial_delay=followup_delay)
             if self.tui_callback: self.tui_callback("✅ Idle")
             self.generation_tasks.pop(chat_id, None)
+            # 仅在没有被"新图片打断"接管时清理后脑缓冲；被接管时上层会保留草稿
+            if not context.get("_back_brain_handed_off", False):
+                self.back_brain_partial.pop(chat_id, None)
+                self.back_brain_input_context.pop(chat_id, None)
             logger.debug(f"[{chat_id}] 本次生成任务结束。")
             
             in_polling = context.get("_in_polling_loop", False)

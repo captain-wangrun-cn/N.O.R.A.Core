@@ -116,6 +116,11 @@ class NoraController(
         self.front_brain_tasks: Dict[str, asyncio.Task] = {}
         # 前脑流式生成的"实时缓冲"：per-chat 字符串，被打断时作为草稿带入下轮
         self.front_brain_partial: Dict[str, str] = {}
+        # 后脑流式生成的"实时缓冲"：per-chat 字符串，被新图片打断时作为草稿带入合并重启
+        self.back_brain_partial: Dict[str, str] = {}
+        # 后脑当前任务的输入快照：per-chat dict，包含原始 text + multimodal_images，
+        # 用于"被新图片打断时把旧图与新图合并重启"
+        self.back_brain_input_context: Dict[str, Dict[str, Any]] = {}
 
         # 是否启用非流式输出（per-chat，可被命令切换）
         interaction_cfg = (config.get_config() or {}).get("interaction", {})

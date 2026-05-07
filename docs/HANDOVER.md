@@ -32,6 +32,9 @@
 7. **/status 提供更细粒度状态**
    - `core/message_handler.py::_cmd_status`：前脑分支区分 🟡 正在生成 / 正在审查 / 正在轮询 / 🟢 空闲，并展示活跃 followup 定时器数量。
 
+8. **后脑忙碌时分开发的多张图片不再触发"在忙"硬编码提示**
+   - `core/message_handler.py`：后脑忙碌且收到带真实图片的新消息时，原本会发一条机械的 "后端忙碌，已把图片需求排队，稍后处理哦～"。改为静默入队（仅写用户消息到 DB），让前脑后续基于上下文自然反应，行为对齐 MessageAggregator 的精神。
+
 **涉及文件**：
 - `core/controller.py`
 - `core/scheduler_mixin.py`

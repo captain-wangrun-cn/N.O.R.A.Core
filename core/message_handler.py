@@ -208,25 +208,16 @@ class MessageHandlerMixin:
             storage_id = chat_id if chat_type != "private" else user_id
             message_content = f"{user_name}: {text}" if chat_type != "private" else text
 
-            # 若包含真实图片输入（已成功加载图片字节），直接入队，避免图片丢失
+            # 若包含真实图片输入（已成功加载图片字节）：聚合器语义合入正在进行的后脑任务。
+            #   - 后脑还没输出任何文本：cancel 旧后脑 → 把"旧图 + 新图"合并 → 立即重启一次后脑。
+            #   - 后脑已经生成部分文本：cancel + 把已生成草稿带到合并后的新一次后脑生成里继续/重写。
+            # 不再发硬编码"已排队"提示——行为对齐前脑文本聚合器的精神。
             if image_input_detected:
                 user_metadata = {}
                 platform_msg_id = context.get("platform_message_id")
                 if platform_msg_id:
                     user_metadata["platform_message_ids"] = [str(platform_msg_id)]
 
-                queue = self.task_queues.setdefault(chat_id, BackendTaskQueue())
-                await queue.enqueue({
-                    "context": context,
-                    "text": text,
-                })
-                busy_reply = "后端忙碌，已把图片需求排队，稍后处理哦～"
-                busy_msg_id = await self.adapter.send_message(chat_id, busy_reply)
-                busy_md = {}
-                if busy_msg_id:
-                    busy_md["platform_message_ids"] = [str(busy_msg_id)]
-
-                # 保存用户消息与提示
                 self.message_history.add_message(
                     platform="telegram",
                     chat_id=storage_id,
@@ -235,16 +226,76 @@ class MessageHandlerMixin:
                     user_id=user_id,
                     metadata=user_metadata or None,
                 )
-                self.message_history.add_message(
-                    platform="telegram",
-                    chat_id=storage_id,
-                    role="assistant",
-                    content=busy_reply,
-                    user_id="assistant",
-                    metadata=busy_md or None,
-                )
                 context["_message_saved"] = True
-                logger.info(f"[{chat_id}] 后端忙碌且检测到图片，消息已入队 (队列长度 {queue.size()})")
+
+                # 收集旧后脑的输入快照与已生成草稿
+                prior_input = self.back_brain_input_context.get(chat_id) or {}
+                prior_text = prior_input.get("text", "") or ""
+                prior_images = list(prior_input.get("multimodal_images") or [])
+                prior_partial = (self.back_brain_partial.get(chat_id) or "").strip()
+
+                # 标记当前任务为"被图片合并打断"，让后脑 finally 不要清空缓冲
+                old_task = self.generation_tasks.get(chat_id)
+                if status:
+                    status_ctx = getattr(status, "context", None)
+                # 给旧后脑 context 打标记的最稳妥方式：直接 cancel 后清理 worker_status，由新任务替代
+                logger.info(
+                    f"[{chat_id}] 后脑忙碌 + 新图片到达：cancel 旧后脑并合并旧图({len(prior_images)}) + 新图重启。"
+                )
+                if old_task and not old_task.done():
+                    # 让 finally 不清掉 partial / input_context（虽然此时它本来就要被新任务覆盖，
+                    # 但保留语义清晰）。直接给旧 context 加标记需要拿到引用——简化处理：
+                    # 我们已经把 partial / input_context 提取到本地变量 prior_*，丢失也不影响。
+                    old_task.cancel()
+                    try:
+                        await asyncio.wait_for(asyncio.shield(old_task), timeout=1.0)
+                    except (asyncio.CancelledError, asyncio.TimeoutError, Exception):
+                        pass
+                    self.generation_tasks.pop(chat_id, None)
+
+                # 标记打断，避免旧任务的 finally 触发 _process_pending_messages
+                session = self.sessions.setdefault(chat_id, {"history": [], "interrupted_thought": "", "pending_text": ""})
+                session["_interrupted_by_frontend"] = True
+
+                # 旧 worker_status 清理
+                if status:
+                    try:
+                        status.finish()
+                    except Exception:
+                        pass
+
+                # 合并 multimodal_images：旧图（保持顺序）+ 新图（同样保持顺序，去重 image_id）
+                new_images = list(context.get("multimodal_images") or [])
+                merged_images: List[Dict[str, Any]] = []
+                seen_ids = set()
+                for img in (prior_images + new_images):
+                    iid = img.get("image_id") if isinstance(img, dict) else None
+                    if iid and iid in seen_ids:
+                        continue
+                    if iid:
+                        seen_ids.add(iid)
+                    merged_images.append(img)
+
+                # 合并 text：把旧文本与新文本拼起来（新文本是这条消息已经处理过 [image:...] 的纯文本）
+                merged_text_parts = [t for t in (prior_text.strip(), text.strip()) if t]
+                merged_text = "\n".join(merged_text_parts) if merged_text_parts else text
+
+                # 构造合并后的 context，重启后脑
+                merged_context = dict(context)
+                merged_context["text"] = merged_text
+                merged_context["multimodal_images"] = merged_images
+                if prior_partial:
+                    merged_context["_back_brain_prior_partial"] = prior_partial
+                merged_context["_message_saved"] = True
+                # 清理上一轮残留：旧 input_context 和 partial 我们已经吃掉了
+                self.back_brain_partial.pop(chat_id, None)
+                self.back_brain_input_context.pop(chat_id, None)
+
+                task = asyncio.create_task(self._generate_response(merged_context))
+                self.generation_tasks[chat_id] = task
+                logger.info(
+                    f"[{chat_id}] 已合并 {len(merged_images)} 张图片（草稿 {len(prior_partial)} 字）重启后脑。"
+                )
                 return
 
             # 无图片：记录消息并运行意图检测，仅在需要打断/切换/队列操作时回复；
