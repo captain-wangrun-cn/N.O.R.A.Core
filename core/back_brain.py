@@ -489,6 +489,8 @@ class BackBrainMixin:
                 last_turn_model_alias = turn_model_alias
                 last_turn_llm = turn_llm
                 image_turn_raw_parts: List[str] = [] if turn_model_alias == "image" else None
+                # 视频模型轮次不传工具，专注生成标签
+                video_turn_no_tools = (turn_model_alias == "video")
                 # 构造本轮 user_prompt：工具返回图片时追加提示（这些是回查的旧图，不要生成 IMAGE_TAGS）
                 turn_user_prompt = full_user_prompt if current_turn == 1 else " (Continue processing tool outputs...)"
                 if current_turn > 1 and turn_multimodal_images and any(ti.get("from_tool") for ti in turn_multimodal_images):
@@ -507,7 +509,7 @@ class BackBrainMixin:
                     system_prompt=system_prompt,
                     user_prompt=turn_user_prompt,
                     history=temp_history,
-                    tools=[] if force_no_tools else self.tool_manager.get_tool_schemas(),
+                    tools=[] if (force_no_tools or video_turn_no_tools) else self.tool_manager.get_tool_schemas(),
                     multimodal_images=turn_multimodal_images if turn_multimodal_images else None,
                     multimodal_videos=turn_multimodal_videos if turn_multimodal_videos else None,
                 )
