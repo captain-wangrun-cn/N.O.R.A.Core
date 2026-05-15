@@ -59,6 +59,18 @@ class GeminiProvider(BaseLLM):
             raise ValueError(f"Model for alias '{model_alias}' not found in config.")
 
         genai.configure(api_key=config.get_api_key(provider_name))
+        # 支持自定义 API endpoint（如代理地址）
+        base_url = config.get_base_url(provider_name)
+        if base_url:
+            try:
+                from google.api_core import client_options as client_options_lib
+                genai.configure(
+                    api_key=config.get_api_key(provider_name),
+                    client_options=client_options_lib.ClientOptions(api_endpoint=base_url),
+                )
+            except Exception:
+                logger.warning(f"Gemini base_url 配置失败，使用默认 endpoint: {base_url}")
+
         self.model_name = model_name
 
         # 配置安全设置 - 放宽内容过滤以允许链接等内容

@@ -486,7 +486,17 @@ class StepProvider(ConfigStep):
             "api_key": api_key,
         }
 
-        if provider_type == "openai":
+        if provider_type == "gemini":
+            base_url = questionary.text(
+                "API Base URL（留空使用 Google 官方地址）:",
+                default=(existing or {}).get("base_url") or ""
+            ).ask()
+            if base_url is None:
+                return None
+            if base_url.strip():
+                provider_cfg["base_url"] = base_url.strip()
+
+        elif provider_type == "openai":
             base_url = questionary.text(
                 t('wizard.openai_base_url_prompt'),
                 default=(existing or {}).get("base_url") or "https://api.openai.com/v1"
@@ -910,7 +920,20 @@ class StepModels(ConfigStep):
         models = self.state.get('models', {})
         model_providers = self.state.setdefault('model_providers', {})
 
-        for role_key in ['smart', 'fast', 'coder', 'image', 'summary']:
+        for role_key in ['smart', 'fast', 'coder', 'image', 'video', 'summary']:
+            # video 模型为可选配置
+            if role_key == 'video':
+                configure_video = questionary.confirm(
+                    "是否配置视频分析模型？（可选，不配置则视频不入库）",
+                    default=bool(models.get('video'))
+                ).ask()
+                if configure_video is None:
+                    return False
+                if not configure_video:
+                    models.pop('video', None)
+                    model_providers.pop('video', None)
+                    continue
+
             provider_name = self._select_provider_for_role(role_key, provider_entries)
             if provider_name is None:
                 return False
