@@ -11,7 +11,7 @@ import re
 import time
 from typing import Dict, Any, Optional
 
-from brain.multimodal import extract_image_payloads
+from brain.multimodal import extract_image_payloads, extract_video_payloads
 from brain.prompts import render_template, get_soul_prompt, load_identity_context
 from core.routing import has_image_input
 from core.default_chat_id_store import save_default_chat_id
@@ -83,10 +83,21 @@ class MessageHandlerMixin:
         if clean_text:
             text = clean_text
 
-        # 将清洗后的文本和多模态图片回填到 context，避免后续丢失图片（尤其是带 caption 时）
+        # 解析视频输入：从 [video: ...] 中提取视频内容
+        clean_text_v, multimodal_videos = extract_video_payloads(text)
+        has_real_video = bool(multimodal_videos)
+        if clean_text_v:
+            text = clean_text_v
+
+        # 将清洗后的文本和多模态内容回填到 context
         context["text"] = text
         if multimodal_images:
             context["multimodal_images"] = multimodal_images
+        if multimodal_videos:
+            context["multimodal_videos"] = multimodal_videos
+        # 视频也需要走后脑（无论是否有视频模型，后脑会判断降级逻辑）
+        video_input_detected = has_real_video
+
         # 如果探测到图片标记但实际未加载到图片字节，记录到 context，
         # 让后续模型 prompt 知道"用户疑似发了图但没真正收到"，从而避免凭空想象图片内容。
         if has_image_marker and not has_real_image:
@@ -208,11 +219,11 @@ class MessageHandlerMixin:
             storage_id = chat_id if chat_type != "private" else user_id
             message_content = f"{user_name}: {text}" if chat_type != "private" else text
 
-            # 若包含真实图片输入（已成功加载图片字节）：聚合器语义合入正在进行的后脑任务。
+            # 若包含真实图片/视频输入（已成功加载字节）：聚合器语义合入正在进行的后脑任务。
             #   - 后脑还没输出任何文本：cancel 旧后脑 → 把"旧图 + 新图"合并 → 立即重启一次后脑。
             #   - 后脑已经生成部分文本：cancel + 把已生成草稿带到合并后的新一次后脑生成里继续/重写。
             # 不再发硬编码"已排队"提示——行为对齐前脑文本聚合器的精神。
-            if image_input_detected:
+            if image_input_detected or video_input_detected:
                 user_metadata = {}
                 platform_msg_id = context.get("platform_message_id")
                 if platform_msg_id:
@@ -417,12 +428,13 @@ class MessageHandlerMixin:
                 self.generation_tasks[chat_id].cancel()
                 await asyncio.sleep(0.1)
 
-        # 图片消息直接走后脑（需要 image 模型 + 工具能力）
+        # 图片/视频消息直接走后脑（需要 image/video 模型 + 工具能力）
         # 注意：此处 image_input_detected 已经只在"真的拿到了图片字节"时为 True；
         # 如果用户文本里出现 [image: ...] 但加载失败，会走下方前脑流程，
         # 由模型基于 context["image_load_failed"] 标记自然回应（不再硬编码"没读到图片"）。
-        if image_input_detected:
-            logger.info(f"[{chat_id}] 检测到图片输入，直接启动后脑。")
+        if image_input_detected or video_input_detected:
+            media_type = "视频" if video_input_detected else "图片"
+            logger.info(f"[{chat_id}] 检测到{media_type}输入，直接启动后脑。")
             # 将解析后的干净文本放入 context，避免后脑重复清洗
             context = dict(context)
             context["text"] = text
