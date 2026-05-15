@@ -888,6 +888,8 @@ class StepModels(ConfigStep):
             return None
 
         if provider_type == "gemini":
+            if provider_cfg.get("base_url"):
+                return None  # 自定义地址无法自动获取模型列表，走手动输入
             return get_gemini_models(api_key, provider_cfg.get("base_url"))
         if provider_type == "openai":
             return get_openai_models(api_key, provider_cfg.get("base_url"))
@@ -964,9 +966,7 @@ class StepModels(ConfigStep):
 
             if provider_name not in provider_model_cache:
                 model_list = self._fetch_models_for_provider(provider_name, provider_cfg)
-                if model_list is None:
-                    return False
-                provider_model_cache[provider_name] = model_list
+                provider_model_cache[provider_name] = model_list or []
 
             selected_model = self.select_model(provider_model_cache[provider_name], role_key, provider_type)
             if selected_model is None:
