@@ -27,7 +27,11 @@ class AnthropicProvider(BaseLLM):
         if not self.model:
             raise ValueError(f"Model for alias '{model_alias}' not found in config.")
 
-    self.client = AsyncAnthropic(api_key=api_key)
+        base_url = config.get_base_url(provider_name)
+        client_kwargs = {"api_key": api_key}
+        if base_url:
+            client_kwargs["base_url"] = base_url
+        self.client = AsyncAnthropic(**client_kwargs)
 
     @staticmethod
     def _convert_tools_schema(tools: List[Dict]) -> List[Dict[str, Any]]:

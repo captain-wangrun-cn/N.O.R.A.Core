@@ -60,9 +60,19 @@ def load_locale():
         _strings = yaml.safe_load(f)
 
 # --- 模型获取 ---
-def get_gemini_models(api_key: str):
+def get_gemini_models(api_key: str, base_url: Optional[str] = None):
     try:
-        genai.configure(api_key=api_key)
+        if base_url:
+            try:
+                from google.api_core import client_options as client_options_lib
+                genai.configure(
+                    api_key=api_key,
+                    client_options=client_options_lib.ClientOptions(api_endpoint=base_url),
+                )
+            except Exception:
+                genai.configure(api_key=api_key)
+        else:
+            genai.configure(api_key=api_key)
         models = [m.name.replace("models/", "") for m in genai.list_models() if 'generateContent' in m.supported_generation_methods]
         return sorted(models)
     except Exception as e:
@@ -488,7 +498,7 @@ class StepProvider(ConfigStep):
 
         if provider_type == "gemini":
             base_url = questionary.text(
-                "API Base URL（留空使用 Google 官方地址）:",
+                "API Base URL（留空使用 Google 官方地址，填写示例: https://my-proxy.com）:",
                 default=(existing or {}).get("base_url") or ""
             ).ask()
             if base_url is None:
@@ -516,6 +526,16 @@ class StepProvider(ConfigStep):
                 "是否优先使用 OpenAI Responses API？",
                 default=bool((existing or {}).get("use_responses_api", False))
             ).ask())
+
+        elif provider_type == "anthropic":
+            base_url = questionary.text(
+                "API Base URL（留空使用 Anthropic 官方地址）:",
+                default=(existing or {}).get("base_url") or ""
+            ).ask()
+            if base_url is None:
+                return None
+            if base_url.strip():
+                provider_cfg["base_url"] = base_url.strip()
 
         providers[provider_name] = provider_cfg
         # 保证至少有一个默认 provider
@@ -868,7 +888,7 @@ class StepModels(ConfigStep):
             return None
 
         if provider_type == "gemini":
-            return get_gemini_models(api_key)
+            return get_gemini_models(api_key, provider_cfg.get("base_url"))
         if provider_type == "openai":
             return get_openai_models(api_key, provider_cfg.get("base_url"))
         if provider_type == "anthropic":
