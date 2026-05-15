@@ -986,28 +986,30 @@ class ToolManager:
         limit: int = 10,
         return_image: bool = True,
         local_path: str = "",
+        media_type: str = "",
     ) -> str:
         """
-        Retrieves images from the image memory database. Supports multiple search modes:
-        1. By image_id: exact lookup (e.g. 'img_a1b2c3d4')
-        2. By keyword: semantic/text search on image tags (e.g. '猫咪', 'sunset beach')
+        Retrieves images or videos from the media memory database. Supports multiple search modes:
+        1. By image_id: exact lookup (e.g. 'img_a1b2c3d4' or 'vid_a1b2c3d4')
+        2. By keyword: semantic/text search on media tags (e.g. '猫咪', 'sunset beach')
         3. By text_query: fuzzy search on OCR text extracted from images (e.g. 'Hello World', '购物清单'). Supports search-engine-like fuzzy matching — partial matches, case-insensitive, multi-keyword AND logic.
         4. By time range: filter by Unix timestamp (start_time/end_time)
-        5. By local_path: read a local image directly (workspace-relative or absolute) and return a MediaTag for image-model analysis.
-        6. If no parameters given: returns the most recent images.
+        5. By local_path: read a local image/video directly (workspace-relative or absolute) and return a MediaTag for model analysis.
+        6. If no parameters given: returns the most recent media.
         text_query and keyword can be used together for combined results.
-        :param image_id: Exact image ID to look up (e.g. 'img_a1b2c3d4').
-        :param keyword: Keyword or description for semantic/text search on image tags.
+        :param image_id: Exact media ID to look up (e.g. 'img_a1b2c3d4' or 'vid_a1b2c3d4').
+        :param keyword: Keyword or description for semantic/text search on media tags.
         :param text_query: Search text content (OCR) extracted from images. Supports fuzzy matching, case-insensitive, multi-keyword AND logic (space-separated). E.g. 'error message', '购物 清单'.
     :param question: Optional question/prompt for the next image-model round. Use this when you need the image model to answer a specific question about the returned image(s). If provided, return_image is forced to true.
         :param start_time: Start of time range as Unix timestamp string (e.g. '1709856000').
         :param end_time: End of time range as Unix timestamp string (e.g. '1709942400').
         :param user_id: Filter by user ID. If empty, searches all users.
         :param limit: Maximum number of results (1-50, default 10).
-        :param return_image: When true, the tool returns image references via `[image: abs_path]`
-            MediaTags，供多模态管线自动读取图片内容。Default: True.
+        :param return_image: When true, the tool returns media references via `[image: abs_path]` or `[video: abs_path]`
+            MediaTags，供多模态管线自动读取内容。Default: True.
         :param local_path: Optional local file path to view directly (workspace-relative or absolute).
             When provided, bypasses DB search and returns the file with MediaTag if exists.
+        :param media_type: Filter by media type: 'image', 'video', or '' (empty = all types).
         """
         try:
             limit = max(1, min(int(limit), 50))
@@ -1042,29 +1044,31 @@ class ToolManager:
                 end_time=e_time,
                 user_id=user_id,
                 limit=limit,
+                media_type=media_type,
             )
 
         if not results:
-            return "No images found matching the criteria."
+            return "No media found matching the criteria."
 
         # 如果提出了具体视觉问题，必须返回 MediaTag，供下一轮 image 模型读取真实图片。
         if question:
             return_image = True
 
         # Format results for LLM consumption
-        output_lines = [f"Found {len(results)} image(s):\n"]
+        output_lines = [f"Found {len(results)} media item(s):\n"]
         if return_image:
-            output_lines.append("[Mode] return_image=true: output includes MediaTag lines [image: abs_path] for downstream multimodal ingestion.\n")
+            output_lines.append("[Mode] return_image=true: output includes MediaTag lines for downstream multimodal ingestion.\n")
         if question:
             output_lines.append(f"[Question] {question}\n")
         for i, img in enumerate(results, 1):
-            output_lines.append(f"--- Image {i} ---")
+            item_type = img.get("media_type", "image")
+            type_label = "Video" if item_type == "video" else "Image"
+            output_lines.append(f"--- {type_label} {i} ---")
             output_lines.append(f"  ID: {img.get('image_id', 'N/A')}")
             output_lines.append(f"  File: {img.get('file_path', 'N/A')}")
             output_lines.append(f"  Tags: {img.get('tags', img.get('text', 'N/A'))}")
             ocr_text = img.get('ocr_text', '')
             if ocr_text:
-                # 截断过长的 OCR 文字，避免输出过大
                 preview = ocr_text[:200] + ('...' if len(ocr_text) > 200 else '')
                 output_lines.append(f"  OCR Text: {preview}")
             ts = img.get("timestamp")
@@ -1080,7 +1084,8 @@ class ToolManager:
                 file_path = str(img.get('file_path', '')).strip()
                 if file_path:
                     abs_path = file_path if os.path.isabs(file_path) else os.path.abspath(file_path)
-                    output_lines.append(f"  MediaTag: [image: {abs_path}]")
+                    tag_type = "video" if item_type == "video" else "image"
+                    output_lines.append(f"  MediaTag: [{tag_type}: {abs_path}]")
             output_lines.append("")
 
         return "\n".join(output_lines)

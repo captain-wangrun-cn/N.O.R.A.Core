@@ -74,6 +74,7 @@ llm:
     fast: "gpt-4o-mini"
     coder: "gpt-4o"
     image: "gemini-1.5-pro-latest" # 用于图片输入理解的模型
+    video: "gemini-2.5-flash" # 用于视频输入理解的模型（可选，不配置则视频不入库）
   summary: "claude-3-5-haiku-latest" # 用于消息历史总结的模型
 
   # 输出 token 上限（统一）

@@ -339,6 +339,7 @@ class TelegramAdapter(BaseAdapter):
         model_handler = CommandHandler('model', self._model_command)
         msg_handler = MessageHandler(filters.TEXT & (~filters.COMMAND), self._handle_incoming_message)
         photo_handler = MessageHandler(filters.PHOTO, self._handle_photo)
+        video_handler = MessageHandler(filters.VIDEO | filters.VIDEO_NOTE, self._handle_video)
         document_handler = MessageHandler(filters.Document.ALL, self._handle_document)
         sticker_handler = MessageHandler(filters.Sticker.ALL, self._handle_sticker)
         callback_handler = CallbackQueryHandler(self._handle_callback)
@@ -358,6 +359,7 @@ class TelegramAdapter(BaseAdapter):
         self.application.add_handler(model_handler)
         self.application.add_handler(msg_handler)
         self.application.add_handler(photo_handler)
+        self.application.add_handler(video_handler)
         self.application.add_handler(document_handler)
         self.application.add_handler(sticker_handler)
         self.application.add_handler(callback_handler)
@@ -920,6 +922,59 @@ class TelegramAdapter(BaseAdapter):
             await self._aggregator.add_message(chat_id, text, full_context)
         
         logger.info(f"[{chat_id}] 相册合并完成: {len(buf['photos'])} 张图片 (group={media_group_id})")
+
+    async def _handle_video(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """处理视频消息（包括普通视频和圆形视频消息 video_note）"""
+        if not await self._should_process_message(update):
+            return
+
+        if not update.effective_chat:
+            return
+        chat_id = str(update.effective_chat.id)
+        self.current_chat_id = chat_id
+
+        if not update.message:
+            return
+
+        video = update.message.video or update.message.video_note
+        if not video:
+            return
+
+        caption = update.message.caption or ""
+        file_id = video.file_id
+        file_ext = ".mp4"
+        if hasattr(video, "mime_type") and video.mime_type:
+            import mimetypes as _mt
+            ext = _mt.guess_extension(video.mime_type)
+            if ext:
+                file_ext = ext
+
+        file = await video.get_file()
+        abs_file_path = os.path.join(self.telegram_data_dir, f"video_{file_id}{file_ext}")
+        await file.download_to_drive(abs_file_path)
+        rel_file_path = os.path.relpath(abs_file_path, self.workspace_root).replace('\\', '/')
+
+        reply_info = await self._extract_reply_info(update.message)
+
+        text = f"[video: {rel_file_path}]"
+        if caption:
+            text += f"\n{caption}"
+        if reply_info:
+            text = f"[回复: {reply_info}]\n{text}"
+
+        if self._aggregator:
+            full_context = {
+                "chat_id": chat_id,
+                "user_id": str(update.effective_user.id) if update.effective_user else chat_id,
+                "text": text,
+                "chat_type": update.effective_chat.type,
+                "user_name": update.effective_user.first_name if update.effective_user else "Unknown",
+                "platform": "telegram",
+                "platform_message_id": str(update.message.message_id) if update.message else None,
+            }
+            await self._aggregator.add_message(chat_id, text, full_context)
+
+        logger.info(f"[{chat_id}] 收到视频: {rel_file_path}")
 
     async def _handle_document(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """处理文档消息"""

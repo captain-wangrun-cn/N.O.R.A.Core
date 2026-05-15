@@ -20,7 +20,7 @@ from brain.prompts import (
     should_inject_custom,
     get_lazy_lexicon_user_prompt_block,
 )
-from brain.multimodal import extract_image_payloads
+from brain.multimodal import extract_image_payloads, extract_video_payloads
 from core.worker_status import WorkerStatus
 import config
 
@@ -47,6 +47,8 @@ class BackBrainMixin:
         cleaned = cls._IMAGE_TAGS_PATTERN.sub("", cleaned)  # type: ignore[attr-defined]
         # 移除 IMAGE_OCR 块（不应展示给用户，仅后台存储用）
         cleaned = cls._IMAGE_OCR_PATTERN.sub("", cleaned)  # type: ignore[attr-defined]
+        # 移除 VIDEO_TAGS 块（不应展示给用户，仅后台存储用）
+        cleaned = cls._VIDEO_TAGS_PATTERN.sub("", cleaned)  # type: ignore[attr-defined]
         cleaned = re.sub(r'\n{3,}', '\n\n', cleaned).strip()
         return cleaned
 
@@ -135,10 +137,19 @@ class BackBrainMixin:
             text = clean_text
         historical_reply_image_direct = "[NORA_HISTORICAL_REPLY_IMAGE_DIRECT]" in text
 
+        # 解析视频输入：把 [video: ...] 对应的本地视频读取为模型可用内容
+        clean_text_v, extracted_videos = extract_video_payloads(text)
+        multimodal_videos = extracted_videos
+        if clean_text_v:
+            text = clean_text_v
+        # 判断是否有可用的视频模型
+        video_llm_available = getattr(self, "video_llm", None) is not None
+
         # 记录本次后脑任务的输入快照：被"新图片到达"打断重启时需要把旧图+新图合并
         self.back_brain_input_context[chat_id] = {
             "text": text,
             "multimodal_images": list(multimodal_images),
+            "multimodal_videos": list(multimodal_videos),
         }
         # 初始化本次后脑流式缓冲（被打断时作为草稿带入合并重启）
         self.back_brain_partial[chat_id] = ""
@@ -156,6 +167,21 @@ class BackBrainMixin:
                         chat_id=chat_id,
                         platform=context.get("platform", "telegram"),
                         platform_message_id=context.get("platform_message_id"),
+                    )
+                )
+
+        # 视频先占位入库（仅当有视频模型时才入库）
+        if multimodal_videos and self.image_store.enabled and video_llm_available:
+            for vid in multimodal_videos:
+                asyncio.create_task(
+                    self._async_save_image_stub(
+                        image_id=vid["video_id"],
+                        file_path=vid["path"],
+                        user_id=user_id,
+                        chat_id=chat_id,
+                        platform=context.get("platform", "telegram"),
+                        platform_message_id=context.get("platform_message_id"),
+                        media_type="video",
                     )
                 )
 
@@ -180,9 +206,16 @@ class BackBrainMixin:
 
         response_platform_ids: List[str] = []
 
-        # 根据输入类型选择模型：只有当前轮真正携带图片字节时走 image 模型，其余走 coder 模型
-        base_model_alias = "image" if multimodal_images else "coder"
-        active_llm = self.image_llm if base_model_alias == "image" else self.coder_llm
+        # 根据输入类型选择模型
+        if multimodal_videos and video_llm_available:
+            base_model_alias = "video"
+            active_llm = self.video_llm
+        elif multimodal_images:
+            base_model_alias = "image"
+            active_llm = self.image_llm
+        else:
+            base_model_alias = "coder"
+            active_llm = self.coder_llm
 
         try:
             if self.tui_callback: self.tui_callback(f"🏃 Handling new message...")
@@ -300,6 +333,24 @@ class BackBrainMixin:
                         image_id_lines="\n".join(image_id_lines)
                     )
                     full_user_prompt = full_user_prompt + image_hint
+
+            # 如果有新视频且视频模型可用，注入视频标签提取提示
+            if multimodal_videos and video_llm_available:
+                video_id_lines = []
+                for vid in multimodal_videos:
+                    video_id_lines.append(f"- 视频 ID: {vid['video_id']}  文件: {os.path.basename(vid['path'])}")
+
+                if video_id_lines:
+                    video_hint = "\n\n" + render_template(
+                        'video_tags.jinja',
+                        'video_tags_prompt',
+                        video_id_lines="\n".join(video_id_lines)
+                    )
+                    full_user_prompt = full_user_prompt + video_hint
+            elif multimodal_videos and not video_llm_available:
+                # 无视频模型时，在文本中标注 [视频] 供 LLM 知晓
+                video_note = "\n\n（用户发送了视频，但当前未配置视频分析模型，无法查看视频内容）"
+                full_user_prompt = full_user_prompt + video_note
             
             # Check for salvaged context from previous interruption
             pending_text = session.get("pending_text", "")
@@ -425,8 +476,16 @@ class BackBrainMixin:
                 await self._send_debug(chat_id, f"💭 开始第 {current_turn}/{MAX_TURNS} 轮推理...")
                 
                 turn_multimodal_images = multimodal_images if current_turn == 1 else pending_tool_multimodal_images
-                turn_model_alias = "image" if turn_multimodal_images else base_model_alias
-                turn_llm = self.image_llm if turn_model_alias == "image" else self.coder_llm
+                turn_multimodal_videos = multimodal_videos if current_turn == 1 else []
+                if turn_multimodal_videos and video_llm_available:
+                    turn_model_alias = "video"
+                    turn_llm = self.video_llm
+                elif turn_multimodal_images:
+                    turn_model_alias = "image"
+                    turn_llm = self.image_llm
+                else:
+                    turn_model_alias = base_model_alias
+                    turn_llm = self.image_llm if turn_model_alias == "image" else self.coder_llm
                 last_turn_model_alias = turn_model_alias
                 last_turn_llm = turn_llm
                 image_turn_raw_parts: List[str] = [] if turn_model_alias == "image" else None
@@ -450,6 +509,7 @@ class BackBrainMixin:
                     history=temp_history,
                     tools=[] if force_no_tools else self.tool_manager.get_tool_schemas(),
                     multimodal_images=turn_multimodal_images if turn_multimodal_images else None,
+                    multimodal_videos=turn_multimodal_videos if turn_multimodal_videos else None,
                 )
                 # 仅消费一轮，避免重复注入同一批工具图片
                 if current_turn > 1 and pending_tool_multimodal_images:
@@ -1141,7 +1201,52 @@ class BackBrainMixin:
                         )
                     )
                     ocr_info = f", ocr_text='{ocr_text[:40]}...'" if ocr_text else ""
-                    logger.info(f"[{chat_id}] 图片 {img_id} 标签已补充: '{tags[:60]}...'{ocr_info}")            
+                    logger.info(f"[{chat_id}] 图片 {img_id} 标签已补充: '{tags[:60]}...'{ocr_info}")
+
+            # --- 4.7 视频记忆存储 (Video Memory Storage) ---
+            if multimodal_videos and video_llm_available and self.image_store.enabled:
+                video_tags_extracted: Dict[str, str] = {}
+                source_text_for_vtags = final_response_buffer or ""
+                for m in self._VIDEO_TAGS_PATTERN.finditer(source_text_for_vtags):
+                    vid_id = m.group(1).strip()
+                    tags_text = m.group(2).strip()
+                    if vid_id and tags_text:
+                        video_tags_extracted[vid_id] = tags_text
+
+                # ID 重映射（和图片逻辑一致）
+                expected_video_ids = [vid["video_id"] for vid in multimodal_videos]
+                expected_video_set = set(expected_video_ids)
+                parsed_vtag_blocks = list(video_tags_extracted.items())
+                if parsed_vtag_blocks:
+                    for idx, expected_id in enumerate(expected_video_ids):
+                        if expected_id in video_tags_extracted:
+                            continue
+                        if idx >= len(parsed_vtag_blocks):
+                            break
+                        parsed_id, parsed_tags = parsed_vtag_blocks[idx]
+                        if parsed_id not in expected_video_set and parsed_tags:
+                            video_tags_extracted[expected_id] = parsed_tags
+                            logger.warning(f"[{chat_id}] VIDEO_TAGS id 不匹配，重映射: {parsed_id} -> {expected_id}")
+
+                for vid in multimodal_videos:
+                    vid_id = vid["video_id"]
+                    tags = video_tags_extracted.get(vid_id, "")
+                    if not tags:
+                        logger.warning(f"[{chat_id}] 视频 {vid_id} 未生成标签，保持占位 (path={vid['path']})")
+                        continue
+                    asyncio.create_task(
+                        self._async_update_image_tags(
+                            image_id=vid_id,
+                            tags=tags,
+                            ocr_text="",
+                            user_id=storage_id,
+                            chat_id=chat_id,
+                            file_path=vid["path"],
+                            platform=context.get("platform", "telegram"),
+                            platform_message_id=context.get("platform_message_id"),
+                        )
+                    )
+                    logger.info(f"[{chat_id}] 视频 {vid_id} 标签已补充: '{tags[:60]}...'")
             # --- 5. RAG 记忆存储 (Memory Storage) ---
             if self.rag.enabled:
                 asyncio.create_task(self._async_save_memory(message_content, storage_id, {"role": "user", "chat_id": chat_id}))

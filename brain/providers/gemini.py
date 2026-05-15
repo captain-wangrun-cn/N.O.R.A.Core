@@ -137,6 +137,7 @@ class GeminiProvider(BaseLLM):
         history: List[Dict[str, str]],
         tools: Optional[List[Dict]] = None,
         multimodal_images: Optional[List[Dict]] = None,
+        multimodal_videos: Optional[List[Dict]] = None,
     ) -> str:
         # Convert history to Gemini's format, handling tool_call/tool_response
         gemini_history = self._convert_history(history)
@@ -218,18 +219,30 @@ class GeminiProvider(BaseLLM):
             return f"抱歉，处理您的请求时遇到了问题：{error_msg}"
 
     @staticmethod
-    def _build_user_parts(user_prompt: str, multimodal_images: Optional[List[Dict]] = None) -> List[Dict]:
-        """构建 Gemini message parts（text + inline_data）。"""
-        if not multimodal_images:
+    def _build_user_parts(user_prompt: str, multimodal_images: Optional[List[Dict]] = None, multimodal_videos: Optional[List[Dict]] = None) -> List[Dict]:
+        """构建 Gemini message parts（text + inline_data for images/videos）。"""
+        if not multimodal_images and not multimodal_videos:
             return [{"text": user_prompt}]
 
         parts: List[Dict] = []
         if user_prompt and user_prompt.strip():
             parts.append({"text": user_prompt})
 
-        for image in multimodal_images:
+        for image in (multimodal_images or []):
             mime_type = image.get("mime_type") or "image/jpeg"
             data = image.get("bytes")
+            if not data:
+                continue
+            parts.append({
+                "inline_data": {
+                    "mime_type": mime_type,
+                    "data": data
+                }
+            })
+
+        for video in (multimodal_videos or []):
+            mime_type = video.get("mime_type") or "video/mp4"
+            data = video.get("bytes")
             if not data:
                 continue
             parts.append({
@@ -250,6 +263,7 @@ class GeminiProvider(BaseLLM):
         history: List[Dict[str, str]],
         tools: Optional[List[Dict]] = None,
         multimodal_images: Optional[List[Dict]] = None,
+        multimodal_videos: Optional[List[Dict]] = None,
     ):
         gemini_history = self._convert_history(history)
 
@@ -281,7 +295,7 @@ class GeminiProvider(BaseLLM):
         if self.max_output_tokens:
             generation_config = {"max_output_tokens": int(self.max_output_tokens)}
 
-        user_parts = self._build_user_parts(full_prompt, multimodal_images)
+        user_parts = self._build_user_parts(full_prompt, multimodal_images, multimodal_videos)
         chat_session = current_model.start_chat(history=gemini_history)
         
         try:

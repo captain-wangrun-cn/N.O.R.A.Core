@@ -251,16 +251,16 @@ class OpenAIProvider(BaseLLM):
         return converted
 
     @staticmethod
-    def _build_user_content(user_prompt: str, multimodal_images: Optional[List[Dict[str, Any]]] = None):
+    def _build_user_content(user_prompt: str, multimodal_images: Optional[List[Dict[str, Any]]] = None, multimodal_videos: Optional[List[Dict[str, Any]]] = None):
         """构建 OpenAI user content：纯文本或多模态 parts。"""
-        if not multimodal_images:
+        if not multimodal_images and not multimodal_videos:
             return user_prompt
 
         parts: List[Dict[str, Any]] = []
         if user_prompt and user_prompt.strip():
             parts.append({"type": "text", "text": user_prompt})
 
-        for image in multimodal_images:
+        for image in (multimodal_images or []):
             mime_type = image.get("mime_type") or "image/jpeg"
             b64 = image.get("base64")
             if not b64:
@@ -268,6 +268,18 @@ class OpenAIProvider(BaseLLM):
             parts.append({
                 "type": "image_url",
                 "image_url": {
+                    "url": f"data:{mime_type};base64,{b64}"
+                }
+            })
+
+        for video in (multimodal_videos or []):
+            mime_type = video.get("mime_type") or "video/mp4"
+            b64 = video.get("base64")
+            if not b64:
+                continue
+            parts.append({
+                "type": "video_url",
+                "video_url": {
                     "url": f"data:{mime_type};base64,{b64}"
                 }
             })
@@ -282,6 +294,7 @@ class OpenAIProvider(BaseLLM):
         history: List[Dict[str, str]],
         tools: Optional[List[Dict]] = None,
         multimodal_images: Optional[List[Dict[str, Any]]] = None,
+        multimodal_videos: Optional[List[Dict[str, Any]]] = None,
     ) -> str:
         """
         非流式调用 OpenAI API（含 function calling 支持）。
@@ -316,7 +329,7 @@ class OpenAIProvider(BaseLLM):
                 return "Sorry, I encountered an issue processing your request with the OpenAI API."
 
         filtered_history = self._convert_history(history)
-        user_content = self._build_user_content(user_prompt, multimodal_images)
+        user_content = self._build_user_content(user_prompt, multimodal_images, multimodal_videos)
         messages = [
             {"role": "system", "content": system_prompt},
             *filtered_history,
@@ -370,6 +383,7 @@ class OpenAIProvider(BaseLLM):
         history: List[Dict[str, str]],
         tools: Optional[List[Dict]] = None,
         multimodal_images: Optional[List[Dict[str, Any]]] = None,
+        multimodal_videos: Optional[List[Dict[str, Any]]] = None,
     ):
         """
         流式调用 OpenAI API，完整支持 function calling。
@@ -447,7 +461,7 @@ class OpenAIProvider(BaseLLM):
             return
 
         filtered_history = self._convert_history(history)
-        user_content = self._build_user_content(user_prompt, multimodal_images)
+        user_content = self._build_user_content(user_prompt, multimodal_images, multimodal_videos)
         messages = [
             {"role": "system", "content": system_prompt},
             *filtered_history,

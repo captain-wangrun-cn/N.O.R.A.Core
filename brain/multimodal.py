@@ -14,7 +14,9 @@ from typing import Any, Dict, List, Tuple
 logger = logging.getLogger(__name__)
 
 _IMAGE_TAG_PATTERN = re.compile(r'\[image:\s*(.*?)\]', re.IGNORECASE)
+_VIDEO_TAG_PATTERN = re.compile(r'\[video:\s*(.*?)\]', re.IGNORECASE)
 _MAX_IMAGE_BYTES = 20 * 1024 * 1024  # 20MB safety limit per image
+_MAX_VIDEO_BYTES = 100 * 1024 * 1024  # 100MB safety limit per video (Gemini inline limit)
 
 
 def _generate_image_id() -> str:
@@ -22,9 +24,14 @@ def _generate_image_id() -> str:
     return f"img_{uuid.uuid4().hex[:8]}"
 
 
+def _generate_video_id() -> str:
+    """生成短且可读的视频 ID，格式: vid_<8位hex>"""
+    return f"vid_{uuid.uuid4().hex[:8]}"
+
+
 def _resolve_local_image_path(raw_path: str) -> str:
     """
-    解析本地图片路径。
+    解析本地媒体文件路径。
     优先顺序：绝对路径 -> 项目根目录相对路径 -> 当前工作目录相对路径 -> workspace downloads 路径。
     """
     path = (raw_path or "").strip().strip('"').strip("'")
@@ -123,3 +130,58 @@ def extract_image_payloads(text: str) -> Tuple[str, List[Dict[str, Any]]]:
     clean_text = re.sub(r'\n{3,}', '\n\n', clean_text).strip()
 
     return clean_text, images
+
+
+def extract_video_payloads(text: str) -> Tuple[str, List[Dict[str, Any]]]:
+    """
+    从用户文本中提取 [video: ...] 标签并加载视频二进制。
+
+    Returns:
+        clean_text: 移除 video 标签后的文本
+        videos: [{"video_id", "path", "mime_type", "bytes", "base64"}, ...]
+    """
+    if not text:
+        return "", []
+
+    videos: List[Dict[str, Any]] = []
+    seen_paths = set()
+
+    for match in _VIDEO_TAG_PATTERN.finditer(text):
+        raw_path = match.group(1)
+        resolved = _resolve_local_image_path(raw_path)
+        if not resolved:
+            logger.warning(f"多模态视频路径不存在，已跳过: {raw_path}")
+            continue
+        if resolved in seen_paths:
+            continue
+
+        mime_type, _ = mimetypes.guess_type(resolved)
+        if not mime_type or not mime_type.startswith("video/"):
+            logger.warning(f"标记为 video 但文件并非视频，已跳过: {resolved}")
+            continue
+
+        try:
+            file_size = os.path.getsize(resolved)
+            if file_size > _MAX_VIDEO_BYTES:
+                logger.warning(f"视频过大（>{_MAX_VIDEO_BYTES} bytes），已跳过: {resolved}")
+                continue
+
+            with open(resolved, "rb") as f:
+                raw_bytes = f.read()
+
+            video_id = _generate_video_id()
+            videos.append({
+                "video_id": video_id,
+                "path": resolved,
+                "mime_type": mime_type,
+                "bytes": raw_bytes,
+                "base64": base64.b64encode(raw_bytes).decode("utf-8"),
+            })
+            seen_paths.add(resolved)
+        except Exception as e:
+            logger.warning(f"读取视频失败，已跳过: {resolved} ({e})")
+
+    clean_text = _VIDEO_TAG_PATTERN.sub("", text)
+    clean_text = re.sub(r'\n{3,}', '\n\n', clean_text).strip()
+
+    return clean_text, videos

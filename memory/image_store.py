@@ -36,6 +36,11 @@ def _generate_image_id() -> str:
     return f"img_{uuid.uuid4().hex[:8]}"
 
 
+def _generate_video_id() -> str:
+    """生成一个短且可读的视频 ID，格式: vid_<8位hex>"""
+    return f"vid_{uuid.uuid4().hex[:8]}"
+
+
 class ImageStore:
     """
     图片记忆的统一存储 & 检索入口。
@@ -151,6 +156,10 @@ class ImageStore:
         """公开接口，生成唯一图片 ID。"""
         return _generate_image_id()
 
+    def generate_video_id(self) -> str:
+        """公开接口，生成唯一视频 ID。"""
+        return _generate_video_id()
+
     def save_image_metadata(
         self,
         image_id: str,
@@ -162,9 +171,10 @@ class ImageStore:
         platform: str = "",
         platform_message_id: Optional[str] = None,
         tag_status: str = "completed",
+        media_type: str = "image",
     ) -> bool:
         """
-        保存/更新一张图片的元数据（默认完成态）。
+        保存/更新一张图片或视频的元数据（默认完成态）。
 
         若 tags 为空仅写 Mongo，不写向量；为兼容新增的「先暂存，后补标签」流程。
         """
@@ -186,6 +196,7 @@ class ImageStore:
             "timestamp": now,
             "datetime": datetime.fromtimestamp(now, tz=timezone.utc).isoformat(),
             "tag_status": tag_status,
+            "media_type": media_type,
             **(extra or {}),
         }
         try:
@@ -213,6 +224,7 @@ class ImageStore:
                                     "user_id": user_id,
                                     "chat_id": chat_id,
                                     "timestamp": now,
+                                    "media_type": media_type,
                                 },
                             )
                         ],
@@ -239,6 +251,7 @@ class ImageStore:
         extra: Optional[Dict[str, Any]] = None,
         platform: str = "",
         platform_message_id: Optional[str] = None,
+        media_type: str = "image",
     ) -> bool:
         """先写入占位元数据（无标签、不写向量），等待模型回复后再补标签。"""
         if not self.enabled:
@@ -257,11 +270,12 @@ class ImageStore:
             "timestamp": now,
             "datetime": datetime.fromtimestamp(now, tz=timezone.utc).isoformat(),
             "tag_status": "pending",
+            "media_type": media_type,
             **(extra or {}),
         }
         try:
             self.mongo_col.replace_one({"image_id": image_id}, doc, upsert=True)
-            logger.info(f"图片占位已入库（等待标签）：{image_id} -> {file_path}")
+            logger.info(f"媒体占位已入库（等待标签）：{image_id} -> {file_path}")
             return True
         except Exception as e:
             logger.error(f"MongoDB 占位写入失败: {e}")
@@ -341,6 +355,7 @@ class ImageStore:
                 vector = self.embed_client.get_embedding(tags)
                 if vector:
                     point_id = str(uuid.uuid4())
+                    media_type_val = existing.get("media_type", "image")
                     self.qdrant.upsert(
                         collection_name=IMAGE_COLLECTION,
                         points=[
@@ -354,14 +369,15 @@ class ImageStore:
                                     "user_id": base_user_id,
                                     "chat_id": base_chat_id,
                                     "timestamp": base_ts,
+                                    "media_type": media_type_val,
                                 },
                             )
                         ],
                     )
                 else:
-                    logger.warning(f"图片标签向量化失败（更新阶段），已仅写 MongoDB: {image_id}")
+                    logger.warning(f"标签向量化失败（更新阶段），已仅写 MongoDB: {image_id}")
             except Exception as e:
-                logger.error(f"Qdrant 写入图片向量失败（更新阶段）: {e}")
+                logger.error(f"Qdrant 写入向量失败（更新阶段）: {e}")
 
         logger.info(
             f"图片标签已更新: {image_id} tags='{tags[:60]}...'"
@@ -565,6 +581,7 @@ class ImageStore:
         end_time: Optional[float] = None,
         user_id: str = "",
         limit: int = 10,
+        media_type: str = "",
     ) -> List[Dict[str, Any]]:
         """
         统一检索入口 —— 自动选择最佳策略：
@@ -572,8 +589,9 @@ class ImageStore:
         2. 有 text_query  → 在图片 OCR 文字中做模糊搜索
         3. 有 keyword     → 先尝试语义搜索，再回退关键词搜索
         4. 有时间范围     → 时间过滤
-        5. 什么都没有     → 返回最近的图片
+        5. 什么都没有     → 返回最近的图片/视频
 
+        media_type: 可选 "image"/"video"/""（空=不过滤）
         当 text_query 和 keyword 同时存在时，text_query 结果优先，
         keyword 结果作为补充（去重合并）。
         """
@@ -581,6 +599,11 @@ class ImageStore:
         if image_id:
             doc = self.get_by_id(image_id)
             return [doc] if doc else []
+
+        def _apply_media_filter(results: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+            if not media_type:
+                return results
+            return [r for r in results if r.get("media_type", "image") == media_type]
 
         # OCR 文字搜索 + 关键词搜索组合
         if text_query and keyword:
@@ -598,26 +621,26 @@ class ImageStore:
                 if rid and rid not in seen_ids:
                     seen_ids.add(rid)
                     merged.append(r)
-            return merged[:limit]
+            return _apply_media_filter(merged[:limit])
 
         # 纯 OCR 文字搜索
         if text_query:
-            return self.search_by_ocr_text(text_query, user_id=user_id, limit=limit)
+            return _apply_media_filter(self.search_by_ocr_text(text_query, user_id=user_id, limit=limit))
 
         # 语义 + 关键词
         if keyword:
             semantic_results = self.search_by_semantic(keyword, user_id=user_id, top_k=limit)
             if semantic_results:
                 # Qdrant 语义搜索结果需要从 MongoDB 补全 ocr_text 等字段
-                return self._enrich_with_mongo(semantic_results)
-            return self.search_by_keyword(keyword, user_id=user_id, limit=limit)
+                return _apply_media_filter(self._enrich_with_mongo(semantic_results))
+            return _apply_media_filter(self.search_by_keyword(keyword, user_id=user_id, limit=limit))
 
         # 时间范围
         if start_time is not None or end_time is not None:
-            return self.search_by_time_range(user_id, start_time, end_time, limit=limit)
+            return _apply_media_filter(self.search_by_time_range(user_id, start_time, end_time, limit=limit))
 
-        # 默认：最近的图片
-        return self.search_by_time_range(user_id, limit=limit)
+        # 默认：最近的图片/视频
+        return _apply_media_filter(self.search_by_time_range(user_id, limit=limit))
 
     def _enrich_with_mongo(self, results: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         """
@@ -644,3 +667,7 @@ class ImageStore:
                     pass
             enriched.append(r)
         return enriched
+
+
+# 兼容别名
+MediaStore = ImageStore

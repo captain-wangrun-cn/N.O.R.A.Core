@@ -82,6 +82,10 @@ class NoraController(
         r'\[IMAGE_OCR:([^\]\s]+)\](.*?)\[/IMAGE_OCR\]',
         re.IGNORECASE | re.DOTALL,
     )
+    _VIDEO_TAGS_PATTERN = re.compile(
+        r'\[VIDEO_TAGS:([^\]\s]+)\](.*?)\[/VIDEO_TAGS\]',
+        re.IGNORECASE | re.DOTALL,
+    )
     _SYSTEM_ENV_MARKER = "【系统环境信息 (System Environment)】"
     _LEXICON_GLOBAL_MARKER = "【词库全局说明 (Lexicon Global Prompt)】"
 
@@ -154,6 +158,12 @@ class NoraController(
             self.image_llm = get_llm_client(model_alias="image")
         except Exception:
             self.image_llm = self.llm
+
+        # 视频输入专用模型（可选，None 表示未配置）
+        try:
+            self.video_llm = get_llm_client(model_alias="video")
+        except Exception:
+            self.video_llm = None
         
         # 消息历史管理
         history_cfg = config.get_message_history_config()
@@ -286,6 +296,10 @@ class NoraController(
             self.image_llm = get_llm_client(model_alias="image")
         except Exception:
             self.image_llm = self.llm
+        try:
+            self.video_llm = get_llm_client(model_alias="video")
+        except Exception:
+            self.video_llm = None
 
     # ------------------------------------------------------------------
     # LLM 调用包装（支持 per-chat 非流式开关）
@@ -426,8 +440,9 @@ class NoraController(
         chat_id: str,
         platform: str = "",
         platform_message_id: Optional[str] = None,
+        media_type: str = "image",
     ):
-        """异步保存占位图片元数据（无标签，不写向量）。"""
+        """异步保存占位媒体元数据（无标签，不写向量）。"""
         try:
             await asyncio.to_thread(  # type: ignore[attr-defined]
                 self.image_store.save_image_stub,
@@ -437,6 +452,7 @@ class NoraController(
                 chat_id=chat_id,
                 platform=platform,
                 platform_message_id=platform_message_id,
+                media_type=media_type,
             )
             logger.debug(f"[{chat_id}] 图片占位已异步保存: {image_id}")
         except Exception as e:

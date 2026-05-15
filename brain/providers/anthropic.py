@@ -110,6 +110,7 @@ class AnthropicProvider(BaseLLM):
         history: List[Dict[str, str]],
         tools: Optional[List[Dict]] = None,
         multimodal_images: Optional[List[Dict[str, Any]]] = None,
+        multimodal_videos: Optional[List[Dict[str, Any]]] = None,
     ) -> str:
         messages = [
             *self._convert_history(history),
@@ -147,6 +148,7 @@ class AnthropicProvider(BaseLLM):
         history: List[Dict[str, str]],
         tools: Optional[List[Dict]] = None,
         multimodal_images: Optional[List[Dict[str, Any]]] = None,
+        multimodal_videos: Optional[List[Dict[str, Any]]] = None,
     ):
         messages = [
             *self._convert_history(history),
