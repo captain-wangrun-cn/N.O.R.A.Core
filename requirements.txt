@@ -4,6 +4,7 @@ requests
 python-dotenv 
 qdrant-client
 openai
+anthropic
 aiohttp
 google-generativeai
 questionary

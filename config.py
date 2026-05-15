@@ -191,6 +191,15 @@ def get_base_url(provider=None):
     cfg = _safe_config()
     return cfg.get("llm", {}).get("base_url")
 
+
+def get_provider_option(provider=None, key: str = ""):
+    """获取提供商自定义配置项。"""
+    if not key:
+        return None
+    provider = provider or get_llm_provider()
+    provider_cfg = get_provider_config(provider)
+    return provider_cfg.get(key)
+
 def get_model_name(model_alias="smart"):
     """Gets the model name for a given alias (e.g., 'smart', 'fast')."""
     cfg = _safe_config()

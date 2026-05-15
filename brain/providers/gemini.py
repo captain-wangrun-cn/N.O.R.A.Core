@@ -1,4 +1,5 @@
 import warnings
+import logging
 
 # Suppress the FutureWarning during import using a context manager
 # This is the most aggressive way to silence warnings emitted at import time
@@ -12,6 +13,8 @@ import random
 
 from brain.interface import BaseLLM
 import config
+
+logger = logging.getLogger(__name__)
 
 def _sanitize_links_for_safety(text: str) -> str:
     """
@@ -56,7 +59,8 @@ class GeminiProvider(BaseLLM):
             raise ValueError(f"Model for alias '{model_alias}' not found in config.")
 
         genai.configure(api_key=config.get_api_key(provider_name))
-        
+        self.model_name = model_name
+
         # 配置安全设置 - 放宽内容过滤以允许链接等内容
         from google.generativeai.types import HarmCategory, HarmBlockThreshold
         safety_settings = {
@@ -65,12 +69,8 @@ class GeminiProvider(BaseLLM):
             HarmCategory.HARM_CATEGORY_SEXUALLY_EXPLICIT: HarmBlockThreshold.BLOCK_NONE,
             HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT: HarmBlockThreshold.BLOCK_NONE,
         }
-        
-        self.model = genai.GenerativeModel(
-            model_name,
-            system_instruction="You are Nora, a helpful assistant.", # Base instruction
-            safety_settings=safety_settings
-        )
+
+        self.model = genai.GenerativeModel(model_name, safety_settings=safety_settings)
 
     def _convert_history(self, history: List[Dict[str, str]]) -> list:
         """
@@ -169,9 +169,10 @@ class GeminiProvider(BaseLLM):
                 # If this fails, we will need to refactor ToolManager to return native Gemini Tool objects.
                 
                 current_model = genai.GenerativeModel(
-                    self.model.model_name,
+                    self.model_name,
                     tools=tools, # Pass tools here
-                    system_instruction=system_prompt # System prompt is static per model usually
+                    system_instruction=system_prompt,
+                    safety_settings=safety_settings,
                 )
             
             # Note: start_chat doesn't take system_prompt again if model has it.
@@ -207,7 +208,7 @@ class GeminiProvider(BaseLLM):
         except Exception as e:
             # Handle potential content filtering and other API errors
             error_msg = str(e)
-            print(f"Gemini API Error: {e}")
+            logger.error(f"Gemini API Error: {e}", exc_info=True)
             
             # 检查是否是内容过滤错误
             if "block_reason" in error_msg or "PROHIBITED_CONTENT" in error_msg or "SAFETY" in error_msg:
@@ -267,7 +268,7 @@ class GeminiProvider(BaseLLM):
             # Pass tools to model. Newer SDKs support OpenAI-style schemas directly or we rely on auto-conversion.
             # We assume tools is a list of schemas.
             current_model = genai.GenerativeModel(
-                self.model.model_name,
+                self.model_name,
                 tools=tools,
                 system_instruction=system_prompt,
                 safety_settings=safety_settings
@@ -342,7 +343,7 @@ class GeminiProvider(BaseLLM):
                 
         except Exception as e:
             error_msg = str(e)
-            print(f"Gemini API Stream Error: {e}")
+            logger.error(f"Gemini API Stream Error: {e}", exc_info=True)
             
             # 检查是否是内容过滤错误
             if "block_reason" in error_msg or "PROHIBITED_CONTENT" in error_msg or "SAFETY" in error_msg:

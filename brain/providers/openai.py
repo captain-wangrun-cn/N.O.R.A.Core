@@ -30,10 +30,67 @@ class OpenAIProvider(BaseLLM):
             base_url=config.get_base_url(provider_name),
             default_headers=default_headers
         )
+        self.use_responses_api = bool(config.get_provider_option(provider_name, "use_responses_api"))
         self.model = config.get_model_name(model_alias)
         self.max_output_tokens = config.get_llm_max_output_tokens(model_alias)
         if not self.model:
             raise ValueError(f"Model for alias '{model_alias}' not found in config.")
+
+    @staticmethod
+    def _convert_history_for_responses(history: List[Dict[str, str]]) -> List[Dict[str, Any]]:
+        converted: List[Dict[str, Any]] = []
+        for item in history:
+            role = item.get("role", "user")
+            content = str(item.get("content", ""))
+            if role == "tool_call":
+                tool_name = item.get("tool_name", "unknown")
+                tool_args = item.get("tool_args", {})
+                converted.append({
+                    "type": "function_call",
+                    "name": tool_name,
+                    "arguments": json.dumps(tool_args, ensure_ascii=False) if isinstance(tool_args, dict) else str(tool_args),
+                    "call_id": f"hist_{len(converted)+1}",
+                })
+            elif role == "tool_response":
+                converted.append({
+                    "type": "function_call_output",
+                    "call_id": f"hist_{len(converted)}",
+                    "output": content,
+                })
+            else:
+                converted.append({
+                    "role": role if role in ("user", "assistant", "system") else "user",
+                    "content": [{"type": "input_text", "text": content}],
+                })
+        return converted
+
+    @staticmethod
+    def _convert_tools_schema_for_responses(tools: List[Dict]) -> List[Dict[str, Any]]:
+        converted = []
+        for tool in OpenAIProvider._convert_tools_schema(tools):
+            fn = tool.get("function", {})
+            converted.append({
+                "type": "function",
+                "name": fn.get("name", ""),
+                "description": fn.get("description", ""),
+                "parameters": fn.get("parameters", {}),
+            })
+        return converted
+
+    async def _responses_create(self, **kwargs):
+        return await self._with_retry(lambda: self.client.responses.create(**kwargs))
+
+    def _extract_response_text(self, response: Any) -> str:
+        output_text = getattr(response, "output_text", None)
+        if output_text:
+            return self.strip_think_content(output_text)
+        chunks: List[str] = []
+        for item in getattr(response, "output", []) or []:
+            for content in getattr(item, "content", []) or []:
+                text = getattr(content, "text", None)
+                if text:
+                    chunks.append(text)
+        return self.strip_think_content("".join(chunks))
 
     async def _with_retry(self, fn, max_retries: int = 3, base_delay: float = 1.0):
         """
@@ -232,6 +289,32 @@ class OpenAIProvider(BaseLLM):
         注意：chat() 用于 fast_llm 等不需要工具调用的场景，
         大部分工具调用走 chat_stream()。但仍完整实现以备需要。
         """
+        if self.use_responses_api:
+            payload: Dict[str, Any] = {
+                "model": self.model,
+                "instructions": system_prompt,
+                "input": [
+                    *self._convert_history_for_responses(history),
+                    {"role": "user", "content": [{"type": "input_text", "text": user_prompt}]},
+                ],
+            }
+            if self.max_output_tokens:
+                payload["max_output_tokens"] = int(self.max_output_tokens)
+            if tools:
+                payload["tools"] = self._convert_tools_schema_for_responses(tools)
+            try:
+                response = await self._responses_create(**payload)
+                usage = getattr(response, "usage", None)
+                if usage:
+                    self.last_usage = {
+                        "input_tokens": getattr(usage, "input_tokens", 0) or 0,
+                        "output_tokens": getattr(usage, "output_tokens", 0) or 0,
+                    }
+                return self._extract_response_text(response)
+            except Exception as e:
+                logger.error(f"OpenAI Responses API Error: {e}", exc_info=True)
+                return "Sorry, I encountered an issue processing your request with the OpenAI API."
+
         filtered_history = self._convert_history(history)
         user_content = self._build_user_content(user_prompt, multimodal_images)
         messages = [
@@ -301,6 +384,68 @@ class OpenAIProvider(BaseLLM):
         - {"type": "tool_call", "name": "...", "args": {...}}
         - {"type": "usage", "input_tokens": N, "output_tokens": N}
         """
+        if self.use_responses_api:
+            payload: Dict[str, Any] = {
+                "model": self.model,
+                "instructions": system_prompt,
+                "input": [
+                    *self._convert_history_for_responses(history),
+                    {"role": "user", "content": [{"type": "input_text", "text": user_prompt}]},
+                ],
+                "stream": True,
+            }
+            if self.max_output_tokens:
+                payload["max_output_tokens"] = int(self.max_output_tokens)
+            if tools:
+                payload["tools"] = self._convert_tools_schema_for_responses(tools)
+            try:
+                stream = await self._with_retry(lambda: self.client.responses.stream(**payload))
+            except Exception as e:
+                logger.error(f"OpenAI Responses Stream Error: {e}", exc_info=True)
+                yield {"type": "text", "content": "Sorry, an error occurred during streaming."}
+                return
+
+            pending_args: Dict[str, str] = {}
+            pending_names: Dict[str, str] = {}
+            in_think_block = False
+            input_tokens = 0
+            output_tokens = 0
+            async with stream as response_stream:
+                async for event in response_stream:
+                    event_type = getattr(event, "type", "")
+                    if event_type == "response.output_text.delta":
+                        delta = getattr(event, "delta", "") or ""
+                        visible_text, in_think_block = self.strip_stream_think_segment(delta, in_think_block)
+                        if visible_text:
+                            yield {"type": "text", "content": visible_text}
+                    elif event_type == "response.function_call_arguments.delta":
+                        call_id = getattr(event, "call_id", "")
+                        pending_args[call_id] = pending_args.get(call_id, "") + (getattr(event, "delta", "") or "")
+                    elif event_type == "response.function_call_arguments.done":
+                        call_id = getattr(event, "call_id", "")
+                        name = pending_names.get(call_id) or getattr(event, "name", "")
+                        raw_args = pending_args.get(call_id, "") or getattr(event, "arguments", "{}")
+                        try:
+                            parsed_args = json.loads(raw_args) if raw_args else {}
+                        except Exception:
+                            parsed_args = {}
+                        yield {"type": "tool_call", "name": name, "args": parsed_args}
+                    elif event_type == "response.output_item.added":
+                        item = getattr(event, "item", None)
+                        if getattr(item, "type", "") == "function_call":
+                            call_id = getattr(item, "call_id", "")
+                            pending_names[call_id] = getattr(item, "name", "")
+                    elif event_type == "response.completed":
+                        response = getattr(event, "response", None)
+                        usage = getattr(response, "usage", None) if response else None
+                        if usage:
+                            input_tokens = getattr(usage, "input_tokens", 0) or 0
+                            output_tokens = getattr(usage, "output_tokens", 0) or 0
+            if input_tokens or output_tokens:
+                self.last_usage = {"input_tokens": input_tokens, "output_tokens": output_tokens}
+                yield {"type": "usage", "input_tokens": input_tokens, "output_tokens": output_tokens}
+            return
+
         filtered_history = self._convert_history(history)
         user_content = self._build_user_content(user_prompt, multimodal_images)
         messages = [

@@ -95,6 +95,18 @@ def get_openai_models(api_key: str, base_url: Optional[str] = None):
         return None
 
 
+def get_anthropic_models(api_key: str):
+    # Anthropic 暂无稳定模型列表接口，这里提供常用模型兜底。
+    _ = api_key
+    return [
+        "claude-3-5-haiku-latest",
+        "claude-3-5-sonnet-latest",
+        "claude-3-7-sonnet-latest",
+        "claude-sonnet-4-0",
+        "claude-opus-4-0",
+    ]
+
+
 def detect_embedding_dimensions(base_url: str, api_key: str, model: str) -> Optional[int]:
     """调用 embeddings 接口自动探测向量维度（OpenAI 兼容协议）。"""
     if not base_url or not api_key or not model:
@@ -450,7 +462,7 @@ class StepProvider(ConfigStep):
         providers = self.state.setdefault("providers", {})
 
         provider_type = preset_type or (existing or {}).get("type", "gemini")
-        if provider_type not in ["gemini", "openai"]:
+        if provider_type not in ["gemini", "openai", "anthropic"]:
             provider_type = "openai"
 
         default_name = (existing or {}).get("name") or self._default_provider_name(provider_type, providers)
@@ -490,6 +502,10 @@ class StepProvider(ConfigStep):
             if use_fake_ua is None:
                 return None
             provider_cfg["user_agent"] = DEFAULT_FAKE_UA if use_fake_ua else ""
+            provider_cfg["use_responses_api"] = bool(questionary.confirm(
+                "是否优先使用 OpenAI Responses API？",
+                default=bool((existing or {}).get("use_responses_api", False))
+            ).ask())
 
         providers[provider_name] = provider_cfg
         # 保证至少有一个默认 provider
@@ -511,6 +527,7 @@ class StepProvider(ConfigStep):
             choices = [
                 questionary.Choice("➕ 添加 Gemini 提供商", value="add_gemini"),
                 questionary.Choice("➕ 添加 OpenAI 兼容提供商", value="add_openai"),
+                questionary.Choice("➕ 添加 Anthropic 提供商", value="add_anthropic"),
             ]
             if providers:
                 choices.extend([
@@ -528,6 +545,8 @@ class StepProvider(ConfigStep):
                 self._configure_provider(preset_type="gemini")
             elif action == "add_openai":
                 self._configure_provider(preset_type="openai")
+            elif action == "add_anthropic":
+                self._configure_provider(preset_type="anthropic")
             elif action == "edit":
                 name = questionary.select("选择要编辑的提供商:", choices=list(providers.keys())).ask()
                 if name is None:
@@ -842,6 +861,8 @@ class StepModels(ConfigStep):
             return get_gemini_models(api_key)
         if provider_type == "openai":
             return get_openai_models(api_key, provider_cfg.get("base_url"))
+        if provider_type == "anthropic":
+            return get_anthropic_models(api_key)
 
         questionary.print(f"不支持的提供商类型: {provider_type}", style="bold red")
         return None
@@ -947,7 +968,7 @@ class StepCostTracking(ConfigStep):
         print("\n📊 成本跟踪配置")
         print("-" * 50)
         print("N.O.R.A. 可以自动跟踪 LLM 调用的 token 使用量和成本。")
-        print("内置了 Gemini 和 OpenAI 的官方定价，也支持自定义价格。")
+        print("内置了 Gemini / OpenAI / Anthropic 的官方或兼容定价，也支持自定义价格。")
         
         # 是否启用成本跟踪
         cost_config = self.state.get('cost_tracking', {})
@@ -964,7 +985,7 @@ class StepCostTracking(ConfigStep):
         
         # 询问是否需要自定义价格
         has_custom = questionary.confirm(
-            "是否需要配置自定义模型价格？\n（如果使用官方 Gemini/OpenAI 模型，通常不需要）",
+            "是否需要配置自定义模型价格？\n（如果使用官方 Gemini/OpenAI/Anthropic 模型，通常不需要）",
             default=False
         ).ask()
         

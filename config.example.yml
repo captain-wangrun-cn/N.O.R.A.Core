@@ -36,7 +36,7 @@ llm:
   provider: "gemini_main"
 
   # 多提供商配置
-  # type: "gemini" | "openai"
+  # type: "gemini" | "openai" | "anthropic"
   providers:
     gemini_main:
       type: "gemini"
@@ -45,8 +45,13 @@ llm:
       type: "openai"
       api_key: "YOUR_OPENAI_API_KEY"
       base_url: "https://api.openai.com/v1"
+      # 可选：使用 OpenAI Responses API 代替 Chat Completions
+      # use_responses_api: true
       # 可选：用于某些兼容端点伪装浏览器请求
       # user_agent: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0 Safari/537.36"
+    anthropic_main:
+      type: "anthropic"
+      api_key: "YOUR_ANTHROPIC_API_KEY"
 
   # 为每个模型别名绑定提供商（值为 providers 的键）
   model_providers:
@@ -54,7 +59,7 @@ llm:
     fast: "openai_main"
     coder: "openai_main"
     image: "gemini_main"
-    summary: "gemini_main"
+    summary: "anthropic_main"
 
   # 兼容旧版配置（可选，建议保留）
   # api_keys:
@@ -69,7 +74,7 @@ llm:
     fast: "gpt-4o-mini"
     coder: "gpt-4o"
     image: "gemini-1.5-pro-latest" # 用于图片输入理解的模型
-    summary: "gemini-1.5-flash-latest" # 用于消息历史总结的模型
+  summary: "claude-3-5-haiku-latest" # 用于消息历史总结的模型
 
   # 输出 token 上限（统一）
   max_output_tokens: 768
