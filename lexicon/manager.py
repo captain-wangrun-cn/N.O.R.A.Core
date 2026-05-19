@@ -171,7 +171,11 @@ class LexiconManager:
         if term_limit <= 0:
             return ""
 
-        lines: List[str] = ["【词库上下文（常加载）】"]
+        lines: List[str] = [
+            "【词库上下文（常加载）】",
+            "以下词汇是你日常表达的一部分。在合适的语境中，自然地使用这些词汇来回复，"
+            "就像一个熟悉网络文化的人那样说话。不要刻意堆砌，但遇到匹配的场景时优先选用词库中的表达。",
+        ]
         if self.always_prompts:
             lines.append("用途提示：")
             for hint in self.always_prompts:

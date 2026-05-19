@@ -578,7 +578,7 @@ class TelegramAdapter(BaseAdapter):
         models_cfg = llm_cfg.get("models", {}) or {}
 
         buttons = []
-        for alias in ["smart", "fast", "coder", "image", "summary"]:
+        for alias in ["smart", "fast", "coder", "image", "video", "security", "summary"]:
             current = models_cfg.get(alias, "")
             label = f"{alias}: {current or '未设置'}"
             buttons.append([InlineKeyboardButton(label, callback_data=f"model_pick:{alias}")])
@@ -801,6 +801,26 @@ class TelegramAdapter(BaseAdapter):
             reply_info = await self._extract_reply_info(update.message)
             if reply_info:
                 text = f"[回复: {reply_info}]\n{text}"
+
+        # 处理转发消息：提取来源信息
+        if update.message:
+            forward_info = None
+            if hasattr(update.message, "forward_origin") and update.message.forward_origin:
+                origin = update.message.forward_origin
+                if hasattr(origin, "sender_user") and origin.sender_user:
+                    forward_info = origin.sender_user.first_name
+                    if origin.sender_user.last_name:
+                        forward_info += f" {origin.sender_user.last_name}"
+                elif hasattr(origin, "chat") and origin.chat:
+                    forward_info = origin.chat.title or origin.chat.first_name or "未知频道"
+                elif hasattr(origin, "sender_user_name") and origin.sender_user_name:
+                    forward_info = origin.sender_user_name
+            elif hasattr(update.message, "forward_from") and update.message.forward_from:
+                forward_info = update.message.forward_from.first_name
+            elif hasattr(update.message, "forward_from_chat") and update.message.forward_from_chat:
+                forward_info = update.message.forward_from_chat.title or "未知频道"
+            if forward_info:
+                text = f"[转发自: {forward_info}]\n{text}"
         
         if self._aggregator:
             full_context = {
@@ -1077,6 +1097,10 @@ class TelegramAdapter(BaseAdapter):
 
         if callback_data and callback_data.startswith("model_pick:"):
             await self._handle_model_pick_callback(query, callback_data)
+            return
+
+        if callback_data and callback_data.startswith("model_clear:"):
+            await self._handle_model_clear_callback(query, callback_data)
             return
 
         if callback_data and callback_data.startswith("model_set:"):
@@ -1439,6 +1463,9 @@ class TelegramAdapter(BaseAdapter):
             provider_type = (providers_cfg.get(provider_name, {}) or {}).get("type", provider_name)
             label = f"{provider_name} ({provider_type})"
             buttons.append([InlineKeyboardButton(label, callback_data=f"model_provider:{alias}:{provider_name}")])
+        # 可选模型（video, security）允许清除配置
+        if alias in ("video", "security"):
+            buttons.append([InlineKeyboardButton("🗑 清除（不使用）", callback_data=f"model_clear:{alias}")])
         buttons.append([
             InlineKeyboardButton("⬅ 返回", callback_data="model_pick:back"),
             InlineKeyboardButton("取消", callback_data="model_pick:cancel"),
@@ -1448,6 +1475,21 @@ class TelegramAdapter(BaseAdapter):
             f"请选择 {alias} 的 Provider：",
             reply_markup=InlineKeyboardMarkup(buttons),
         )
+
+    async def _handle_model_clear_callback(self, query, callback_data: str):
+        """清除可选模型（video/security）的配置。"""
+        alias = callback_data.split(":", 1)[1]
+        try:
+            cfg = config.get_config() or {}
+            llm_cfg = cfg.setdefault("llm", {})
+            models_cfg = llm_cfg.setdefault("models", {})
+            model_providers = llm_cfg.setdefault("model_providers", {})
+            models_cfg.pop(alias, None)
+            model_providers.pop(alias, None)
+            config.save_config(cfg)
+            await query.edit_message_text(f"✅ 已清除 {alias} 模型配置。")
+        except Exception as e:
+            await query.edit_message_text(f"❌ 清除失败: {e}")
 
     async def _apply_model_update(self, update: Update, alias: str, model_name: str):
         if not update.effective_chat or not update.message:

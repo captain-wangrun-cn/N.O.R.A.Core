@@ -942,7 +942,7 @@ class StepModels(ConfigStep):
         models = self.state.get('models', {})
         model_providers = self.state.setdefault('model_providers', {})
 
-        for role_key in ['smart', 'fast', 'coder', 'image', 'video', 'summary']:
+        for role_key in ['smart', 'fast', 'coder', 'image', 'video', 'security', 'summary']:
             # video 模型为可选配置
             if role_key == 'video':
                 configure_video = questionary.confirm(
@@ -954,6 +954,19 @@ class StepModels(ConfigStep):
                 if not configure_video:
                     models.pop('video', None)
                     model_providers.pop('video', None)
+                    continue
+
+            # security 模型为可选配置
+            if role_key == 'security':
+                configure_security = questionary.confirm(
+                    "是否配置安全审查模型？（可选，开启后工具调用前经过模型审查）",
+                    default=bool(models.get('security'))
+                ).ask()
+                if configure_security is None:
+                    return False
+                if not configure_security:
+                    models.pop('security', None)
+                    model_providers.pop('security', None)
                     continue
 
             provider_name = self._select_provider_for_role(role_key, provider_entries)

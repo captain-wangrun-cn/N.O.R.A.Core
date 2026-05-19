@@ -112,7 +112,33 @@ class ToolManager:
         self.adapter = adapter
         self.image_store = image_store  # memory.image_store.ImageStore 实例
         self.scheduler = scheduler  # core.scheduler.ProactiveScheduler 实例
+
+        # Security model configuration
+        self._security_enabled = False
+        self._security_whitelist: set = set()
+        self._security_llm = None
+        self._init_security_config()
+
         self._register_tools()
+
+    def _init_security_config(self):
+        """初始化安全审查配置。"""
+        try:
+            from config import get_config
+            cfg = get_config() or {}
+            security_cfg = cfg.get("security", {})
+            self._security_enabled = security_cfg.get("enabled", False)
+            self._security_whitelist = set(security_cfg.get("tool_whitelist", [
+                "view_image", "crop_image_for_llm", "read_file", "list_dir",
+                "search", "get_available_skills", "report_progress",
+                "store_progress_note", "get_progress_note", "list_alarms",
+                "read_secret_vault",
+            ]))
+            if self._security_enabled:
+                logger.info(f"Security model enabled. Whitelist: {self._security_whitelist}")
+        except Exception as e:
+            logger.debug(f"Security config init skipped: {e}")
+            self._security_enabled = False
 
     def _register_tools(self):
         self.register(self.create_new_skill)
@@ -197,12 +223,76 @@ class ToolManager:
             logger.info(f"Executing tool: {name} with args: {args}")
             # Filter out 'kwargs' if it exists in args to prevent common LLM mapping errors
             filtered_args = {k: v for k, v in args.items() if k != 'kwargs'}
+
+            # Security review gate
+            if self._security_enabled and name not in self._security_whitelist:
+                verdict = await self._security_review(name, filtered_args)
+                if not verdict["approved"]:
+                    logger.warning(f"Security review BLOCKED tool: {name}, reason: {verdict['reason']}")
+                    return f"[安全审查] 工具调用被拒绝: {verdict['reason']}"
+
             func = self._tools[name]
             result = await func(**filtered_args) if inspect.iscoroutinefunction(func) else func(**filtered_args)
             return str(result)
         except Exception as e:
             logger.error(f"Tool execution error for {name}: {e}", exc_info=True)
             return f"Error executing {name}: {str(e)}"
+
+    async def _security_review(self, tool_name: str, args: Dict[str, Any]) -> Dict[str, Any]:
+        """使用轻量 LLM 审查工具调用安全性。"""
+        if self._security_llm is None:
+            try:
+                from brain.llm import get_llm_client
+                # 优先使用 security alias，未配置则 fallback 到 fast
+                try:
+                    self._security_llm = get_llm_client(model_alias="security")
+                except Exception:
+                    self._security_llm = get_llm_client(model_alias="fast")
+            except Exception as e:
+                logger.warning(f"Security LLM init failed: {e}, auto-approving.")
+                return {"approved": True, "reason": ""}
+
+        args_str = json.dumps(args, ensure_ascii=False)
+        if len(args_str) > 500:
+            args_str = args_str[:500] + "..."
+
+        prompt = (
+            f"审查以下工具调用是否安全：\n"
+            f"工具: {tool_name}\n"
+            f"参数: {args_str}\n\n"
+            f"检查项：\n"
+            f"- 是否有破坏性文件操作（删除关键文件、覆盖系统配置）\n"
+            f"- exec_command 中是否有命令注入或危险命令\n"
+            f"- 是否访问敏感路径（config.yml, .env, secret.key 等）\n"
+            f"- 是否有数据外泄风险\n\n"
+            f"如果安全，回答: APPROVED\n"
+            f"如果危险，回答: DENIED: <简短原因>\n"
+            f"只回答一行。"
+        )
+        try:
+            response = ""
+            async for chunk in self._security_llm.chat_stream(
+                system_prompt="你是一个工具调用安全审查器。简洁判断工具调用是否安全。",
+                user_prompt=prompt,
+                history=[],
+            ):
+                if isinstance(chunk, dict) and chunk.get("type") == "text":
+                    response += chunk["content"]
+                elif isinstance(chunk, str):
+                    response += chunk
+
+            response = response.strip()
+            if response.upper().startswith("APPROVED"):
+                return {"approved": True, "reason": ""}
+            elif response.upper().startswith("DENIED"):
+                reason = response[7:].strip().lstrip(":").strip() or "安全审查未通过"
+                return {"approved": False, "reason": reason}
+            else:
+                logger.warning(f"Security review unclear response: {response}, auto-approving.")
+                return {"approved": True, "reason": ""}
+        except Exception as e:
+            logger.warning(f"Security review failed: {e}, auto-approving.")
+            return {"approved": True, "reason": ""}
 
     async def execute_tool_plan(
         self,

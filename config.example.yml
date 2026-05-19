@@ -157,6 +157,24 @@ cost_tracking:
     # 示例: 自定义模型价格
     # "my-custom-model": {"input": 0.5, "output": 2.0}
 
+# 安全审查模型（可选，默认关闭）
+# 开启后，每次工具调用前会经过独立 LLM 审查，白名单工具除外
+security:
+  enabled: false
+  # 白名单工具（这些工具不经过安全审查）
+  tool_whitelist:
+    - view_image
+    - crop_image_for_llm
+    - read_file
+    - list_dir
+    - search
+    - get_available_skills
+    - report_progress
+    - store_progress_note
+    - get_progress_note
+    - list_alarms
+    - read_secret_vault
+
 # 主动消息调度配置
 schedule:
   enabled: true  # 是否启用主动消息调度系统

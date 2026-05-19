@@ -121,6 +121,25 @@ class MessageHandlerMixin:
         # 取消该 chat 已有的对话延续定时器（用户回来了）
         self._cancel_followup_timer(chat_id)
 
+        # ── 非中断型命令快速路径：不打断前脑生成 ──
+        # 这些命令不需要取消正在进行的生成任务，直接执行后返回。
+        stripped_early = text.strip()
+        _NON_INTERRUPTING_CMDS = (
+            r"(?m)^\s*/debug\b",
+            r"(?m)^\s*/status\b",
+            r"(?m)^\s*/custom_scope\b",
+            r"(?m)^\s*/set_stream\b",
+            r"(?m)^\s*/nonstream\b",
+            r"(?m)^\s*/undo\b",
+            r"(?m)^\s*/context\b",
+        )
+        for _pat in _NON_INTERRUPTING_CMDS:
+            if re.search(_pat, stripped_early):
+                # 直接跳转到命令分发，不取消前脑任务
+                return await self._dispatch_non_interrupting_cmd(
+                    chat_id, chat_type, user_id, stripped_early
+                )
+
         # 用户在前脑还在生成时又发了一条消息：取消前脑的当前生成，按聚合器语义合并：
         #   - 如果前脑还没输出任何文本：直接 cancel，DB 里已经存有上一条用户消息，
         #     新消息走正常流程时会从历史读到上一条 user 消息，相当于"未输出阶段合并消息"。
@@ -487,6 +506,12 @@ class MessageHandlerMixin:
 
         # 去除了：后脑忙碌时，只要要给用户发消息，就附带当前队列详情（避免聊天时泄漏队列信息）
 
+        # 3.5) 撤回旧消息（必须在保存新消息到 DB 之前执行，否则 delete_last_assistant_message
+        #       会误删刚保存的新消息）
+        retract_target = str(front_result.get("retract_message_target", "") or "").strip()
+        if retract_target:
+            await self._handle_retract_signal(chat_id, chat_type, user_id, retract_target)
+
         if send_front_reply:
             # 使用 [SPLIT] 分段发送
             sent_message_ids = await self._send_split_message(chat_id, user_reply)
@@ -522,11 +547,6 @@ class MessageHandlerMixin:
             if len(session_history) > 20:
                 session["history"] = session_history[-20:]
 
-        # 4) 根据路由信号决定是否启动后脑
-        retract_target = str(front_result.get("retract_message_target", "") or "").strip()
-        if retract_target:
-            await self._handle_retract_signal(chat_id, chat_type, user_id, retract_target)
-
         if front_result.get("force_semi_online"):
             logger.info(f"[{chat_id}] 前脑触发 [SEMI_ONLINE]，立即进入半在线状态。")
             self._transition_to_semi_online(chat_id)
@@ -537,6 +557,14 @@ class MessageHandlerMixin:
             self._suspend_followup_until_idle(chat_id)
             followup_delay = None
         if front_result["needs_backend"]:
+            # 如果前脑没有发送回复，用户不知道后脑即将启动，发送 typing indicator
+            if not send_front_reply:
+                try:
+                    if hasattr(self.adapter, "start_typing"):
+                        await self.adapter.start_typing(chat_id)
+                except Exception:
+                    pass
+
             # 标记上下文：后脑应跳过用户消息保存（前脑已保存）
             backend_context = context.copy()
             backend_context["_front_brain_handled"] = True
@@ -1119,6 +1147,23 @@ class MessageHandlerMixin:
             logger.error(f"[{chat_id}] /schedule_today 执行失败: {e}", exc_info=True)
             await self.adapter.send_message(chat_id, f"❌ 获取今日计划失败: {e}")
 
+    async def _dispatch_non_interrupting_cmd(
+        self, chat_id: str, chat_type: str, user_id: str, stripped: str
+    ) -> None:
+        """分发不打断前脑生成的命令。"""
+        if re.search(r"(?m)^\s*/debug\b", stripped):
+            await self._cmd_debug(chat_id)
+        elif re.search(r"(?m)^\s*/status\b", stripped):
+            await self._cmd_status(chat_id, chat_type, user_id)
+        elif re.search(r"(?m)^\s*/custom_scope\b", stripped):
+            await self._cmd_custom_scope(chat_id, stripped)
+        elif re.search(r"(?m)^\s*/undo\b", stripped):
+            await self._cmd_undo(chat_id, chat_type, user_id)
+        elif re.search(r"(?m)^\s*/set_stream\b", stripped) or re.search(r"(?m)^\s*/nonstream\b", stripped):
+            await self._cmd_set_stream(chat_id, chat_type, user_id, stripped)
+        elif re.search(r"(?m)^\s*/context\b", stripped):
+            await self._cmd_context(chat_id, chat_type, user_id)
+
     async def _cmd_status(self, chat_id: str, chat_type: str, user_id: str):
         try:
             lines = ["📊 **N.O.R.A. Core 状态报告**\n"]
@@ -1222,6 +1267,34 @@ class MessageHandlerMixin:
         except Exception as e:
             logger.error(f"[{chat_id}] /status 执行失败: {e}", exc_info=True)
             await self.adapter.send_message(chat_id, f"❌ 获取状态失败: {e}")
+
+    async def _cmd_context(self, chat_id: str, chat_type: str, user_id: str):
+        """显示当前上下文窗口使用情况。"""
+        try:
+            storage_id = chat_id if chat_type != "private" else user_id
+            context_msgs = self.message_history.get_context_messages("telegram", storage_id)
+            stats = self.message_history.get_statistics("telegram", storage_id)
+
+            total_chars = sum(len(msg.get("content", "")) for msg in context_msgs)
+            estimated_tokens = int(total_chars / 1.5)
+
+            lines = [
+                "📊 上下文窗口状态",
+                "",
+                f"当前上下文消息数: {len(context_msgs)}",
+                f"估算 Token 数: ~{estimated_tokens:,}",
+                f"总字符数: {total_chars:,}",
+                "",
+                f"活跃消息: {stats.get('raw_messages', 0)}",
+                f"已归档: {stats.get('archived_messages', 0)}",
+                f"置顶: {stats.get('pinned_messages', 0)}",
+                f"对话段落: {stats.get('total_sessions', 0)}",
+                f"L1 总结: {stats.get('level1_summaries', 0)}",
+            ]
+            await self.adapter.send_message(chat_id, "\n".join(lines))
+        except Exception as e:
+            logger.error(f"[{chat_id}] /context 执行失败: {e}", exc_info=True)
+            await self.adapter.send_message(chat_id, f"❌ 获取上下文信息失败: {e}")
 
     async def _cmd_debug(self, chat_id: str):
         current = self.debug_mode.get(chat_id, False)

@@ -121,6 +121,47 @@ class BackBrainMixin:
     # 后脑主循环
     # ------------------------------------------------------------------
 
+    async def _ask_front_brain_continue(
+        self, chat_id: str, current_turn: int,
+        tool_history: list, key_results: list, original_query: str,
+    ) -> bool:
+        """询问前脑（fast_llm）后脑是否应继续执行。"""
+        history_summary = "\n".join(tool_history[-10:]) if tool_history else "(无)"
+        results_summary = "\n".join(key_results[-5:]) if key_results else "(无)"
+
+        prompt = (
+            f"后脑已执行 {current_turn} 轮工具调用，到达轮数上限。\n"
+            f"原始任务: {original_query[:300]}\n"
+            f"最近工具调用:\n{history_summary}\n"
+            f"关键结果:\n{results_summary}\n\n"
+            f"判断：任务是否还需要继续执行才能完成？\n"
+            f"如果任务明显还没完成且有明确的下一步，回答 CONTINUE。\n"
+            f"如果任务已基本完成或陷入循环，回答 STOP。\n"
+            f"只回答一个词：CONTINUE 或 STOP。"
+        )
+        try:
+            response = ""
+            stream = self._chat_stream_wrapper(
+                self.fast_llm, chat_id,
+                system_prompt="你是一个任务进度判断器。根据后脑的执行情况判断是否需要继续。",
+                user_prompt=prompt,
+                history=[],
+                tools=[],
+            )
+            async for raw_chunk in stream:
+                chunk = cast(Dict[str, Any], raw_chunk) if isinstance(raw_chunk, dict) else raw_chunk
+                if isinstance(chunk, dict) and chunk.get("type") == "text":
+                    response += chunk["content"]
+                elif isinstance(chunk, str):
+                    response += chunk
+
+            decision = response.strip().upper()
+            logger.info(f"[{chat_id}] 前脑续期判定: {decision}")
+            return "CONTINUE" in decision
+        except Exception as e:
+            logger.warning(f"[{chat_id}] 询问前脑续期失败: {e}，默认停止。")
+            return False
+
     async def _generate_response(self, context: Dict[str, Any]):
         """内部生成逻辑。"""
         chat_id = context["chat_id"]
@@ -833,7 +874,14 @@ class BackBrainMixin:
                     
                     # CRITICAL: Sync current progress back to the main session
                     session["history"] = list(temp_history)
-                    
+
+                    # 每 5 轮提醒后脑汇报进展（仅非轮询模式）
+                    if current_turn > 1 and current_turn % 5 == 0 and not context.get("_in_polling_loop", False):
+                        temp_history.append({
+                            "role": "user",
+                            "content": "[系统提示] 你已经执行了多轮工具调用。如果有阶段性成果，请用 report_progress 工具向用户简要汇报当前进展。"
+                        })
+
                     continue
                 else:
                     # No tool call -> Final response
@@ -841,11 +889,74 @@ class BackBrainMixin:
             
             # If loop exhausted MAX_TURNS with pending tool work
             if current_turn >= MAX_TURNS and not final_response_buffer:
-                logger.warning(f"[{chat_id}] Tool loop exhausted {MAX_TURNS} turns. Requesting LLM summary.")
-                temp_history.append({
-                    "role": "user",
-                    "content": render_template('loop_interventions.jinja', 'turns_exhausted')
-                })
+                logger.warning(f"[{chat_id}] Tool loop exhausted {MAX_TURNS} turns.")
+
+                # 询问前脑是否需要继续
+                should_continue = await self._ask_front_brain_continue(
+                    chat_id=chat_id,
+                    current_turn=current_turn,
+                    tool_history=status.tool_history_readable,
+                    key_results=status.key_results,
+                    original_query=status.original_query,
+                )
+                if should_continue:
+                    logger.info(f"[{chat_id}] 前脑判定继续执行，追加 15 轮额度。")
+                    MAX_TURNS += 15
+                    status.max_turns = MAX_TURNS
+                    await self._send_debug(chat_id, f"🔄 前脑批准续期，新上限 {MAX_TURNS} 轮")
+                    # 重新进入工具循环
+                    while current_turn < MAX_TURNS:
+                        await asyncio.sleep(0)
+                        current_turn += 1
+                        status.current_turn = current_turn
+                        status.update("思考中", f"第 {current_turn}/{MAX_TURNS} 轮推理（续期）...")
+                        logger.debug(f"[{chat_id}] Extended turn {current_turn}/{MAX_TURNS}")
+                        await self._send_debug(chat_id, f"💭 续期第 {current_turn}/{MAX_TURNS} 轮推理...")
+
+                        turn_model_alias = base_model_alias
+                        turn_llm = self.coder_llm
+                        last_turn_model_alias = turn_model_alias
+                        last_turn_llm = turn_llm
+
+                        stream = self._chat_stream_wrapper(
+                            turn_llm, chat_id,
+                            system_prompt=system_prompt,
+                            user_prompt=None,
+                            history=temp_history,
+                            tools=self.tool_manager.get_tool_schemas(),
+                        )
+                        turn_text = ""
+                        tool_call_data = None
+                        usage_data = None
+                        async for raw_chunk in stream:
+                            chunk = cast(Dict[str, Any], raw_chunk) if isinstance(raw_chunk, dict) else raw_chunk
+                            if isinstance(chunk, dict):
+                                if chunk.get("type") == "text":
+                                    turn_text += chunk["content"]
+                                elif chunk.get("type") == "tool_call":
+                                    tool_call_data = chunk
+                                elif chunk.get("type") == "usage":
+                                    usage_data = chunk.get("data")
+                            elif isinstance(chunk, str):
+                                turn_text += chunk
+
+                        if tool_call_data:
+                            tool_name = tool_call_data["name"]
+                            tool_args = tool_call_data.get("args", {})
+                            status.log_tool(tool_name, tool_args)
+                            tool_result = await self.tool_manager.execute(tool_name, tool_args)
+                            temp_history.append({"role": "user", "content": f"【Tool Output for {tool_name}】\n{tool_result[:4000]}"})
+                            session["history"] = list(temp_history)
+                        else:
+                            final_response_buffer = turn_text
+                            break
+
+                if not final_response_buffer:
+                    logger.info(f"[{chat_id}] 前脑判定停止（或续期后仍未完成），请求 LLM 总结。")
+                    temp_history.append({
+                        "role": "user",
+                        "content": render_template('loop_interventions.jinja', 'turns_exhausted')
+                    })
                 stream = self._chat_stream_wrapper(
                     last_turn_llm,
                     chat_id,
