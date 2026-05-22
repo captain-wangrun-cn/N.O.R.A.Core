@@ -2,7 +2,7 @@
 Tests for image memory system:
 - Image ID generation in multimodal.py
 - IMAGE_TAGS parsing from LLM response
-- view_image tool output formatting
+- view_media tool output formatting
 """
 
 import os
@@ -266,11 +266,11 @@ def test_deferred_image_send_preserves_split_boundaries():
 
 
 # ---------------------------------------------------------------------------
-# 3. view_image tool schema generation
+# 3. view_media tool schema generation
 # ---------------------------------------------------------------------------
 
-def test_view_image_tool_schema_registered():
-    """view_image 应出现在 ToolManager 的工具 schema 列表中"""
+def test_view_media_tool_schema_registered():
+    """view_media 应出现在 ToolManager 的工具 schema 列表中"""
     from unittest.mock import MagicMock
     from brain.tools import ToolManager
 
@@ -279,12 +279,12 @@ def test_view_image_tool_schema_registered():
     
     tm = ToolManager(mock_adapter, image_store=None)
     schema_names = [s["name"] for s in tm.get_tool_schemas()]
-    assert "view_image" in schema_names
+    assert "view_media" in schema_names
     assert "crop_image_for_llm" in schema_names
 
 
-def test_view_image_tool_no_image_store():
-    """没有 ImageStore 时 view_image 应返回错误"""
+def test_view_media_tool_no_image_store():
+    """没有 ImageStore 时 view_media 应返回错误"""
     from unittest.mock import MagicMock
     from brain.tools import ToolManager
 
@@ -292,12 +292,12 @@ def test_view_image_tool_no_image_store():
     mock_adapter.platform_features = MagicMock()
     
     tm = ToolManager(mock_adapter, image_store=None)
-    result = tm.view_image(keyword="猫")
+    result = tm.view_media(keyword="猫")
     assert "Error" in result or "not available" in result
 
 
-def test_view_image_tool_disabled_image_store():
-    """ImageStore.enabled=False 时 view_image 应返回错误"""
+def test_view_media_tool_disabled_image_store():
+    """ImageStore.enabled=False 时 view_media 应返回错误"""
     from unittest.mock import MagicMock
     from brain.tools import ToolManager
 
@@ -307,12 +307,12 @@ def test_view_image_tool_disabled_image_store():
     mock_store.enabled = False
     
     tm = ToolManager(mock_adapter, image_store=mock_store)
-    result = tm.view_image(keyword="猫")
+    result = tm.view_media(keyword="猫")
     assert "offline" in result.lower() or "Error" in result
 
 
-def test_view_image_format_output():
-    """view_image 应正确格式化搜索结果"""
+def test_view_media_format_output():
+    """view_media 应正确格式化搜索结果"""
     from unittest.mock import MagicMock
     from brain.tools import ToolManager
 
@@ -331,7 +331,7 @@ def test_view_image_format_output():
     ]
 
     tm = ToolManager(mock_adapter, image_store=mock_store)
-    result = tm.view_image(keyword="猫")
+    result = tm.view_media(keyword="猫")
     
     assert "img_test1234" in result
     assert "猫咪" in result
@@ -573,11 +573,11 @@ def test_image_tags_keep_exact_match_without_wrong_remap():
 
 
 # ---------------------------------------------------------------------------
-# 5. view_image text_query parameter
+# 5. view_media text_query parameter
 # ---------------------------------------------------------------------------
 
-def test_view_image_text_query_parameter():
-    """view_image 应支持 text_query 参数搜索 OCR 文字"""
+def test_view_media_text_query_parameter():
+    """view_media 应支持 text_query 参数搜索 OCR 文字"""
     from unittest.mock import MagicMock
     from brain.tools import ToolManager
 
@@ -597,7 +597,7 @@ def test_view_image_text_query_parameter():
     ]
 
     tm = ToolManager(mock_adapter, image_store=mock_store)
-    result = tm.view_image(text_query="hello")
+    result = tm.view_media(text_query="hello")
 
     # 验证 search_images 被正确调用
     mock_store.search_images.assert_called_once()
@@ -611,8 +611,8 @@ def test_view_image_text_query_parameter():
     assert "Found 1 image" in result
 
 
-def test_view_image_text_query_and_keyword_combined():
-    """view_image 应支持 text_query 与 keyword 同时使用"""
+def test_view_media_text_query_and_keyword_combined():
+    """view_media 应支持 text_query 与 keyword 同时使用"""
     from unittest.mock import MagicMock
     from brain.tools import ToolManager
 
@@ -632,15 +632,15 @@ def test_view_image_text_query_and_keyword_combined():
     ]
 
     tm = ToolManager(mock_adapter, image_store=mock_store)
-    result = tm.view_image(keyword="文档", text_query="销售报表")
+    result = tm.view_media(keyword="文档", text_query="销售报表")
 
     call_kwargs = mock_store.search_images.call_args[1]
     assert call_kwargs["keyword"] == "文档"
     assert call_kwargs["text_query"] == "销售报表"
 
 
-def test_view_image_tool_schema_has_text_query():
-    """view_image schema 应包含 text_query 参数"""
+def test_view_media_tool_schema_has_text_query():
+    """view_media schema 应包含 text_query 参数"""
     from unittest.mock import MagicMock
     from brain.tools import ToolManager
 
@@ -649,12 +649,12 @@ def test_view_image_tool_schema_has_text_query():
     tm = ToolManager(mock_adapter, image_store=None)
 
     schemas = tm.get_tool_schemas()
-    view_image_schema = next(s for s in schemas if s["name"] == "view_image")
-    assert "text_query" in view_image_schema["parameters"]["properties"]
+    view_media_schema = next(s for s in schemas if s["name"] == "view_media")
+    assert "text_query" in view_media_schema["parameters"]["properties"]
 
 
-def test_view_image_tool_schema_has_question():
-    """view_image schema 应包含 question 参数"""
+def test_view_media_tool_schema_has_question():
+    """view_media schema 应包含 question 参数"""
     from unittest.mock import MagicMock
     from brain.tools import ToolManager
 
@@ -663,12 +663,12 @@ def test_view_image_tool_schema_has_question():
     tm = ToolManager(mock_adapter, image_store=None)
 
     schemas = tm.get_tool_schemas()
-    view_image_schema = next(s for s in schemas if s["name"] == "view_image")
-    assert "question" in view_image_schema["parameters"]["properties"]
+    view_media_schema = next(s for s in schemas if s["name"] == "view_media")
+    assert "question" in view_media_schema["parameters"]["properties"]
 
 
-def test_view_image_local_path_without_image_store(tmp_path):
-    """没有 ImageStore 时，view_image 仍应支持通过 local_path 读取本地图片"""
+def test_view_media_local_path_without_image_store(tmp_path):
+    """没有 ImageStore 时，view_media 仍应支持通过 local_path 读取本地图片"""
     from unittest.mock import MagicMock
     from PIL import Image
     from brain.tools import ToolManager
@@ -680,7 +680,7 @@ def test_view_image_local_path_without_image_store(tmp_path):
     mock_adapter.platform_features = MagicMock()
     tm = ToolManager(mock_adapter, image_store=None)
 
-    result = tm.view_image(local_path=str(img_path), question="这张图是什么颜色？")
+    result = tm.view_media(local_path=str(img_path), question="这张图是什么颜色？")
 
     assert "Found 1 image" in result
     assert "[Question] 这张图是什么颜色？" in result
@@ -688,7 +688,7 @@ def test_view_image_local_path_without_image_store(tmp_path):
     assert str(img_path) in result
 
 
-def test_view_image_question_forces_return_image():
+def test_view_media_question_forces_return_image():
     """question 非空时，即使 return_image=False 也应强制返回 MediaTag"""
     from unittest.mock import MagicMock
     from brain.tools import ToolManager
@@ -708,7 +708,7 @@ def test_view_image_question_forces_return_image():
     ]
 
     tm = ToolManager(mock_adapter, image_store=mock_store)
-    result = tm.view_image(keyword="按钮", question="按钮是否可见？", return_image=False)
+    result = tm.view_media(keyword="按钮", question="按钮是否可见？", return_image=False)
 
     assert "[Question] 按钮是否可见？" in result
     assert "MediaTag: [image:" in result

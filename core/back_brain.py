@@ -179,8 +179,9 @@ class BackBrainMixin:
         historical_reply_image_direct = "[NORA_HISTORICAL_REPLY_IMAGE_DIRECT]" in text
 
         # 解析视频输入：把 [video: ...] 对应的本地视频读取为模型可用内容
+        provided_videos = context.get("multimodal_videos") or []
         clean_text_v, extracted_videos = extract_video_payloads(text)
-        multimodal_videos = extracted_videos
+        multimodal_videos = provided_videos or extracted_videos
         if clean_text_v:
             text = clean_text_v
         # 判断是否有可用的视频模型
@@ -497,12 +498,14 @@ class BackBrainMixin:
                 any(not img.get("from_tool") for img in multimodal_images)
                 and not historical_reply_image_direct
             )
-            # 工具回查图片（view_image return_image=true）注入到下一轮多模态输入
+            # 工具回查媒体（view_media return_image=true）注入到下一轮多模态输入
             pending_tool_multimodal_images: List[Dict[str, Any]] = []
+            pending_tool_multimodal_videos: List[Dict[str, Any]] = []
             in_polling_mode = context.get("_in_polling_loop", False)
             no_reply = context.get("no_reply", False)
             # 记录最后一次 image 回合的原始输出，便于检测空输出/标签结构异常
             last_image_raw_output: Optional[str] = None
+            last_video_raw_output: Optional[str] = None
             
             status.update("思考中", "正在生成回复...")
 
@@ -517,7 +520,7 @@ class BackBrainMixin:
                 await self._send_debug(chat_id, f"💭 开始第 {current_turn}/{MAX_TURNS} 轮推理...")
                 
                 turn_multimodal_images = multimodal_images if current_turn == 1 else pending_tool_multimodal_images
-                turn_multimodal_videos = multimodal_videos if current_turn == 1 else []
+                turn_multimodal_videos = multimodal_videos if current_turn == 1 else pending_tool_multimodal_videos
                 if turn_multimodal_videos and video_llm_available:
                     turn_model_alias = "video"
                     turn_llm = self.video_llm
@@ -529,7 +532,7 @@ class BackBrainMixin:
                     turn_llm = self.image_llm if turn_model_alias == "image" else self.coder_llm
                 last_turn_model_alias = turn_model_alias
                 last_turn_llm = turn_llm
-                image_turn_raw_parts: List[str] = [] if turn_model_alias == "image" else None
+                media_turn_raw_parts: List[str] = [] if turn_model_alias in ("image", "video") else None
                 # 视频模型轮次不传工具，专注生成标签
                 video_turn_no_tools = (turn_model_alias == "video")
                 # 构造本轮 user_prompt：工具返回图片时追加提示（这些是回查的旧图，不要生成 IMAGE_TAGS）
@@ -540,9 +543,19 @@ class BackBrainMixin:
                         if ti.get("from_tool") and str(ti.get("question", "")).strip():
                             tool_image_question = str(ti.get("question", "")).strip()
                             break
-                    turn_user_prompt += "\n\n（注意：以下图片是通过 view_image 工具回查的已有图片，**不要**生成 [IMAGE_TAGS] 标签，直接分析图片内容即可。"
+                    turn_user_prompt += "\n\n（注意：以下媒体是通过 view_media 工具回查的已有图片，**不要**生成 [IMAGE_TAGS] 标签，直接分析内容即可。"
                     if tool_image_question:
                         turn_user_prompt += f"请只围绕这个问题观察并回答：{tool_image_question}"
+                    turn_user_prompt += "）"
+                if current_turn > 1 and turn_multimodal_videos and any(tv.get("from_tool") for tv in turn_multimodal_videos):
+                    tool_video_question = ""
+                    for tv in turn_multimodal_videos:
+                        if tv.get("from_tool") and str(tv.get("question", "")).strip():
+                            tool_video_question = str(tv.get("question", "")).strip()
+                            break
+                    turn_user_prompt += "\n\n（注意：以下媒体是通过 view_media 工具回查的已有视频，**不要**生成 [VIDEO_TAGS] 标签，直接分析内容即可。"
+                    if tool_video_question:
+                        turn_user_prompt += f"请只围绕这个问题观察并回答：{tool_video_question}"
                     turn_user_prompt += "）"
                 stream = self._chat_stream_wrapper(
                     turn_llm,
@@ -554,9 +567,11 @@ class BackBrainMixin:
                     multimodal_images=turn_multimodal_images if turn_multimodal_images else None,
                     multimodal_videos=turn_multimodal_videos if turn_multimodal_videos else None,
                 )
-                # 仅消费一轮，避免重复注入同一批工具图片
+                # 仅消费一轮，避免重复注入同一批工具媒体
                 if current_turn > 1 and pending_tool_multimodal_images:
                     pending_tool_multimodal_images = []
+                if current_turn > 1 and pending_tool_multimodal_videos:
+                    pending_tool_multimodal_videos = []
                 force_no_tools = False  # 重置，仅影响紧跟的一轮
 
                 # 一进入生成阶段即提示 typing，避免 Telegram 输入状态过短
@@ -585,8 +600,8 @@ class BackBrainMixin:
                             self.back_brain_partial[chat_id] = (
                                 self.back_brain_partial.get(chat_id, "") + content
                             )
-                            if image_turn_raw_parts is not None:
-                                image_turn_raw_parts.append(content)
+                            if media_turn_raw_parts is not None:
+                                media_turn_raw_parts.append(content)
                             
                             # Real-time splitting logic
                             if self._SPLIT_MARKER_PATTERN.search(response_text_buffer):
@@ -640,17 +655,23 @@ class BackBrainMixin:
                     elif isinstance(chunk, str):
                         # Fallback for legacy providers
                         response_text_buffer += chunk
-                        if image_turn_raw_parts is not None:
-                            image_turn_raw_parts.append(chunk)
+                        if media_turn_raw_parts is not None:
+                            media_turn_raw_parts.append(chunk)
                 
-                # Debug: 在 image 模型回合输出完整原始内容，便于排查标签缺失
-                if turn_model_alias == "image" and self.debug_mode.get(chat_id, False):
-                    raw_image_text = "".join(image_turn_raw_parts) if image_turn_raw_parts else ""
-                    last_image_raw_output = raw_image_text
-                    await self._send_debug(chat_id, f"[image turn {current_turn}] raw output:\n{raw_image_text or '(empty)'}")
+                # Debug: 在 image/video 模型回合输出完整原始内容，便于排查标签缺失
+                if turn_model_alias in ("image", "video") and self.debug_mode.get(chat_id, False):
+                    raw_media_text = "".join(media_turn_raw_parts) if media_turn_raw_parts else ""
+                    if turn_model_alias == "image":
+                        last_image_raw_output = raw_media_text
+                    else:
+                        last_video_raw_output = raw_media_text
+                    await self._send_debug(chat_id, f"[{turn_model_alias} turn {current_turn}] raw output:\n{raw_media_text or '(empty)'}")
                 elif turn_model_alias == "image":
-                    raw_image_text = "".join(image_turn_raw_parts) if image_turn_raw_parts else ""
-                    last_image_raw_output = raw_image_text
+                    raw_media_text = "".join(media_turn_raw_parts) if media_turn_raw_parts else ""
+                    last_image_raw_output = raw_media_text
+                elif turn_model_alias == "video":
+                    raw_media_text = "".join(media_turn_raw_parts) if media_turn_raw_parts else ""
+                    last_video_raw_output = raw_media_text
 
                 # 记录成本（如果启用）
                 if self.cost_tracking_enabled and self.cost_tracker and usage_data:
@@ -777,7 +798,7 @@ class BackBrainMixin:
                     status.preview_next(tool_name, tool_args)
                     status.update("工具调用", f"正在执行 {tool_name}...")
                     status.log_tool(tool_name, tool_args)
-                    if tool_name == "view_image" and isinstance(tool_args, dict):
+                    if tool_name == "view_media" and isinstance(tool_args, dict):
                         if not str(tool_args.get("user_id", "")).strip():
                             tool_args["user_id"] = storage_id
                     # --- report_progress 拦截 ---
@@ -804,9 +825,9 @@ class BackBrainMixin:
                             tool_result = "No message provided."
                     else:
                         tool_result = await self.tool_manager.execute(tool_name, cast(Dict[str, Any], tool_args))
-                    # 如果工具请求了 return_image，提取返回中的 [image: ...] 作为下一轮多模态输入
+                    # 如果工具请求了 return_image，提取返回中的 [image: ...] / [video: ...] 作为下一轮多模态输入
                     if (
-                        tool_name in {"view_image", "crop_image_for_llm"}
+                        tool_name in {"view_media", "crop_image_for_llm"}
                         and isinstance(tool_args, dict)
                         and bool(tool_args.get("return_image", False))
                     ):
@@ -815,12 +836,21 @@ class BackBrainMixin:
                             if tool_images:
                                 for ti in tool_images:
                                     ti["from_tool"] = True
-                                    if tool_name == "view_image" and str(tool_args.get("question", "")).strip():
+                                    if tool_name == "view_media" and str(tool_args.get("question", "")).strip():
                                         ti["question"] = str(tool_args.get("question", "")).strip()
                                 pending_tool_multimodal_images = tool_images
                                 logger.info(f"[{chat_id}] {tool_name} 返回 {len(tool_images)} 张图片，下一轮切换 image 模型进行分析。")
+                            # 同时提取视频 payload
+                            _clean_v, tool_videos = extract_video_payloads(tool_result)
+                            if tool_videos:
+                                for tv in tool_videos:
+                                    tv["from_tool"] = True
+                                    if tool_name == "view_media" and str(tool_args.get("question", "")).strip():
+                                        tv["question"] = str(tool_args.get("question", "")).strip()
+                                pending_tool_multimodal_videos = tool_videos
+                                logger.info(f"[{chat_id}] {tool_name} 返回 {len(tool_videos)} 个视频，下一轮切换 video 模型进行分析。")
                         except Exception:
-                            logger.warning(f"[{chat_id}] 解析 {tool_name} 返回图片失败，已跳过多模态注入。", exc_info=True)
+                            logger.warning(f"[{chat_id}] 解析 {tool_name} 返回媒体失败，已跳过多模态注入。", exc_info=True)
                     status.update("处理结果", f"{tool_name} 执行完毕，正在分析结果...")
                     # --- 抢占检查点：工具执行后检查取消 ---
                     await asyncio.sleep(0)
@@ -1288,7 +1318,7 @@ class BackBrainMixin:
             if multimodal_images and self.image_store.enabled:
                 for img in multimodal_images:
                     img_id = img["image_id"]
-                    # view_image 等工具回查的旧图不需要重新入库
+                    # view_media 等工具回查的旧图不需要重新入库
                     if img.get("from_tool"):
                         logger.debug(f"[{chat_id}] 跳过工具回查图片入库: {img_id} ({img['path']})")
                         continue
@@ -1319,7 +1349,7 @@ class BackBrainMixin:
             # --- 4.7 视频记忆存储 (Video Memory Storage) ---
             if multimodal_videos and video_llm_available and self.image_store.enabled:
                 video_tags_extracted: Dict[str, str] = {}
-                source_text_for_vtags = final_response_buffer or ""
+                source_text_for_vtags = final_response_buffer or last_video_raw_output or ""
                 for m in self._VIDEO_TAGS_PATTERN.finditer(source_text_for_vtags):
                     vid_id = m.group(1).strip()
                     tags_text = m.group(2).strip()

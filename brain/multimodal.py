@@ -8,8 +8,10 @@ import logging
 import mimetypes
 import os
 import re
+import subprocess
+import tempfile
 import uuid
-from typing import Any, Dict, List, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 logger = logging.getLogger(__name__)
 
@@ -19,6 +21,8 @@ _FILE_TAG_PATTERN = re.compile(r'\[file:\s*(.*?)\]', re.IGNORECASE)
 _VIDEO_EXTENSIONS = {'.mp4', '.mkv', '.avi', '.mov', '.webm', '.flv', '.wmv', '.m4v', '.3gp'}
 _MAX_IMAGE_BYTES = 20 * 1024 * 1024  # 20MB safety limit per image
 _MAX_VIDEO_BYTES = 100 * 1024 * 1024  # 100MB safety limit per video (Gemini inline limit)
+_VIDEO_COMPRESS_THRESHOLD = 10 * 1024 * 1024  # 10MB: videos above this are compressed before upload
+_VIDEO_COMPRESS_MAX_DIM = 1280  # max width/height after scaling (720p equivalent)
 
 
 def _generate_image_id() -> str:
@@ -77,6 +81,71 @@ def _resolve_local_image_path(raw_path: str) -> str:
             return norm
 
     return ""
+
+
+def _compress_video(input_path: str, max_bytes: int) -> bytes:
+    """用 ffmpeg 压缩视频：缩放至最大 {_VIDEO_COMPRESS_MAX_DIM}px，CRF 28，fast preset。"""
+    with tempfile.NamedTemporaryFile(suffix=".mp4", delete=False) as tmp:
+        out_path = tmp.name
+
+    try:
+        scale = f"scale='min({_VIDEO_COMPRESS_MAX_DIM},iw)':'min({_VIDEO_COMPRESS_MAX_DIM},ih)':force_original_aspect_ratio=decrease"
+        cmd = [
+            "ffmpeg", "-y", "-i", input_path,
+            "-vf", scale,
+            "-c:v", "libx264", "-preset", "fast", "-crf", "28",
+            "-c:a", "aac", "-b:a", "64k",
+            "-movflags", "+faststart",
+            out_path,
+        ]
+        subprocess.run(cmd, capture_output=True, check=True, timeout=120)
+
+        with open(out_path, "rb") as f:
+            compressed = f.read()
+
+        # 如果压缩后仍然超过阈值，不再进一步压缩（避免无限循环或质量极差）
+        if len(compressed) > max_bytes:
+            logger.warning(
+                f"视频压缩后仍 {len(compressed)} bytes（目标 {max_bytes}），"
+                f"将使用压缩版本（已比原始更小）"
+            )
+
+        return compressed
+    finally:
+        try:
+            os.unlink(out_path)
+        except OSError:
+            pass
+
+
+def _load_video_bytes(resolved: str) -> Tuple[Optional[bytes], Optional[str], Optional[str]]:
+    """读取视频文件，过大时自动 ffmpeg 压缩。返回 (bytes, mime_type, error_message)。"""
+    mime_type, _ = mimetypes.guess_type(resolved)
+    if not mime_type or not mime_type.startswith("video/"):
+        return None, None, f"文件并非视频: {resolved}"
+
+    try:
+        file_size = os.path.getsize(resolved)
+        if file_size > _MAX_VIDEO_BYTES:
+            return None, None, f"视频过大（>{_MAX_VIDEO_BYTES} bytes）: {resolved}"
+
+        if file_size > _VIDEO_COMPRESS_THRESHOLD:
+            logger.info(
+                f"视频 {os.path.basename(resolved)} 大小 {file_size} 字节，"
+                f"超过 {_VIDEO_COMPRESS_THRESHOLD} 阈值，正在 ffmpeg 压缩..."
+            )
+            raw_bytes = _compress_video(resolved, _VIDEO_COMPRESS_THRESHOLD)
+            ratio = len(raw_bytes) / file_size * 100
+            logger.info(
+                f"视频压缩完成: {file_size} -> {len(raw_bytes)} 字节 ({ratio:.0f}%)"
+            )
+            return raw_bytes, "video/mp4", None
+
+        with open(resolved, "rb") as f:
+            raw_bytes = f.read()
+        return raw_bytes, mime_type, None
+    except Exception as e:
+        return None, None, str(e)
 
 
 def extract_image_payloads(text: str) -> Tuple[str, List[Dict[str, Any]]]:
@@ -159,31 +228,20 @@ def extract_video_payloads(text: str) -> Tuple[str, List[Dict[str, Any]]]:
         if resolved in seen_paths:
             continue
 
-        mime_type, _ = mimetypes.guess_type(resolved)
-        if not mime_type or not mime_type.startswith("video/"):
-            logger.warning(f"标记为 video 但文件并非视频，已跳过: {resolved}")
+        raw_bytes, mime_type, error = _load_video_bytes(resolved)
+        if error:
+            logger.warning(f"加载视频失败: {resolved} ({error})")
             continue
 
-        try:
-            file_size = os.path.getsize(resolved)
-            if file_size > _MAX_VIDEO_BYTES:
-                logger.warning(f"视频过大（>{_MAX_VIDEO_BYTES} bytes），已跳过: {resolved}")
-                continue
-
-            with open(resolved, "rb") as f:
-                raw_bytes = f.read()
-
-            video_id = _generate_video_id()
-            videos.append({
-                "video_id": video_id,
-                "path": resolved,
-                "mime_type": mime_type,
-                "bytes": raw_bytes,
-                "base64": base64.b64encode(raw_bytes).decode("utf-8"),
-            })
-            seen_paths.add(resolved)
-        except Exception as e:
-            logger.warning(f"读取视频失败，已跳过: {resolved} ({e})")
+        video_id = _generate_video_id()
+        videos.append({
+            "video_id": video_id,
+            "path": resolved,
+            "mime_type": mime_type,
+            "bytes": raw_bytes,
+            "base64": base64.b64encode(raw_bytes).decode("utf-8"),
+        })
+        seen_paths.add(resolved)
 
     # 2) 匹配 [file: ...] 标签中视频后缀的文件
     for match in _FILE_TAG_PATTERN.finditer(text):
@@ -199,31 +257,21 @@ def extract_video_payloads(text: str) -> Tuple[str, List[Dict[str, Any]]]:
             matched_file_tags.append(match)
             continue
 
-        mime_type, _ = mimetypes.guess_type(resolved)
-        if not mime_type or not mime_type.startswith("video/"):
-            mime_type = "video/mp4"
+        raw_bytes, mime_type, error = _load_video_bytes(resolved)
+        if error:
+            logger.warning(f"加载文件形式视频失败: {resolved} ({error})")
+            continue
 
-        try:
-            file_size = os.path.getsize(resolved)
-            if file_size > _MAX_VIDEO_BYTES:
-                logger.warning(f"文件形式视频过大（>{_MAX_VIDEO_BYTES} bytes），已跳过: {resolved}")
-                continue
-
-            with open(resolved, "rb") as f:
-                raw_bytes = f.read()
-
-            video_id = _generate_video_id()
-            videos.append({
-                "video_id": video_id,
-                "path": resolved,
-                "mime_type": mime_type,
-                "bytes": raw_bytes,
-                "base64": base64.b64encode(raw_bytes).decode("utf-8"),
-            })
-            seen_paths.add(resolved)
-            matched_file_tags.append(match)
-        except Exception as e:
-            logger.warning(f"读取文件形式视频失败，已跳过: {resolved} ({e})")
+        video_id = _generate_video_id()
+        videos.append({
+            "video_id": video_id,
+            "path": resolved,
+            "mime_type": mime_type,
+            "bytes": raw_bytes,
+            "base64": base64.b64encode(raw_bytes).decode("utf-8"),
+        })
+        seen_paths.add(resolved)
+        matched_file_tags.append(match)
 
     # 清理已匹配的标签：先处理 [file:] 标签（从后往前避免位移），再处理 [video:]
     result_text = text

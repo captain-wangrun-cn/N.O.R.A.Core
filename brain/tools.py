@@ -31,7 +31,7 @@ TOOL_INTROS = {
     "list_dir": "列出目录内容，查看文件和子目录，适合确认路径。",
     "get_available_skills": "列出 workspace/skills 下当前可用技能清单，便于选择技能。",
     "exec_command": "执行受限的系统命令，作为无法用高层工具时的兜底；默认工作目录为 workspace 根目录。",
-    "view_image": "读取本地图片或检索用户之前发送给 AI 的历史图片；可用 question 参数指定希望图片模型围绕图片回答的问题。",
+    "view_media": "读取本地媒体文件或检索用户之前发送给 AI 的历史图片/视频；可用 question 参数指定希望多模态模型围绕媒体回答的问题，可用 type 参数筛选 image/video。",
     "crop_image_for_llm": "裁剪图片以便模型分析，用户要求仔细观察图片某个部分时可调用。",
     "report_progress": "向用户发送阶段性进度汇报，适合长任务中途更新。",
     "set_alarm": "设置提醒或倒计时闹钟，适合提醒/日程。",
@@ -129,7 +129,7 @@ class ToolManager:
             security_cfg = cfg.get("security", {})
             self._security_enabled = security_cfg.get("enabled", False)
             self._security_whitelist = set(security_cfg.get("tool_whitelist", [
-                "view_image", "crop_image_for_llm", "read_file", "list_dir",
+                "view_media", "crop_image_for_llm", "read_file", "list_dir",
                 "search", "get_available_skills", "report_progress",
                 "store_progress_note", "get_progress_note", "list_alarms",
                 "read_secret_vault",
@@ -151,7 +151,7 @@ class ToolManager:
         self.register(self.list_dir)
         self.register(self.get_available_skills)
         self.register(self.exec_command)
-        self.register(self.view_image)
+        self.register(self.view_media)
         self.register(self.crop_image_for_llm)
         self.register(self.report_progress)
         self.register(self.read_secret_vault)
@@ -1064,7 +1064,7 @@ class ToolManager:
             return f"Error: Command timed out after {timeout} seconds. For long-running commands (apt install, pip install, etc.), use a higher timeout value, e.g. exec_command(command, timeout=300)."
         except Exception as e: return f"Error executing command: {e}"
 
-    def view_image(
+    def view_media(
         self,
         image_id: str = "",
         keyword: str = "",
@@ -1076,7 +1076,7 @@ class ToolManager:
         limit: int = 10,
         return_image: bool = True,
         local_path: str = "",
-        media_type: str = "",
+        type: str = "",
     ) -> str:
         """
         Retrieves images or videos from the media memory database. Supports multiple search modes:
@@ -1090,16 +1090,16 @@ class ToolManager:
         :param image_id: Exact media ID to look up (e.g. 'img_a1b2c3d4' or 'vid_a1b2c3d4').
         :param keyword: Keyword or description for semantic/text search on media tags.
         :param text_query: Search text content (OCR) extracted from images. Supports fuzzy matching, case-insensitive, multi-keyword AND logic (space-separated). E.g. 'error message', '购物 清单'.
-    :param question: Optional question/prompt for the next image-model round. Use this when you need the image model to answer a specific question about the returned image(s). If provided, return_image is forced to true.
+        :param question: Optional question/prompt for the next multimodal round. Use this when you need the model to answer a specific question about the returned media. If provided, return_image is forced to true.
         :param start_time: Start of time range as Unix timestamp string (e.g. '1709856000').
         :param end_time: End of time range as Unix timestamp string (e.g. '1709942400').
         :param user_id: Filter by user ID. If empty, searches all users.
         :param limit: Maximum number of results (1-50, default 10).
         :param return_image: When true, the tool returns media references via `[image: abs_path]` or `[video: abs_path]`
-            MediaTags，供多模态管线自动读取内容。Default: True.
+            MediaTags for multimodal pipeline ingestion. Default: True.
         :param local_path: Optional local file path to view directly (workspace-relative or absolute).
             When provided, bypasses DB search and returns the file with MediaTag if exists.
-        :param media_type: Filter by media type: 'image', 'video', or '' (empty = all types).
+        :param type: Filter by media type: 'image', 'video', or '' (empty = all types). Default: ''.
         """
         try:
             limit = max(1, min(int(limit), 50))
@@ -1134,7 +1134,7 @@ class ToolManager:
                 end_time=e_time,
                 user_id=user_id,
                 limit=limit,
-                media_type=media_type,
+                media_type=type,
             )
 
         if not results:

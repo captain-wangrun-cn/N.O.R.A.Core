@@ -10,8 +10,8 @@
 2. **将图片原图发送给 LLM**（多模态输入，二进制 bytes）
 3. **在文本提示中告知 LLM 图片 ID**，要求 LLM 返回关键词标签列表（用于检索）
 4. **解析 LLM 回复中的标签**，与图片 ID、路径、时间等一起存入 MongoDB + Qdrant
-5. **提供 `view_image` 工具**，支持多种检索方式
-6. 当 `view_image(return_image=true)` 时，工具会返回图片内容标签，下一轮自动切换 `image` 模型进行图像分析
+5. **提供 `view_media` 工具**，支持多种检索方式
+6. 当 `view_media(return_image=true)` 时，工具会返回图片内容标签，下一轮自动切换 `image` 模型进行图像分析
 
 ## 数据流
 
@@ -49,8 +49,8 @@ ImageStore.save_image_metadata()
      ├── MongoDB: 结构化元数据 (id, path, tags, user, time)
      └── Qdrant:  标签文本向量 (语义检索)
 
-用户请求找回图片（view_image）
-     │  view_image(keyword/image_id/time/text_query, return_image=true)
+用户请求找回图片（view_media）
+     │  view_media(keyword/image_id/time/text_query, return_image=true)
      ▼
 Tool 返回元数据 + MediaTag: [image: absolute_path]
      │
@@ -147,7 +147,7 @@ def hello_world():
 4. 将标签文本向量化并存入 Qdrant
 5. 将 OCR 文字存入 MongoDB 的 `ocr_text` 字段
 
-## `view_image` 工具
+## `view_media` 工具
 
 注册在 `brain/tools.py` 中的内置工具，LLM 可以在对话中调用它来检索图片。
 
@@ -191,12 +191,12 @@ def hello_world():
 ### 使用场景
 
 LLM 在对话中可以这样调用：
-- "找一下我之前发的那张猫的照片" → `view_image(keyword="猫")`
-- "看看 img_a1b2c3d4 那张图" → `view_image(image_id="img_a1b2c3d4")`
-- "上周发的照片有哪些" → `view_image(start_time="...", end_time="...")`
-- "找一下包含 Hello World 的截图" → `view_image(text_query="Hello World")`
-- "找那张有购物清单的图片" → `view_image(text_query="购物清单")`
-- "找有 error 字样的代码截图" → `view_image(keyword="代码截图", text_query="error")`
+- "找一下我之前发的那张猫的照片" → `view_media(keyword="猫")`
+- "看看 img_a1b2c3d4 那张图" → `view_media(image_id="img_a1b2c3d4")`
+- "上周发的照片有哪些" → `view_media(start_time="...", end_time="...")`
+- "找一下包含 Hello World 的截图" → `view_media(text_query="Hello World")`
+- "找那张有购物清单的图片" → `view_media(text_query="购物清单")`
+- "找有 error 字样的代码截图" → `view_media(keyword="代码截图", text_query="error")`
 
 ## 涉及的文件
 
@@ -205,7 +205,7 @@ LLM 在对话中可以这样调用：
 | `memory/image_store.py` | 图片元数据的 MongoDB + Qdrant 存储和检索 |
 | `brain/multimodal.py` | 图片标签解析、image_id 生成、二进制读取 |
 | `core/controller.py` | 编排：ID 注入 → LLM 调用 → 标签提取 → 存储 |
-| `brain/tools.py` | `view_image` 工具注册和执行（含 `return_image`） |
+| `brain/tools.py` | `view_media` 工具注册和执行（含 `return_image`） |
 | `brain/templates/image_tags.jinja` | 图片标签提取提示词模板 |
 | `tests/test_image_memory.py` | 单元测试 |
 
@@ -234,4 +234,4 @@ memory:
 - MongoDB 或 Qdrant 不可用 → `ImageStore.enabled = False`，图片标签仍会作为普通对话记忆存入 RAG
 - Embedding 服务不可用 → 仅保存 MongoDB 元数据，语义检索不可用
 - LLM 未按格式返回标签 → 使用文件名作为 fallback 标签
-- `view_image(return_image=true)` 但图片文件已丢失/路径失效 → 跳过多模态注入，仅返回检索元数据
+- `view_media(return_image=true)` 但图片文件已丢失/路径失效 → 跳过多模态注入，仅返回检索元数据

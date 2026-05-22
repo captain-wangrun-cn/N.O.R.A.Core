@@ -163,7 +163,7 @@ security:
   enabled: false
   # 白名单工具（这些工具不经过安全审查）
   tool_whitelist:
-    - view_image
+    - view_media
     - crop_image_for_llm
     - read_file
     - list_dir

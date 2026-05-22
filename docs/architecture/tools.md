@@ -25,7 +25,7 @@
 8. `list_dir`
 9. `get_available_skills`
 10. `exec_command`
-11. `view_image`
+11. `view_media`
 12. `crop_image_for_llm`
 13. `report_progress`
 14. `set_alarm`
@@ -204,7 +204,7 @@
 
 ---
 
-## `view_image`
+## `view_media`
 
 **作用**：仅从图片记忆系统回查**用户曾发送给 AI 的历史图片**（按 ID / 标签语义 / OCR 文本 / 时间 / 最近）。不用于搜索或生成新图。支持关键词与 OCR 文本联合检索。
 

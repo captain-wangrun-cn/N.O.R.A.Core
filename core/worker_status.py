@@ -28,7 +28,7 @@ class WorkerStatus:
         "exec_command": "执行命令",
         "create_new_skill": "创建新技能",
         "execute_tool_plan": "执行多步骤计划",
-        "view_image": "检索图片",
+        "view_media": "检索媒体",
         "crop_image_for_llm": "裁剪图片",
         "set_alarm": "设置闹钟",
         "get_available_skills": "查看可用技能",

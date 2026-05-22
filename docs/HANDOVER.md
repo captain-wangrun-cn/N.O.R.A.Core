@@ -1,7 +1,7 @@
 ## 项目概览
 - 仓库：N.O.R.A.Core（branch: main）
 - 目标：多平台智能体内核，包含 LLM 适配、工具/技能体系、成本追踪、记忆/RAG。
-- 当前状态：可运行，自测通过；已完成图片记忆链路（入库/检索/回查再分析）、`view_image` 工具增强、CLI 高危清理保护。
+- 当前状态：可运行，自测通过；已完成图片记忆链路（入库/检索/回查再分析）、`view_media` 工具增强、CLI 高危清理保护。
 
 ## 近期关键改动（截至 2026-05-07）
 
@@ -49,25 +49,25 @@
 
 ## 近期关键改动（截至 2026-05-04）
 
-### 🖼️ view_image 提问参数 + 移除持续强制 image 模型规则 — 2026-05-04
+### 🖼️ view_media 提问参数 + 移除持续强制 image 模型规则 — 2026-05-04
 
-**背景**：旧设计里 `view_image(use_image_model=true)` 或上游 `[USE_IMAGE_MODEL]` 会让后脑持续使用 image 模型，直到 `crop_image_for_llm` 输出后才解除。用户希望删除这个持续规则，改为让 `view_image` 自带“提问参数”，由后脑对特定图片发起一次性图片模型分析。
+**背景**：旧设计里 `view_media(use_image_model=true)` 或上游 `[USE_IMAGE_MODEL]` 会让后脑持续使用 image 模型，直到 `crop_image_for_llm` 输出后才解除。用户希望删除这个持续规则，改为让 `view_media` 自带“提问参数”，由后脑对特定图片发起一次性图片模型分析。
 
 **修复：**
 - `core/back_brain.py`
    - 删除 `force_image_model_until_crop_done` 状态机。
    - 后脑模型路由改为：只有当前轮真正携带 `multimodal_images` 图片字节时才使用 `image` 模型，否则回到 `coder`。
-   - `view_image` / `crop_image_for_llm` 返回 `MediaTag` 时，下一轮注入图片并临时走 image 模型；该批图片消费后不再持续强制 image。
-   - 若 `view_image(question=...)` 返回图片，下一轮 image prompt 会注入该问题，要求只围绕该问题观察回答。
+   - `view_media` / `crop_image_for_llm` 返回 `MediaTag` 时，下一轮注入图片并临时走 image 模型；该批图片消费后不再持续强制 image。
+   - 若 `view_media(question=...)` 返回图片，下一轮 image prompt 会注入该问题，要求只围绕该问题观察回答。
 - `brain/tools.py`
-   - `view_image` 新增 `question: str = ""` 参数。
+   - `view_media` 新增 `question: str = ""` 参数。
    - `question` 非空时自动强制 `return_image=true`，确保下一轮 image 模型能读取真实图片；`return_image=false` 仅用于元数据/标签/OCR 检索。
    - 移除 `use_image_model` 参数与输出提示。
    - `local_path` 直读本地图片现在不再依赖 ImageStore 初始化；无图片记忆库时也可用于手动识别本地图片。
 - `brain/templates/system.jinja` / `brain/templates/front_brain.jinja`
-   - 更新工具使用规则：需要图片模型回答具体问题时使用 `view_image(question=...)`，不要再使用持续强制模型标记。
+   - 更新工具使用规则：需要图片模型回答具体问题时使用 `view_media(question=...)`，不要再使用持续强制模型标记。
 - `docs/onboarding/QUICK_REFERENCE.md`
-   - 更新 `view_image` 速查说明。
+   - 更新 `view_media` 速查说明。
 
 **验证：**
 - `python -m py_compile core/back_brain.py brain/tools.py core/routing.py` 通过。
@@ -102,7 +102,7 @@
 - `core/front_brain.py :: _generate_front_chat_response`：
   - 当 `context["image_load_failed"]` 为真时，向 user_prompt 追加一段系统备注，告诉模型 "本轮系统没真正接收到图片数据"，**绝对不能假装看到图片或编造图片内容**，并给出更自然的语气示例。
 - `brain/templates/system.jinja §9 富媒体发送`：
-  - 新增 **🚫 图片/媒体接收的诚实底线** 段，统一覆盖前脑/后脑：网络/系统问题导致没收到图片时，不许编造视觉细节、不许臆想内容；可调用 `view_image` 检索历史图片；宁可如实说"图片好像没传过来"也不要瞎编。
+  - 新增 **🚫 图片/媒体接收的诚实底线** 段，统一覆盖前脑/后脑：网络/系统问题导致没收到图片时，不许编造视觉细节、不许臆想内容；可调用 `view_media` 检索历史图片；宁可如实说"图片好像没传过来"也不要瞎编。
 
 **修复 2：followup_loop 在双方告别后不再发任何收尾消息**
 
@@ -651,12 +651,12 @@
 - 标签协议保留 `[IMAGE_TAGS:img_xxx]...[/IMAGE_TAGS]`，并在对用户输出前剥离。
 - 新增图片元数据异步入库逻辑。
 
-4) `brain/tools.py` / `view_image`
-- `view_image` 增加 `return_image: bool`。
+4) `brain/tools.py` / `view_media`
+- `view_media` 增加 `return_image: bool`。
 - `return_image=false`：返回元数据。
 - `return_image=true`：额外返回 `MediaTag: [image: absolute_path]`，用于直接发送或后续多模态分析。
 
-5) `view_image(return_image=true)` 后自动切 image 模型
+5) `view_media(return_image=true)` 后自动切 image 模型
 - Controller 会解析工具输出中的图片标签并在下一轮注入 `multimodal_images`。
 - 下一轮自动切换到 `image_llm` 进行图片分析。
 
@@ -666,7 +666,7 @@
 
 7) Prompt / 文档同步
 - 新增模板：`brain/templates/image_tags.jinja`（关键词标签策略）。
-- `system.jinja` 补充 `view_image` 参数约束（禁止空参数调用、优先 keyword/image_id/time、可启用 `return_image=true`）。
+- `system.jinja` 补充 `view_media` 参数约束（禁止空参数调用、优先 keyword/image_id/time、可启用 `return_image=true`）。
 - 更新 `docs/architecture/image-memory.md`、`docs/CODE_STRUCTURE.md`、`README.md`、`docs/CLI_USAGE.md`。
 
 8) 测试状态
@@ -744,7 +744,7 @@
 - `core/controller.py`：消息路由、脑口分离、任务队列、打断与状态跟踪。
 - `core/cost_tracker.py`：成本记录、定价表、统计输出。
 - `brain/providers/openai.py` / `brain/providers/gemini.py`：流式输出 + usage chunk。
-- `brain/tools.py`：工具注册与实现（含 `view_image(return_image)`）。
+- `brain/tools.py`：工具注册与实现（含 `view_media(return_image)`）。
 - `brain/multimodal.py`：图片 payload 解析、`image_id` 生成、路径映射。
 - `memory/image_store.py`：图片元数据与向量存储/检索。
 - `skills/web_fetch`：网页抽取（r.jina.ai + fast LLM）。
@@ -769,7 +769,7 @@
 - 每日记忆（`workspace/data/memory/YYYY-MM-DD.md`）默认不自动注入；如业务需要可在 prompt 组装层手动恢复。
 - 聊天记录默认 DB 路径为 `workspace/data/memory/message_history.db`；若配置了 `memory.message_history.db_path` 则按配置优先。
 - Telegram 媒体下载路径为 `workspace/data/telegram/`；多模态解析支持 `data/...` 路径映射。
-- `view_image` 若用于“找回并继续看图”，应传 `return_image=true`；否则只返回元数据。
+- `view_media` 若用于“找回并继续看图”，应传 `return_image=true`；否则只返回元数据。
 - CLI 清理 RAG 数据是高危操作：会删除所有 collections，且必须二次确认（`DELETE ALL`）。
 
 ## 快速检查清单
