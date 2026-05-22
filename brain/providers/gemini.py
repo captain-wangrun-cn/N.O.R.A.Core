@@ -9,7 +9,12 @@ with warnings.catch_warnings():
 
 from typing import List, Dict, Optional, Any
 import re
+import json
 import random
+import base64
+import urllib.parse
+
+import aiohttp
 
 from brain.interface import BaseLLM
 import config
@@ -58,18 +63,20 @@ class GeminiProvider(BaseLLM):
         if not model_name:
             raise ValueError(f"Model for alias '{model_alias}' not found in config.")
 
-        genai.configure(api_key=config.get_api_key(provider_name))
+        self.api_key = config.get_api_key(provider_name)
+        self.base_url = config.get_base_url(provider_name) or "https://generativelanguage.googleapis.com"
+
+        genai.configure(api_key=self.api_key)
         # 支持自定义 API endpoint（如代理地址）
-        base_url = config.get_base_url(provider_name)
-        if base_url:
+        if config.get_base_url(provider_name):
             try:
                 from google.api_core import client_options as client_options_lib
                 genai.configure(
-                    api_key=config.get_api_key(provider_name),
-                    client_options=client_options_lib.ClientOptions(api_endpoint=base_url),
+                    api_key=self.api_key,
+                    client_options=client_options_lib.ClientOptions(api_endpoint=self.base_url),
                 )
             except Exception:
-                logger.warning(f"Gemini base_url 配置失败，使用默认 endpoint: {base_url}")
+                logger.warning(f"Gemini base_url 配置失败，使用默认 endpoint: {self.base_url}")
 
         self.model_name = model_name
 
@@ -268,6 +275,165 @@ class GeminiProvider(BaseLLM):
             parts.append({"text": user_prompt})
         return parts
 
+    def _convert_history_to_rest(self, history: List[Dict[str, str]]) -> List[Dict]:
+        """将 temp_history 转换为 REST API 格式的 contents 列表。"""
+        contents = []
+        for item in history:
+            role_raw = item.get("role", "user")
+            content = str(item.get("content", ""))
+
+            if role_raw == "tool_call":
+                tool_name = item.get("tool_name", "unknown")
+                tool_args = item.get("tool_args", {})
+                contents.append({
+                    "role": "model",
+                    "parts": [{"functionCall": {"name": tool_name, "args": tool_args}}]
+                })
+            elif role_raw == "tool_response":
+                tool_name = item.get("tool_name", "unknown")
+                contents.append({
+                    "role": "user",
+                    "parts": [{"functionResponse": {"name": tool_name, "response": {"result": content}}}]
+                })
+            else:
+                role = "user" if role_raw == "user" else "model"
+                contents.append({"role": role, "parts": [{"text": content}]})
+        return contents
+
+    async def _video_stream_via_rest(
+        self,
+        system_prompt: str,
+        user_prompt: str,
+        history: List[Dict[str, str]],
+        multimodal_images: Optional[List[Dict]] = None,
+        multimodal_videos: Optional[List[Dict]] = None,
+        generation_config: Optional[Dict] = None,
+    ):
+        """绕过 SDK，直接用 REST API 流式请求（解决 SDK + 自定义 endpoint + 视频 inline_data 卡死问题）。"""
+        model_encoded = urllib.parse.quote(self.model_name)
+        url = f"{self.base_url}/v1beta/models/{model_encoded}:streamGenerateContent?alt=sse"
+
+        headers = {
+            "Content-Type": "application/json",
+            "x-goog-api-key": self.api_key,
+        }
+
+        # 构建 contents: history + 当前用户消息
+        contents = self._convert_history_to_rest(history)
+
+        # 当前用户消息 parts
+        user_parts = []
+        if user_prompt and user_prompt.strip():
+            user_parts.append({"text": user_prompt})
+        for image in (multimodal_images or []):
+            mime_type = image.get("mime_type") or "image/jpeg"
+            raw_bytes = image.get("bytes")
+            if not raw_bytes:
+                continue
+            b64 = base64.b64encode(raw_bytes).decode("utf-8") if isinstance(raw_bytes, bytes) else raw_bytes
+            user_parts.append({"inlineData": {"mimeType": mime_type, "data": b64}})
+        for video in (multimodal_videos or []):
+            mime_type = video.get("mime_type") or "video/mp4"
+            raw_bytes = video.get("bytes")
+            if not raw_bytes:
+                continue
+            b64 = base64.b64encode(raw_bytes).decode("utf-8") if isinstance(raw_bytes, bytes) else raw_bytes
+            user_parts.append({"inlineData": {"mimeType": mime_type, "data": b64}})
+
+        contents.append({"role": "user", "parts": user_parts})
+
+        body: Dict[str, Any] = {"contents": contents}
+
+        if system_prompt and system_prompt.strip():
+            body["systemInstruction"] = {"parts": [{"text": system_prompt}]}
+
+        body["safetySettings"] = [
+            {"category": "HARM_CATEGORY_HARASSMENT", "threshold": "BLOCK_NONE"},
+            {"category": "HARM_CATEGORY_HATE_SPEECH", "threshold": "BLOCK_NONE"},
+            {"category": "HARM_CATEGORY_SEXUALLY_EXPLICIT", "threshold": "BLOCK_NONE"},
+            {"category": "HARM_CATEGORY_DANGEROUS_CONTENT", "threshold": "BLOCK_NONE"},
+        ]
+
+        if generation_config:
+            body["generationConfig"] = generation_config
+
+        timeout = aiohttp.ClientTimeout(total=120)
+        in_think_block = False
+        input_tokens = 0
+        output_tokens = 0
+
+        try:
+            async with aiohttp.ClientSession(timeout=timeout) as session:
+                async with session.post(url, headers=headers, json=body) as resp:
+                    if resp.status != 200:
+                        error_text = await resp.text()
+                        logger.error(f"Gemini REST API error {resp.status}: {error_text[:200]}")
+                        yield {"type": "text", "content": f"抱歉，处理请求时遇到问题：HTTP {resp.status}"}
+                        return
+
+                    # 解析 SSE 流
+                    buffer = ""
+                    async for line in resp.content:
+                        decoded = line.decode("utf-8", errors="replace")
+                        buffer += decoded
+
+                        while "\n" in buffer:
+                            raw_line, buffer = buffer.split("\n", 1)
+                            raw_line = raw_line.strip()
+
+                            if not raw_line.startswith("data: "):
+                                continue
+                            json_str = raw_line[6:]
+                            if not json_str:
+                                continue
+
+                            try:
+                                chunk_data = json.loads(json_str)
+                            except json.JSONDecodeError:
+                                continue
+
+                            # 提取 usage
+                            usage_meta = chunk_data.get("usageMetadata") or {}
+                            if usage_meta.get("promptTokenCount"):
+                                input_tokens = usage_meta["promptTokenCount"]
+                            if usage_meta.get("candidatesTokenCount"):
+                                output_tokens = usage_meta["candidatesTokenCount"]
+
+                            candidates = chunk_data.get("candidates") or []
+                            for candidate in candidates:
+                                parts = (candidate.get("content") or {}).get("parts") or []
+                                for part in parts:
+                                    # thinking 内容跳过
+                                    if part.get("thought"):
+                                        continue
+                                    if "functionCall" in part:
+                                        fc = part["functionCall"]
+                                        yield {
+                                            "type": "tool_call",
+                                            "name": fc.get("name", ""),
+                                            "args": fc.get("args", {})
+                                        }
+                                    elif "text" in part:
+                                        text = part["text"]
+                                        visible_text, in_think_block = self.strip_stream_think_segment(text, in_think_block)
+                                        if visible_text:
+                                            yield {"type": "text", "content": visible_text}
+
+            if input_tokens or output_tokens:
+                self.last_usage = {"input_tokens": input_tokens, "output_tokens": output_tokens}
+                yield {"type": "usage", "input_tokens": input_tokens, "output_tokens": output_tokens}
+
+        except aiohttp.ClientError as e:
+            logger.error(f"Gemini REST video stream network error: {e}", exc_info=True)
+            yield {"type": "text", "content": f"抱歉，视频处理请求失败：{str(e)[:100]}"}
+        except Exception as e:
+            error_msg = str(e)
+            logger.error(f"Gemini REST video stream error: {e}", exc_info=True)
+            if "block_reason" in error_msg or "PROHIBITED_CONTENT" in error_msg or "SAFETY" in error_msg:
+                yield {"type": "text", "content": "抱歉，由于内容安全限制，我无法直接回复该消息。"}
+            else:
+                yield {"type": "text", "content": f"抱歉，处理请求时遇到问题：{error_msg[:100]}"}
+
     async def chat_stream(
         self,
         system_prompt: str,
@@ -277,6 +443,21 @@ class GeminiProvider(BaseLLM):
         multimodal_images: Optional[List[Dict]] = None,
         multimodal_videos: Optional[List[Dict]] = None,
     ):
+        # 视频请求绕过 SDK，直接走 REST API（SDK + 自定义 endpoint + 视频 inline_data 会卡死）
+        if multimodal_videos:
+            full_prompt = f"{system_prompt}\n\n---\n\n{user_prompt}" if not tools else user_prompt
+            gen_config = {"maxOutputTokens": int(self.max_output_tokens)} if self.max_output_tokens else None
+            async for chunk in self._video_stream_via_rest(
+                system_prompt=system_prompt if tools else "",
+                user_prompt=full_prompt,
+                history=history,
+                multimodal_images=multimodal_images,
+                multimodal_videos=multimodal_videos,
+                generation_config=gen_config,
+            ):
+                yield chunk
+            return
+
         gemini_history = self._convert_history(history)
 
         # 配置安全设置

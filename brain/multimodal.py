@@ -15,6 +15,8 @@ logger = logging.getLogger(__name__)
 
 _IMAGE_TAG_PATTERN = re.compile(r'\[image:\s*(.*?)\]', re.IGNORECASE)
 _VIDEO_TAG_PATTERN = re.compile(r'\[video:\s*(.*?)\]', re.IGNORECASE)
+_FILE_TAG_PATTERN = re.compile(r'\[file:\s*(.*?)\]', re.IGNORECASE)
+_VIDEO_EXTENSIONS = {'.mp4', '.mkv', '.avi', '.mov', '.webm', '.flv', '.wmv', '.m4v', '.3gp'}
 _MAX_IMAGE_BYTES = 20 * 1024 * 1024  # 20MB safety limit per image
 _MAX_VIDEO_BYTES = 100 * 1024 * 1024  # 100MB safety limit per video (Gemini inline limit)
 
@@ -134,10 +136,10 @@ def extract_image_payloads(text: str) -> Tuple[str, List[Dict[str, Any]]]:
 
 def extract_video_payloads(text: str) -> Tuple[str, List[Dict[str, Any]]]:
     """
-    从用户文本中提取 [video: ...] 标签并加载视频二进制。
+    从用户文本中提取 [video: ...] 标签以及 [file: ...] 中视频后缀的文件，并加载视频二进制。
 
     Returns:
-        clean_text: 移除 video 标签后的文本
+        clean_text: 移除已匹配标签后的文本
         videos: [{"video_id", "path", "mime_type", "bytes", "base64"}, ...]
     """
     if not text:
@@ -145,7 +147,9 @@ def extract_video_payloads(text: str) -> Tuple[str, List[Dict[str, Any]]]:
 
     videos: List[Dict[str, Any]] = []
     seen_paths = set()
+    matched_file_tags: List[re.Match] = []
 
+    # 1) 匹配 [video: ...] 标签
     for match in _VIDEO_TAG_PATTERN.finditer(text):
         raw_path = match.group(1)
         resolved = _resolve_local_image_path(raw_path)
@@ -181,7 +185,51 @@ def extract_video_payloads(text: str) -> Tuple[str, List[Dict[str, Any]]]:
         except Exception as e:
             logger.warning(f"读取视频失败，已跳过: {resolved} ({e})")
 
-    clean_text = _VIDEO_TAG_PATTERN.sub("", text)
-    clean_text = re.sub(r'\n{3,}', '\n\n', clean_text).strip()
+    # 2) 匹配 [file: ...] 标签中视频后缀的文件
+    for match in _FILE_TAG_PATTERN.finditer(text):
+        raw_path = match.group(1)
+        ext = os.path.splitext(raw_path)[1].lower()
+        if ext not in _VIDEO_EXTENSIONS:
+            continue
 
-    return clean_text, videos
+        resolved = _resolve_local_image_path(raw_path)
+        if not resolved:
+            continue
+        if resolved in seen_paths:
+            matched_file_tags.append(match)
+            continue
+
+        mime_type, _ = mimetypes.guess_type(resolved)
+        if not mime_type or not mime_type.startswith("video/"):
+            mime_type = "video/mp4"
+
+        try:
+            file_size = os.path.getsize(resolved)
+            if file_size > _MAX_VIDEO_BYTES:
+                logger.warning(f"文件形式视频过大（>{_MAX_VIDEO_BYTES} bytes），已跳过: {resolved}")
+                continue
+
+            with open(resolved, "rb") as f:
+                raw_bytes = f.read()
+
+            video_id = _generate_video_id()
+            videos.append({
+                "video_id": video_id,
+                "path": resolved,
+                "mime_type": mime_type,
+                "bytes": raw_bytes,
+                "base64": base64.b64encode(raw_bytes).decode("utf-8"),
+            })
+            seen_paths.add(resolved)
+            matched_file_tags.append(match)
+        except Exception as e:
+            logger.warning(f"读取文件形式视频失败，已跳过: {resolved} ({e})")
+
+    # 清理已匹配的标签：先处理 [file:] 标签（从后往前避免位移），再处理 [video:]
+    result_text = text
+    for m in reversed(sorted(matched_file_tags, key=lambda x: x.start())):
+        result_text = result_text[:m.start()] + result_text[m.end():]
+    result_text = _VIDEO_TAG_PATTERN.sub("", result_text)
+    result_text = re.sub(r'\n{3,}', '\n\n', result_text).strip()
+
+    return result_text, videos
