@@ -215,6 +215,8 @@ class BackBrainMixin:
         # 视频先占位入库（仅当有视频模型时才入库）
         if multimodal_videos and self.image_store.enabled and video_llm_available:
             for vid in multimodal_videos:
+                if vid.get("from_tool"):
+                    continue
                 asyncio.create_task(
                     self._async_save_image_stub(
                         image_id=vid["video_id"],
@@ -1349,47 +1351,51 @@ class BackBrainMixin:
             # --- 4.7 视频记忆存储 (Video Memory Storage) ---
             if multimodal_videos and video_llm_available and self.image_store.enabled:
                 video_tags_extracted: Dict[str, str] = {}
-                source_text_for_vtags = final_response_buffer or last_video_raw_output or ""
-                for m in self._VIDEO_TAGS_PATTERN.finditer(source_text_for_vtags):
-                    vid_id = m.group(1).strip()
-                    tags_text = m.group(2).strip()
-                    if vid_id and tags_text:
-                        video_tags_extracted[vid_id] = tags_text
+                # 仅对新用户视频（非工具回查）提取标签，和图片逻辑一致
+                expected_video_ids = [vid["video_id"] for vid in multimodal_videos if not vid.get("from_tool")]
+                if expected_video_ids:
+                    source_text_for_vtags = final_response_buffer or last_video_raw_output or ""
+                    for m in self._VIDEO_TAGS_PATTERN.finditer(source_text_for_vtags):
+                        vid_id = m.group(1).strip()
+                        tags_text = m.group(2).strip()
+                        if vid_id and tags_text:
+                            video_tags_extracted[vid_id] = tags_text
 
-                # ID 重映射（和图片逻辑一致）
-                expected_video_ids = [vid["video_id"] for vid in multimodal_videos]
-                expected_video_set = set(expected_video_ids)
-                parsed_vtag_blocks = list(video_tags_extracted.items())
-                if parsed_vtag_blocks:
-                    for idx, expected_id in enumerate(expected_video_ids):
-                        if expected_id in video_tags_extracted:
+                    # ID 重映射（和图片逻辑一致）
+                    expected_video_set = set(expected_video_ids)
+                    parsed_vtag_blocks = list(video_tags_extracted.items())
+                    if parsed_vtag_blocks:
+                        for idx, expected_id in enumerate(expected_video_ids):
+                            if expected_id in video_tags_extracted:
+                                continue
+                            if idx >= len(parsed_vtag_blocks):
+                                break
+                            parsed_id, parsed_tags = parsed_vtag_blocks[idx]
+                            if parsed_id not in expected_video_set and parsed_tags:
+                                video_tags_extracted[expected_id] = parsed_tags
+                                logger.warning(f"[{chat_id}] VIDEO_TAGS id 不匹配，重映射: {parsed_id} -> {expected_id}")
+
+                    for vid in multimodal_videos:
+                        if vid.get("from_tool"):
                             continue
-                        if idx >= len(parsed_vtag_blocks):
-                            break
-                        parsed_id, parsed_tags = parsed_vtag_blocks[idx]
-                        if parsed_id not in expected_video_set and parsed_tags:
-                            video_tags_extracted[expected_id] = parsed_tags
-                            logger.warning(f"[{chat_id}] VIDEO_TAGS id 不匹配，重映射: {parsed_id} -> {expected_id}")
-
-                for vid in multimodal_videos:
-                    vid_id = vid["video_id"]
-                    tags = video_tags_extracted.get(vid_id, "")
-                    if not tags:
-                        logger.warning(f"[{chat_id}] 视频 {vid_id} 未生成标签，保持占位 (path={vid['path']})")
-                        continue
-                    asyncio.create_task(
-                        self._async_update_image_tags(
-                            image_id=vid_id,
-                            tags=tags,
-                            ocr_text="",
-                            user_id=storage_id,
-                            chat_id=chat_id,
-                            file_path=vid["path"],
-                            platform=context.get("platform", "telegram"),
-                            platform_message_id=context.get("platform_message_id"),
+                        vid_id = vid["video_id"]
+                        tags = video_tags_extracted.get(vid_id, "")
+                        if not tags:
+                            logger.warning(f"[{chat_id}] 视频 {vid_id} 未生成标签，保持占位 (path={vid['path']})")
+                            continue
+                        asyncio.create_task(
+                            self._async_update_image_tags(
+                                image_id=vid_id,
+                                tags=tags,
+                                ocr_text="",
+                                user_id=storage_id,
+                                chat_id=chat_id,
+                                file_path=vid["path"],
+                                platform=context.get("platform", "telegram"),
+                                platform_message_id=context.get("platform_message_id"),
+                            )
                         )
-                    )
-                    logger.info(f"[{chat_id}] 视频 {vid_id} 标签已补充: '{tags[:60]}...'")
+                        logger.info(f"[{chat_id}] 视频 {vid_id} 标签已补充: '{tags[:60]}...'")
             # --- 5. RAG 记忆存储 (Memory Storage) ---
             if self.rag.enabled:
                 asyncio.create_task(self._async_save_memory(message_content, storage_id, {"role": "user", "chat_id": chat_id}))

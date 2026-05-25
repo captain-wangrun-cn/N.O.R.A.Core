@@ -335,6 +335,7 @@ class TelegramAdapter(BaseAdapter):
         nora_prefs_handler = CommandHandler('nora_prefs', self._nora_prefs_command)
         set_stream_handler = CommandHandler('set_stream', self._set_stream_command)
         legacy_nonstream_handler = CommandHandler('nonstream', self._set_stream_command)
+        context_handler = CommandHandler('context', self._context_command)
         debug_cleanup_handler = CommandHandler('debug_cleanup', self._debug_cleanup_command)
         model_handler = CommandHandler('model', self._model_command)
         msg_handler = MessageHandler(filters.TEXT & (~filters.COMMAND), self._handle_incoming_message)
@@ -355,6 +356,7 @@ class TelegramAdapter(BaseAdapter):
         self.application.add_handler(nora_prefs_handler)
         self.application.add_handler(set_stream_handler)
         self.application.add_handler(legacy_nonstream_handler)
+        self.application.add_handler(context_handler)
         self.application.add_handler(debug_cleanup_handler)
         self.application.add_handler(model_handler)
         self.application.add_handler(msg_handler)
@@ -521,6 +523,25 @@ class TelegramAdapter(BaseAdapter):
             logger.error(f"[{chat_id}] 获取状态时出错: {e}", exc_info=True)
             if update.message:
                 await update.message.reply_text("❌ 获取系统状态时发生错误。")
+
+    async def _context_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """显示上下文窗口使用情况，透传给 controller。"""
+        if not update.effective_chat:
+            return
+        chat_id = str(update.effective_chat.id)
+        if not self._message_handler:
+            if update.message:
+                await update.message.reply_text("❌ 指令处理器未就绪。")
+            return
+
+        event_context = {
+            "chat_id": chat_id,
+            "user_id": str(update.effective_user.id) if update.effective_user else chat_id,
+            "text": "/context",
+            "chat_type": update.effective_chat.type,
+            "user_name": update.effective_user.first_name if update.effective_user else "Unknown"
+        }
+        await self._message_handler(event_context)
 
     async def _debug_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """切换 debug 模式，透传给 controller。"""
@@ -873,7 +894,7 @@ class TelegramAdapter(BaseAdapter):
                     "message_ids": [],
                 }
             
-            self._media_group_buffers[media_group_id]["photos"].append(rel_file_path)
+            self._media_group_buffers[media_group_id]["photos"].append(f"[image: {rel_file_path}]")
             if update.message:
                 self._media_group_buffers[media_group_id]["message_ids"].append(str(update.message.message_id))
             # caption 只取第一张非空的（Telegram 相册只允许第一张图有 caption）
@@ -911,17 +932,17 @@ class TelegramAdapter(BaseAdapter):
             logger.info(f"[{chat_id}] 收到图片: {rel_file_path}")
 
     async def _flush_media_group(self, media_group_id: str):
-        """等待短暂时间后，将同一相册的所有图片合并为一条消息发送给聚合器。"""
-        await asyncio.sleep(1.0)  # 等待 1 秒让 Telegram 发完所有图片
-        
+        """等待短暂时间后，将同一媒体组的所有图片/视频合并为一条消息发送给聚合器。"""
+        await asyncio.sleep(1.0)  # 等待 1 秒让 Telegram 发完所有媒体
+
         buf = self._media_group_buffers.pop(media_group_id, None)
         self._media_group_timers.pop(media_group_id, None)
         if not buf or not buf["photos"]:
             return
-        
-        # 构造包含所有图片的消息文本
-        image_tags = "\n".join(f"[image: {p}]" for p in buf["photos"])
-        text = image_tags
+
+        # 构造包含所有媒体的消息文本（每项已是完整的 [image: ...] 或 [video: ...] 标签）
+        media_tags = "\n".join(buf["photos"])
+        text = media_tags
         if buf["caption"]:
             text += f"\n{buf['caption']}"
         if buf.get("reply_info"):
@@ -941,7 +962,7 @@ class TelegramAdapter(BaseAdapter):
             }
             await self._aggregator.add_message(chat_id, text, full_context)
         
-        logger.info(f"[{chat_id}] 相册合并完成: {len(buf['photos'])} 张图片 (group={media_group_id})")
+        logger.info(f"[{chat_id}] 媒体组合并完成: {len(buf['photos'])} 个媒体 (group={media_group_id})")
 
     async def _handle_video(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """处理视频消息（包括普通视频和圆形视频消息 video_note）"""
@@ -975,26 +996,61 @@ class TelegramAdapter(BaseAdapter):
         rel_file_path = os.path.relpath(abs_file_path, self.workspace_root).replace('\\', '/')
 
         reply_info = await self._extract_reply_info(update.message)
+        media_group_id = update.message.media_group_id
 
-        text = f"[video: {rel_file_path}]"
-        if caption:
-            text += f"\n{caption}"
-        if reply_info:
-            text = f"[回复: {reply_info}]\n{text}"
+        original_filename = getattr(video, "file_name", None) or ""
+        video_tag = f"[video: {rel_file_path}]"
+        if original_filename:
+            video_tag += f"\n(文件名: {original_filename})"
 
-        if self._aggregator:
-            full_context = {
-                "chat_id": chat_id,
-                "user_id": str(update.effective_user.id) if update.effective_user else chat_id,
-                "text": text,
-                "chat_type": update.effective_chat.type,
-                "user_name": update.effective_user.first_name if update.effective_user else "Unknown",
-                "platform": "telegram",
-                "platform_message_id": str(update.message.message_id) if update.message else None,
-            }
-            await self._aggregator.add_message(chat_id, text, full_context)
+        if media_group_id:
+            # 媒体组：加入同一缓冲（和图片共用），等待合并
+            if media_group_id not in self._media_group_buffers:
+                self._media_group_buffers[media_group_id] = {
+                    "photos": [],
+                    "caption": "",
+                    "chat_id": chat_id,
+                    "user_id": str(update.effective_user.id) if update.effective_user else chat_id,
+                    "chat_type": update.effective_chat.type,
+                    "user_name": update.effective_user.first_name if update.effective_user else "Unknown",
+                    "reply_info": reply_info,
+                    "platform": "telegram",
+                    "message_ids": [],
+                }
+            self._media_group_buffers[media_group_id]["photos"].append(video_tag)
+            if update.message:
+                self._media_group_buffers[media_group_id]["message_ids"].append(str(update.message.message_id))
+            if caption and not self._media_group_buffers[media_group_id]["caption"]:
+                self._media_group_buffers[media_group_id]["caption"] = caption
 
-        logger.info(f"[{chat_id}] 收到视频: {rel_file_path}")
+            old_timer = self._media_group_timers.pop(media_group_id, None)
+            if old_timer and not old_timer.done():
+                old_timer.cancel()
+            self._media_group_timers[media_group_id] = asyncio.create_task(
+                self._flush_media_group(media_group_id)
+            )
+            logger.info(f"[{chat_id}] 收到媒体组视频: {rel_file_path} (group={media_group_id})")
+        else:
+            # 单独视频：直接处理
+            text = video_tag
+            if caption:
+                text += f"\n{caption}"
+            if reply_info:
+                text = f"[回复: {reply_info}]\n{text}"
+
+            if self._aggregator:
+                full_context = {
+                    "chat_id": chat_id,
+                    "user_id": str(update.effective_user.id) if update.effective_user else chat_id,
+                    "text": text,
+                    "chat_type": update.effective_chat.type,
+                    "user_name": update.effective_user.first_name if update.effective_user else "Unknown",
+                    "platform": "telegram",
+                    "platform_message_id": str(update.message.message_id) if update.message else None,
+                }
+                await self._aggregator.add_message(chat_id, text, full_context)
+
+            logger.info(f"[{chat_id}] 收到视频: {rel_file_path}")
 
     async def _handle_document(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """处理文档消息"""
@@ -1263,7 +1319,11 @@ class TelegramAdapter(BaseAdapter):
             scopes = self._load_custom_scopes()
             # Toggle logic
             if action == "none":
-                scopes = ["none"]
+                # 切换 none：如果当前是 none 则恢复为 all（空列表），否则设为 none
+                if any(s in ("none", "off") for s in scopes):
+                    scopes = []
+                else:
+                    scopes = ["none"]
             else:
                 scopes = [s for s in scopes if s not in ("none", "off")]
                 if action in scopes:

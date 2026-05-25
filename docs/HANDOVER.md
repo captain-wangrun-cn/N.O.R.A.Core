@@ -3,6 +3,45 @@
 - 目标：多平台智能体内核，包含 LLM 适配、工具/技能体系、成本追踪、记忆/RAG。
 - 当前状态：可运行，自测通过；已完成图片记忆链路（入库/检索/回查再分析）、`view_media` 工具增强、CLI 高危清理保护。
 
+## 近期关键改动（截至 2026-05-25）
+
+### 🛠️ 八项修复与增强 — 2026-05-25
+
+1. **视频回复不再重新生成 VIDEO_TAGS**
+   - `core/back_brain.py`：视频标签生成逻辑对齐图片——`from_tool=True` 的视频跳过占位入库、标签提取和存储。`expected_video_ids` 现在过滤 `from_tool` 视频，整个标签提取块用 `if expected_video_ids:` 守护。
+
+2. **回复图片/视频不再重复提取 tag（确认）**
+   - 图片侧已有 `from_tool` 过滤（2026-05-07 修复），本次补齐视频侧同等逻辑。
+
+3. **告知 Nora 可自行修改 trigger 过滤规则**
+   - `brain/templates/system.jinja`：新增"外部触发器"段，说明 `triggers/` 子系统、邮件过滤模板路径、修改方式。
+
+4. **传图片/视频时附带文件名**
+   - `adapters/telegram/main.py`：视频消息现在附带 `(文件名: xxx)` 信息（当 Telegram 提供 `file_name` 时）。
+
+5. **消息聚合适配图片+视频混合媒体组**
+   - `adapters/telegram/main.py`：视频处理器新增 `media_group_id` 支持，与图片共用同一缓冲区。`_flush_media_group` 改为直接拼接预格式化的媒体标签（`[image: ...]` / `[video: ...]`），不再硬编码 `[image: ...]` 包装。
+
+6. **修复 custom scope 按钮逻辑**
+   - `adapters/telegram/main.py`：`_handle_custom_scope_callback` 中 "none" 按钮改为 toggle（当前是 none 则恢复 all，否则设为 none），避免用户取消所有 scope 后意外变成 "all"。
+
+7. **告诉 Nora 查看媒体文件时必须真的调用后脑**
+   - `brain/templates/system.jinja`：强化 `view_media` 强制规则，明确 IMAGE_TAGS 只是索引标签不能替代视觉分析。
+   - `brain/templates/front_brain.jinja`：新增"再次查看媒体 = 必须后脑"规则，禁止前脑凭记忆回答。
+
+8. **/context 指令修复**
+   - `adapters/telegram/main.py`：新增 `CommandHandler('context', self._context_command)` 注册，解决 `/context` 被 `~filters.COMMAND` 过滤导致无响应的问题。
+
+**涉及文件**：
+- `core/back_brain.py`
+- `adapters/telegram/main.py`
+- `brain/templates/system.jinja`
+- `brain/templates/front_brain.jinja`
+
+**验证**：`python -m py_compile` 所有改动文件通过；Jinja 模板解析通过。
+
+---
+
 ## 近期关键改动（截至 2026-05-07）
 
 ### 🛠️ 七项修复 — 2026-05-07
