@@ -803,6 +803,97 @@ def test_search_by_ocr_text_with_user_id():
     assert has_user_id
 
 
+def test_search_by_time_range_allows_legacy_docs_missing_context_fields():
+    from unittest.mock import MagicMock
+
+    from memory.image_store import ImageStore
+
+    store = ImageStore.__new__(ImageStore)
+    store.mongo_col = MagicMock()
+    store.qdrant = None
+    store.embed_client = MagicMock()
+    store.enabled = True
+
+    mock_cursor = MagicMock()
+    mock_cursor.sort.return_value = mock_cursor
+    mock_cursor.limit.return_value = iter([])
+    store.mongo_col.find.return_value = mock_cursor
+
+    store.search_by_time_range(
+        user_id="user123",
+        platform="telegram",
+        chat_id="chat-1",
+        storage_id="user123",
+    )
+
+    query_arg = store.mongo_col.find.call_args[0][0]
+    assert query_arg["user_id"] == "user123"
+    assert "$and" in query_arg
+    assert {"platform": "telegram"} in query_arg["$and"][0]["$or"]
+    assert {"chat_id": "chat-1"} in query_arg["$and"][1]["$or"]
+    assert {"storage_id": "user123"} in query_arg["$and"][2]["$or"]
+
+
+def test_search_by_keyword_keeps_text_query_top_level_with_legacy_context_filters():
+    from unittest.mock import MagicMock
+
+    from memory.image_store import ImageStore
+
+    store = ImageStore.__new__(ImageStore)
+    store.mongo_col = MagicMock()
+    store.qdrant = None
+    store.embed_client = MagicMock()
+    store.enabled = True
+
+    mock_cursor = MagicMock()
+    mock_cursor.sort.return_value = mock_cursor
+    mock_cursor.limit.return_value = iter([])
+    store.mongo_col.find.return_value = mock_cursor
+
+    store.search_by_keyword(
+        "猫",
+        user_id="user123",
+        platform="telegram",
+        chat_id="chat-1",
+        storage_id="user123",
+    )
+
+    query_arg = store.mongo_col.find.call_args[0][0]
+    assert query_arg["$text"] == {"$search": "猫"}
+    assert query_arg["user_id"] == "user123"
+    assert "$and" in query_arg
+
+
+def test_search_by_semantic_filters_legacy_payloads_in_memory():
+    from types import SimpleNamespace
+    from unittest.mock import MagicMock
+
+    from memory.image_store import ImageStore
+
+    store = ImageStore.__new__(ImageStore)
+    store.mongo_col = None
+    store.qdrant = MagicMock()
+    store.embed_client = MagicMock()
+    store.embed_client.enabled = True
+    store.embed_client.get_embedding.return_value = [0.1, 0.2]
+    store.enabled = True
+
+    store.qdrant.query_points.return_value = SimpleNamespace(points=[
+        SimpleNamespace(payload={"image_id": "legacy", "user_id": "user123"}, score=0.9),
+        SimpleNamespace(payload={"image_id": "wrong", "user_id": "user123", "chat_id": "other"}, score=0.9),
+    ])
+
+    results = store.search_by_semantic(
+        "猫",
+        user_id="user123",
+        platform="telegram",
+        chat_id="chat-1",
+        storage_id="user123",
+    )
+
+    assert [item["image_id"] for item in results] == ["legacy"]
+
+
 # ---------------------------------------------------------------------------
 # 7. search_images unified entry supports text_query
 # ---------------------------------------------------------------------------

@@ -410,6 +410,67 @@ class ImageStore:
     # 检索
     # ------------------------------------------------------------------
 
+    @staticmethod
+    def _legacy_optional_match(field: str, value: str) -> Dict[str, Any]:
+        return {"$or": [{field: value}, {field: {"$exists": False}}, {field: ""}, {field: None}]}
+
+    @classmethod
+    def _add_optional_context_filters(
+        cls,
+        query: Dict[str, Any],
+        *,
+        platform: str = "",
+        chat_id: str = "",
+        storage_id: str = "",
+    ) -> Dict[str, Any]:
+        filters = []
+        if platform:
+            filters.append(cls._legacy_optional_match("platform", platform))
+        if chat_id:
+            filters.append(cls._legacy_optional_match("chat_id", chat_id))
+        if storage_id:
+            filters.append(cls._legacy_optional_match("storage_id", storage_id))
+        if not filters:
+            return query
+        if "$and" in query:
+            query["$and"].extend(filters)
+        elif "$text" in query:
+            query["$and"] = filters
+        elif not query:
+            query["$and"] = filters
+        else:
+            base = dict(query)
+            query.clear()
+            query["$and"] = [base, *filters]
+        return query
+
+    @staticmethod
+    def _payload_matches_context(payload: Dict[str, Any], *, platform: str = "", chat_id: str = "", storage_id: str = "") -> bool:
+        for field, expected in (("platform", platform), ("chat_id", chat_id), ("storage_id", storage_id)):
+            if not expected:
+                continue
+            actual = payload.get(field)
+            if actual in (None, ""):
+                continue
+            if str(actual) != str(expected):
+                return False
+        return True
+
+    @staticmethod
+    def _dedupe_by_image_id(results: List[Dict[str, Any]], limit: int) -> List[Dict[str, Any]]:
+        seen = set()
+        deduped: List[Dict[str, Any]] = []
+        for item in results:
+            image_id = item.get("image_id")
+            key = image_id or (item.get("file_path"), item.get("timestamp"))
+            if key in seen:
+                continue
+            seen.add(key)
+            deduped.append(item)
+            if len(deduped) >= limit:
+                break
+        return deduped
+
     def get_by_id(self, image_id: str) -> Optional[Dict[str, Any]]:
         """按图片 ID 精确查询。"""
         if self.mongo_col is None:
@@ -438,10 +499,10 @@ class ImageStore:
             return None
         try:
             query: Dict[str, Any] = {"platform_message_id": str(platform_message_id)}
-            if platform:
-                query["platform"] = platform
             if chat_id:
                 query["chat_id"] = str(chat_id)
+            if platform:
+                query["platform"] = platform
             return self.mongo_col.find_one(query, {"_id": 0})
         except Exception as e:
             logger.error(f"按 platform_message_id 查询图片失败: {e}")
@@ -462,12 +523,12 @@ class ImageStore:
             return []
         try:
             query: Dict[str, Any] = {}
-            if platform:
-                query["platform"] = platform
-            if chat_id:
-                query["chat_id"] = chat_id
-            if storage_id:
-                query["storage_id"] = storage_id
+            query = self._add_optional_context_filters(
+                query,
+                platform=platform,
+                chat_id=chat_id,
+                storage_id=storage_id,
+            )
             if user_id:
                 query["user_id"] = user_id
             time_filter: Dict[str, Any] = {}
@@ -498,12 +559,12 @@ class ImageStore:
             return []
         try:
             query: Dict[str, Any] = {"$text": {"$search": keyword}}
-            if platform:
-                query["platform"] = platform
-            if chat_id:
-                query["chat_id"] = chat_id
-            if storage_id:
-                query["storage_id"] = storage_id
+            query = self._add_optional_context_filters(
+                query,
+                platform=platform,
+                chat_id=chat_id,
+                storage_id=storage_id,
+            )
             if user_id:
                 query["user_id"] = user_id
             cursor = (
@@ -563,21 +624,12 @@ class ImageStore:
                 })
 
             query: Dict[str, Any] = {"$and": regex_conditions} if len(regex_conditions) > 1 else regex_conditions[0]
-            if platform:
-                if "$and" in query:
-                    query["$and"].append({"platform": platform})
-                else:
-                    query["platform"] = platform
-            if chat_id:
-                if "$and" in query:
-                    query["$and"].append({"chat_id": chat_id})
-                else:
-                    query["chat_id"] = chat_id
-            if storage_id:
-                if "$and" in query:
-                    query["$and"].append({"storage_id": storage_id})
-                else:
-                    query["storage_id"] = storage_id
+            query = self._add_optional_context_filters(
+                query,
+                platform=platform,
+                chat_id=chat_id,
+                storage_id=storage_id,
+            )
             if user_id:
                 if "$and" in query:
                     query["$and"].append({"user_id": user_id})
@@ -611,12 +663,6 @@ class ImageStore:
             must_conditions = []
             if user_id:
                 must_conditions.append(qdrant_models.FieldCondition(key="user_id", match=qdrant_models.MatchValue(value=user_id)))
-            if storage_id:
-                must_conditions.append(qdrant_models.FieldCondition(key="storage_id", match=qdrant_models.MatchValue(value=storage_id)))
-            if platform:
-                must_conditions.append(qdrant_models.FieldCondition(key="platform", match=qdrant_models.MatchValue(value=platform)))
-            if chat_id:
-                must_conditions.append(qdrant_models.FieldCondition(key="chat_id", match=qdrant_models.MatchValue(value=chat_id)))
             if must_conditions:
                 qdrant_filter = qdrant_models.Filter(must=must_conditions)
 
@@ -629,8 +675,17 @@ class ImageStore:
             results = []
             for hit in response.points:
                 item = dict(hit.payload)
+                if not self._payload_matches_context(
+                    item,
+                    platform=platform,
+                    chat_id=chat_id,
+                    storage_id=storage_id,
+                ):
+                    continue
                 item["score"] = hit.score
                 results.append(item)
+                if len(results) >= top_k:
+                    break
             return results
         except Exception as e:
             logger.error(f"语义搜索图片失败: {e}")

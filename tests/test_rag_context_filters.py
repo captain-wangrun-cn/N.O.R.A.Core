@@ -11,9 +11,10 @@ class _Embed:
 class _Vector:
     client = object()
 
-    def __init__(self):
+    def __init__(self, query_results=None):
         self.upserts = []
         self.queries = []
+        self.query_results = query_results or []
 
     def upsert(self, text, vector, metadata=None):
         self.upserts.append({"text": text, "vector": vector, "metadata": metadata or {}})
@@ -23,13 +24,16 @@ class _Vector:
         self.queries.append(
             {"vector": vector, "top_k": top_k, "filter_criteria": filter_criteria or {}}
         )
+        idx = len(self.queries) - 1
+        if idx < len(self.query_results):
+            return self.query_results[idx]
         return []
 
 
-def _rag():
+def _rag(query_results=None):
     rag = RAGEngine.__new__(RAGEngine)
     rag.embed_client = _Embed()
-    rag.vector_store = _Vector()
+    rag.vector_store = _Vector(query_results=query_results)
     rag.enabled = True
     return rag
 
@@ -77,3 +81,31 @@ def test_retrieve_memory_filters_by_context_dimensions():
         "storage_id": "storage-1",
         "chat_type": "private",
     }
+
+
+def test_retrieve_memory_falls_back_to_legacy_user_payload_without_context_fields():
+    rag = _rag(query_results=[
+        [],
+        [
+            {"text": "legacy ok", "user_id": "storage-1", "score": 0.9},
+            {
+                "text": "wrong platform",
+                "user_id": "storage-1",
+                "platform": "discord",
+                "score": 0.9,
+            },
+        ],
+    ])
+
+    results = rag.retrieve_memory(
+        "hello",
+        user_id="storage-1",
+        platform="telegram",
+        chat_id="chat-1",
+        storage_id="storage-1",
+        chat_type="private",
+    )
+
+    assert [item["text"] for item in results] == ["legacy ok"]
+    assert rag.vector_store.queries[0]["filter_criteria"]["platform"] == "telegram"
+    assert rag.vector_store.queries[1]["filter_criteria"] == {"user_id": "storage-1"}

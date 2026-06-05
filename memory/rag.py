@@ -45,6 +45,38 @@ class RAGEngine:
             logger.error(f"存储记忆时发生错误: {e}")
             return False
 
+    @staticmethod
+    def _matches_requested_context(memory: Dict[str, Any], requested: Dict[str, str]) -> bool:
+        """Allow old payloads that lack new context fields, but reject mismatches."""
+        for key, expected in requested.items():
+            if not expected:
+                continue
+            actual = memory.get(key)
+            if actual in (None, ""):
+                continue
+            if str(actual) != str(expected):
+                return False
+        return True
+
+    @staticmethod
+    def _dedupe_memories(memories: List[Dict[str, Any]], limit: int) -> List[Dict[str, Any]]:
+        seen = set()
+        result: List[Dict[str, Any]] = []
+        for memory in memories:
+            key = (
+                memory.get("text"),
+                memory.get("timestamp"),
+                memory.get("role"),
+                memory.get("user_id"),
+            )
+            if key in seen:
+                continue
+            seen.add(key)
+            result.append(memory)
+            if len(result) >= limit:
+                break
+        return result
+
     def retrieve_memory(
         self,
         query_text: str,
@@ -80,6 +112,25 @@ class RAGEngine:
             if chat_type:
                 filter_criteria["chat_type"] = chat_type
             results = self.vector_store.query(vector, top_k, filter_criteria=filter_criteria)
+
+            requested_context = {
+                "platform": platform,
+                "chat_id": chat_id,
+                "storage_id": storage_id,
+                "chat_type": chat_type,
+            }
+            needs_legacy_fallback = any(requested_context.values()) and len(results) < top_k
+            if needs_legacy_fallback:
+                legacy_results = self.vector_store.query(
+                    vector,
+                    top_k,
+                    filter_criteria={"user_id": user_id},
+                )
+                compatible_legacy = [
+                    item for item in legacy_results
+                    if self._matches_requested_context(item, requested_context)
+                ]
+                results = self._dedupe_memories(results + compatible_legacy, top_k)
             return results
             
         except Exception as e:
