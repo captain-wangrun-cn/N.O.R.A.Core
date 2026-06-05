@@ -421,6 +421,7 @@ class TelegramAdapter(BaseAdapter):
         if self._message_handler:
             # Propagate start command as a special message
             event_context = {
+                "platform": "telegram",
                 "chat_id": chat_id,
                 "user_id": str(update.effective_user.id) if update.effective_user else chat_id,
                 "text": "/start",
@@ -436,6 +437,7 @@ class TelegramAdapter(BaseAdapter):
         # 优先交由 controller 统一清理（包含内存上下文）
         if self._message_handler:
             event_context = {
+                "platform": "telegram",
                 "chat_id": chat_id,
                 "user_id": str(update.effective_user.id) if update.effective_user else chat_id,
                 "text": "/clear",
@@ -464,6 +466,7 @@ class TelegramAdapter(BaseAdapter):
         # 交由 controller 统一停止前/后脑任务
         if self._message_handler:
             event_context = {
+                "platform": "telegram",
                 "chat_id": chat_id,
                 "user_id": str(update.effective_user.id) if update.effective_user else chat_id,
                 "text": "/stop",
@@ -535,6 +538,7 @@ class TelegramAdapter(BaseAdapter):
             return
 
         event_context = {
+            "platform": "telegram",
             "chat_id": chat_id,
             "user_id": str(update.effective_user.id) if update.effective_user else chat_id,
             "text": "/context",
@@ -554,6 +558,7 @@ class TelegramAdapter(BaseAdapter):
             return
 
         event_context = {
+            "platform": "telegram",
             "chat_id": chat_id,
             "user_id": str(update.effective_user.id) if update.effective_user else chat_id,
             "text": "/debug",
@@ -687,6 +692,7 @@ class TelegramAdapter(BaseAdapter):
 
         # 透传为控制器命令，统一在 controller 层执行调度逻辑
         event_context = {
+            "platform": "telegram",
             "chat_id": chat_id,
             "user_id": str(update.effective_user.id) if update.effective_user else chat_id,
             "text": f"/regenerate_proactive {mode}",
@@ -706,6 +712,7 @@ class TelegramAdapter(BaseAdapter):
             return
 
         event_context = {
+            "platform": "telegram",
             "chat_id": chat_id,
             "user_id": str(update.effective_user.id) if update.effective_user else chat_id,
             "text": "/schedule_today",
@@ -767,6 +774,7 @@ class TelegramAdapter(BaseAdapter):
         arg = (context.args[0].strip().lower() if context and context.args else "").replace("\n", " ")
         if arg in ("on", "off"):
             event_context = {
+                "platform": "telegram",
                 "chat_id": chat_id,
                 "user_id": str(update.effective_user.id) if update.effective_user else chat_id,
                 "text": f"/set_stream {arg}",
@@ -782,6 +790,7 @@ class TelegramAdapter(BaseAdapter):
             return
 
         event_context = {
+            "platform": "telegram",
             "chat_id": chat_id,
             "user_id": str(update.effective_user.id) if update.effective_user else chat_id,
             "text": "/set_stream",
@@ -1280,6 +1289,7 @@ class TelegramAdapter(BaseAdapter):
             return
 
         event_context = {
+            "platform": "telegram",
             "chat_id": chat_id,
             "user_id": user_id,
             "text": f"/set_stream {action}",
@@ -1596,6 +1606,7 @@ class TelegramAdapter(BaseAdapter):
 
             if self._message_handler:
                 event_context = {
+                    "platform": "telegram",
                     "chat_id": str(query.message.chat.id),
                     "user_id": str(query.from_user.id) if query.from_user else str(query.message.chat.id),
                     "text": "/reload_models",
@@ -1817,16 +1828,23 @@ class TelegramAdapter(BaseAdapter):
         """提取回复消息的信息"""
         if not message.reply_to_message:
             return None
-        
+
         reply_msg = message.reply_to_message
         reply_chat_id = str(reply_msg.chat.id)
         reply_msg_id = str(reply_msg.message_id)
-        
+
         # 从历史记录中获取回复内容
         history = self.message_history.get_context_messages("telegram", reply_chat_id)
         if not history:
             history = []
-        
+
+        logger.debug(
+            f"[telegram] _extract_reply_info: reply_msg_id={reply_msg_id}, "
+            f"chat_id={reply_chat_id}, history_size={len(history)}, "
+            f"has_text={bool(reply_msg.text)}, has_caption={bool(reply_msg.caption)}, "
+            f"has_photo={bool(reply_msg.photo)}"
+        )
+
         # 查找对应的回复消息
         for msg in history:
             md = msg.get("metadata") or {}
@@ -1834,6 +1852,7 @@ class TelegramAdapter(BaseAdapter):
             db_message_id = str(msg.get("message_id")) if msg.get("message_id") is not None else None
 
             if reply_msg_id == db_message_id or reply_msg_id in platform_ids:
+                logger.debug(f"[telegram] reply 命中历史消息: msg_id={reply_msg_id}, platform_ids={platform_ids}")
                 content = msg.get("content", "")
                 image_id = None
                 if isinstance(md, dict):
@@ -1878,7 +1897,7 @@ class TelegramAdapter(BaseAdapter):
             try:
                 store = self._get_image_store()
                 if store is not None:
-                    doc = store.get_by_platform_message_id("telegram", reply_msg_id)
+                    doc = store.get_by_platform_message_id("telegram", reply_msg_id, chat_id=reply_chat_id)
                     if doc:
                         image_input = self._image_doc_to_image_input(doc)
                         image_from_existing_store_file = bool(image_input)
@@ -1933,7 +1952,12 @@ class TelegramAdapter(BaseAdapter):
             # 使用纯描述文本，让模型从语义上理解"用户引用了一张图片但当前没附上图片字节"。
             fallback_parts.append("(用户引用了一张历史图片，但本轮未重新附带图片内容)")
 
-        return "\n".join(part for part in fallback_parts if part) or None
+        result = "\n".join(part for part in fallback_parts if part) or None
+        if result:
+            logger.debug(f"[telegram] reply 使用 Telegram API 直接内容兜底 (历史未命中): msg_id={reply_msg_id}")
+        else:
+            logger.debug(f"[telegram] reply 最终返回 None: msg_id={reply_msg_id}, 无可用文本/图片内容")
+        return result
 
     # ------------------------------------------------------------------
     # 回复历史图片的兜底支持
@@ -2204,16 +2228,19 @@ class TelegramAdapter(BaseAdapter):
         
         return text
 
-    async def send_message(self, chat_id: str, text: str, **kwargs) -> str:
+    async def send_message(self, chat_id: str, text: str, **kwargs) -> list[str]:
         """
         发送消息，自动检测并发送嵌入的富媒体文件。
-        
+
+        返回所有已发送 Telegram 消息的 message_id 列表（可能包含多个 ID，
+        例如文本 + 图片分别发送时会返回两条消息的 ID）。
+
         支持的嵌入语法:
           - Markdown:  ![alt](path/to/file.png)
           - HTML:      <img src="path/to/file.png">
           - 自定义标记: [image: path] / [file: path] / [audio: path] / [video: path] / [doc: path]
           - 原始路径:  /path/to/file.ext (自动识别)
-        
+
         支持的媒体类型:
           - 图片: png, jpg, jpeg, webp, bmp
           - GIF动图: gif
@@ -2266,7 +2293,7 @@ class TelegramAdapter(BaseAdapter):
         clean_text = self._sanitize_links_if_needed(clean_text)
 
         # 3. 发送文本部分
-        last_message_id = None
+        all_message_ids: list[str] = []
         if clean_text:
             # Markdown → HTML 转换（LLM 有时会输出 Markdown 格式）
             html_text = _markdown_to_html(clean_text)
@@ -2296,7 +2323,7 @@ class TelegramAdapter(BaseAdapter):
                                 text=part
                             )
                         )
-                last_message_id = str(message.message_id)
+                all_message_ids.append(str(message.message_id))
 
         # 4. 逐个发送媒体文件
         for file_path, media_type, is_url in file_entries:
@@ -2352,7 +2379,7 @@ class TelegramAdapter(BaseAdapter):
                             message = await self._send_with_retry(lambda: self.application.bot.send_document(
                                 chat_id=chat_id, document=f, caption=caption
                             ))
-                last_message_id = str(message.message_id)
+                all_message_ids.append(str(message.message_id))
                 logger.info(f"[{chat_id}] 已发送{media_type}: {file_path}")
             except Exception as e:
                 logger.error(f"[{chat_id}] 发送{media_type}失败 {file_path}: {e}")
@@ -2364,17 +2391,17 @@ class TelegramAdapter(BaseAdapter):
                         ).format(file_path=file_path, media_type=media_type, err=e)
                     )
                 )
-                last_message_id = str(message.message_id)
+                all_message_ids.append(str(message.message_id))
 
         # 5. 兜底：如果什么都没发出去，发原始文本
-        if last_message_id is None:
+        if not all_message_ids:
             message = await self.application.bot.send_message(
                 chat_id=chat_id,
                 text=text or "(empty message)"
             )
-            last_message_id = str(message.message_id)
+            all_message_ids.append(str(message.message_id))
 
-        return last_message_id
+        return all_message_ids
 
     async def start_typing(self, chat_id: str):
         await self.application.bot.send_chat_action(chat_id=chat_id, action=ChatAction.TYPING)

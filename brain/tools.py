@@ -1073,6 +1073,9 @@ class ToolManager:
         start_time: str = "",
         end_time: str = "",
         user_id: str = "",
+        storage_id: str = "",
+        platform: str = "",
+        chat_id: str = "",
         limit: int = 10,
         return_image: bool = True,
         local_path: str = "",
@@ -1093,7 +1096,10 @@ class ToolManager:
         :param question: Optional question/prompt for the next multimodal round. Use this when you need the model to answer a specific question about the returned media. If provided, return_image is forced to true.
         :param start_time: Start of time range as Unix timestamp string (e.g. '1709856000').
         :param end_time: End of time range as Unix timestamp string (e.g. '1709942400').
-        :param user_id: Filter by user ID. If empty, searches all users.
+        :param user_id: Filter by sender/user ID. If empty, does not filter by sender.
+        :param storage_id: Filter by conversation memory owner (private=user, group=chat).
+        :param platform: Filter by platform name, e.g. telegram.
+        :param chat_id: Filter by platform chat ID.
         :param limit: Maximum number of results (1-50, default 10).
         :param return_image: When true, the tool returns media references via `[image: abs_path]` or `[video: abs_path]`
             MediaTags for multimodal pipeline ingestion. Default: True.
@@ -1133,6 +1139,9 @@ class ToolManager:
                 start_time=s_time,
                 end_time=e_time,
                 user_id=user_id,
+                storage_id=storage_id,
+                platform=platform,
+                chat_id=chat_id,
                 limit=limit,
                 media_type=type,
             )
@@ -1145,7 +1154,14 @@ class ToolManager:
             return_image = True
 
         # Format results for LLM consumption
-        output_lines = [f"Found {len(results)} media item(s):\n"]
+        result_types = [str(item.get("media_type", "image") or "image") for item in results]
+        if result_types and all(t == "image" for t in result_types):
+            result_label = "image(s)"
+        elif result_types and all(t == "video" for t in result_types):
+            result_label = "video(s)"
+        else:
+            result_label = "media item(s)"
+        output_lines = [f"Found {len(results)} {result_label}:\n"]
         if return_image:
             output_lines.append("[Mode] return_image=true: output includes MediaTag lines for downstream multimodal ingestion.\n")
         if question:
@@ -1335,6 +1351,7 @@ class ToolManager:
         trigger_time: str = "",
         reason: str = "",
         countdown_minutes: int = 0,
+        chat_id: str = "",
     ) -> str:
         """
         Set a dynamic alarm/reminder that triggers at a specific time or after a countdown. Supports both absolute time and countdown mode. Reason is optional.
@@ -1342,6 +1359,7 @@ class ToolManager:
         :param trigger_time: Absolute trigger time. Format: "HH:MM" (today), "YYYY-MM-DD HH:MM", or "MM-DD HH:MM". Leave empty if using countdown mode.
         :param reason: The reason/purpose for the alarm (optional). E.g. "提醒主人喝水", "下班提醒", "会议开始".
         :param countdown_minutes: Countdown in minutes from now. Set to > 0 to use countdown mode (trigger_time will be ignored). E.g. 30 means "30 minutes from now".
+        :param chat_id: Internal conversation runtime key. Leave empty; the system fills this automatically.
         """
         if not self.scheduler:
             return "Error: Scheduler not available."
@@ -1350,6 +1368,7 @@ class ToolManager:
         result = self.scheduler.add_alarm(
             trigger_time_str=trigger_time,
             reason=reason,
+            chat_id=chat_id,
             is_countdown=is_countdown,
             countdown_minutes=countdown_minutes,
         )

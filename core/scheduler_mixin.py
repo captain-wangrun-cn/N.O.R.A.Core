@@ -97,20 +97,22 @@ class SchedulerMixin:
         start_ts = start_dt.timestamp()
         end_ts = end_dt.timestamp()
 
-        # 2) 确定 chat_id（默认用 scheduler.default_chat_id）
-        storage_id = ""
+        # 2) 确定会话（默认用 scheduler.default_chat_id，内部存 runtime_key）
+        target_key = ""
         scheduler = getattr(self, "scheduler", None)
         if scheduler:
-            storage_id = getattr(scheduler, "default_chat_id", "") or ""
+            target_key = getattr(scheduler, "default_chat_id", "") or ""
         sessions = getattr(self, "sessions", {}) or {}
-        if not storage_id and sessions:
-            storage_id = next(iter(sessions.keys()), "")
+        if not target_key and sessions:
+            target_key = next(iter(sessions.keys()), "")
 
-        if not storage_id:
+        if not target_key:
             logger.warning("每日总结跳过：default_chat_id 未设置，尚无会话")
             return
 
-        platform = "telegram"
+        identity = self._identity_for_runtime_key(target_key)
+        platform = identity.platform
+        storage_id = identity.storage_id
 
         # 3) 读取当日消息
         msgs = []
@@ -211,10 +213,11 @@ class SchedulerMixin:
             elif not self.scheduler.default_chat_id:
                 # 兜底：再次尝试从持久化文件读取（init 时可能 workspace 还未就绪）
                 try:
-                    from core.default_chat_id_store import load_default_chat_id
-                    persisted = load_default_chat_id()
-                    if persisted:
-                        self.scheduler.default_chat_id = persisted
+                    from core.default_chat_id_store import load_default_chat_target
+                    persisted_target = load_default_chat_target()
+                    if persisted_target:
+                        identity = self._identity_from_target(persisted_target)
+                        self.scheduler.default_chat_id = identity.runtime_key
                 except Exception as e:
                     logger.warning(f"start_scheduler 兜底读取 default_chat_id 失败: {e}")
             self.scheduler.start()
@@ -338,7 +341,8 @@ class SchedulerMixin:
           - 或 AI 的最后一条消息直接是收尾性质（晚安/拜拜/有空再聊/[SEMI_ONLINE] 等）
         """
         try:
-            msgs = self.message_history.get_current_segment_messages("telegram", chat_id) or []
+            identity = self._identity_for_runtime_key(chat_id)
+            msgs = self.message_history.get_current_segment_messages(identity.platform, identity.storage_id) or []
         except Exception as e:
             logger.debug(f"[{chat_id}] 读取当前段消息失败，无法做告别短路: {e}")
             return False
@@ -494,14 +498,15 @@ class SchedulerMixin:
 
     def _transition_to_semi_online(self, chat_id: str):
         """安全地从 ONLINE 过渡到 SEMI_ONLINE，同时关闭当前对话段落。"""
+        identity = self._identity_for_runtime_key(chat_id)
         clear_conversation_tracking(chat_id)
         set_ai_presence(AIPresence.SEMI_ONLINE)
         self._followup_timers.pop(chat_id, None)
         
         try:
             session_id = self.message_history.close_session(
-                platform="telegram",
-                chat_id=chat_id,
+                platform=identity.platform,
+                chat_id=identity.storage_id,
                 trigger_type="user",
             )
             if session_id:
@@ -524,8 +529,9 @@ class SchedulerMixin:
         tz_str = config.get_message_history_config().get("timezone", "Asia/Shanghai")
         now = datetime.now(ZoneInfo(tz_str))
 
-        storage_id = chat_id
-        current_segment_msgs = self.message_history.get_current_segment_messages("telegram", storage_id)
+        identity = self._identity_for_runtime_key(chat_id)
+        storage_id = identity.storage_id
+        current_segment_msgs = self.message_history.get_current_segment_messages(identity.platform, storage_id)
         recent_msgs = current_segment_msgs[-10:] if current_segment_msgs else []
         recent_conversation = "\n".join(
             f"{'用户' if m['role'] == 'user' else 'AI'}: {m['content']}"
@@ -596,8 +602,9 @@ class SchedulerMixin:
 
         soul = get_soul_prompt()
 
-        storage_id = chat_id
-        current_segment_msgs = self.message_history.get_current_segment_messages("telegram", storage_id)
+        identity = self._identity_for_runtime_key(chat_id)
+        storage_id = identity.storage_id
+        current_segment_msgs = self.message_history.get_current_segment_messages(identity.platform, storage_id)
         recent_msgs = current_segment_msgs[-10:] if current_segment_msgs else []
         recent_conversation = "\n".join(
             f"{'用户' if m['role'] == 'user' else 'AI'}: {m['content']}"
@@ -630,7 +637,7 @@ class SchedulerMixin:
             if response:
                 await self._send_split_response(chat_id, response)
                 self.message_history.add_message(
-                    platform="telegram",
+                    platform=identity.platform,
                     chat_id=storage_id,
                     role="assistant",
                     content=response,
@@ -655,7 +662,7 @@ class SchedulerMixin:
             await self._send_split_message(chat_id, response)
             return True
 
-        await self.adapter.send_message(chat_id, response)
+        await self._send_platform_message(chat_id, response)
         return False
 
     async def _send_wrapup_message(self, chat_id: str):
@@ -664,8 +671,9 @@ class SchedulerMixin:
         idle_secs = get_user_idle_seconds(chat_id)
         count = get_followup_count(chat_id)
 
-        storage_id = chat_id
-        current_segment_msgs = self.message_history.get_current_segment_messages("telegram", storage_id)
+        identity = self._identity_for_runtime_key(chat_id)
+        storage_id = identity.storage_id
+        current_segment_msgs = self.message_history.get_current_segment_messages(identity.platform, storage_id)
         recent_msgs = current_segment_msgs[-10:] if current_segment_msgs else []
         recent_conversation = "\n".join(
             f"{'用户' if m['role'] == 'user' else 'AI'}: {m['content']}"
@@ -699,7 +707,7 @@ class SchedulerMixin:
             if response:
                 await self._send_split_response(chat_id, response)
                 self.message_history.add_message(
-                    platform="telegram",
+                    platform=identity.platform,
                     chat_id=storage_id,
                     role="assistant",
                     content=response,
@@ -804,6 +812,11 @@ class SchedulerMixin:
         """
         Scheduler 回调：到达触发时间后，用 LLM 生成主动消息并发送。
         """
+        identity = self._identity_for_runtime_key(chat_id)
+        chat_id = identity.runtime_key
+        platform = identity.platform
+        storage_id = identity.storage_id
+        platform_chat_id = identity.platform_chat_id
         message_kind = (message_kind or "autonomous").strip().lower()
         if event_type != "alarm" and message_kind == "autonomous":
             prefs = self._get_nora_preferences()
@@ -826,7 +839,7 @@ class SchedulerMixin:
         # 触发前提取完整对话线索，确保 trigger 消息基于完整上下文继续生成
         recent_hint = ""
         try:
-            db_context = self.message_history.get_context_messages("telegram", chat_id)
+            db_context = self.message_history.get_context_messages(platform, storage_id)
             recent_msgs = db_context if db_context else []
             hint_lines = []
             for m in recent_msgs:
@@ -853,9 +866,10 @@ class SchedulerMixin:
             "recent_daily_summaries": recent_daily_summaries,
         }
         front_context = {
-            "chat_id": chat_id,
-            "user_id": chat_id,
-            "chat_type": "private",
+            "platform": platform,
+            "chat_id": platform_chat_id,
+            "user_id": identity.actor_user_id,
+            "chat_type": identity.chat_type,
             "user_name": "User",
             "text": f"[proactive:{event_type}:{message_kind}] {reason_display}",
         }
@@ -871,9 +885,8 @@ class SchedulerMixin:
         if user_reply:
             await self._send_split_message(chat_id, user_reply)
 
-            storage_id = chat_id
             self.message_history.add_message(
-                platform="telegram",
+                platform=platform,
                 chat_id=storage_id,
                 role="assistant",
                 content=user_reply,
@@ -908,9 +921,10 @@ class SchedulerMixin:
                 backend_instruction += f"\n\n【任务指示】\n{task_instruction}"
 
             backend_context = {
-                "chat_id": chat_id,
-                "chat_type": "private",
-                "user_id": chat_id,
+                "platform": platform,
+                "chat_id": platform_chat_id,
+                "chat_type": identity.chat_type,
+                "user_id": identity.actor_user_id,
                 "user_name": "User",
                 "text": backend_instruction,
                 "_front_brain_handled": True,

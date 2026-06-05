@@ -57,8 +57,8 @@ class InterruptHandlerMixin:
         # 带入最近对话历史，让 smart_llm 理解上下文（而不是只看当前这一句）
         recent_history = []
         try:
-            storage_id = chat_id  # 无 user_id 信息时退化为 chat 维度
-            db_context = self.message_history.get_context_messages("telegram", storage_id)
+            identity = self._identity_for_runtime_key(chat_id)
+            db_context = self.message_history.get_context_messages(identity.platform, identity.storage_id)
             if len(db_context) > 20:
                 db_context = db_context[-20:]
             recent_history = [
@@ -189,6 +189,9 @@ class InterruptHandlerMixin:
         skip_reply: 是否跳过回复（调用方已经发过回复）
         """
         logger.info(f"[{chat_id}] 前端打断后端: reason={reason}, text='{user_text[:50]}'")
+        identity = self._identity_for_runtime_key(chat_id)
+        platform = identity.platform
+        storage_id = identity.storage_id
         
         # 设置打断标记，防止 finally 块自动处理排队消息
         session = self.sessions.setdefault(chat_id, {"history": [], "interrupted_thought": "", "pending_text": ""})
@@ -223,10 +226,11 @@ class InterruptHandlerMixin:
             if reason == "change":
                 # 启动新任务处理 user_text
                 context = {
-                    "chat_id": chat_id,
-                    "user_id": chat_id,  # Fallback, might need better user_id handling
+                    "platform": platform,
+                    "chat_id": identity.platform_chat_id,
+                    "user_id": identity.actor_user_id,
                     "text": user_text,
-                    "chat_type": "private"  # Fallback
+                    "chat_type": identity.chat_type,
                 }
                 task = asyncio.create_task(self._run_polling_loop(context))
                 self.generation_tasks[chat_id] = task
@@ -234,24 +238,25 @@ class InterruptHandlerMixin:
             # 需要生成并发送回复（兼容旧调用方式）
             if reason == "stop":
                 reply = "好的，已经停下来了～"
-                await self.adapter.send_message(chat_id, reply)
+                await self._send_platform_message(chat_id, reply)
                 self.message_history.add_message(
-                    platform="telegram", chat_id=chat_id,
+                    platform=platform, chat_id=storage_id,
                     role="assistant", content=reply
                 )
             elif reason == "change":
                 reply = "好，马上切换～"
-                await self.adapter.send_message(chat_id, reply)
+                await self._send_platform_message(chat_id, reply)
                 self.message_history.add_message(
-                    platform="telegram", chat_id=chat_id,
+                    platform=platform, chat_id=storage_id,
                     role="assistant", content=reply
                 )
                 # 启动新任务
                 context = {
-                    "chat_id": chat_id,
-                    "user_id": chat_id,  # Fallback
+                    "platform": platform,
+                    "chat_id": identity.platform_chat_id,
+                    "user_id": identity.actor_user_id,
                     "text": user_text,
-                    "chat_type": "private"  # Fallback
+                    "chat_type": identity.chat_type,
                 }
                 task = asyncio.create_task(self._run_polling_loop(context))
                 self.generation_tasks[chat_id] = task

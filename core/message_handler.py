@@ -9,12 +9,13 @@ import asyncio
 import logging
 import re
 import time
-from typing import Dict, Any, Optional
+from typing import Dict, Any, List, Optional
 
 from brain.multimodal import extract_image_payloads, extract_video_payloads
 from brain.prompts import render_template, get_soul_prompt, load_identity_context
 from core.routing import has_image_input
-from core.default_chat_id_store import save_default_chat_id
+from core.conversation_identity import conversation_target_dict
+from core.default_chat_id_store import save_default_chat_target
 from core.scheduler import (
     AIPresence,
     set_ai_presence,
@@ -62,10 +63,14 @@ class MessageHandlerMixin:
         """处理来自适配器的新消息/命令。"""
         # copy context to allow safe mutation (inject multimodal payloads, flags, etc.)
         context = dict(context)
-        chat_id = context["chat_id"]
-        user_id = context["user_id"]
+        identity = self._identity(context)
+        chat_id = identity.runtime_key
+        platform_chat_id = identity.platform_chat_id
+        platform = identity.platform
+        storage_id = identity.storage_id
+        user_id = identity.actor_user_id
         text = context["text"]
-        chat_type = context.get("chat_type", "private")
+        chat_type = identity.chat_type
         user_name = context.get("user_name", "User")
 
         # 解析多模态输入：从 [image: ...] 中提取真实图片内容
@@ -161,24 +166,24 @@ class MessageHandlerMixin:
             self.front_brain_tasks.pop(chat_id, None)
             # 注意：故意 *不* 清理 self.front_brain_partial[chat_id]，让下一次前脑能看到草稿。
 
-        # 统一计算 storage id（私聊用 user_id，群聊用 chat_id）
-        storage_id_for_scheduler = chat_id if chat_type != "private" else user_id
-
         if self.scheduler:
             # 自动设置 default_chat_id（首次消息时）
             if not self.scheduler.default_chat_id:
-                self.scheduler.default_chat_id = storage_id_for_scheduler
-                save_default_chat_id(storage_id_for_scheduler)
-                logger.info(f"Scheduler default_chat_id 已设置: {storage_id_for_scheduler}")
+                self.scheduler.default_chat_id = chat_id
+                save_default_chat_target(conversation_target_dict(identity))
+                logger.info(f"Scheduler default_chat_id 已设置: {chat_id}")
 
         if getattr(self, "trigger_manager", None) and not self.trigger_manager.default_chat_id:
-            self.trigger_manager.default_chat_id = storage_id_for_scheduler
-            save_default_chat_id(storage_id_for_scheduler)
+            self.trigger_manager.default_chat_id = chat_id
+            self.trigger_manager.default_chat_target = conversation_target_dict(identity)
+            save_default_chat_target(self.trigger_manager.default_chat_target)
             # 同步给已注册的 sub-trigger（如 EmailTrigger 在初始化时拿到的是空字符串）
             for trig in getattr(self.trigger_manager, "_triggers", []) or []:
                 if hasattr(trig, "default_chat_id") and not trig.default_chat_id:
-                    trig.default_chat_id = storage_id_for_scheduler
-            logger.info(f"Trigger default_chat_id 已设置: {storage_id_for_scheduler}")
+                    trig.default_chat_id = chat_id
+                if hasattr(trig, "default_chat_target") and not getattr(trig, "default_chat_target", None):
+                    trig.default_chat_target = dict(self.trigger_manager.default_chat_target)
+            logger.info(f"Trigger default_chat_id 已设置: {chat_id}")
         
         # ── 命令分发 ──
         stripped = text.strip()
@@ -196,7 +201,7 @@ class MessageHandlerMixin:
             return
 
         if re.search(r"(?m)^\s*/stop\b", stripped):
-            await self._cmd_stop(chat_id)
+            await self._cmd_stop(chat_id, chat_type, user_id)
             return
 
         if re.search(r"(?m)^\s*/regenerate_proactive\b", stripped):
@@ -235,7 +240,6 @@ class MessageHandlerMixin:
         if backend_busy_or_queued:
             # 后端忙碌：允许前脑继续生成，不强制回复“在忙”。
             # 仅在有图片时直接排队，其他情况交由前脑处理并按需打断/切换。
-            storage_id = chat_id if chat_type != "private" else user_id
             message_content = f"{user_name}: {text}" if chat_type != "private" else text
 
             # 若包含真实图片/视频输入（已成功加载字节）：聚合器语义合入正在进行的后脑任务。
@@ -249,7 +253,7 @@ class MessageHandlerMixin:
                     user_metadata["platform_message_ids"] = [str(platform_msg_id)]
 
                 self.message_history.add_message(
-                    platform="telegram",
+                    platform=platform,
                     chat_id=storage_id,
                     role="user",
                     content=message_content,
@@ -337,7 +341,7 @@ class MessageHandlerMixin:
                 user_metadata["platform_message_ids"] = [str(platform_msg_id)]
 
             self.message_history.add_message(
-                platform="telegram",
+                platform=platform,
                 chat_id=storage_id,
                 role="user",
                 content=message_content,
@@ -356,12 +360,12 @@ class MessageHandlerMixin:
             if action in {"stop", "change"}:
                 session_history.append({"role": "user", "content": message_content})
                 if reply:
-                    msg_id = await self.adapter.send_message(chat_id, reply)
+                    msg_ids = await self._send_platform_message(chat_id, reply)
                     md = {"source": "interrupt"}
-                    if msg_id:
-                        md["platform_message_ids"] = [str(msg_id)]
+                    if msg_ids:
+                        md["platform_message_ids"] = [str(mid) for mid in msg_ids]
                     self.message_history.add_message(
-                        platform="telegram",
+                        platform=platform,
                         chat_id=storage_id,
                         role="assistant",
                         content=reply,
@@ -375,12 +379,12 @@ class MessageHandlerMixin:
                 session_history.append({"role": "user", "content": message_content})
                 if reply:
                     reply = self._append_busy_queue_summary(chat_id, reply)
-                    msg_id = await self.adapter.send_message(chat_id, reply)
+                    msg_ids = await self._send_platform_message(chat_id, reply)
                     md = {"source": "queue_status"}
-                    if msg_id:
-                        md["platform_message_ids"] = [str(msg_id)]
+                    if msg_ids:
+                        md["platform_message_ids"] = [str(mid) for mid in msg_ids]
                     self.message_history.add_message(
-                        platform="telegram",
+                        platform=platform,
                         chat_id=storage_id,
                         role="assistant",
                         content=reply,
@@ -400,12 +404,12 @@ class MessageHandlerMixin:
                     else:
                         logger.warning(f"[{chat_id}] 取消排队任务 #{param} 失败（序号无效或队列已空）")
                 if reply:
-                    msg_id = await self.adapter.send_message(chat_id, reply)
+                    msg_ids = await self._send_platform_message(chat_id, reply)
                     md = {"source": "queue_cancel"}
-                    if msg_id:
-                        md["platform_message_ids"] = [str(msg_id)]
+                    if msg_ids:
+                        md["platform_message_ids"] = [str(mid) for mid in msg_ids]
                     self.message_history.add_message(
-                        platform="telegram",
+                        platform=platform,
                         chat_id=storage_id,
                         role="assistant",
                         content=reply,
@@ -421,12 +425,12 @@ class MessageHandlerMixin:
                     await queue.clear()
                     logger.info(f"[{chat_id}] 已清空所有排队任务")
                 if reply:
-                    msg_id = await self.adapter.send_message(chat_id, reply)
+                    msg_ids = await self._send_platform_message(chat_id, reply)
                     md = {"source": "queue_clear"}
-                    if msg_id:
-                        md["platform_message_ids"] = [str(msg_id)]
+                    if msg_ids:
+                        md["platform_message_ids"] = [str(mid) for mid in msg_ids]
                     self.message_history.add_message(
-                        platform="telegram",
+                        platform=platform,
                         chat_id=storage_id,
                         role="assistant",
                         content=reply,
@@ -465,7 +469,6 @@ class MessageHandlerMixin:
 
         # --- 前脑优先路由 (Front-Brain-First) ---
         # 1) 保存用户消息到数据库（保证前脑能读到历史）
-        storage_id = chat_id if chat_type != "private" else user_id
         message_content = f"{user_name}: {text}" if chat_type != "private" else text
         if not context.get("_message_saved"):
             user_metadata = {}
@@ -474,7 +477,7 @@ class MessageHandlerMixin:
                 user_metadata["platform_message_ids"] = [str(platform_msg_id)]
 
             self.message_history.add_message(
-                platform="telegram",
+                platform=platform,
                 chat_id=storage_id,
                 role="user",
                 content=message_content,
@@ -530,7 +533,7 @@ class MessageHandlerMixin:
                     "task_instruction": front_task_instruction,
                 }
             self.message_history.add_message(
-                platform="telegram",
+                platform=platform,
                 chat_id=storage_id,
                 role="assistant",
                 content=user_reply,
@@ -561,7 +564,7 @@ class MessageHandlerMixin:
             if not send_front_reply:
                 try:
                     if hasattr(self.adapter, "start_typing"):
-                        await self.adapter.start_typing(chat_id)
+                        await self._start_platform_typing(chat_id)
                 except Exception:
                     pass
 
@@ -619,7 +622,9 @@ class MessageHandlerMixin:
 
     async def _handle_retract_signal(self, chat_id: str, chat_type: str, user_id: str, target: str) -> None:
         """处理前脑发出的撤回标记。支持撤回最近一条或倒数第 N 条 assistant 消息。"""
-        storage_id = chat_id if chat_type != "private" else user_id
+        identity = self._identity_for_runtime_key(chat_id)
+        storage_id = identity.storage_id
+        platform = identity.platform
         normalized = target.strip().lower() if target else "last"
         source = None
         nth = 1
@@ -632,7 +637,7 @@ class MessageHandlerMixin:
                 nth = 1
         try:
             undo_result = self.message_history.delete_last_assistant_message(
-                "telegram",
+                platform,
                 storage_id,
                 source=source,
                 nth=nth,
@@ -645,7 +650,7 @@ class MessageHandlerMixin:
             if getattr(feats, "supports_delete_message", False):
                 for pid in platform_ids:
                     try:
-                        await self.adapter.delete_message(chat_id, str(pid))
+                        await self._delete_platform_message(chat_id, str(pid))
                     except Exception:
                         logger.debug(f"[{chat_id}] 撤回平台消息失败: {pid}", exc_info=True)
         except Exception:
@@ -722,6 +727,7 @@ class MessageHandlerMixin:
         front_reply: str = "",
     ) -> None:
         """后脑忙碌时，先缓存待入队任务并向用户发起二次确认。"""
+        platform = self._platform_for_key(chat_id)
         session = self.sessions.setdefault(chat_id, {"history": [], "interrupted_thought": "", "pending_text": ""})
 
         queue = self.task_queues.get(chat_id)
@@ -752,7 +758,7 @@ class MessageHandlerMixin:
             if front_sent_ids:
                 front_metadata["platform_message_ids"] = front_sent_ids
             self.message_history.add_message(
-                platform="telegram",
+                platform=platform,
                 chat_id=storage_id,
                 role="assistant",
                 content=front_reply,
@@ -768,7 +774,7 @@ class MessageHandlerMixin:
                 metadata["platform_message_ids"] = sent_ids
 
             self.message_history.add_message(
-                platform="telegram",
+                platform=platform,
                 chat_id=storage_id,
                 role="assistant",
                 content=confirm_reply,
@@ -790,6 +796,12 @@ class MessageHandlerMixin:
     ) -> bool:
         """处理“待确认入队”对话；已处理返回 True。"""
         chat_id = context["chat_id"]
+        identity = self._identity(context)
+        chat_id = identity.runtime_key
+        platform = identity.platform
+        storage_id = identity.storage_id
+        user_id = identity.actor_user_id
+        chat_type = identity.chat_type
         session = self.sessions.setdefault(chat_id, {"history": [], "interrupted_thought": "", "pending_text": ""})
         pending = session.get("pending_backend_enqueue")
         if not pending:
@@ -819,7 +831,6 @@ class MessageHandlerMixin:
             logger.info(f"[{chat_id}] 待确认入队取消：用户开始了新话题或拒绝（判断为 ignore）")
             return False
 
-        storage_id = chat_id if chat_type != "private" else user_id
         message_content = f"{user_name}: {text}" if chat_type != "private" else text
 
         user_metadata = {}
@@ -828,7 +839,7 @@ class MessageHandlerMixin:
             user_metadata["platform_message_ids"] = [str(platform_msg_id)]
 
         self.message_history.add_message(
-            platform="telegram",
+            platform=platform,
             chat_id=storage_id,
             role="user",
             content=message_content,
@@ -869,7 +880,7 @@ class MessageHandlerMixin:
                 metadata["platform_message_ids"] = sent_ids
 
             self.message_history.add_message(
-                platform="telegram",
+                platform=platform,
                 chat_id=storage_id,
                 role="assistant",
                 content=reply,
@@ -999,14 +1010,14 @@ class MessageHandlerMixin:
         sent_message_ids: list[str] = []
         # _SPLIT_MARKER_PATTERN 现在返回 [text_part, delay_str, text_part, ...]
         parts = self._SPLIT_MARKER_PATTERN.split(text)
-        
+
         for i in range(0, len(parts), 2):
             part = parts[i].strip()
             if part:
-                msg_id = await self.adapter.send_message(chat_id, part)
-                if msg_id:
-                    sent_message_ids.append(str(msg_id))
-            
+                msg_ids = await self._send_platform_message(chat_id, part)
+                if msg_ids:
+                    sent_message_ids.extend(str(mid) for mid in msg_ids)
+
             # 如果后面还有 delay，则执行停顿（最后一个 part 后面没有 delay 所以用 i+1 检查）
             if i + 1 < len(parts) and parts[i+1] is not None:
                 try:
@@ -1022,31 +1033,36 @@ class MessageHandlerMixin:
     # ------------------------------------------------------------------
 
     async def _cmd_start(self, chat_id: str, chat_type: str, user_id: str):
+        identity = self._identity_for_runtime_key(chat_id)
+        platform = identity.platform
+        storage_id = identity.storage_id
         if chat_id in self.generation_tasks:
             self.generation_tasks[chat_id].cancel()
             await asyncio.sleep(0.1)
         self.sessions[chat_id] = {"history": [], "interrupted_thought": ""}
-        storage_id = chat_id if chat_type != "private" else user_id
-        self.message_history.clear_chat_history("telegram", storage_id, keep_pinned=True)
+        self.message_history.clear_chat_history(platform, storage_id, keep_pinned=True)
         status = self.worker_status.get(chat_id)
         if status:
             status.finish()
         queue = self.task_queues.get(chat_id)
         if queue:
             await queue.clear()
-        await self.adapter.send_message(chat_id, "N.O.R.A. Core 已启动。")
+        await self._send_platform_message(chat_id, "N.O.R.A. Core 已启动。")
         logger.info(f"[{chat_id}] Session已重置 by /start command.")
 
     async def _cmd_reload_models(self, chat_id: str):
         try:
             self._reload_llm_clients()
-            await self.adapter.send_message(chat_id, "✅ 模型配置已重新加载。")
+            await self._send_platform_message(chat_id, "✅ 模型配置已重新加载。")
             logger.info(f"[{chat_id}] 模型配置已通过 /reload_models 刷新。")
         except Exception as e:
             logger.error(f"[{chat_id}] /reload_models 执行失败: {e}", exc_info=True)
-            await self.adapter.send_message(chat_id, f"❌ 模型刷新失败: {e}")
+            await self._send_platform_message(chat_id, f"❌ 模型刷新失败: {e}")
 
     async def _cmd_clear(self, chat_id: str, chat_type: str, user_id: str):
+        identity = self._identity_for_runtime_key(chat_id)
+        platform = identity.platform
+        storage_id = identity.storage_id
         try:
             if chat_id in self.generation_tasks:
                 self.generation_tasks[chat_id].cancel()
@@ -1058,15 +1074,17 @@ class MessageHandlerMixin:
             status = self.worker_status.get(chat_id)
             if status:
                 status.finish()
-            storage_id = chat_id if chat_type != "private" else user_id
-            self.message_history.clear_chat_history("telegram", storage_id, keep_pinned=False)
-            await self.adapter.send_message(chat_id, "✅ 当前聊天的历史记录已清空。")
+            self.message_history.clear_chat_history(platform, storage_id, keep_pinned=False)
+            await self._send_platform_message(chat_id, "✅ 当前聊天的历史记录已清空。")
             logger.info(f"[{chat_id}] 聊天历史已通过 /clear 命令清空。")
         except Exception as e:
             logger.error(f"[{chat_id}] 清空历史记录时出错: {e}")
-            await self.adapter.send_message(chat_id, "❌ 清空历史记录时发生错误。")
+            await self._send_platform_message(chat_id, "❌ 清空历史记录时发生错误。")
 
-    async def _cmd_stop(self, chat_id: str):
+    async def _cmd_stop(self, chat_id: str, chat_type: str = "private", user_id: str = ""):
+        identity = self._identity_for_runtime_key(chat_id)
+        platform = identity.platform
+        storage_id = identity.storage_id
         try:
             if chat_id in self.generation_tasks:
                 self.generation_tasks[chat_id].cancel()
@@ -1083,10 +1101,10 @@ class MessageHandlerMixin:
             session = self.sessions.setdefault(chat_id, {"history": [], "interrupted_thought": "", "pending_text": ""})
             session["_interrupted_by_frontend"] = True
             reply = "✅ 已停止当前所有任务。"
-            await self.adapter.send_message(chat_id, reply)
+            await self._send_platform_message(chat_id, reply)
             self.message_history.add_message(
-                platform="telegram",
-                chat_id=chat_id,
+                platform=platform,
+                chat_id=storage_id,
                 role="assistant",
                 content=reply,
                 user_id="assistant",
@@ -1094,11 +1112,11 @@ class MessageHandlerMixin:
             logger.info(f"[{chat_id}] 已通过 /stop 命令停止所有任务。")
         except Exception as e:
             logger.error(f"[{chat_id}] 停止任务时出错: {e}")
-            await self.adapter.send_message(chat_id, "❌ 停止任务时发生错误。")
+            await self._send_platform_message(chat_id, "❌ 停止任务时发生错误。")
 
     async def _cmd_regenerate_proactive(self, chat_id: str, text: str):
         if not self.scheduler:
-            await self.adapter.send_message(chat_id, "❌ Scheduler 未启用，无法重新生成主动消息计划。")
+            await self._send_platform_message(chat_id, "❌ Scheduler 未启用，无法重新生成主动消息计划。")
             return
 
         mode = "replace"
@@ -1118,19 +1136,19 @@ class MessageHandlerMixin:
                 )
             else:
                 msg = f"❌ 重新生成失败: {result.get('message', 'unknown error')}"
-            await self.adapter.send_message(chat_id, msg)
+            await self._send_platform_message(chat_id, msg)
         except Exception as e:
             logger.error(f"[{chat_id}] /regenerate_proactive 执行失败: {e}", exc_info=True)
-            await self.adapter.send_message(chat_id, f"❌ 重新生成失败: {e}")
+            await self._send_platform_message(chat_id, f"❌ 重新生成失败: {e}")
 
     async def _cmd_schedule_today(self, chat_id: str):
         if not self.scheduler:
-            await self.adapter.send_message(chat_id, "❌ Scheduler 未启用，无法查看今日计划。")
+            await self._send_platform_message(chat_id, "❌ Scheduler 未启用，无法查看今日计划。")
             return
         try:
             today_plan = self.scheduler.get_today_plan()
             if not today_plan:
-                await self.adapter.send_message(chat_id, "📭 今日没有未触发的主动消息计划。")
+                await self._send_platform_message(chat_id, "📭 今日没有未触发的主动消息计划。")
                 return
             sorted_plan = sorted(today_plan, key=lambda x: x.get("trigger_time", ""))
             lines = ["🗓️ 今日主动消息计划（未触发）:"]
@@ -1142,10 +1160,10 @@ class MessageHandlerMixin:
                 kind_label = "明确提醒" if kind == "explicit" else "自主消息"
                 lines.append(f"{i}. {hhmm} [{kind_label}] - {reason}")
             lines.append(f"\n共 {len(sorted_plan)} 条")
-            await self.adapter.send_message(chat_id, "\n".join(lines))
+            await self._send_platform_message(chat_id, "\n".join(lines))
         except Exception as e:
             logger.error(f"[{chat_id}] /schedule_today 执行失败: {e}", exc_info=True)
-            await self.adapter.send_message(chat_id, f"❌ 获取今日计划失败: {e}")
+            await self._send_platform_message(chat_id, f"❌ 获取今日计划失败: {e}")
 
     async def _dispatch_non_interrupting_cmd(
         self, chat_id: str, chat_type: str, user_id: str, stripped: str
@@ -1165,6 +1183,9 @@ class MessageHandlerMixin:
             await self._cmd_context(chat_id, chat_type, user_id)
 
     async def _cmd_status(self, chat_id: str, chat_type: str, user_id: str):
+        identity = self._identity_for_runtime_key(chat_id)
+        platform = identity.platform
+        storage_id = identity.storage_id
         try:
             lines = ["📊 **N.O.R.A. Core 状态报告**\n"]
             
@@ -1253,8 +1274,7 @@ class MessageHandlerMixin:
             
             # 对话分段统计
             try:
-                _stat_storage_id = chat_id if chat_type != "private" else user_id
-                stats = self.message_history.get_statistics("telegram", _stat_storage_id)
+                stats = self.message_history.get_statistics(platform, storage_id)
                 lines.append("")
                 lines.append(f"📋 对话段落: {stats.get('total_sessions', 0)} 个已封闭")
                 active_msgs = stats.get('active_messages', 0)
@@ -1263,17 +1283,19 @@ class MessageHandlerMixin:
             except Exception:
                 pass
             
-            await self.adapter.send_message(chat_id, "\n".join(lines))
+            await self._send_platform_message(chat_id, "\n".join(lines))
         except Exception as e:
             logger.error(f"[{chat_id}] /status 执行失败: {e}", exc_info=True)
-            await self.adapter.send_message(chat_id, f"❌ 获取状态失败: {e}")
+            await self._send_platform_message(chat_id, f"❌ 获取状态失败: {e}")
 
     async def _cmd_context(self, chat_id: str, chat_type: str, user_id: str):
         """显示当前上下文窗口使用情况。"""
+        identity = self._identity_for_runtime_key(chat_id)
+        platform = identity.platform
+        storage_id = identity.storage_id
         try:
-            storage_id = chat_id if chat_type != "private" else user_id
-            context_msgs = self.message_history.get_context_messages("telegram", storage_id)
-            stats = self.message_history.get_statistics("telegram", storage_id)
+            context_msgs = self.message_history.get_context_messages(platform, storage_id)
+            stats = self.message_history.get_statistics(platform, storage_id)
 
             total_chars = sum(len(msg.get("content", "")) for msg in context_msgs)
             estimated_tokens = int(total_chars / 1.5)
@@ -1291,16 +1313,16 @@ class MessageHandlerMixin:
                 f"对话段落: {stats.get('total_sessions', 0)}",
                 f"L1 总结: {stats.get('level1_summaries', 0)}",
             ]
-            await self.adapter.send_message(chat_id, "\n".join(lines))
+            await self._send_platform_message(chat_id, "\n".join(lines))
         except Exception as e:
             logger.error(f"[{chat_id}] /context 执行失败: {e}", exc_info=True)
-            await self.adapter.send_message(chat_id, f"❌ 获取上下文信息失败: {e}")
+            await self._send_platform_message(chat_id, f"❌ 获取上下文信息失败: {e}")
 
     async def _cmd_debug(self, chat_id: str):
         current = self.debug_mode.get(chat_id, False)
         self.debug_mode[chat_id] = not current
         state_str = "🟢 已开启" if self.debug_mode[chat_id] else "🔴 已关闭"
-        await self.adapter.send_message(chat_id, f"🐛 Debug 模式: {state_str}\n开启后每次工具调用、技能执行、思考阶段都会实时推送详情。")
+        await self._send_platform_message(chat_id, f"🐛 Debug 模式: {state_str}\n开启后每次工具调用、技能执行、思考阶段都会实时推送详情。")
         logger.info(f"[{chat_id}] Debug 模式切换为: {self.debug_mode[chat_id]}")
 
     async def _cmd_custom_scope(self, chat_id: str, text: str):
@@ -1317,7 +1339,7 @@ class MessageHandlerMixin:
                     scope_desc = "none"
                 else:
                     scope_desc = ", ".join(current_scopes)
-                await self.adapter.send_message(
+                await self._send_platform_message(
                     chat_id,
                     "🧭 CUSTOM 注入范围\n"
                     f"当前: {scope_desc}\n"
@@ -1333,7 +1355,7 @@ class MessageHandlerMixin:
                 allowed = {"fast", "smart", "image", "coder"}
                 invalid = [a for a in args if a not in allowed]
                 if invalid:
-                    await self.adapter.send_message(
+                    await self._send_platform_message(
                         chat_id,
                         "❌ 无效范围: " + ", ".join(invalid) + "。可选: fast, smart, image, coder, all, none",
                     )
@@ -1350,22 +1372,24 @@ class MessageHandlerMixin:
             else:
                 scope_desc = ", ".join(scopes_to_set)
 
-            await self.adapter.send_message(chat_id, f"✅ CUSTOM 注入范围已更新为: {scope_desc}")
+            await self._send_platform_message(chat_id, f"✅ CUSTOM 注入范围已更新为: {scope_desc}")
         except Exception as e:
             logger.error(f"[{chat_id}] /custom_scope 执行失败: {e}", exc_info=True)
-            await self.adapter.send_message(chat_id, f"❌ 设置失败: {e}")
+            await self._send_platform_message(chat_id, f"❌ 设置失败: {e}")
 
     async def _cmd_undo(self, chat_id: str, chat_type: str, user_id: str):
         """撤销上一条已发送的 assistant 消息。"""
-        storage_id = chat_id if chat_type != "private" else user_id
+        identity = self._identity_for_runtime_key(chat_id)
+        platform = identity.platform
+        storage_id = identity.storage_id
         try:
             removed = self.message_history.delete_last_assistant_message(
-                platform="telegram",
+                platform=platform,
                 chat_id=storage_id,
                 source=None,
             )
             if removed is None:
-                await self.adapter.send_message(chat_id, "❌ 没有可撤销的消息。")
+                await self._send_platform_message(chat_id, "❌ 没有可撤销的消息。")
                 return
 
             # 内存会话历史同步删除最近一条 assistant（不连带用户）
@@ -1388,24 +1412,27 @@ class MessageHandlerMixin:
                     delete_attempted = True
                     for pid in platform_ids:
                         try:
-                            ok = await self.adapter.delete_message(chat_id, pid)
+                            ok = await self._delete_platform_message(chat_id, pid)
                             delete_ok = delete_ok or ok
                         except Exception:
                             logger.warning(f"[{chat_id}] 平台删除消息 {pid} 失败", exc_info=True)
 
             if delete_attempted:
                 if delete_ok:
-                    await self.adapter.send_message(chat_id, "✅ 已撤销上一条 AI 消息（聊天界面已删除）。")
+                    await self._send_platform_message(chat_id, "✅ 已撤销上一条 AI 消息（聊天界面已删除）。")
                 else:
-                    await self.adapter.send_message(chat_id, "✅ 已撤销存档；⚠️ 平台消息删除失败或权限不足。")
+                    await self._send_platform_message(chat_id, "✅ 已撤销存档；⚠️ 平台消息删除失败或权限不足。")
             else:
-                await self.adapter.send_message(chat_id, "✅ 已撤销上一条 AI 消息（仅存档层面）。")
+                await self._send_platform_message(chat_id, "✅ 已撤销上一条 AI 消息（仅存档层面）。")
         except Exception as e:
             logger.error(f"[{chat_id}] /undo 执行失败: {e}", exc_info=True)
-            await self.adapter.send_message(chat_id, f"❌ 撤销失败: {e}")
+            await self._send_platform_message(chat_id, f"❌ 撤销失败: {e}")
 
     async def _cmd_set_stream(self, chat_id: str, chat_type: str, user_id: str, text: str):
         """切换 per-chat 非流式输出模式。/set_stream on|off（on=一次性输出，off=流式），空参=查询当前状态。"""
+        identity = self._identity_for_runtime_key(chat_id)
+        platform = identity.platform
+        storage_id = identity.storage_id
         parts = text.strip().split()
         arg = parts[1].lower() if len(parts) >= 2 else ""
         current = self.non_stream_flags.get(chat_id, self.default_non_stream)
@@ -1417,10 +1444,9 @@ class MessageHandlerMixin:
         else:
             msg = "ℹ️ 当前输出模式: " + ("一次性输出（非流式）" if current else "流式输出")
 
-        await self.adapter.send_message(chat_id, msg)
-        storage_id = chat_id if chat_type != "private" else user_id
+        await self._send_platform_message(chat_id, msg)
         self.message_history.add_message(
-            platform="telegram",
+            platform=platform,
             chat_id=storage_id,
             role="assistant",
             content=msg,

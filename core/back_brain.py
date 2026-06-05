@@ -162,12 +162,39 @@ class BackBrainMixin:
             logger.warning(f"[{chat_id}] 询问前脑续期失败: {e}，默认停止。")
             return False
 
+    def _inject_current_tool_context(
+        self,
+        tool_name: str,
+        tool_args: Dict[str, Any],
+        *,
+        runtime_key: str,
+        platform: str,
+        platform_chat_id: str,
+        storage_id: str,
+    ) -> Dict[str, Any]:
+        """Fill implicit per-conversation tool arguments without overriding explicit filters."""
+        if tool_name == "view_media":
+            if not str(tool_args.get("platform", "")).strip():
+                tool_args["platform"] = platform
+            if not str(tool_args.get("chat_id", "")).strip():
+                tool_args["chat_id"] = platform_chat_id
+            if not str(tool_args.get("storage_id", "")).strip():
+                tool_args["storage_id"] = storage_id
+        if tool_name in {"set_alarm", "store_progress_note", "get_progress_note"}:
+            if not str(tool_args.get("chat_id", "")).strip():
+                tool_args["chat_id"] = runtime_key
+        return tool_args
+
     async def _generate_response(self, context: Dict[str, Any]):
         """内部生成逻辑。"""
-        chat_id = context["chat_id"]
-        user_id = context["user_id"]
+        identity = self._identity(context)
+        chat_id = identity.runtime_key
+        platform_chat_id = identity.platform_chat_id
+        platform = identity.platform
+        storage_id = identity.storage_id
+        user_id = identity.actor_user_id
         text = context["text"]
-        chat_type = context.get("chat_type", "private")
+        chat_type = identity.chat_type
         user_name = context.get("user_name", "User")
 
         # 解析多模态输入：把 [image: ...] 对应的本地图片读取为模型可用内容
@@ -206,9 +233,10 @@ class BackBrainMixin:
                         image_id=img["image_id"],
                         file_path=img["path"],
                         user_id=user_id,
-                        chat_id=chat_id,
-                        platform=context.get("platform", "telegram"),
+                        chat_id=platform_chat_id,
+                        platform=platform,
                         platform_message_id=context.get("platform_message_id"),
+                        storage_id=storage_id,
                     )
                 )
 
@@ -222,15 +250,13 @@ class BackBrainMixin:
                         image_id=vid["video_id"],
                         file_path=vid["path"],
                         user_id=user_id,
-                        chat_id=chat_id,
-                        platform=context.get("platform", "telegram"),
+                        chat_id=platform_chat_id,
+                        platform=platform,
                         platform_message_id=context.get("platform_message_id"),
                         media_type="video",
+                        storage_id=storage_id,
                     )
                 )
-
-        # 确定用于存储和检索的唯一ID
-        storage_id = chat_id if chat_type != "private" else user_id
 
         # Ensure session keys exist
         session = self.sessions.setdefault(chat_id, {"history": [], "interrupted_thought": "", "pending_text": ""})
@@ -277,7 +303,7 @@ class BackBrainMixin:
                     user_metadata["platform_message_ids"] = [str(platform_msg_id)]
 
                 self.message_history.add_message(
-                    platform="telegram",
+                    platform=platform,
                     chat_id=storage_id,
                     role="user",
                     content=message_content,
@@ -291,7 +317,15 @@ class BackBrainMixin:
                 status.update("记忆检索", "正在从大脑检索相关记忆 (RAG)...")
                 if self.tui_callback: self.tui_callback("🧠 Retrieving memories (RAG)...")
                 logger.debug(f"[{chat_id}] 正在从大脑检索相关记忆...")
-                rag_context = self.rag.get_context_string(text, user_id=storage_id, top_k=2)
+                rag_context = self.rag.get_context_string(
+                    text,
+                    user_id=storage_id,
+                    top_k=2,
+                    platform=platform,
+                    chat_id=platform_chat_id,
+                    storage_id=storage_id,
+                    chat_type=chat_type,
+                )
                 if rag_context:
                     logger.info(f"[{chat_id}] RAG 命中: {len(rag_context.splitlines())} lines.")
                     await self._send_debug(chat_id, f"🧠 RAG 命中: {len(rag_context.splitlines())} 行记忆")
@@ -472,7 +506,7 @@ class BackBrainMixin:
             last_turn_llm = active_llm
             
             # 临时历史，从数据库加载持久化上下文
-            db_context = self.message_history.get_context_messages("telegram", storage_id)
+            db_context = self.message_history.get_context_messages(platform, storage_id)
 
             # 避免重复注入：清理历史尾部与当前轮次重合的消息
             # 可能的尾部结构： [user(当前消息)], 或 [user(当前消息), assistant(前脑/忙碌回复)]
@@ -579,7 +613,7 @@ class BackBrainMixin:
                 # 一进入生成阶段即提示 typing，避免 Telegram 输入状态过短
                 if (not typing_started) and getattr(self.adapter.platform_features, "supports_typing_indicator", False):
                     try:
-                        await self.adapter.start_typing(chat_id)
+                        await self._start_platform_typing(chat_id)
                         typing_started = True
                     except Exception:
                         logger.debug("typing indicator failed to start", exc_info=True)
@@ -621,9 +655,9 @@ class BackBrainMixin:
                                     ):
                                         # 轮询模式 / no_reply / 图片标签待校验 时均不直接发送，先缓冲
                                         if not in_polling_mode and not no_reply and not defer_user_send_until_image_tags_ready:
-                                            msg_id = await self.adapter.send_message(chat_id, text_to_send)
-                                            if msg_id:
-                                                response_platform_ids.append(str(msg_id))
+                                            msg_ids = await self._send_platform_message(chat_id, text_to_send)
+                                            if msg_ids:
+                                                response_platform_ids.extend(str(mid) for mid in msg_ids)
                                         elif defer_user_send_until_image_tags_ready and not in_polling_mode and not no_reply:
                                             # 图片标签校验期间延迟发送：保留 SPLIT 边界，避免最终被拼成整段
                                             if final_response_buffer:
@@ -800,18 +834,24 @@ class BackBrainMixin:
                     status.preview_next(tool_name, tool_args)
                     status.update("工具调用", f"正在执行 {tool_name}...")
                     status.log_tool(tool_name, tool_args)
-                    if tool_name == "view_media" and isinstance(tool_args, dict):
-                        if not str(tool_args.get("user_id", "")).strip():
-                            tool_args["user_id"] = storage_id
+                    if isinstance(tool_args, dict):
+                        tool_args = self._inject_current_tool_context(
+                            tool_name,
+                            tool_args,
+                            runtime_key=chat_id,
+                            platform=platform,
+                            platform_chat_id=platform_chat_id,
+                            storage_id=storage_id,
+                        )
                     # --- report_progress 拦截 ---
                     if tool_name == "report_progress" and isinstance(tool_args, dict):
                         progress_msg = str(tool_args.get("message", "")).strip()
                         in_polling = context.get("_in_polling_loop", False)
                         if progress_msg and not in_polling and not no_reply:
                             try:
-                                await self.adapter.send_message(chat_id, f"⏳ {progress_msg}", parse_media=False)
+                                await self._send_platform_message(chat_id, f"⏳ {progress_msg}", parse_media=False)
                                 self.message_history.add_message(
-                                    platform="telegram",
+                                    platform=platform,
                                     chat_id=storage_id,
                                     role="assistant",
                                     content=f"⏳ {progress_msg}",
@@ -1211,7 +1251,7 @@ class BackBrainMixin:
 
             if image_tags_failed:
                 if not in_polling and not no_reply:
-                    await self.adapter.send_message(chat_id, "图片输出异常，已自动重试失败，请稍后重试。")
+                    await self._send_platform_message(chat_id, "图片输出异常，已自动重试失败，请稍后重试。")
                 else:
                     logger.info(f"[{chat_id}] [轮询模式] 图片输出异常，已自动重试失败，前脑稍后重试。")
             elif final_response_buffer:
@@ -1308,7 +1348,7 @@ class BackBrainMixin:
                     metadata["platform_message_ids"] = response_platform_ids
 
                 self.message_history.add_message(
-                    platform="telegram",
+                    platform=platform,
                     chat_id=storage_id,
                     role="assistant",
                     content=final_response_buffer,
@@ -1338,11 +1378,12 @@ class BackBrainMixin:
                             image_id=img_id,
                             tags=tags,
                             ocr_text=ocr_text,
-                            user_id=storage_id,
-                            chat_id=chat_id,
+                            user_id=user_id,
+                            chat_id=platform_chat_id,
                             file_path=img["path"],
-                            platform=context.get("platform", "telegram"),
+                            platform=platform,
                             platform_message_id=context.get("platform_message_id"),
+                            storage_id=storage_id,
                         )
                     )
                     ocr_info = f", ocr_text='{ocr_text[:40]}...'" if ocr_text else ""
@@ -1388,24 +1429,49 @@ class BackBrainMixin:
                                 image_id=vid_id,
                                 tags=tags,
                                 ocr_text="",
-                                user_id=storage_id,
-                                chat_id=chat_id,
+                                user_id=user_id,
+                                chat_id=platform_chat_id,
                                 file_path=vid["path"],
-                                platform=context.get("platform", "telegram"),
+                                platform=platform,
                                 platform_message_id=context.get("platform_message_id"),
+                                storage_id=storage_id,
                             )
                         )
                         logger.info(f"[{chat_id}] 视频 {vid_id} 标签已补充: '{tags[:60]}...'")
             # --- 5. RAG 记忆存储 (Memory Storage) ---
             if self.rag.enabled:
-                asyncio.create_task(self._async_save_memory(message_content, storage_id, {"role": "user", "chat_id": chat_id}))
+                asyncio.create_task(
+                    self._async_save_memory(
+                        message_content,
+                        storage_id,
+                        {
+                            "role": "user",
+                            "platform": platform,
+                            "chat_id": platform_chat_id,
+                            "storage_id": storage_id,
+                            "chat_type": chat_type,
+                        },
+                    )
+                )
                 
                 full_assistant_turn = " ".join([h['content'] for h in temp_history if h['role'] == 'assistant'])
                 if final_response_buffer and final_response_buffer not in full_assistant_turn:
                     full_assistant_turn += " " + final_response_buffer
                 
                 if full_assistant_turn.strip():
-                    asyncio.create_task(self._async_save_memory(full_assistant_turn.strip(), storage_id, {"role": "assistant", "chat_id": chat_id}))
+                    asyncio.create_task(
+                        self._async_save_memory(
+                            full_assistant_turn.strip(),
+                            storage_id,
+                            {
+                                "role": "assistant",
+                                "platform": platform,
+                                "chat_id": platform_chat_id,
+                                "storage_id": storage_id,
+                                "chat_type": chat_type,
+                            },
+                        )
+                    )
 
             # Update session history
             session["history"] = [
@@ -1443,7 +1509,7 @@ class BackBrainMixin:
                 except Exception:
                     logger.debug("发送错误详情失败", exc_info=True)
             try:
-                await self.adapter.send_message(chat_id, "抱歉，处理您的请求时出现内部错误。")
+                await self._send_platform_message(chat_id, "抱歉，处理您的请求时出现内部错误。")
             except Exception:
                 pass
             

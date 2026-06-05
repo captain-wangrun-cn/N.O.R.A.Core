@@ -199,12 +199,14 @@ class FrontBrainMixin:
                 "raw_response": str,     # LLM 原始输出（含信号，用于日志）
             }
         """
-        chat_id = context["chat_id"]
-        user_id = context["user_id"]
+        identity = self._identity(context)
+        chat_id = identity.runtime_key
+        platform = identity.platform
+        storage_id = identity.storage_id
+        user_id = identity.actor_user_id
         text = context["text"]
-        chat_type = context.get("chat_type", "private")
+        chat_type = identity.chat_type
         user_name = context.get("user_name", "User")
-        storage_id = chat_id if chat_type != "private" else user_id
 
         proactive_meta = proactive_meta or {}
         proactive_mode = bool(proactive_meta)
@@ -345,7 +347,15 @@ class FrontBrainMixin:
         # --- 前脑也接入 RAG 记忆检索 ---
         if self.rag.enabled:
             try:
-                rag_context = self.rag.get_context_string(text, user_id=storage_id, top_k=2)
+                rag_context = self.rag.get_context_string(
+                    text,
+                    user_id=storage_id,
+                    top_k=2,
+                    platform=platform,
+                    chat_id=identity.platform_chat_id,
+                    storage_id=storage_id,
+                    chat_type=chat_type,
+                )
                 if rag_context:
                     system_prompt = (
                         system_prompt
@@ -357,7 +367,7 @@ class FrontBrainMixin:
                 logger.warning(f"[{chat_id}] 前脑 RAG 检索失败，已降级继续。", exc_info=True)
 
         # --- 加载对话历史 ---
-        db_context = self.message_history.get_context_messages("telegram", storage_id)
+        db_context = self.message_history.get_context_messages(platform, storage_id)
         # 常规前脑仅保留最近 20 条；trigger/proactive 场景使用完整上下文
         if (not proactive_mode) and len(db_context) > 20:
             db_context = db_context[-20:]
@@ -579,10 +589,12 @@ class FrontBrainMixin:
                 "user_reply": str,
             }
         """
-        chat_id = context["chat_id"]
-        user_id = context["user_id"]
-        chat_type = context.get("chat_type", "private")
-        storage_id = chat_id if chat_type != "private" else user_id
+        identity = self._identity(context)
+        chat_id = identity.runtime_key
+        platform = identity.platform
+        storage_id = identity.storage_id
+        user_id = identity.actor_user_id
+        chat_type = identity.chat_type
 
         logger.info(f"[{chat_id}] 前脑审查: 后脑结果 {len(backend_result)} 字, 新用户消息 {len(new_user_messages)} 条")
 
@@ -638,7 +650,7 @@ class FrontBrainMixin:
         )
 
         # 仅取当前对话段的上下文；过长时再截断
-        db_context = self.message_history.get_context_messages("telegram", storage_id)
+        db_context = self.message_history.get_context_messages(platform, storage_id)
         current_session_msgs = [
             {
                 "role": msg["role"],

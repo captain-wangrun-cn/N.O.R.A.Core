@@ -27,6 +27,56 @@ def test_get_by_platform_message_id_builds_query():
     assert query_arg["platform"] == "telegram"
 
 
+def test_get_by_platform_message_id_filters_by_chat_id():
+    from memory.image_store import ImageStore
+
+    store = ImageStore.__new__(ImageStore)
+    store.mongo_col = MagicMock()
+    store.qdrant = None
+    store.embed_client = MagicMock()
+    store.enabled = True
+
+    store.mongo_col.find_one.return_value = {
+        "image_id": "img_chat_a",
+        "platform": "telegram",
+        "chat_id": "chat-a",
+        "platform_message_id": "42",
+    }
+
+    doc = store.get_by_platform_message_id("telegram", "42", chat_id="chat-a")
+    assert doc is not None
+    assert doc["image_id"] == "img_chat_a"
+
+    query_arg = store.mongo_col.find_one.call_args[0][0]
+    assert query_arg == {
+        "platform_message_id": "42",
+        "platform": "telegram",
+        "chat_id": "chat-a",
+    }
+
+
+def test_get_by_platform_message_id_does_not_fallback_across_chats():
+    from memory.image_store import ImageStore
+
+    store = ImageStore.__new__(ImageStore)
+    store.mongo_col = MagicMock()
+    store.qdrant = None
+    store.embed_client = MagicMock()
+    store.enabled = True
+
+    store.mongo_col.find_one.return_value = None
+
+    assert store.get_by_platform_message_id("telegram", "42", chat_id="chat-a") is None
+    store.mongo_col.find_one.assert_called_once_with(
+        {
+            "platform_message_id": "42",
+            "platform": "telegram",
+            "chat_id": "chat-a",
+        },
+        {"_id": 0},
+    )
+
+
 def test_get_by_platform_message_id_returns_none_when_missing():
     from memory.image_store import ImageStore
 

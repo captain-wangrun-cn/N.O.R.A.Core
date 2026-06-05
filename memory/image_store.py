@@ -111,20 +111,25 @@ class ImageStore:
                         distance=qdrant_models.Distance.COSINE,
                     ),
                 )
-                # 创建常用 payload 索引
-                for field in ("image_id", "user_id"):
-                    self.qdrant.create_payload_index(
-                        collection_name=IMAGE_COLLECTION,
-                        field_name=field,
-                        field_schema=qdrant_models.PayloadSchemaType.KEYWORD,
-                    )
-                self.qdrant.create_payload_index(
-                    collection_name=IMAGE_COLLECTION,
-                    field_name="timestamp",
-                    field_schema=qdrant_models.PayloadSchemaType.FLOAT,
-                )
+            # 新旧 collection 都补齐 payload 索引，保证升级后的上下文过滤可高效执行。
+            self._ensure_qdrant_payload_index("image_id", qdrant_models.PayloadSchemaType.KEYWORD)
+            self._ensure_qdrant_payload_index("user_id", qdrant_models.PayloadSchemaType.KEYWORD)
+            self._ensure_qdrant_payload_index("storage_id", qdrant_models.PayloadSchemaType.KEYWORD)
+            self._ensure_qdrant_payload_index("platform", qdrant_models.PayloadSchemaType.KEYWORD)
+            self._ensure_qdrant_payload_index("chat_id", qdrant_models.PayloadSchemaType.KEYWORD)
+            self._ensure_qdrant_payload_index("timestamp", qdrant_models.PayloadSchemaType.FLOAT)
         except Exception as e:
             logger.error(f"创建 Qdrant collection 失败: {e}")
+
+    def _ensure_qdrant_payload_index(self, field_name: str, field_schema) -> None:
+        try:
+            self.qdrant.create_payload_index(
+                collection_name=IMAGE_COLLECTION,
+                field_name=field_name,
+                field_schema=field_schema,
+            )
+        except Exception as e:
+            logger.debug(f"ImageStore: Qdrant payload 索引已存在或创建失败: {field_name}, {e}")
 
     def _ensure_mongo_indexes(self):
         """确保 MongoDB 索引存在。"""
@@ -133,6 +138,9 @@ class ImageStore:
         try:
             self.mongo_col.create_index("image_id", unique=True)
             self.mongo_col.create_index("user_id")
+            self.mongo_col.create_index("storage_id")
+            self.mongo_col.create_index([("platform", 1), ("chat_id", 1), ("platform_message_id", 1)])
+            self.mongo_col.create_index([("platform", 1), ("storage_id", 1), ("timestamp", -1)])
             self.mongo_col.create_index("timestamp")
             # 复合文本索引：同时覆盖 tags 和 ocr_text，支持全文搜索
             # 注意：MongoDB 每个 collection 只能有一个文本索引，需要先尝试删除旧的
@@ -172,6 +180,7 @@ class ImageStore:
         platform_message_id: Optional[str] = None,
         tag_status: str = "completed",
         media_type: str = "image",
+        storage_id: str = "",
     ) -> bool:
         """
         保存/更新一张图片或视频的元数据（默认完成态）。
@@ -191,6 +200,7 @@ class ImageStore:
             "tags": tags,
             "user_id": user_id,
             "chat_id": chat_id,
+            "storage_id": storage_id or user_id,
             "platform": platform,
             "platform_message_id": platform_message_id,
             "timestamp": now,
@@ -223,6 +233,8 @@ class ImageStore:
                                     "file_path": file_path,
                                     "user_id": user_id,
                                     "chat_id": chat_id,
+                                    "storage_id": storage_id or user_id,
+                                    "platform": platform,
                                     "timestamp": now,
                                     "media_type": media_type,
                                 },
@@ -252,6 +264,7 @@ class ImageStore:
         platform: str = "",
         platform_message_id: Optional[str] = None,
         media_type: str = "image",
+        storage_id: str = "",
     ) -> bool:
         """先写入占位元数据（无标签、不写向量），等待模型回复后再补标签。"""
         if not self.enabled:
@@ -265,6 +278,7 @@ class ImageStore:
             "tags": "",
             "user_id": user_id,
             "chat_id": chat_id,
+            "storage_id": storage_id or user_id,
             "platform": platform,
             "platform_message_id": platform_message_id,
             "timestamp": now,
@@ -291,6 +305,7 @@ class ImageStore:
         file_path: Optional[str] = None,
         platform: str = "",
         platform_message_id: Optional[str] = None,
+        storage_id: str = "",
     ) -> bool:
         """在模型回复后补充标签/OCR，并写入向量。"""
         if not self.enabled:
@@ -307,6 +322,7 @@ class ImageStore:
         base_file_path = file_path or existing.get("file_path", "")
         base_user_id = user_id or existing.get("user_id", "")
         base_chat_id = chat_id or existing.get("chat_id", "")
+        base_storage_id = storage_id or existing.get("storage_id") or base_user_id
         base_ts = existing.get("timestamp", now)
 
         set_doc: Dict[str, Any] = {
@@ -327,6 +343,8 @@ class ImageStore:
             set_doc["user_id"] = user_id
         if chat_id:
             set_doc["chat_id"] = chat_id
+        if storage_id:
+            set_doc["storage_id"] = storage_id
 
         try:
             result = self.mongo_col.update_one({"image_id": image_id}, {"$set": set_doc}, upsert=False)
@@ -337,6 +355,7 @@ class ImageStore:
                     "file_path": base_file_path,
                     "user_id": base_user_id,
                     "chat_id": base_chat_id,
+                    "storage_id": base_storage_id,
                     "platform": platform,
                     "platform_message_id": platform_message_id,
                     "timestamp": base_ts,
@@ -368,6 +387,8 @@ class ImageStore:
                                     "file_path": base_file_path,
                                     "user_id": base_user_id,
                                     "chat_id": base_chat_id,
+                                    "storage_id": base_storage_id,
+                                    "platform": platform or existing.get("platform", ""),
                                     "timestamp": base_ts,
                                     "media_type": media_type_val,
                                 },
@@ -404,6 +425,7 @@ class ImageStore:
         self,
         platform: str,
         platform_message_id: str,
+        chat_id: Optional[str] = None,
     ) -> Optional[Dict[str, Any]]:
         """
         按平台消息 ID 反查图片元数据。
@@ -418,8 +440,9 @@ class ImageStore:
             query: Dict[str, Any] = {"platform_message_id": str(platform_message_id)}
             if platform:
                 query["platform"] = platform
-            doc = self.mongo_col.find_one(query, {"_id": 0})
-            return doc
+            if chat_id:
+                query["chat_id"] = str(chat_id)
+            return self.mongo_col.find_one(query, {"_id": 0})
         except Exception as e:
             logger.error(f"按 platform_message_id 查询图片失败: {e}")
             return None
@@ -430,12 +453,21 @@ class ImageStore:
         start_time: Optional[float] = None,
         end_time: Optional[float] = None,
         limit: int = 20,
+        storage_id: str = "",
+        platform: str = "",
+        chat_id: str = "",
     ) -> List[Dict[str, Any]]:
         """按时间范围查询图片（MongoDB）。"""
         if self.mongo_col is None:
             return []
         try:
             query: Dict[str, Any] = {}
+            if platform:
+                query["platform"] = platform
+            if chat_id:
+                query["chat_id"] = chat_id
+            if storage_id:
+                query["storage_id"] = storage_id
             if user_id:
                 query["user_id"] = user_id
             time_filter: Dict[str, Any] = {}
@@ -457,12 +489,21 @@ class ImageStore:
         keyword: str,
         user_id: str = "",
         limit: int = 10,
+        storage_id: str = "",
+        platform: str = "",
+        chat_id: str = "",
     ) -> List[Dict[str, Any]]:
         """按关键词在 tags 中做文本搜索（MongoDB $text）。"""
         if self.mongo_col is None:
             return []
         try:
             query: Dict[str, Any] = {"$text": {"$search": keyword}}
+            if platform:
+                query["platform"] = platform
+            if chat_id:
+                query["chat_id"] = chat_id
+            if storage_id:
+                query["storage_id"] = storage_id
             if user_id:
                 query["user_id"] = user_id
             cursor = (
@@ -480,6 +521,9 @@ class ImageStore:
         text_query: str,
         user_id: str = "",
         limit: int = 10,
+        storage_id: str = "",
+        platform: str = "",
+        chat_id: str = "",
     ) -> List[Dict[str, Any]]:
         """
         在图片 OCR 文字中做模糊搜索（支持类搜索引擎的模糊匹配）。
@@ -519,6 +563,21 @@ class ImageStore:
                 })
 
             query: Dict[str, Any] = {"$and": regex_conditions} if len(regex_conditions) > 1 else regex_conditions[0]
+            if platform:
+                if "$and" in query:
+                    query["$and"].append({"platform": platform})
+                else:
+                    query["platform"] = platform
+            if chat_id:
+                if "$and" in query:
+                    query["$and"].append({"chat_id": chat_id})
+                else:
+                    query["chat_id"] = chat_id
+            if storage_id:
+                if "$and" in query:
+                    query["$and"].append({"storage_id": storage_id})
+                else:
+                    query["storage_id"] = storage_id
             if user_id:
                 if "$and" in query:
                     query["$and"].append({"user_id": user_id})
@@ -536,6 +595,9 @@ class ImageStore:
         query_text: str,
         user_id: str = "",
         top_k: int = 5,
+        storage_id: str = "",
+        platform: str = "",
+        chat_id: str = "",
     ) -> List[Dict[str, Any]]:
         """语义向量检索（Qdrant）。"""
         if self.qdrant is None or not self.embed_client.enabled:
@@ -546,15 +608,17 @@ class ImageStore:
                 return []
 
             qdrant_filter = None
+            must_conditions = []
             if user_id:
-                qdrant_filter = qdrant_models.Filter(
-                    must=[
-                        qdrant_models.FieldCondition(
-                            key="user_id",
-                            match=qdrant_models.MatchValue(value=user_id),
-                        )
-                    ]
-                )
+                must_conditions.append(qdrant_models.FieldCondition(key="user_id", match=qdrant_models.MatchValue(value=user_id)))
+            if storage_id:
+                must_conditions.append(qdrant_models.FieldCondition(key="storage_id", match=qdrant_models.MatchValue(value=storage_id)))
+            if platform:
+                must_conditions.append(qdrant_models.FieldCondition(key="platform", match=qdrant_models.MatchValue(value=platform)))
+            if chat_id:
+                must_conditions.append(qdrant_models.FieldCondition(key="chat_id", match=qdrant_models.MatchValue(value=chat_id)))
+            if must_conditions:
+                qdrant_filter = qdrant_models.Filter(must=must_conditions)
 
             response = self.qdrant.query_points(
                 collection_name=IMAGE_COLLECTION,
@@ -582,6 +646,9 @@ class ImageStore:
         user_id: str = "",
         limit: int = 10,
         media_type: str = "",
+        storage_id: str = "",
+        platform: str = "",
+        chat_id: str = "",
     ) -> List[Dict[str, Any]]:
         """
         统一检索入口 —— 自动选择最佳策略：
@@ -605,12 +672,25 @@ class ImageStore:
                 return results
             return [r for r in results if r.get("media_type", "image") == media_type]
 
+        def _context_kwargs(*, include_user: bool = True, limit_key: str = "limit") -> Dict[str, Any]:
+            kwargs: Dict[str, Any] = {}
+            if include_user:
+                kwargs["user_id"] = user_id
+            kwargs[limit_key] = limit
+            if storage_id:
+                kwargs["storage_id"] = storage_id
+            if platform:
+                kwargs["platform"] = platform
+            if chat_id:
+                kwargs["chat_id"] = chat_id
+            return kwargs
+
         # OCR 文字搜索 + 关键词搜索组合
         if text_query and keyword:
-            ocr_results = self.search_by_ocr_text(text_query, user_id=user_id, limit=limit)
-            keyword_results = self.search_by_semantic(keyword, user_id=user_id, top_k=limit)
+            ocr_results = self.search_by_ocr_text(text_query, **_context_kwargs())
+            keyword_results = self.search_by_semantic(keyword, **_context_kwargs(limit_key="top_k"))
             if not keyword_results:
-                keyword_results = self.search_by_keyword(keyword, user_id=user_id, limit=limit)
+                keyword_results = self.search_by_keyword(keyword, **_context_kwargs())
             # Qdrant 语义搜索结果需要从 MongoDB 补全 ocr_text 等字段
             keyword_results = self._enrich_with_mongo(keyword_results)
             # 合并去重（以 image_id 去重，OCR 结果优先）
@@ -625,22 +705,26 @@ class ImageStore:
 
         # 纯 OCR 文字搜索
         if text_query:
-            return _apply_media_filter(self.search_by_ocr_text(text_query, user_id=user_id, limit=limit))
+            return _apply_media_filter(self.search_by_ocr_text(text_query, **_context_kwargs()))
 
         # 语义 + 关键词
         if keyword:
-            semantic_results = self.search_by_semantic(keyword, user_id=user_id, top_k=limit)
+            semantic_results = self.search_by_semantic(keyword, **_context_kwargs(limit_key="top_k"))
             if semantic_results:
                 # Qdrant 语义搜索结果需要从 MongoDB 补全 ocr_text 等字段
                 return _apply_media_filter(self._enrich_with_mongo(semantic_results))
-            return _apply_media_filter(self.search_by_keyword(keyword, user_id=user_id, limit=limit))
+            return _apply_media_filter(self.search_by_keyword(keyword, **_context_kwargs()))
 
         # 时间范围
         if start_time is not None or end_time is not None:
-            return _apply_media_filter(self.search_by_time_range(user_id, start_time, end_time, limit=limit))
+            time_kwargs = _context_kwargs(limit_key="limit")
+            time_kwargs.pop("user_id", None)
+            return _apply_media_filter(self.search_by_time_range(user_id, start_time, end_time, **time_kwargs))
 
         # 默认：最近的图片/视频
-        return _apply_media_filter(self.search_by_time_range(user_id, limit=limit))
+        time_kwargs = _context_kwargs(limit_key="limit")
+        time_kwargs.pop("user_id", None)
+        return _apply_media_filter(self.search_by_time_range(user_id, **time_kwargs))
 
     def _enrich_with_mongo(self, results: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         """

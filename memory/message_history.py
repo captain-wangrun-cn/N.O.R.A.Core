@@ -1285,9 +1285,21 @@ class MessageHistory:
         cursor.execute("""
             DELETE FROM conversation_sessions WHERE platform = ? AND chat_id = ?
         """, (platform, chat_id))
+
+        cursor.execute("""
+            DELETE FROM compression_retry_queue WHERE platform = ? AND chat_id = ?
+        """, (platform, chat_id))
         
         conn.commit()
         conn.close()
+        try:
+            self.message_log.clear_chat(platform, chat_id)
+        except Exception:
+            logger.warning(f"[{platform}/{chat_id}] 清理消息镜像失败", exc_info=True)
+        try:
+            self.context_compressor.clear_chat(platform, chat_id)
+        except Exception:
+            logger.warning(f"[{platform}/{chat_id}] 清理压缩上下文失败", exc_info=True)
         logger.info(f"[{platform}/{chat_id}] 聊天历史已清除 (保留标记: {keep_pinned})")
 
     def clear_all_history(self, include_pinned: bool = False):

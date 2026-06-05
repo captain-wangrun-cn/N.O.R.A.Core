@@ -49,15 +49,22 @@ class VectorStore:
                         distance=models.Distance.COSINE
                     )
                 )
-                # 为 user_id 创建 payload 索引
-                self.client.create_payload_index(
-                    collection_name=self.collection_name,
-                    field_name="user_id",
-                    field_schema=models.PayloadSchemaType.KEYWORD
-                )
-                logger.info(f"Collection '{self.collection_name}' 创建成功，并为 'user_id' 创建索引。")
+                logger.info(f"Collection '{self.collection_name}' 创建成功。")
+            for field in ("user_id", "platform", "chat_id", "storage_id", "chat_type"):
+                self._ensure_payload_index(field)
+            logger.info(f"Collection '{self.collection_name}' 会话维度索引已确认。")
         except Exception as e:
             logger.error(f"检查/创建 Collection 失败: {e}")
+
+    def _ensure_payload_index(self, field_name: str) -> None:
+        try:
+            self.client.create_payload_index(
+                collection_name=self.collection_name,
+                field_name=field_name,
+                field_schema=models.PayloadSchemaType.KEYWORD
+            )
+        except Exception as e:
+            logger.debug(f"VectorStore payload 索引已存在或创建失败: {field_name}, {e}")
 
     def upsert(self, text: str, vector: List[float], metadata: Optional[Dict[str, Any]] = None) -> bool:
         """

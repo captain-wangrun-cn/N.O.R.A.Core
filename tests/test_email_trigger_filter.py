@@ -57,3 +57,42 @@ def test_build_review_key_fallback_is_stable():
     )
     assert key1.startswith("fallback:")
     assert key1 == key2
+
+
+def test_resolve_target_prefers_full_default_target():
+    trigger = EmailTrigger.__new__(EmailTrigger)
+    trigger.cfg = {}
+    trigger.default_chat_id = "telegram:private-chat"
+    trigger.default_chat_target = {
+        "platform": "telegram",
+        "chat_id": "private-chat",
+        "platform_chat_id": "private-chat",
+        "chat_type": "private",
+        "user_id": "real-user",
+        "actor_user_id": "real-user",
+        "storage_id": "real-user",
+        "runtime_key": "telegram:private-chat",
+    }
+
+    target = trigger._resolve_target()
+
+    assert target["runtime_key"] == "telegram:private-chat"
+    assert target["platform_chat_id"] == "private-chat"
+    assert target["storage_id"] == "real-user"
+
+
+def test_resolve_target_config_chat_id_overrides_default():
+    trigger = EmailTrigger.__new__(EmailTrigger)
+    trigger.cfg = {"chat_id": "telegram:configured-chat"}
+    trigger.default_chat_id = "telegram:private-chat"
+    trigger.default_chat_target = {
+        "platform": "telegram",
+        "chat_id": "private-chat",
+        "storage_id": "real-user",
+        "runtime_key": "telegram:private-chat",
+    }
+
+    target = trigger._resolve_target()
+
+    assert target["runtime_key"] == "telegram:configured-chat"
+    assert target["storage_id"] == "configured-chat"

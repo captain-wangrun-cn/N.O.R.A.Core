@@ -42,7 +42,16 @@ from skills.loader import SkillLoader
 from core.cost_tracker import get_cost_tracker
 from core.worker_status import WorkerStatus, BackendTaskQueue
 from core.scheduler import ProactiveScheduler
-from core.default_chat_id_store import load_default_chat_id
+from core.default_chat_id_store import load_default_chat_id, load_default_chat_target
+from core.conversation_identity import (
+    ConversationIdentity,
+    build_conversation_identity,
+    build_identity_from_target,
+    build_identity_from_parts,
+    conversation_target_dict,
+    resolve_platform,
+    runtime_key_for,
+)
 from triggers import TriggerManager
 from triggers.factory import build_triggers
 import config
@@ -102,6 +111,7 @@ class NoraController(
         self.skill_loader = SkillLoader()
         self.sessions: Dict[str, Any] = {}
         self.generation_tasks: Dict[str, asyncio.Task] = {}
+        self.conversation_identities: Dict[str, ConversationIdentity] = {}
         
         # 前后端分离：每个 chat_id 一个 WorkerStatus
         self.worker_status: Dict[str, WorkerStatus] = {}
@@ -198,7 +208,14 @@ class NoraController(
         schedule_cfg = (config.get_config() or {}).get("schedule", {})
         schedule_enabled = schedule_cfg.get("enabled", True)
         scheduler_tz = history_cfg.get("timezone", "Asia/Shanghai")
-        persisted_default_chat_id = load_default_chat_id()
+        persisted_default_target = load_default_chat_target()
+        persisted_identity = (
+            self._identity_from_target(persisted_default_target)
+            if persisted_default_target
+            else None
+        )
+        persisted_default_chat_id = persisted_identity.runtime_key if persisted_identity else ""
+        persisted_default_target = conversation_target_dict(persisted_identity) if persisted_identity else {}
         
         if schedule_enabled:
             self.scheduler = ProactiveScheduler(
@@ -217,13 +234,28 @@ class NoraController(
 
         trigger_cfg = config.get_triggers_config()
         trigger_enabled = trigger_cfg.get("enabled", False)
-        trigger_default_chat_id = trigger_cfg.get("default_chat_id", "") or persisted_default_chat_id
+        trigger_cfg_default_chat_id = str(trigger_cfg.get("default_chat_id", "") or "").strip()
+        trigger_default_target = (
+            self._target_from_chat_id(trigger_cfg_default_chat_id)
+            if trigger_cfg_default_chat_id
+            else persisted_default_target
+        )
+        trigger_default_chat_id = (
+            str(trigger_default_target.get("runtime_key") or "").strip()
+            or trigger_cfg_default_chat_id
+            or persisted_default_chat_id
+        )
         if trigger_enabled:
             self.trigger_manager = TriggerManager(
                 notify_callback=self._handle_trigger_notification,
                 default_chat_id=trigger_default_chat_id,
+                default_chat_target=trigger_default_target,
             )
-            for trigger in build_triggers(trigger_cfg, default_chat_id=trigger_default_chat_id):
+            for trigger in build_triggers(
+                trigger_cfg,
+                default_chat_id=trigger_default_chat_id,
+                default_chat_target=trigger_default_target,
+            ):
                 self.trigger_manager.register(trigger)
             logger.info("Trigger 系统已初始化")
         else:
@@ -239,6 +271,97 @@ class NoraController(
             f"Triggers: {'Online' if self.trigger_manager else 'Offline'}"
         )
 
+    def _platform_name(self) -> str:
+        return resolve_platform(adapter=self.adapter)
+
+    def _identity(self, context: Dict[str, Any]) -> ConversationIdentity:
+        identity = build_conversation_identity(context, adapter=self.adapter)
+        self._remember_identity(identity)
+        return identity
+
+    def _identity_from_parts(
+        self,
+        chat_id: str,
+        user_id: Optional[str] = None,
+        chat_type: str = "private",
+        platform: Optional[str] = None,
+    ) -> ConversationIdentity:
+        identity = build_identity_from_parts(
+            chat_id=chat_id,
+            user_id=user_id,
+            chat_type=chat_type,
+            platform=platform or self._platform_name(),
+        )
+        self._remember_identity(identity)
+        return identity
+
+    def _identity_from_target(self, target: Dict[str, Any]) -> ConversationIdentity:
+        identity = build_identity_from_target(target, adapter=self.adapter)
+        self._remember_identity(identity)
+        return identity
+
+    def _target_from_chat_id(self, chat_id: str) -> Dict[str, Any]:
+        if not chat_id:
+            return {}
+        identity = build_identity_from_target(
+            {"runtime_key": chat_id, "chat_type": "private"},
+            adapter=self.adapter,
+        )
+        self._remember_identity(identity)
+        return conversation_target_dict(identity)
+
+    def _runtime_key(self, chat_id: str, platform: Optional[str] = None) -> str:
+        return runtime_key_for(platform or self._platform_name(), str(chat_id))
+
+    def _remember_identity(self, identity: ConversationIdentity) -> ConversationIdentity:
+        self.conversation_identities[identity.runtime_key] = identity
+        return identity
+
+    def _identity_for_runtime_key(self, runtime_key: str) -> ConversationIdentity:
+        key = str(runtime_key)
+        identity = self.conversation_identities.get(key)
+        if identity:
+            return identity
+        for known in self.conversation_identities.values():
+            if known.platform_chat_id == key:
+                return known
+        if ":" in key:
+            platform, chat_id = key.split(":", 1)
+            return self._identity_from_parts(chat_id=chat_id, user_id=chat_id, platform=platform)
+        return self._identity_from_parts(chat_id=key, user_id=key)
+
+    def _target_for_key(self, chat_or_runtime_key: str) -> Dict[str, Any]:
+        return conversation_target_dict(self._identity_for_runtime_key(str(chat_or_runtime_key)))
+
+    def _platform_chat_id(self, chat_or_runtime_key: str) -> str:
+        return self._identity_for_runtime_key(str(chat_or_runtime_key)).platform_chat_id
+
+    def _storage_id_for_key(self, chat_or_runtime_key: str) -> str:
+        return self._identity_for_runtime_key(str(chat_or_runtime_key)).storage_id
+
+    def _platform_for_key(self, chat_or_runtime_key: str) -> str:
+        return self._identity_for_runtime_key(str(chat_or_runtime_key)).platform
+
+    async def _send_platform_message(self, chat_or_runtime_key: str, text: str, **kwargs):
+        return await self.adapter.send_message(
+            self._platform_chat_id(chat_or_runtime_key),
+            text,
+            **kwargs,
+        )
+
+    async def _start_platform_typing(self, chat_or_runtime_key: str):
+        return await self.adapter.start_typing(self._platform_chat_id(chat_or_runtime_key))
+
+    async def _stop_platform_typing(self, chat_or_runtime_key: str):
+        return await self.adapter.stop_typing(self._platform_chat_id(chat_or_runtime_key))
+
+    async def _delete_platform_message(self, chat_or_runtime_key: str, message_id: str, **kwargs) -> bool:
+        return await self.adapter.delete_message(
+            self._platform_chat_id(chat_or_runtime_key),
+            message_id,
+            **kwargs,
+        )
+
     async def _handle_trigger_notification(self, chat_id: str, reason: str, event_type: str):
         """将外部 trigger 事件转换为主动消息链路通知。"""
         await self._send_proactive_message(chat_id, reason, event_type=event_type)
@@ -248,15 +371,19 @@ class NoraController(
         if self.trigger_manager:
             if default_chat_id:
                 self.trigger_manager.default_chat_id = default_chat_id
+                self.trigger_manager.default_chat_target = self._target_for_key(default_chat_id)
             if not self.trigger_manager.default_chat_id:
                 # 兜底：先从 scheduler 同步，再从持久化文件兜底
                 if self.scheduler and self.scheduler.default_chat_id:
                     self.trigger_manager.default_chat_id = self.scheduler.default_chat_id
+                    self.trigger_manager.default_chat_target = self._target_for_key(self.scheduler.default_chat_id)
                 else:
                     try:
-                        persisted = load_default_chat_id()
-                        if persisted:
-                            self.trigger_manager.default_chat_id = persisted
+                        persisted_target = load_default_chat_target()
+                        if persisted_target:
+                            identity = self._identity_from_target(persisted_target)
+                            self.trigger_manager.default_chat_id = identity.runtime_key
+                            self.trigger_manager.default_chat_target = conversation_target_dict(identity)
                     except Exception as e:
                         logger.warning(f"start_triggers 兜底读取 default_chat_id 失败: {e}")
 
@@ -265,6 +392,8 @@ class NoraController(
                 for trig in getattr(self.trigger_manager, "_triggers", []) or []:
                     if hasattr(trig, "default_chat_id") and not trig.default_chat_id:
                         trig.default_chat_id = self.trigger_manager.default_chat_id
+                    if hasattr(trig, "default_chat_target") and not getattr(trig, "default_chat_target", None):
+                        trig.default_chat_target = dict(self.trigger_manager.default_chat_target or {})
 
             logger.info(
                 f"Trigger 启动参数: default_chat_id={self.trigger_manager.default_chat_id or '(empty)'}"
@@ -377,7 +506,7 @@ class NoraController(
             if len(message) > 2000:
                 message = message[:2000] + "\n... (truncated)"
             safe_debug = f"```\n🐛 {message}\n```"
-            await self.adapter.send_message(chat_id, safe_debug, parse_media=False)
+            await self._send_platform_message(chat_id, safe_debug, parse_media=False)
         except Exception as e:
             logger.debug(f"[{chat_id}] 发送 debug 消息失败: {e}")
 
@@ -410,6 +539,7 @@ class NoraController(
         platform: str = "",
         platform_message_id: Optional[str] = None,
         tag_status: str = "completed",
+        storage_id: str = "",
     ):
         """异步保存图片元数据到 MongoDB + Qdrant。"""
         try:
@@ -427,6 +557,7 @@ class NoraController(
                 platform=platform,
                 platform_message_id=platform_message_id,
                 tag_status=tag_status,
+                storage_id=storage_id,
             )
             logger.debug(f"[{chat_id}] 图片元数据已异步保存: {image_id}" + (f" (含 OCR {len(ocr_text)} 字)" if ocr_text else ""))
         except Exception as e:
@@ -441,6 +572,7 @@ class NoraController(
         platform: str = "",
         platform_message_id: Optional[str] = None,
         media_type: str = "image",
+        storage_id: str = "",
     ):
         """异步保存占位媒体元数据（无标签，不写向量）。"""
         try:
@@ -453,6 +585,7 @@ class NoraController(
                 platform=platform,
                 platform_message_id=platform_message_id,
                 media_type=media_type,
+                storage_id=storage_id,
             )
             logger.debug(f"[{chat_id}] 图片占位已异步保存: {image_id}")
         except Exception as e:
@@ -468,6 +601,7 @@ class NoraController(
         file_path: str,
         platform: str = "",
         platform_message_id: Optional[str] = None,
+        storage_id: str = "",
     ):
         """异步补充标签/OCR 并写向量。"""
         try:
@@ -481,6 +615,7 @@ class NoraController(
                 file_path=file_path,
                 platform=platform,
                 platform_message_id=platform_message_id,
+                storage_id=storage_id,
             )
             logger.debug(f"[{chat_id}] 图片标签已异步更新: {image_id}")
         except Exception as e:

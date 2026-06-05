@@ -1,6 +1,6 @@
 from abc import ABC, abstractmethod
 from dataclasses import asdict, dataclass
-from typing import Any, Awaitable, Callable, Dict
+from typing import Any, Awaitable, Callable, Dict, List
 
 
 MessageHandler = Callable[[Dict[str, Any]], Awaitable[Any] | Any]
@@ -87,8 +87,8 @@ class BaseAdapter(ABC):
         }
 
     @abstractmethod
-    async def send_message(self, chat_id: str, text: str, **kwargs) -> str:
-        """发送一条完整消息，返回平台消息 ID。"""
+    async def send_message(self, chat_id: str, text: str, **kwargs) -> List[str]:
+        """发送一条或多条平台消息，返回平台消息 ID 列表。"""
 
     @abstractmethod
     async def start_typing(self, chat_id: str):

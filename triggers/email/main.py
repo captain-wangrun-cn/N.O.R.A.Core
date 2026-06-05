@@ -15,9 +15,10 @@ import os
 import re
 from email.header import decode_header
 from email.message import Message
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 from brain.prompts import render_template, get_soul_prompt, _read_file_safe, WORKSPACE_USER_FILE
+from core.conversation_identity import build_identity_from_target, conversation_target_dict
 from triggers.base import BaseTrigger, TriggerEvent, TriggerFeatures
 from workspace_config import get_workspace_manager
 from memory.message_history import MessageHistory
@@ -28,10 +29,16 @@ logger = logging.getLogger(__name__)
 class EmailTrigger(BaseTrigger):
     """IMAP 邮件触发器：轮询新邮件并用 fast 模型判断是否通知 Nora。"""
 
-    def __init__(self, cfg: Dict[str, Any], default_chat_id: str = ""):
+    def __init__(
+        self,
+        cfg: Dict[str, Any],
+        default_chat_id: str = "",
+        default_chat_target: Optional[Dict[str, Any]] = None,
+    ):
         super().__init__()
         self.cfg = cfg
         self.default_chat_id = default_chat_id
+        self.default_chat_target = dict(default_chat_target or {})
         history_cfg = __import__("config").get_message_history_config()
         self.message_history = MessageHistory(
             db_path=history_cfg.get("db_path"),
@@ -52,6 +59,23 @@ class EmailTrigger(BaseTrigger):
         self._reviewed_store_max = int(self.cfg.get("reviewed_store_max", 5000) or 5000)
         self._warned_missing_config = False
         self._poll_round = 0
+
+    def _resolve_target(self) -> Dict[str, str]:
+        configured_chat_id = str(self.cfg.get("chat_id") or "").strip()
+        if configured_chat_id:
+            identity = build_identity_from_target(
+                {"runtime_key": configured_chat_id, "chat_type": "private"}
+            )
+            return conversation_target_dict(identity)
+        if self.default_chat_target:
+            identity = build_identity_from_target(self.default_chat_target)
+            return conversation_target_dict(identity)
+        if self.default_chat_id:
+            identity = build_identity_from_target(
+                {"runtime_key": self.default_chat_id, "chat_type": "private"}
+            )
+            return conversation_target_dict(identity)
+        return {}
 
     @property
     def trigger_name(self) -> str:
@@ -193,9 +217,11 @@ class EmailTrigger(BaseTrigger):
         history: List[Dict[str, str]] = []
 
         try:
-            review_chat_id = (self.cfg.get("chat_id") or self.default_chat_id or "").strip()
-            if review_chat_id:
-                db_context = self.message_history.get_context_messages("telegram", review_chat_id)
+            target = self._resolve_target()
+            if target:
+                platform = str(target.get("platform") or "telegram")
+                storage_id = str(target.get("storage_id") or target.get("chat_id") or "")
+                db_context = self.message_history.get_context_messages(platform, storage_id)
                 history = [
                     {
                         "role": str(msg.get("role", "")).strip(),
@@ -265,7 +291,7 @@ class EmailTrigger(BaseTrigger):
             event_type="trigger_email",
             reason=event_reason,
             payload=email_data,
-            chat_id=(self.cfg.get("chat_id") or self.default_chat_id or None),
+            chat_id=(self._resolve_target().get("runtime_key") or None),
         )
         logger.info(f"[trigger:email] 命中通知规则，准备分发事件: subject={subject[:80]}")
         await self.dispatch_event(event)

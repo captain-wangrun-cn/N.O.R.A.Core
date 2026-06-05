@@ -138,6 +138,17 @@ class MessageLog:
         conn.commit()
         conn.close()
 
+    def clear_chat(self, platform: str, chat_id: str) -> None:
+        """删除指定平台会话的所有镜像消息。"""
+        conn = sqlite3.connect(str(self.db_path))
+        cursor = conn.cursor()
+        cursor.execute(
+            "DELETE FROM raw_messages WHERE platform = ? AND chat_id = ?",
+            (platform, chat_id),
+        )
+        conn.commit()
+        conn.close()
+
 
 # ---------------------------------------------------------------------------
 # 上下文压缩存储：滑动窗口策略
@@ -650,6 +661,17 @@ class ContextCompressor:
                 }
             )
         return messages
+
+    def clear_chat(self, platform: str, chat_id: str) -> None:
+        """删除指定平台会话的压缩上下文片段。"""
+        conn = sqlite3.connect(str(self.db_path))
+        cursor = conn.cursor()
+        cursor.execute(
+            "DELETE FROM context_segments WHERE platform = ? AND chat_id = ?",
+            (platform, chat_id),
+        )
+        conn.commit()
+        conn.close()
 
 
 __all__ = [

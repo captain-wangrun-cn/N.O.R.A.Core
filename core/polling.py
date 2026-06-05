@@ -36,7 +36,10 @@ class PollingMixin:
         - 前脑审查时：从 DB 获取后脑启动后的新用户消息注入审查上下文
         - 前脑生成期间到达的新消息：等前脑完成后在下一轮审查中处理
         """
-        chat_id = context["chat_id"]
+        identity = self._identity(context)
+        chat_id = identity.runtime_key
+        platform = identity.platform
+        storage_id = identity.storage_id
         
         # 标记轮询模式，让 _generate_response 的 finally 不自动处理队列
         context = context.copy()
@@ -59,13 +62,9 @@ class PollingMixin:
                     return  # 被打断时不进入审查
                 
                 # --- 前脑审查 ---
-                chat_type = context.get("chat_type", "private")
-                user_id = context["user_id"]
-                storage_id = chat_id if chat_type != "private" else user_id
-                
                 # 获取后脑执行期间用户发送的新消息
                 new_user_msgs = self.message_history.get_messages_since(
-                    "telegram", storage_id, backend_start_ts, role="user"
+                    platform, storage_id, backend_start_ts, role="user"
                 )
                 new_user_texts = [
                     self._strip_timestamp_markers(str(msg["content"]))
@@ -161,7 +160,7 @@ class PollingMixin:
                     
                     # 保存到数据库
                     self.message_history.add_message(
-                        platform="telegram",
+                        platform=platform,
                         chat_id=storage_id,
                         role="assistant",
                         content=review_reply,
@@ -245,15 +244,11 @@ class PollingMixin:
         if remaining > 0:
             try:
                 msg = f"📋 开始处理排队任务... (还有 {remaining} 个任务在等待)"
-                await self.adapter.send_message(
-                    chat_id,
-                    msg,
-                    parse_media=False
-                )
-                storage_id = chat_id if context.get("chat_type", "private") != "private" else context.get("user_id", chat_id)
+                await self._send_platform_message(chat_id, msg, parse_media=False)
+                identity = self._identity(context)
                 self.message_history.add_message(
-                    platform="telegram",
-                    chat_id=storage_id,
+                    platform=identity.platform,
+                    chat_id=identity.storage_id,
                     role="assistant",
                     content=msg,
                     user_id="assistant",

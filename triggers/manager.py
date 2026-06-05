@@ -4,7 +4,7 @@ date:          2026-04-02 22:08:41
 Copyright © WR（captain-wangrun-cn） All rights reserved
 '''
 import logging
-from typing import Any, Awaitable, Callable, Dict, List
+from typing import Any, Awaitable, Callable, Dict, List, Optional
 
 from .base import BaseTrigger, TriggerEvent
 
@@ -21,9 +21,11 @@ class TriggerManager:
         *,
         notify_callback: TriggerNotifyCallback,
         default_chat_id: str = "",
+        default_chat_target: Optional[Dict[str, Any]] = None,
     ):
         self._notify_callback = notify_callback
         self.default_chat_id = default_chat_id
+        self.default_chat_target = dict(default_chat_target or {})
         self._triggers: List[BaseTrigger] = []
         self._is_running = False
 

@@ -45,7 +45,17 @@ class RAGEngine:
             logger.error(f"存储记忆时发生错误: {e}")
             return False
 
-    def retrieve_memory(self, query_text: str, user_id: str, top_k: int = 5) -> List[Dict[str, Any]]:
+    def retrieve_memory(
+        self,
+        query_text: str,
+        user_id: str,
+        top_k: int = 5,
+        *,
+        platform: str = "",
+        chat_id: str = "",
+        storage_id: str = "",
+        chat_type: str = "",
+    ) -> List[Dict[str, Any]]:
         """
         检索相关记忆。
         过程: Query -> Vector -> DB Search
@@ -60,18 +70,45 @@ class RAGEngine:
                 return []
 
             # 2. 搜索数据库
-            results = self.vector_store.query(vector, top_k, filter_criteria={"user_id": user_id})
+            filter_criteria: Dict[str, Any] = {"user_id": user_id}
+            if platform:
+                filter_criteria["platform"] = platform
+            if chat_id:
+                filter_criteria["chat_id"] = chat_id
+            if storage_id:
+                filter_criteria["storage_id"] = storage_id
+            if chat_type:
+                filter_criteria["chat_type"] = chat_type
+            results = self.vector_store.query(vector, top_k, filter_criteria=filter_criteria)
             return results
             
         except Exception as e:
             logger.error(f"检索记忆时发生错误: {e}")
             return []
 
-    def get_context_string(self, query_text: str, user_id: str, top_k: int = 5) -> str:
+    def get_context_string(
+        self,
+        query_text: str,
+        user_id: str,
+        top_k: int = 5,
+        *,
+        platform: str = "",
+        chat_id: str = "",
+        storage_id: str = "",
+        chat_type: str = "",
+    ) -> str:
         """
         [Helper] 检索并格式化为适合注入 Prompt 的字符串。
         """
-        memories = self.retrieve_memory(query_text, user_id, top_k)
+        memories = self.retrieve_memory(
+            query_text,
+            user_id,
+            top_k,
+            platform=platform,
+            chat_id=chat_id,
+            storage_id=storage_id,
+            chat_type=chat_type,
+        )
         if not memories:
             return ""
 
