@@ -213,6 +213,8 @@ flowchart TB
   - 图片/视频 ID 分配、LLM 标签提取、MongoDB + Qdrant 双写、语义检索与 `view_media` 工具。
 - **[身份与记忆文件一览](./identity_files.md)**
   - SOUL/USER/MEMORY/SCHEDULE/CUSTOM/SECRET 文件的角色、边界、专用工具与 openclaw 启发说明。
+- **[跨平台接力与五层身份模型](./cross-platform-relay.md)**
+  - 同一个 Nora 跨平台连续：五层身份模型、共享 `memory_scope_id`、主人/访客分离、最近活跃端投递。
 - **[Nora 偏好系统 (Nora Preferences)](./nora-preferences.md)**
   - 偏好配置结构、follow-up / proactive 概率逻辑、prompt 注入分层、Telegram `/nora_prefs` 调整入口。
 - **[词库系统 (Lexicon System)](./lexicon-system.md)**

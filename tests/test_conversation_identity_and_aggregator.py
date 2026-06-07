@@ -2,9 +2,12 @@ import asyncio
 
 from adapters.aggregator import MessageAggregator
 from core.conversation_identity import (
+    DEFAULT_OWNER_ID,
+    DEFAULT_RELATIONSHIP_ID,
     build_conversation_identity,
     build_identity_from_target,
     conversation_target_dict,
+    set_owner_resolver,
 )
 
 
@@ -35,6 +38,85 @@ def test_conversation_target_round_trips_private_storage_id():
     assert restored.platform_chat_id == "chat-1"
     assert restored.actor_user_id == "user-1"
     assert restored.storage_id == "user-1"
+
+
+def test_shared_memory_scope_across_platforms():
+    """三平台私聊归入同一 memory_scope_id，但 place/runtime 各不相同。"""
+    set_owner_resolver(None)
+    try:
+        tg = build_conversation_identity(
+            {"platform": "telegram", "chat_id": "c1", "user_id": "u1", "chat_type": "private"}
+        )
+        web = build_conversation_identity(
+            {"platform": "web", "chat_id": "c2", "user_id": "u1", "chat_type": "private"}
+        )
+        discord = build_conversation_identity(
+            {"platform": "discord", "chat_id": "c3", "user_id": "u1", "chat_type": "private"}
+        )
+
+        # 共享上下文主键一致
+        assert tg.memory_scope_id == web.memory_scope_id == discord.memory_scope_id
+        assert tg.memory_scope_id == DEFAULT_RELATIONSHIP_ID
+        assert tg.owner_id == DEFAULT_OWNER_ID
+
+        # 来源地点 & runtime_key 各异
+        assert tg.place_scope_id == "telegram:c1"
+        assert web.place_scope_id == "web:c2"
+        assert discord.place_scope_id == "discord:c3"
+        assert len({tg.runtime_key, web.runtime_key, discord.runtime_key}) == 3
+    finally:
+        set_owner_resolver(None)
+
+
+def test_actor_display_name_captured_and_persisted():
+    set_owner_resolver(None)
+    try:
+        identity = build_conversation_identity(
+            {
+                "platform": "telegram",
+                "chat_id": "group-1",
+                "user_id": "u9",
+                "user_name": "张三",
+                "chat_type": "group",
+            }
+        )
+        assert identity.actor_display_name == "张三"
+
+        restored = build_identity_from_target(conversation_target_dict(identity))
+        assert restored.actor_display_name == "张三"
+        assert restored.memory_scope_id == DEFAULT_RELATIONSHIP_ID
+        assert restored.place_scope_id == "telegram:group-1"
+    finally:
+        set_owner_resolver(None)
+
+
+def test_owner_resolver_injection_sets_is_owner():
+    """注入的 resolver 决定 is_owner；恢复 target 时优先用持久化值避免副作用。"""
+    calls = []
+
+    def resolver(platform, user_id, chat_type):
+        calls.append((platform, user_id, chat_type))
+        return user_id == "owner-uid"
+
+    set_owner_resolver(resolver)
+    try:
+        owner = build_conversation_identity(
+            {"platform": "telegram", "chat_id": "c1", "user_id": "owner-uid", "chat_type": "private"}
+        )
+        visitor = build_conversation_identity(
+            {"platform": "telegram", "chat_id": "g1", "user_id": "other", "chat_type": "group"}
+        )
+        assert owner.is_owner is True
+        assert visitor.is_owner is False
+        assert len(calls) == 2
+
+        # 持久化里带 is_owner=True，恢复时不应再调用 resolver
+        calls.clear()
+        restored = build_identity_from_target(conversation_target_dict(owner))
+        assert restored.is_owner is True
+        assert calls == []
+    finally:
+        set_owner_resolver(None)
 
 
 def test_aggregator_separates_same_chat_id_across_platforms():

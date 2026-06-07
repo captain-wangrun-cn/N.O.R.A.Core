@@ -76,10 +76,21 @@ LLM 基于找回图片继续分析并回复
     "ocr_text": "（图片中提取的文字内容，如有）",
     "user_id": "123456789",
     "chat_id": "123456789",
+    "platform": "telegram",
+    "memory_scope_id": "relationship:owner:default",
+    "place_scope_id": "telegram:123456789",
+    "owner_id": "owner:default",
+    "relationship_id": "relationship:owner:default",
+    "actor_display_name": "张三",
     "timestamp": 1709856000.0,
     "datetime": "2024-03-08T00:00:00+00:00"
 }
 ```
+
+> **检索主键（跨平台接力后）**：`view_media` 默认按 `memory_scope_id` 过滤，跨平台能找回别处发过的图；
+> 旧记录缺 scope 字段时回退旧 `user_id/chat_id` 兼容逻辑。精确回查（reply 引用历史图）仍走
+> `platform + platform_message_id + chat_id` 不串图。详见
+> [跨平台接力与五层身份模型](./cross-platform-relay.md)。
 
 **索引:**
 - `image_id` (唯一)

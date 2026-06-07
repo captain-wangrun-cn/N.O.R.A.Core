@@ -50,7 +50,10 @@ class VectorStore:
                     )
                 )
                 logger.info(f"Collection '{self.collection_name}' 创建成功。")
-            for field in ("user_id", "platform", "chat_id", "storage_id", "chat_type"):
+            for field in (
+                "user_id", "platform", "chat_id", "storage_id", "chat_type",
+                "owner_id", "relationship_id", "memory_scope_id", "place_scope_id",
+            ):
                 self._ensure_payload_index(field)
             logger.info(f"Collection '{self.collection_name}' 会话维度索引已确认。")
         except Exception as e:

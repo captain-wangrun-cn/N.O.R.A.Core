@@ -16,6 +16,7 @@ from brain.prompts import render_template, get_soul_prompt, load_identity_contex
 from core.routing import has_image_input
 from core.conversation_identity import conversation_target_dict
 from core.default_chat_id_store import save_default_chat_target
+from core.delivery_target_store import update_last_active_target
 from core.scheduler import (
     AIPresence,
     set_ai_presence,
@@ -72,6 +73,10 @@ class MessageHandlerMixin:
         text = context["text"]
         chat_type = identity.chat_type
         user_name = context.get("user_name", "User")
+        # 跨平台接力作用域字段（统一在身份解包处取，供下方所有 add_message/读取调用复用）
+        memory_scope_id = identity.memory_scope_id
+        place_scope_id = identity.place_scope_id
+        actor_display_name = identity.actor_display_name
 
         # 解析多模态输入：从 [image: ...] 中提取真实图片内容
         clean_text, multimodal_images = extract_image_payloads(text)
@@ -184,7 +189,16 @@ class MessageHandlerMixin:
                 if hasattr(trig, "default_chat_target") and not getattr(trig, "default_chat_target", None):
                     trig.default_chat_target = dict(self.trigger_manager.default_chat_target)
             logger.info(f"Trigger default_chat_id 已设置: {chat_id}")
-        
+
+        # ── 更新最近活跃投递端（跨平台接力 Phase 4）──
+        # 主动消息默认投递到用户最后活跃的私聊端；群聊活跃不改变投递目标
+        # （update_last_active_target 内部已对群聊做拦截，落实「仅私聊投递」）。
+        if chat_type == "private":
+            try:
+                update_last_active_target(conversation_target_dict(identity))
+            except Exception as e:
+                logger.debug(f"[{chat_id}] 更新最近活跃投递端失败: {e}")
+
         # ── 命令分发 ──
         stripped = text.strip()
 
@@ -259,6 +273,9 @@ class MessageHandlerMixin:
                     content=message_content,
                     user_id=user_id,
                     metadata=user_metadata or None,
+                    memory_scope_id=memory_scope_id,
+                    place_scope_id=place_scope_id,
+                    actor_display_name=actor_display_name,
                 )
                 context["_message_saved"] = True
 
@@ -347,6 +364,9 @@ class MessageHandlerMixin:
                 content=message_content,
                 user_id=user_id,
                 metadata=user_metadata or None,
+                memory_scope_id=memory_scope_id,
+                place_scope_id=place_scope_id,
+                actor_display_name=actor_display_name,
             )
             decision = await self._detect_interrupt_intent_and_reply(chat_id, text, status)
             action = decision.get("action", "queue")
@@ -371,6 +391,8 @@ class MessageHandlerMixin:
                         content=reply,
                         user_id="assistant",
                         metadata=md,
+                        memory_scope_id=memory_scope_id,
+                        place_scope_id=place_scope_id,
                     )
                     session_history.append({"role": "assistant", "content": reply})
                 await self._interrupt_backend(chat_id, reason=action, user_text=text, skip_reply=True)
@@ -390,6 +412,8 @@ class MessageHandlerMixin:
                         content=reply,
                         user_id="assistant",
                         metadata=md,
+                        memory_scope_id=memory_scope_id,
+                        place_scope_id=place_scope_id,
                     )
                     session_history.append({"role": "assistant", "content": reply})
                 return
@@ -415,6 +439,8 @@ class MessageHandlerMixin:
                         content=reply,
                         user_id="assistant",
                         metadata=md,
+                        memory_scope_id=memory_scope_id,
+                        place_scope_id=place_scope_id,
                     )
                     session_history.append({"role": "assistant", "content": reply})
                 return
@@ -436,6 +462,8 @@ class MessageHandlerMixin:
                         content=reply,
                         user_id="assistant",
                         metadata=md,
+                        memory_scope_id=memory_scope_id,
+                        place_scope_id=place_scope_id,
                     )
                     session_history.append({"role": "assistant", "content": reply})
                 return
@@ -483,6 +511,9 @@ class MessageHandlerMixin:
                 content=message_content,
                 user_id=user_id,
                 metadata=user_metadata or None,
+                memory_scope_id=memory_scope_id,
+                place_scope_id=place_scope_id,
+                actor_display_name=actor_display_name,
             )
             context["_message_saved"] = True
 
@@ -539,6 +570,8 @@ class MessageHandlerMixin:
                 content=user_reply,
                 user_id="assistant",
                 metadata=metadata,
+                memory_scope_id=memory_scope_id,
+                place_scope_id=place_scope_id,
             )
 
             # 同步到 session history
@@ -727,7 +760,10 @@ class MessageHandlerMixin:
         front_reply: str = "",
     ) -> None:
         """后脑忙碌时，先缓存待入队任务并向用户发起二次确认。"""
-        platform = self._platform_for_key(chat_id)
+        identity = self._identity_for_runtime_key(chat_id)
+        platform = identity.platform
+        memory_scope_id = identity.memory_scope_id
+        place_scope_id = identity.place_scope_id
         session = self.sessions.setdefault(chat_id, {"history": [], "interrupted_thought": "", "pending_text": ""})
 
         queue = self.task_queues.get(chat_id)
@@ -764,6 +800,8 @@ class MessageHandlerMixin:
                 content=front_reply,
                 user_id="assistant",
                 metadata=front_metadata,
+                memory_scope_id=memory_scope_id,
+                place_scope_id=place_scope_id,
             )
             session_history.append({"role": "assistant", "content": front_reply})
 
@@ -780,6 +818,8 @@ class MessageHandlerMixin:
                 content=confirm_reply,
                 user_id="assistant",
                 metadata=metadata,
+                memory_scope_id=memory_scope_id,
+                place_scope_id=place_scope_id,
             )
             session_history.append({"role": "assistant", "content": confirm_reply})
 
@@ -802,6 +842,9 @@ class MessageHandlerMixin:
         storage_id = identity.storage_id
         user_id = identity.actor_user_id
         chat_type = identity.chat_type
+        memory_scope_id = identity.memory_scope_id
+        place_scope_id = identity.place_scope_id
+        actor_display_name = identity.actor_display_name
         session = self.sessions.setdefault(chat_id, {"history": [], "interrupted_thought": "", "pending_text": ""})
         pending = session.get("pending_backend_enqueue")
         if not pending:
@@ -845,6 +888,9 @@ class MessageHandlerMixin:
             content=message_content,
             user_id=user_id,
             metadata=user_metadata or None,
+            memory_scope_id=memory_scope_id,
+            place_scope_id=place_scope_id,
+            actor_display_name=actor_display_name,
         )
         context["_message_saved"] = True
 
@@ -886,6 +932,8 @@ class MessageHandlerMixin:
                 content=reply,
                 user_id="assistant",
                 metadata=metadata,
+                memory_scope_id=memory_scope_id,
+                place_scope_id=place_scope_id,
             )
             session_history.append({"role": "assistant", "content": reply})
 
@@ -1036,11 +1084,12 @@ class MessageHandlerMixin:
         identity = self._identity_for_runtime_key(chat_id)
         platform = identity.platform
         storage_id = identity.storage_id
+        memory_scope_id = identity.memory_scope_id
         if chat_id in self.generation_tasks:
             self.generation_tasks[chat_id].cancel()
             await asyncio.sleep(0.1)
         self.sessions[chat_id] = {"history": [], "interrupted_thought": ""}
-        self.message_history.clear_chat_history(platform, storage_id, keep_pinned=True)
+        self.message_history.clear_chat_history(platform, storage_id, keep_pinned=True, memory_scope_id=memory_scope_id)
         status = self.worker_status.get(chat_id)
         if status:
             status.finish()
@@ -1063,6 +1112,7 @@ class MessageHandlerMixin:
         identity = self._identity_for_runtime_key(chat_id)
         platform = identity.platform
         storage_id = identity.storage_id
+        memory_scope_id = identity.memory_scope_id
         try:
             if chat_id in self.generation_tasks:
                 self.generation_tasks[chat_id].cancel()
@@ -1074,9 +1124,9 @@ class MessageHandlerMixin:
             status = self.worker_status.get(chat_id)
             if status:
                 status.finish()
-            self.message_history.clear_chat_history(platform, storage_id, keep_pinned=False)
-            await self._send_platform_message(chat_id, "✅ 当前聊天的历史记录已清空。")
-            logger.info(f"[{chat_id}] 聊天历史已通过 /clear 命令清空。")
+            self.message_history.clear_chat_history(platform, storage_id, keep_pinned=False, memory_scope_id=memory_scope_id)
+            await self._send_platform_message(chat_id, "✅ 已清空跨平台共享的聊天记录（所有平台/窗口的共享上下文）。")
+            logger.info(f"[{chat_id}] 聊天历史已通过 /clear 命令清空（共享作用域 {memory_scope_id}）。")
         except Exception as e:
             logger.error(f"[{chat_id}] 清空历史记录时出错: {e}")
             await self._send_platform_message(chat_id, "❌ 清空历史记录时发生错误。")
@@ -1085,6 +1135,8 @@ class MessageHandlerMixin:
         identity = self._identity_for_runtime_key(chat_id)
         platform = identity.platform
         storage_id = identity.storage_id
+        memory_scope_id = identity.memory_scope_id
+        place_scope_id = identity.place_scope_id
         try:
             if chat_id in self.generation_tasks:
                 self.generation_tasks[chat_id].cancel()
@@ -1108,6 +1160,8 @@ class MessageHandlerMixin:
                 role="assistant",
                 content=reply,
                 user_id="assistant",
+                memory_scope_id=memory_scope_id,
+                place_scope_id=place_scope_id,
             )
             logger.info(f"[{chat_id}] 已通过 /stop 命令停止所有任务。")
         except Exception as e:
@@ -1186,6 +1240,7 @@ class MessageHandlerMixin:
         identity = self._identity_for_runtime_key(chat_id)
         platform = identity.platform
         storage_id = identity.storage_id
+        memory_scope_id = identity.memory_scope_id
         try:
             lines = ["📊 **N.O.R.A. Core 状态报告**\n"]
             
@@ -1274,7 +1329,7 @@ class MessageHandlerMixin:
             
             # 对话分段统计
             try:
-                stats = self.message_history.get_statistics(platform, storage_id)
+                stats = self.message_history.get_statistics(platform, storage_id, memory_scope_id=memory_scope_id)
                 lines.append("")
                 lines.append(f"📋 对话段落: {stats.get('total_sessions', 0)} 个已封闭")
                 active_msgs = stats.get('active_messages', 0)
@@ -1293,9 +1348,13 @@ class MessageHandlerMixin:
         identity = self._identity_for_runtime_key(chat_id)
         platform = identity.platform
         storage_id = identity.storage_id
+        memory_scope_id = identity.memory_scope_id
+        place_scope_id = identity.place_scope_id
         try:
-            context_msgs = self.message_history.get_context_messages(platform, storage_id)
-            stats = self.message_history.get_statistics(platform, storage_id)
+            context_msgs = self.message_history.get_context_messages(
+                platform, storage_id, memory_scope_id=memory_scope_id, current_place_scope_id=place_scope_id
+            )
+            stats = self.message_history.get_statistics(platform, storage_id, memory_scope_id=memory_scope_id)
 
             total_chars = sum(len(msg.get("content", "")) for msg in context_msgs)
             estimated_tokens = int(total_chars / 1.5)
@@ -1433,6 +1492,8 @@ class MessageHandlerMixin:
         identity = self._identity_for_runtime_key(chat_id)
         platform = identity.platform
         storage_id = identity.storage_id
+        memory_scope_id = identity.memory_scope_id
+        place_scope_id = identity.place_scope_id
         parts = text.strip().split()
         arg = parts[1].lower() if len(parts) >= 2 else ""
         current = self.non_stream_flags.get(chat_id, self.default_non_stream)
@@ -1451,4 +1512,6 @@ class MessageHandlerMixin:
             role="assistant",
             content=msg,
             user_id="assistant",
+            memory_scope_id=memory_scope_id,
+            place_scope_id=place_scope_id,
         )

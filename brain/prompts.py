@@ -61,6 +61,8 @@ _workspace = get_workspace_manager()
 WORKSPACE_ROOT = _workspace.root
 WORKSPACE_DATA_DIR = _workspace.data_dir
 WORKSPACE_MEMORY_DIR = os.path.join(WORKSPACE_DATA_DIR, "memory")
+# Nora 的自主人物记忆区：她想记住某个人（尤其群聊里的访客）就在这里按昵称建文件。
+WORKSPACE_PEOPLE_DIR = os.path.join(WORKSPACE_MEMORY_DIR, "people")
 LEGACY_MEMORY_DIR = os.path.join(PROJECT_ROOT, "memory")
 os.makedirs(WORKSPACE_MEMORY_DIR, exist_ok=True)
 
@@ -120,6 +122,12 @@ def _ensure_workspace_identity_files():
             except Exception as e:
                 logger.warning(f"复制 {src} 到 {dst} 失败: {e}")
 
+    # 确保 Nora 的自主人物记忆区存在（跨平台接力：她可按昵称给访客/熟人建档）。
+    try:
+        os.makedirs(WORKSPACE_PEOPLE_DIR, exist_ok=True)
+    except Exception as e:
+        logger.warning(f"创建人物记忆目录失败 {WORKSPACE_PEOPLE_DIR}: {e}")
+
 
 def _resolve_memory_file(filename: str) -> str:
     """
@@ -154,12 +162,21 @@ def get_soul_prompt() -> str:
     return persona_template.render()
 
 
-def load_identity_context(*, include_schedule: bool = True) -> str:
+def load_identity_context(
+    *,
+    include_schedule: bool = True,
+    actor_display_name: str = "",
+    is_owner: bool = True,
+    chat_type: str = "private",
+) -> str:
     """
     加载 SOUL.md + USER.md + MEMORY.md (+ SCHEDULE.md) 组成身份上下文。
 
     Args:
         include_schedule: 是否在身份上下文中包含 SCHEDULE.md（默认包含）。
+        actor_display_name: 当前这轮说话人的昵称（用于"是谁在说话"判断）。
+        is_owner: 当前说话人是否为主人。默认 True 以兼容旧调用（私聊即主人）。
+        chat_type: 当前会话类型（private/group/...），用于决定是否提示群聊得体性。
     """
     _ensure_workspace_identity_files()
 
@@ -187,6 +204,14 @@ def load_identity_context(*, include_schedule: bool = True) -> str:
         if schedule:
             sections.append(f"<schedule>\n{schedule}\n</schedule>")
 
+    speaker_block = _build_current_speaker_block(
+        actor_display_name=actor_display_name,
+        is_owner=is_owner,
+        chat_type=chat_type,
+    )
+    if speaker_block:
+        sections.append(speaker_block)
+
     if not sections:
         return ""
 
@@ -194,9 +219,53 @@ def load_identity_context(*, include_schedule: bool = True) -> str:
         "【身份与记忆上下文 (Identity & Memory Context)】\n"
         "以下文件在每次会话开始时自动加载。如果 SOUL.md 存在，请体现其人设和语气。\n"
         "请使用通用文件工具 `read_file`、`write_file`、`edit_file` 来更新这些文件。\n"
-        "⚠️ 严格遵守各文件边界：SOUL=AI人设 | USER=用户信息 | SCHEDULE=作息日程 | MEMORY=长期记忆\n\n"
+        "⚠️ USER.md 描述的是你的**主人**，不一定是当前跟你说话的人（见 <current_speaker>）。\n"
+        "⚠️ 严格遵守各文件边界：SOUL=AI人设 | USER=主人信息 | SCHEDULE=作息日程 | MEMORY=长期记忆\n\n"
         + "\n\n".join(sections)
     )
+
+
+def _build_current_speaker_block(
+    *,
+    actor_display_name: str = "",
+    is_owner: bool = True,
+    chat_type: str = "private",
+) -> str:
+    """构造"当前是谁在说话"注入块。
+
+    跨平台接力 / 主人-访客分离：USER.md 写的是主人，但当前说话人不一定是主人
+    （尤其群聊）。把说话人昵称与 is_owner 显式注入，让 Nora 判断语气与边界。
+    主人私聊是默认场景，不额外加噪声；只有"非主人"或"群聊"才注入提示。
+    """
+    name = (actor_display_name or "").strip()
+    is_group = str(chat_type or "").strip().lower() not in ("private", "")
+
+    # 主人 + 私聊：默认场景，保持上下文纯净，不注入。
+    if is_owner and not is_group:
+        return ""
+
+    lines = ["<current_speaker>"]
+    who = name or "（未提供昵称）"
+    if is_owner:
+        # 主人，但在群里：提醒注意场合得体性。
+        lines.append(f"当前说话人：{who}（这是你的**主人**本人）。")
+        lines.append(
+            "你正处在**群聊/公开场景**。USER.md 里的私人信息、隐私、私下约定，"
+            "要像真人一样判断哪些适合在这种场合提起，哪些只适合私聊时再说——不要机械地把私密内容抖出来。"
+        )
+    else:
+        # 非主人：这是访客。
+        lines.append(f"当前说话人：{who}（**不是你的主人**，是一位访客/其他人）。")
+        lines.append(
+            "USER.md 描述的是你的主人，**不要把它当成对方**——别把主人的偏好、隐私、私下约定安在这位访客身上，"
+            "也不要替主人向陌生人透露这些。对访客保持礼貌、有边界，像真人面对不太熟的人那样自然。"
+        )
+        lines.append(
+            "如果你想记住这位访客（聊得多了、值得记），可以在 `data/memory/people/` 下按昵称给 ta 建一份笔记，"
+            "记下显示名、平台 id、你对 ta 的印象等——那是你自己的人物记忆区，和主人档案 USER.md 互不混淆。"
+        )
+    lines.append("</current_speaker>")
+    return "\n".join(lines)
 
 
 def load_custom_prompt() -> str:
@@ -305,13 +374,19 @@ def get_system_prompt(
     platform: Optional[str] = None,
     custom_scope: str = "system",
     custom_scopes: Optional[Iterable[str]] = None,
+    actor_display_name: str = "",
+    is_owner: bool = True,
+    chat_type: str = "private",
 ) -> str:
     """
     使用 Jinja2 模板渲染最终的 System Prompt。
-    
+
     Args:
         instructions: 额外的指令列表
         platform: 当前运行的平台名称 (如 'telegram'), 用于加载特定的 prompt
+        actor_display_name: 当前说话人昵称（主人/访客分离用）
+        is_owner: 当前说话人是否为主人（默认 True 兼容旧调用）
+        chat_type: 会话类型（private/group），决定群聊得体性提示
     """
     _ensure_workspace_identity_files()
 
@@ -336,7 +411,11 @@ def get_system_prompt(
             print(f"Warning: Failed to load {platform} prompt: {e}")
 
     # 加载身份与记忆上下文与自定义指令，注入到 instructions
-    identity_context = load_identity_context()
+    identity_context = load_identity_context(
+        actor_display_name=actor_display_name,
+        is_owner=is_owner,
+        chat_type=chat_type,
+    )
     custom_prompt = load_custom_prompt() if should_inject_custom(custom_scope, custom_scopes) else ""
     all_instructions = list(instructions or [])
     if custom_prompt:

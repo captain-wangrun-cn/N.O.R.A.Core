@@ -243,6 +243,7 @@ class ProactiveScheduler:
         generate_plan_callback: Optional[Callable[..., Awaitable[List[Dict[str, str]]]]] = None,
         send_proactive_callback: Optional[Callable[..., Awaitable[None]]] = None,
     daily_summary_callback: Optional[Callable[[date], Awaitable[None]]] = None,
+    resolve_delivery_callback: Optional[Callable[[str], str]] = None,
     ):
         self.cache_dir = cache_dir
         os.makedirs(cache_dir, exist_ok=True)
@@ -252,6 +253,9 @@ class ProactiveScheduler:
         self._generate_plan_callback = generate_plan_callback
         self._send_proactive_callback = send_proactive_callback
         self._daily_summary_callback = daily_summary_callback
+        # 投递目标解析：proactive 默认发到最近活跃私聊端，不可用回退传入 fallback。
+        # 注入 None 时退化为恒等（直接用 fallback），保持可独立测试。
+        self._resolve_delivery_callback = resolve_delivery_callback
 
         # 事件列表（用于查询/序列化，实际触发由 APScheduler Job 驱动）
         self._daily_events: List[ScheduledEvent] = []
@@ -576,7 +580,7 @@ class ProactiveScheduler:
 
         if self._send_proactive_callback:
             try:
-                target_chat = event.chat_id or self.default_chat_id
+                target_chat = self._resolve_delivery_target(event)
                 if target_chat:
                     await self._send_proactive_callback(target_chat, event.reason, event.event_type)
                 else:
@@ -588,6 +592,25 @@ class ProactiveScheduler:
             logger.warning(f"事件 {event_id} 触发但 send_proactive_callback 未设置")
 
         self._persist_event_list(event)
+
+    def _resolve_delivery_target(self, event: ScheduledEvent) -> str:
+        """决定事件实际投递到哪个 runtime_key。
+
+        - 闹钟（alarm）：用户/AI 显式设定了目标，原样投递，绝不重定向。
+        - 主动消息（proactive）：默认投到最近活跃的私聊端，不可用则回退
+          event.chat_id 或 default_chat_id（语义已改为 fallback）。
+        """
+        explicit_chat = (event.chat_id or self.default_chat_id or "").strip()
+        if event.event_type == "alarm":
+            return explicit_chat
+        if self._resolve_delivery_callback is not None:
+            try:
+                resolved = (self._resolve_delivery_callback(explicit_chat) or "").strip()
+                if resolved:
+                    return resolved
+            except Exception as e:
+                logger.warning(f"解析最近活跃投递端失败，回退默认: {e}")
+        return explicit_chat
 
     # ----------------------------------------------------------------
     # 内部方法

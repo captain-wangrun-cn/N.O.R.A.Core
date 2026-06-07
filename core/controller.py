@@ -43,6 +43,7 @@ from core.cost_tracker import get_cost_tracker
 from core.worker_status import WorkerStatus, BackendTaskQueue
 from core.scheduler import ProactiveScheduler
 from core.default_chat_id_store import load_default_chat_id, load_default_chat_target
+from core.delivery_target_store import resolve_delivery_runtime_key
 from core.conversation_identity import (
     ConversationIdentity,
     build_conversation_identity,
@@ -105,6 +106,13 @@ class NoraController(
     def __init__(self, adapter: BaseAdapter, tui_callback: Optional[Callable[[str], None]] = None):
         self.adapter = adapter
         self.tui_callback = tui_callback
+        # 注入主人识别回调，让 conversation_identity 能判断 is_owner（自动绑定+config 预声明）。
+        try:
+            from core.owner_registry import resolve_is_owner as _resolve_owner
+            from core.conversation_identity import set_owner_resolver
+            set_owner_resolver(_resolve_owner)
+        except Exception as e:
+            logger.warning(f"主人识别回调注入失败，将默认无主人: {e}")
         self.llm = llm_client
         self.rag = RAGEngine()
         self.image_store = ImageStore()
@@ -224,6 +232,7 @@ class NoraController(
                 generate_plan_callback=self._generate_daily_plan_via_llm,
                 send_proactive_callback=self._send_proactive_message,
                 daily_summary_callback=self._generate_daily_summary,
+                resolve_delivery_callback=resolve_delivery_runtime_key,
             )
             if persisted_default_chat_id:
                 self.scheduler.default_chat_id = persisted_default_chat_id
@@ -250,6 +259,7 @@ class NoraController(
                 notify_callback=self._handle_trigger_notification,
                 default_chat_id=trigger_default_chat_id,
                 default_chat_target=trigger_default_target,
+                resolve_delivery_callback=resolve_delivery_runtime_key,
             )
             for trigger in build_triggers(
                 trigger_cfg,
@@ -540,6 +550,11 @@ class NoraController(
         platform_message_id: Optional[str] = None,
         tag_status: str = "completed",
         storage_id: str = "",
+        memory_scope_id: str = "",
+        place_scope_id: str = "",
+        owner_id: str = "",
+        relationship_id: str = "",
+        actor_display_name: str = "",
     ):
         """异步保存图片元数据到 MongoDB + Qdrant。"""
         try:
@@ -558,6 +573,11 @@ class NoraController(
                 platform_message_id=platform_message_id,
                 tag_status=tag_status,
                 storage_id=storage_id,
+                memory_scope_id=memory_scope_id,
+                place_scope_id=place_scope_id,
+                owner_id=owner_id,
+                relationship_id=relationship_id,
+                actor_display_name=actor_display_name,
             )
             logger.debug(f"[{chat_id}] 图片元数据已异步保存: {image_id}" + (f" (含 OCR {len(ocr_text)} 字)" if ocr_text else ""))
         except Exception as e:
@@ -573,6 +593,11 @@ class NoraController(
         platform_message_id: Optional[str] = None,
         media_type: str = "image",
         storage_id: str = "",
+        memory_scope_id: str = "",
+        place_scope_id: str = "",
+        owner_id: str = "",
+        relationship_id: str = "",
+        actor_display_name: str = "",
     ):
         """异步保存占位媒体元数据（无标签，不写向量）。"""
         try:
@@ -586,6 +611,11 @@ class NoraController(
                 platform_message_id=platform_message_id,
                 media_type=media_type,
                 storage_id=storage_id,
+                memory_scope_id=memory_scope_id,
+                place_scope_id=place_scope_id,
+                owner_id=owner_id,
+                relationship_id=relationship_id,
+                actor_display_name=actor_display_name,
             )
             logger.debug(f"[{chat_id}] 图片占位已异步保存: {image_id}")
         except Exception as e:
@@ -602,6 +632,11 @@ class NoraController(
         platform: str = "",
         platform_message_id: Optional[str] = None,
         storage_id: str = "",
+        memory_scope_id: str = "",
+        place_scope_id: str = "",
+        owner_id: str = "",
+        relationship_id: str = "",
+        actor_display_name: str = "",
     ):
         """异步补充标签/OCR 并写向量。"""
         try:
@@ -616,6 +651,11 @@ class NoraController(
                 platform=platform,
                 platform_message_id=platform_message_id,
                 storage_id=storage_id,
+                memory_scope_id=memory_scope_id,
+                place_scope_id=place_scope_id,
+                owner_id=owner_id,
+                relationship_id=relationship_id,
+                actor_display_name=actor_display_name,
             )
             logger.debug(f"[{chat_id}] 图片标签已异步更新: {image_id}")
         except Exception as e:

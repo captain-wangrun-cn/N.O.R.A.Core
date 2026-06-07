@@ -117,6 +117,8 @@ class ImageStore:
             self._ensure_qdrant_payload_index("storage_id", qdrant_models.PayloadSchemaType.KEYWORD)
             self._ensure_qdrant_payload_index("platform", qdrant_models.PayloadSchemaType.KEYWORD)
             self._ensure_qdrant_payload_index("chat_id", qdrant_models.PayloadSchemaType.KEYWORD)
+            self._ensure_qdrant_payload_index("memory_scope_id", qdrant_models.PayloadSchemaType.KEYWORD)
+            self._ensure_qdrant_payload_index("place_scope_id", qdrant_models.PayloadSchemaType.KEYWORD)
             self._ensure_qdrant_payload_index("timestamp", qdrant_models.PayloadSchemaType.FLOAT)
         except Exception as e:
             logger.error(f"创建 Qdrant collection 失败: {e}")
@@ -141,6 +143,7 @@ class ImageStore:
             self.mongo_col.create_index("storage_id")
             self.mongo_col.create_index([("platform", 1), ("chat_id", 1), ("platform_message_id", 1)])
             self.mongo_col.create_index([("platform", 1), ("storage_id", 1), ("timestamp", -1)])
+            self.mongo_col.create_index([("memory_scope_id", 1), ("timestamp", -1)])
             self.mongo_col.create_index("timestamp")
             # 复合文本索引：同时覆盖 tags 和 ocr_text，支持全文搜索
             # 注意：MongoDB 每个 collection 只能有一个文本索引，需要先尝试删除旧的
@@ -168,6 +171,36 @@ class ImageStore:
         """公开接口，生成唯一视频 ID。"""
         return _generate_video_id()
 
+    @staticmethod
+    def _scope_payload(
+        *,
+        memory_scope_id: str = "",
+        place_scope_id: str = "",
+        owner_id: str = "",
+        relationship_id: str = "",
+        actor_display_name: str = "",
+        platform: str = "",
+        chat_id: str = "",
+    ) -> Dict[str, Any]:
+        """
+        构建跨平台接力的作用域 payload。
+        memory_scope_id 为空时不写（保持旧记录形态）；place_scope_id 缺省由 platform:chat_id 生成，
+        方便日后按来源地点回查。
+        """
+        fields: Dict[str, Any] = {}
+        if memory_scope_id:
+            fields["memory_scope_id"] = memory_scope_id
+            fields["place_scope_id"] = place_scope_id or (
+                f"{platform}:{chat_id}" if (platform or chat_id) else ""
+            )
+            if owner_id:
+                fields["owner_id"] = owner_id
+            if relationship_id:
+                fields["relationship_id"] = relationship_id
+            if actor_display_name:
+                fields["actor_display_name"] = actor_display_name
+        return fields
+
     def save_image_metadata(
         self,
         image_id: str,
@@ -181,6 +214,11 @@ class ImageStore:
         tag_status: str = "completed",
         media_type: str = "image",
         storage_id: str = "",
+        memory_scope_id: str = "",
+        place_scope_id: str = "",
+        owner_id: str = "",
+        relationship_id: str = "",
+        actor_display_name: str = "",
     ) -> bool:
         """
         保存/更新一张图片或视频的元数据（默认完成态）。
@@ -192,6 +230,15 @@ class ImageStore:
             return False
 
         now = time.time()
+        scope_fields = self._scope_payload(
+            memory_scope_id=memory_scope_id,
+            place_scope_id=place_scope_id,
+            owner_id=owner_id,
+            relationship_id=relationship_id,
+            actor_display_name=actor_display_name,
+            platform=platform,
+            chat_id=chat_id,
+        )
 
         # ---- MongoDB ----
         doc = {
@@ -207,6 +254,7 @@ class ImageStore:
             "datetime": datetime.fromtimestamp(now, tz=timezone.utc).isoformat(),
             "tag_status": tag_status,
             "media_type": media_type,
+            **scope_fields,
             **(extra or {}),
         }
         try:
@@ -237,6 +285,7 @@ class ImageStore:
                                     "platform": platform,
                                     "timestamp": now,
                                     "media_type": media_type,
+                                    **scope_fields,
                                 },
                             )
                         ],
@@ -246,7 +295,7 @@ class ImageStore:
             except Exception as e:
                 logger.error(f"Qdrant 写入图片向量失败: {e}")
                 # MongoDB 已写入，不算完全失败
-        
+
         logger.info(f"图片元数据已保存: {image_id} tags='{tags[:60]}...'")
         return True
 
@@ -265,6 +314,11 @@ class ImageStore:
         platform_message_id: Optional[str] = None,
         media_type: str = "image",
         storage_id: str = "",
+        memory_scope_id: str = "",
+        place_scope_id: str = "",
+        owner_id: str = "",
+        relationship_id: str = "",
+        actor_display_name: str = "",
     ) -> bool:
         """先写入占位元数据（无标签、不写向量），等待模型回复后再补标签。"""
         if not self.enabled:
@@ -272,6 +326,15 @@ class ImageStore:
             return False
 
         now = time.time()
+        scope_fields = self._scope_payload(
+            memory_scope_id=memory_scope_id,
+            place_scope_id=place_scope_id,
+            owner_id=owner_id,
+            relationship_id=relationship_id,
+            actor_display_name=actor_display_name,
+            platform=platform,
+            chat_id=chat_id,
+        )
         doc = {
             "image_id": image_id,
             "file_path": file_path,
@@ -285,6 +348,7 @@ class ImageStore:
             "datetime": datetime.fromtimestamp(now, tz=timezone.utc).isoformat(),
             "tag_status": "pending",
             "media_type": media_type,
+            **scope_fields,
             **(extra or {}),
         }
         try:
@@ -306,6 +370,11 @@ class ImageStore:
         platform: str = "",
         platform_message_id: Optional[str] = None,
         storage_id: str = "",
+        memory_scope_id: str = "",
+        place_scope_id: str = "",
+        owner_id: str = "",
+        relationship_id: str = "",
+        actor_display_name: str = "",
     ) -> bool:
         """在模型回复后补充标签/OCR，并写入向量。"""
         if not self.enabled:
@@ -324,6 +393,21 @@ class ImageStore:
         base_chat_id = chat_id or existing.get("chat_id", "")
         base_storage_id = storage_id or existing.get("storage_id") or base_user_id
         base_ts = existing.get("timestamp", now)
+        # 作用域字段：显式传入优先，否则继承占位记录里已有的
+        base_memory_scope = memory_scope_id or existing.get("memory_scope_id", "")
+        base_place_scope = place_scope_id or existing.get("place_scope_id", "")
+        base_owner = owner_id or existing.get("owner_id", "")
+        base_relationship = relationship_id or existing.get("relationship_id", "")
+        base_actor = actor_display_name or existing.get("actor_display_name", "")
+        scope_fields = self._scope_payload(
+            memory_scope_id=base_memory_scope,
+            place_scope_id=base_place_scope,
+            owner_id=base_owner,
+            relationship_id=base_relationship,
+            actor_display_name=base_actor,
+            platform=platform or existing.get("platform", ""),
+            chat_id=base_chat_id,
+        )
 
         set_doc: Dict[str, Any] = {
             "tags": tags,
@@ -345,6 +429,8 @@ class ImageStore:
             set_doc["chat_id"] = chat_id
         if storage_id:
             set_doc["storage_id"] = storage_id
+        # 把（继承到的或新传入的）作用域字段补进文档，便于按 scope 检索
+        set_doc.update(scope_fields)
 
         try:
             result = self.mongo_col.update_one({"image_id": image_id}, {"$set": set_doc}, upsert=False)
@@ -391,6 +477,7 @@ class ImageStore:
                                     "platform": platform or existing.get("platform", ""),
                                     "timestamp": base_ts,
                                     "media_type": media_type_val,
+                                    **scope_fields,
                                 },
                             )
                         ],
@@ -422,14 +509,24 @@ class ImageStore:
         platform: str = "",
         chat_id: str = "",
         storage_id: str = "",
+        memory_scope_id: str = "",
     ) -> Dict[str, Any]:
+        """
+        给 Mongo 查询追加上下文过滤。
+
+        跨平台接力：传入 memory_scope_id 时按共享作用域聚合（旧记录缺字段时放行），
+        并忽略 platform/chat_id/storage_id 以跨平台取回；不传时保持旧的逐平台过滤。
+        """
         filters = []
-        if platform:
-            filters.append(cls._legacy_optional_match("platform", platform))
-        if chat_id:
-            filters.append(cls._legacy_optional_match("chat_id", chat_id))
-        if storage_id:
-            filters.append(cls._legacy_optional_match("storage_id", storage_id))
+        if memory_scope_id:
+            filters.append(cls._legacy_optional_match("memory_scope_id", memory_scope_id))
+        else:
+            if platform:
+                filters.append(cls._legacy_optional_match("platform", platform))
+            if chat_id:
+                filters.append(cls._legacy_optional_match("chat_id", chat_id))
+            if storage_id:
+                filters.append(cls._legacy_optional_match("storage_id", storage_id))
         if not filters:
             return query
         if "$and" in query:
@@ -445,7 +542,20 @@ class ImageStore:
         return query
 
     @staticmethod
-    def _payload_matches_context(payload: Dict[str, Any], *, platform: str = "", chat_id: str = "", storage_id: str = "") -> bool:
+    def _payload_matches_context(
+        payload: Dict[str, Any],
+        *,
+        platform: str = "",
+        chat_id: str = "",
+        storage_id: str = "",
+        memory_scope_id: str = "",
+    ) -> bool:
+        # 跨平台接力：scope 模式只校验 memory_scope_id（旧记录缺字段放行），忽略 platform/chat_id。
+        if memory_scope_id:
+            actual = payload.get("memory_scope_id")
+            if actual in (None, ""):
+                return True
+            return str(actual) == str(memory_scope_id)
         for field, expected in (("platform", platform), ("chat_id", chat_id), ("storage_id", storage_id)):
             if not expected:
                 continue
@@ -517,6 +627,7 @@ class ImageStore:
         storage_id: str = "",
         platform: str = "",
         chat_id: str = "",
+        memory_scope_id: str = "",
     ) -> List[Dict[str, Any]]:
         """按时间范围查询图片（MongoDB）。"""
         if self.mongo_col is None:
@@ -528,6 +639,7 @@ class ImageStore:
                 platform=platform,
                 chat_id=chat_id,
                 storage_id=storage_id,
+                memory_scope_id=memory_scope_id,
             )
             if user_id:
                 query["user_id"] = user_id
@@ -553,6 +665,7 @@ class ImageStore:
         storage_id: str = "",
         platform: str = "",
         chat_id: str = "",
+        memory_scope_id: str = "",
     ) -> List[Dict[str, Any]]:
         """按关键词在 tags 中做文本搜索（MongoDB $text）。"""
         if self.mongo_col is None:
@@ -564,6 +677,7 @@ class ImageStore:
                 platform=platform,
                 chat_id=chat_id,
                 storage_id=storage_id,
+                memory_scope_id=memory_scope_id,
             )
             if user_id:
                 query["user_id"] = user_id
@@ -585,6 +699,7 @@ class ImageStore:
         storage_id: str = "",
         platform: str = "",
         chat_id: str = "",
+        memory_scope_id: str = "",
     ) -> List[Dict[str, Any]]:
         """
         在图片 OCR 文字中做模糊搜索（支持类搜索引擎的模糊匹配）。
@@ -629,6 +744,7 @@ class ImageStore:
                 platform=platform,
                 chat_id=chat_id,
                 storage_id=storage_id,
+                memory_scope_id=memory_scope_id,
             )
             if user_id:
                 if "$and" in query:
@@ -650,6 +766,7 @@ class ImageStore:
         storage_id: str = "",
         platform: str = "",
         chat_id: str = "",
+        memory_scope_id: str = "",
     ) -> List[Dict[str, Any]]:
         """语义向量检索（Qdrant）。"""
         if self.qdrant is None or not self.embed_client.enabled:
@@ -680,6 +797,7 @@ class ImageStore:
                     platform=platform,
                     chat_id=chat_id,
                     storage_id=storage_id,
+                    memory_scope_id=memory_scope_id,
                 ):
                     continue
                 item["score"] = hit.score
@@ -704,6 +822,7 @@ class ImageStore:
         storage_id: str = "",
         platform: str = "",
         chat_id: str = "",
+        memory_scope_id: str = "",
     ) -> List[Dict[str, Any]]:
         """
         统一检索入口 —— 自动选择最佳策略：
@@ -738,6 +857,8 @@ class ImageStore:
                 kwargs["platform"] = platform
             if chat_id:
                 kwargs["chat_id"] = chat_id
+            if memory_scope_id:
+                kwargs["memory_scope_id"] = memory_scope_id
             return kwargs
 
         # OCR 文字搜索 + 关键词搜索组合

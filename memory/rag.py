@@ -87,10 +87,15 @@ class RAGEngine:
         chat_id: str = "",
         storage_id: str = "",
         chat_type: str = "",
+        memory_scope_id: str = "",
     ) -> List[Dict[str, Any]]:
         """
         检索相关记忆。
         过程: Query -> Vector -> DB Search
+
+        跨平台接力：传入 memory_scope_id 时按共享作用域聚合所有平台/窗口的记忆，
+        不再受单平台 platform/chat_id 限制；旧 payload 缺该字段时回退按 user_id 检索。
+        不传 memory_scope_id 时保持改造前的逐平台过滤逻辑。
         """
         if not self.enabled or not query_text.strip():
             return []
@@ -101,7 +106,26 @@ class RAGEngine:
             if not vector:
                 return []
 
-            # 2. 搜索数据库
+            # 2a. 跨平台共享检索：按 memory_scope_id 聚合
+            if memory_scope_id:
+                results = self.vector_store.query(
+                    vector, top_k, filter_criteria={"memory_scope_id": memory_scope_id}
+                )
+                # 旧 payload 缺 memory_scope_id：回退按 user_id 检索，仅纳入未标记 scope 的旧记录
+                if len(results) < top_k:
+                    legacy_results = self.vector_store.query(
+                        vector,
+                        top_k,
+                        filter_criteria={"user_id": user_id},
+                    )
+                    compatible_legacy = [
+                        item for item in legacy_results
+                        if not str(item.get("memory_scope_id") or "").strip()
+                    ]
+                    results = self._dedupe_memories(results + compatible_legacy, top_k)
+                return results
+
+            # 2b. 旧路径（无 scope）：保持与改造前逐字节一致
             filter_criteria: Dict[str, Any] = {"user_id": user_id}
             if platform:
                 filter_criteria["platform"] = platform
@@ -132,7 +156,7 @@ class RAGEngine:
                 ]
                 results = self._dedupe_memories(results + compatible_legacy, top_k)
             return results
-            
+
         except Exception as e:
             logger.error(f"检索记忆时发生错误: {e}")
             return []
@@ -147,6 +171,7 @@ class RAGEngine:
         chat_id: str = "",
         storage_id: str = "",
         chat_type: str = "",
+        memory_scope_id: str = "",
     ) -> str:
         """
         [Helper] 检索并格式化为适合注入 Prompt 的字符串。
@@ -159,6 +184,7 @@ class RAGEngine:
             chat_id=chat_id,
             storage_id=storage_id,
             chat_type=chat_type,
+            memory_scope_id=memory_scope_id,
         )
         if not memories:
             return ""

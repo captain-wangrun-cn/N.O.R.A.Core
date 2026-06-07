@@ -207,6 +207,8 @@ class FrontBrainMixin:
         text = context["text"]
         chat_type = identity.chat_type
         user_name = context.get("user_name", "User")
+        memory_scope_id = identity.memory_scope_id
+        place_scope_id = identity.place_scope_id
 
         proactive_meta = proactive_meta or {}
         proactive_mode = bool(proactive_meta)
@@ -215,7 +217,15 @@ class FrontBrainMixin:
 
         # --- 构建前脑 prompt ---
         soul_prompt = get_soul_prompt()
-        identity_context = load_identity_context(include_schedule=False)
+        identity_context = load_identity_context(
+            include_schedule=False,
+            actor_display_name=identity.actor_display_name,
+            is_owner=identity.is_owner,
+            chat_type=chat_type,
+        )
+
+        # 可选注入块默认空串：下面这些块都是按条件/try 注入，
+        # 若条件不满足或注入失败必须有兜底空值，否则渲染模板时会 UnboundLocalError。
         schedule_block = ""
         custom_block = ""
         tool_intro_block = ""
@@ -355,6 +365,7 @@ class FrontBrainMixin:
                     chat_id=identity.platform_chat_id,
                     storage_id=storage_id,
                     chat_type=chat_type,
+                    memory_scope_id=memory_scope_id,
                 )
                 if rag_context:
                     system_prompt = (
@@ -367,7 +378,9 @@ class FrontBrainMixin:
                 logger.warning(f"[{chat_id}] 前脑 RAG 检索失败，已降级继续。", exc_info=True)
 
         # --- 加载对话历史 ---
-        db_context = self.message_history.get_context_messages(platform, storage_id)
+        db_context = self.message_history.get_context_messages(
+            platform, storage_id, memory_scope_id=memory_scope_id, current_place_scope_id=place_scope_id
+        )
         # 常规前脑仅保留最近 20 条；trigger/proactive 场景使用完整上下文
         if (not proactive_mode) and len(db_context) > 20:
             db_context = db_context[-20:]
@@ -595,12 +608,19 @@ class FrontBrainMixin:
         storage_id = identity.storage_id
         user_id = identity.actor_user_id
         chat_type = identity.chat_type
+        memory_scope_id = identity.memory_scope_id
+        place_scope_id = identity.place_scope_id
 
         logger.info(f"[{chat_id}] 前脑审查: 后脑结果 {len(backend_result)} 字, 新用户消息 {len(new_user_messages)} 条")
 
         # --- 构建审查 prompt ---
         soul_prompt = get_soul_prompt()
-        identity_context = load_identity_context(include_schedule=False)
+        identity_context = load_identity_context(
+            include_schedule=False,
+            actor_display_name=identity.actor_display_name,
+            is_owner=identity.is_owner,
+            chat_type=chat_type,
+        )
         schedule_block = ""
         custom_block = ""
         tool_intro_block = ""
@@ -650,7 +670,9 @@ class FrontBrainMixin:
         )
 
         # 仅取当前对话段的上下文；过长时再截断
-        db_context = self.message_history.get_context_messages(platform, storage_id)
+        db_context = self.message_history.get_context_messages(
+            platform, storage_id, memory_scope_id=memory_scope_id, current_place_scope_id=place_scope_id
+        )
         current_session_msgs = [
             {
                 "role": msg["role"],

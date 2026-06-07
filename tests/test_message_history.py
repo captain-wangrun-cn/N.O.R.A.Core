@@ -1,7 +1,28 @@
 import asyncio
-import pytest
-from memory.message_history import MessageHistory, get_default_message_history_db
+import sqlite3
+from pathlib import Path
 
+import pytest
+from memory.message_history import (
+    MessageHistory,
+    get_default_message_history_db,
+    DEFAULT_MEMORY_SCOPE_ID,
+)
+
+
+def _make_history(tmp_path: Path) -> MessageHistory:
+    """构造一个完全隔离在临时目录的 MessageHistory（不触碰生产库）。
+
+    compress_window 调高、消息短，避免触发摘要 LLM 调用。
+    """
+    return MessageHistory(
+        db_path=str(tmp_path / "history.db"),
+        mirror_db_path=str(tmp_path / "mirror.db"),
+        context_db_path=str(tmp_path / "context.db"),
+        raw_window=80,
+        compress_window=9999,
+        archive_threshold=99999,
+    )
 
 async def _async_test_message_history():
     """测试消息历史管理"""
@@ -165,3 +186,174 @@ if __name__ == "__main__":
 def test_message_history():
     """同步包装以便 pytest 无需异步插件即可运行。"""
     asyncio.run(_async_test_message_history())
+
+
+# ======================================================================
+# Phase 2 — 跨平台共享上下文 + 数据迁移
+# ======================================================================
+
+SCOPE = DEFAULT_MEMORY_SCOPE_ID
+
+
+def test_cross_platform_shared_read(tmp_path):
+    """A 平台写入 → B 平台用同一 memory_scope_id 读取应能看到。"""
+    history = _make_history(tmp_path)
+
+    # Telegram（私聊，storage_id=用户id）写一条
+    history.add_message(
+        platform="telegram", chat_id="user_a", role="user", content="我在 Telegram 说的话",
+        memory_scope_id=SCOPE, place_scope_id="telegram:user_a", actor_display_name="主人",
+    )
+    # Web（不同平台/不同 chat_id）写一条，同一作用域
+    history.add_message(
+        platform="web", chat_id="sess_b", role="user", content="我在 Web 说的话",
+        memory_scope_id=SCOPE, place_scope_id="web:sess_b", actor_display_name="主人",
+    )
+
+    # 从 Web 端按共享作用域读 → 两条都应出现
+    msgs = history.get_context_messages(
+        "web", "sess_b", memory_scope_id=SCOPE, current_place_scope_id="web:sess_b",
+    )
+    contents = " ".join(m["content"] for m in msgs)
+    assert "我在 Telegram 说的话" in contents
+    assert "我在 Web 说的话" in contents
+
+    # 对照：不传 scope 的旧式读取只看到本平台那条
+    legacy = history.get_context_messages("web", "sess_b")
+    legacy_contents = " ".join(m["content"] for m in legacy)
+    assert "我在 Web 说的话" in legacy_contents
+    assert "我在 Telegram 说的话" not in legacy_contents
+
+
+def test_source_label_only_for_foreign_place(tmp_path):
+    """共享读取时，仅对“非当前地点”的消息打来源标签，当前地点消息保持原样。"""
+    history = _make_history(tmp_path)
+    history.add_message(
+        platform="telegram", chat_id="user_a", role="user", content="远端消息",
+        memory_scope_id=SCOPE, place_scope_id="telegram:user_a", actor_display_name="张三",
+    )
+    history.add_message(
+        platform="web", chat_id="sess_b", role="user", content="本地消息",
+        memory_scope_id=SCOPE, place_scope_id="web:sess_b", actor_display_name="主人",
+    )
+
+    msgs = history.get_context_messages(
+        "web", "sess_b", memory_scope_id=SCOPE, current_place_scope_id="web:sess_b",
+    )
+    by_place = {m.get("place_scope_id"): m["content"] for m in msgs if m.get("place_scope_id")}
+    # 远端（telegram）消息带来源标签
+    assert "[来自 telegram:user_a / 张三]" in by_place["telegram:user_a"]
+    # 本地（web，当前地点）消息不带来源标签
+    assert "[来自" not in by_place["web:sess_b"]
+
+
+def test_legacy_db_migration_backfills_scope(tmp_path):
+    """旧库（无作用域列）启动迁移后，旧行应归入默认共享作用域、place 由 platform/chat_id 生成。"""
+    db_path = tmp_path / "legacy.db"
+
+    # 1) 手工建一个“旧版” messages 表（没有作用域列），插入一行旧数据
+    conn = sqlite3.connect(str(db_path))
+    cur = conn.cursor()
+    cur.execute(
+        """
+        CREATE TABLE messages (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            platform TEXT NOT NULL, chat_id TEXT NOT NULL, user_id TEXT,
+            role TEXT NOT NULL, content TEXT NOT NULL, timestamp REAL NOT NULL,
+            metadata TEXT, is_pinned INTEGER DEFAULT 0, is_archived INTEGER DEFAULT 0,
+            session_id INTEGER, created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+        """
+    )
+    cur.execute(
+        "INSERT INTO messages (platform, chat_id, role, content, timestamp) VALUES (?, ?, ?, ?, ?)",
+        ("telegram", "old_chat", "user", "[2026-01-01 09:00] 旧的历史消息", 1735707600.0),
+    )
+    conn.commit()
+    conn.close()
+
+    # 2) 用 MessageHistory 打开（触发自动迁移）
+    history = MessageHistory(
+        db_path=str(db_path),
+        mirror_db_path=str(tmp_path / "m.db"),
+        context_db_path=str(tmp_path / "c.db"),
+        compress_window=9999, archive_threshold=99999,
+    )
+
+    # 3) 旧行应已回填作用域
+    conn = sqlite3.connect(str(db_path))
+    conn.row_factory = sqlite3.Row
+    row = conn.execute("SELECT memory_scope_id, place_scope_id FROM messages WHERE chat_id='old_chat'").fetchone()
+    conn.close()
+    assert row["memory_scope_id"] == SCOPE
+    assert row["place_scope_id"] == "telegram:old_chat"
+
+    # 4) 旧历史能通过共享作用域读取到
+    msgs = history.get_context_messages(
+        "web", "new_sess", memory_scope_id=SCOPE, current_place_scope_id="web:new_sess",
+    )
+    assert any("旧的历史消息" in m["content"] for m in msgs)
+
+
+def test_close_session_spans_scope(tmp_path):
+    """按共享作用域关闭对话段落，应把所有平台的活跃消息纳入同一 session。"""
+    history = _make_history(tmp_path)
+    history.add_message(
+        platform="telegram", chat_id="user_a", role="user", content="tg 消息",
+        memory_scope_id=SCOPE, place_scope_id="telegram:user_a",
+    )
+    history.add_message(
+        platform="web", chat_id="sess_b", role="assistant", content="web 回复",
+        memory_scope_id=SCOPE, place_scope_id="web:sess_b",
+    )
+
+    session_id = history.close_session(
+        platform="telegram", chat_id="user_a", trigger_type="user", memory_scope_id=SCOPE,
+    )
+    assert session_id is not None
+
+    # 两个平台的消息都应被打上同一个 session_id（即跨平台合并为一段连续对话）
+    conn = sqlite3.connect(str(history.db_path))
+    rows = conn.execute("SELECT platform, session_id FROM messages").fetchall()
+    conn.close()
+    assert all(r[1] == session_id for r in rows), rows
+    assert {r[0] for r in rows} == {"telegram", "web"}
+
+    # 关闭后当前活跃段（按 scope）应为空
+    active = history.get_current_segment_messages("telegram", "user_a", memory_scope_id=SCOPE)
+    assert active == []
+
+
+def test_clear_chat_history_clears_whole_scope(tmp_path):
+    """clear_chat_history 传入 scope 时清空整个共享作用域（所有平台）。"""
+    history = _make_history(tmp_path)
+    history.add_message(
+        platform="telegram", chat_id="user_a", role="user", content="tg",
+        memory_scope_id=SCOPE, place_scope_id="telegram:user_a",
+    )
+    history.add_message(
+        platform="web", chat_id="sess_b", role="user", content="web",
+        memory_scope_id=SCOPE, place_scope_id="web:sess_b",
+    )
+
+    history.clear_chat_history("telegram", "user_a", keep_pinned=False, memory_scope_id=SCOPE)
+
+    conn = sqlite3.connect(str(history.db_path))
+    remaining = conn.execute("SELECT COUNT(*) FROM messages WHERE memory_scope_id=?", (SCOPE,)).fetchone()[0]
+    conn.close()
+    assert remaining == 0
+
+
+def test_legacy_add_message_defaults_to_shared_scope(tmp_path):
+    """不传作用域的旧式 add_message，应默认归入共享作用域，从而天然跨平台可读。"""
+    history = _make_history(tmp_path)
+    # 旧式调用（无 scope 参数）
+    history.add_message(platform="telegram", chat_id="user_a", role="user", content="无scope旧式写入")
+
+    conn = sqlite3.connect(str(history.db_path))
+    conn.row_factory = sqlite3.Row
+    row = conn.execute("SELECT memory_scope_id, place_scope_id FROM messages").fetchone()
+    conn.close()
+    assert row["memory_scope_id"] == SCOPE
+    assert row["place_scope_id"] == "telegram:user_a"
+

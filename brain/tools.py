@@ -1080,6 +1080,7 @@ class ToolManager:
         return_image: bool = True,
         local_path: str = "",
         type: str = "",
+        memory_scope_id: str = "",
     ) -> str:
         """
         Retrieves images or videos from the media memory database. Supports multiple search modes:
@@ -1100,6 +1101,7 @@ class ToolManager:
         :param storage_id: Filter by conversation memory owner (private=user, group=chat).
         :param platform: Filter by platform name, e.g. telegram.
         :param chat_id: Filter by platform chat ID.
+        :param memory_scope_id: Shared cross-platform memory scope. Auto-injected; leave empty to use the current conversation's shared scope (recalls media sent on any platform).
         :param limit: Maximum number of results (1-50, default 10).
         :param return_image: When true, the tool returns media references via `[image: abs_path]` or `[video: abs_path]`
             MediaTags for multimodal pipeline ingestion. Default: True.
@@ -1144,6 +1146,7 @@ class ToolManager:
                 chat_id=chat_id,
                 limit=limit,
                 media_type=type,
+                memory_scope_id=memory_scope_id,
             )
 
         if not results:

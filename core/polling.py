@@ -40,7 +40,9 @@ class PollingMixin:
         chat_id = identity.runtime_key
         platform = identity.platform
         storage_id = identity.storage_id
-        
+        memory_scope_id = identity.memory_scope_id
+        place_scope_id = identity.place_scope_id
+
         # 标记轮询模式，让 _generate_response 的 finally 不自动处理队列
         context = context.copy()
         context["_in_polling_loop"] = True
@@ -64,7 +66,7 @@ class PollingMixin:
                 # --- 前脑审查 ---
                 # 获取后脑执行期间用户发送的新消息
                 new_user_msgs = self.message_history.get_messages_since(
-                    platform, storage_id, backend_start_ts, role="user"
+                    platform, storage_id, backend_start_ts, role="user", memory_scope_id=memory_scope_id
                 )
                 new_user_texts = [
                     self._strip_timestamp_markers(str(msg["content"]))
@@ -165,7 +167,9 @@ class PollingMixin:
                         role="assistant",
                         content=review_reply,
                         user_id="assistant",
-                        metadata={"source": "polling_review", "platform_message_ids": sent_ids}
+                        metadata={"source": "polling_review", "platform_message_ids": sent_ids},
+                        memory_scope_id=memory_scope_id,
+                        place_scope_id=place_scope_id,
                     )
                     # 同步到 session history
                     session_history = session.setdefault("history", [])
@@ -252,6 +256,8 @@ class PollingMixin:
                     role="assistant",
                     content=msg,
                     user_id="assistant",
+                    memory_scope_id=identity.memory_scope_id,
+                    place_scope_id=identity.place_scope_id,
                 )
             except Exception:
                 pass

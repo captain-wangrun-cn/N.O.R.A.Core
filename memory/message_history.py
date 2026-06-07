@@ -14,6 +14,11 @@ from memory.context_store import ContextCompressor, MessageLog
 
 logger = logging.getLogger(__name__)
 
+# 必须与 core/conversation_identity.DEFAULT_RELATIONSHIP_ID 保持一致：
+# 单主人实例下所有平台共享的默认记忆作用域。旧数据迁移、未显式传入作用域的新写入
+# 都归入这个作用域，从而让 Nora 在任何平台都是同一个连续主体。
+DEFAULT_MEMORY_SCOPE_ID = "relationship:owner:default"
+
 
 def get_default_message_history_db() -> Path:
     """返回 workspace 下的默认聊天记录数据库路径，并确保目录存在。"""
@@ -108,10 +113,13 @@ class MessageHistory:
                 is_pinned INTEGER DEFAULT 0,  -- 是否永久标记
                 is_archived INTEGER DEFAULT 0,  -- 是否已归档
                 session_id INTEGER,  -- 所属对话段落ID (NULL=尚未分配)
+                memory_scope_id TEXT,  -- 共享上下文主键（跨平台接力）
+                place_scope_id TEXT,   -- 来源地点 {platform}:{platform_chat_id}
+                actor_display_name TEXT,  -- 说话人昵称
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
         """)
-        
+
         # 对话段落表 (Conversation Sessions)
         # 当 AI 从 ONLINE 进入 SEMI_ONLINE 时，将这次在线状态的所有对话封装为一个段落
         cursor.execute("""
@@ -125,10 +133,12 @@ class MessageHistory:
                 summary TEXT,                   -- 本段对话摘要 (异步生成)
                 trigger_type TEXT DEFAULT 'user', -- 触发来源: 'user'=用户发起, 'proactive'=AI主动, 'alarm'=闹钟
                 metadata TEXT,                  -- JSON格式额外信息
+                memory_scope_id TEXT,           -- 共享上下文主键（跨平台接力）
+                place_scope_id TEXT,            -- 来源地点 {platform}:{platform_chat_id}
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
         """)
-        
+
         # 压缩总结表
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS summaries (
@@ -141,6 +151,8 @@ class MessageHistory:
                 summary_text TEXT NOT NULL,
                 message_count INTEGER,     -- 总结了多少条消息
                 timestamp REAL NOT NULL,
+                memory_scope_id TEXT,      -- 共享上下文主键（跨平台接力）
+                place_scope_id TEXT,       -- 来源地点 {platform}:{platform_chat_id}
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 FOREIGN KEY (start_message_id) REFERENCES messages(id),
                 FOREIGN KEY (end_message_id) REFERENCES messages(id)
@@ -165,9 +177,11 @@ class MessageHistory:
             ON summaries(platform, chat_id, level, timestamp)
         """)
         cursor.execute("""
-            CREATE INDEX IF NOT EXISTS idx_sessions_chat 
+            CREATE INDEX IF NOT EXISTS idx_sessions_chat
             ON conversation_sessions(platform, chat_id, started_at)
         """)
+        # 注意：作用域列（memory_scope_id 等）相关索引在 _migrate_db 中、确保列已存在后再创建，
+        # 否则对旧库执行时列尚未 ALTER 出来会报 "no such column"。
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS compression_retry_queue (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -197,17 +211,93 @@ class MessageHistory:
         logger.info(f"消息历史数据库初始化完成: {self.db_path}")
 
     def _migrate_db(self, conn: sqlite3.Connection):
-        """执行数据库迁移，安全地添加新列到已有表。"""
+        """执行数据库迁移，安全地添加新列到已有表（非破坏性，自动检测）。"""
         cursor = conn.cursor()
-        
-        # 检查 messages 表是否有 session_id 列
-        cursor.execute("PRAGMA table_info(messages)")
-        columns = {row[1] for row in cursor.fetchall()}
-        
-        if "session_id" not in columns:
+
+        def _columns(table: str) -> set:
+            cursor.execute(f"PRAGMA table_info({table})")
+            return {row[1] for row in cursor.fetchall()}
+
+        # --- messages.session_id（历史遗留迁移）---
+        msg_cols = _columns("messages")
+        if "session_id" not in msg_cols:
             logger.info("数据库迁移: 为 messages 表添加 session_id 列")
             cursor.execute("ALTER TABLE messages ADD COLUMN session_id INTEGER")
             conn.commit()
+            msg_cols.add("session_id")
+
+        # --- 跨平台接力：为三张表补充作用域列 ---
+        # messages: memory_scope_id / place_scope_id / actor_display_name
+        added_scope_to_messages = False
+        if "memory_scope_id" not in msg_cols:
+            logger.info("数据库迁移: 为 messages 表添加 memory_scope_id 列")
+            cursor.execute("ALTER TABLE messages ADD COLUMN memory_scope_id TEXT")
+            added_scope_to_messages = True
+        if "place_scope_id" not in msg_cols:
+            logger.info("数据库迁移: 为 messages 表添加 place_scope_id 列")
+            cursor.execute("ALTER TABLE messages ADD COLUMN place_scope_id TEXT")
+        if "actor_display_name" not in msg_cols:
+            logger.info("数据库迁移: 为 messages 表添加 actor_display_name 列")
+            cursor.execute("ALTER TABLE messages ADD COLUMN actor_display_name TEXT")
+
+        # summaries: memory_scope_id / place_scope_id
+        sum_cols = _columns("summaries")
+        if "memory_scope_id" not in sum_cols:
+            logger.info("数据库迁移: 为 summaries 表添加 memory_scope_id 列")
+            cursor.execute("ALTER TABLE summaries ADD COLUMN memory_scope_id TEXT")
+        if "place_scope_id" not in sum_cols:
+            cursor.execute("ALTER TABLE summaries ADD COLUMN place_scope_id TEXT")
+
+        # conversation_sessions: memory_scope_id / place_scope_id
+        ses_cols = _columns("conversation_sessions")
+        if "memory_scope_id" not in ses_cols:
+            logger.info("数据库迁移: 为 conversation_sessions 表添加 memory_scope_id 列")
+            cursor.execute("ALTER TABLE conversation_sessions ADD COLUMN memory_scope_id TEXT")
+        if "place_scope_id" not in ses_cols:
+            cursor.execute("ALTER TABLE conversation_sessions ADD COLUMN place_scope_id TEXT")
+
+        conn.commit()
+
+        # --- 回填旧数据：缺失 memory_scope_id 的行统一归入默认共享作用域，
+        #     place_scope_id 由旧 platform/chat_id 生成（保留来源地点）。---
+        for table in ("messages", "summaries", "conversation_sessions"):
+            try:
+                cursor.execute(
+                    f"""
+                    UPDATE {table}
+                    SET memory_scope_id = ?
+                    WHERE memory_scope_id IS NULL OR memory_scope_id = ''
+                    """,
+                    (DEFAULT_MEMORY_SCOPE_ID,),
+                )
+                cursor.execute(
+                    f"""
+                    UPDATE {table}
+                    SET place_scope_id = platform || ':' || chat_id
+                    WHERE place_scope_id IS NULL OR place_scope_id = ''
+                    """
+                )
+            except sqlite3.OperationalError as e:
+                logger.warning("回填作用域列失败 (%s): %s", table, e)
+        conn.commit()
+        if added_scope_to_messages:
+            logger.info("数据库迁移: 旧消息已归入默认共享作用域 %s", DEFAULT_MEMORY_SCOPE_ID)
+
+        # 作用域列已确保存在，现在创建相关索引（对新库/旧库都安全）。
+        cursor.execute("""
+            CREATE INDEX IF NOT EXISTS idx_messages_scope
+            ON messages(memory_scope_id, timestamp)
+        """)
+        cursor.execute("""
+            CREATE INDEX IF NOT EXISTS idx_summaries_scope
+            ON summaries(memory_scope_id, level, timestamp)
+        """)
+        cursor.execute("""
+            CREATE INDEX IF NOT EXISTS idx_sessions_scope
+            ON conversation_sessions(memory_scope_id, started_at)
+        """)
+        conn.commit()
+
     
     def add_message(
         self,
@@ -217,24 +307,36 @@ class MessageHistory:
         content: str,
         user_id: Optional[str] = None,
         metadata: Optional[Dict] = None,
-        is_pinned: bool = False
+        is_pinned: bool = False,
+        memory_scope_id: Optional[str] = None,
+        place_scope_id: Optional[str] = None,
+        actor_display_name: Optional[str] = None,
     ) -> int:
         """
         添加一条消息
-        
+
     自动插入时间戳（每条消息都会插入）:
     - 时间戳格式: [YYYY-MM-DD HH:MM]
-        
+
+    跨平台接力字段（默认值保证旧调用方兼容）:
+    - memory_scope_id: 共享上下文主键；缺省归入默认共享作用域。
+    - place_scope_id: 来源地点；缺省由 platform/chat_id 生成。
+    - actor_display_name: 说话人昵称。
+
         :return: 消息ID
         """
+        # 作用域兜底：未显式传入时归入单主人默认共享作用域，并由 platform/chat_id 生成来源地点。
+        resolved_scope = memory_scope_id or DEFAULT_MEMORY_SCOPE_ID
+        resolved_place = place_scope_id or f"{platform}:{chat_id}"
+
         conn = sqlite3.connect(str(self.db_path))
         cursor = conn.cursor()
-        
+
         timestamp = datetime.now().timestamp()
-        
+
         # 每条消息都插入时间戳
         should_add_timestamp = True
-        
+
         # 如果需要，在内容前添加时间戳
         original_content = content
         if should_add_timestamp:
@@ -247,13 +349,15 @@ class MessageHistory:
                 metadata = {}
             metadata["has_timestamp"] = True
             logger.debug(f"[{platform}/{chat_id}] 插入时间戳: {time_str} ({self.timezone})")
-        
+
         metadata_json = json.dumps(metadata) if metadata else None
-        
+
         cursor.execute("""
-            INSERT INTO messages (platform, chat_id, user_id, role, content, timestamp, metadata, is_pinned)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-        """, (platform, chat_id, user_id, role, content, timestamp, metadata_json, int(is_pinned)))
+            INSERT INTO messages (platform, chat_id, user_id, role, content, timestamp, metadata, is_pinned,
+                                  memory_scope_id, place_scope_id, actor_display_name)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """, (platform, chat_id, user_id, role, content, timestamp, metadata_json, int(is_pinned),
+              resolved_scope, resolved_place, actor_display_name))
 
         message_id = int(cursor.lastrowid or 0)
         conn.commit()
@@ -270,12 +374,17 @@ class MessageHistory:
                 raw_content=original_content,
                 timestamp=timestamp,
                 metadata=metadata,
+                memory_scope_id=resolved_scope,
+                place_scope_id=resolved_place,
             )
         except Exception as e:
             logger.warning(f"[{platform}/{chat_id}] 写入消息镜像失败: {e}")
 
         # 触发压缩上下文刷新（独立上下文数据库）
-        self._schedule_context_refresh(platform, chat_id)
+        # 注意：这里传“原始” memory_scope_id（旧调用方为 None），而非 resolved_scope，
+        # 以保证旧调用方的压缩段仍按物理 (platform, chat_id) 分区读写/清理，行为不变；
+        # 显式传作用域的调用方（接力改造后所有生产调用方）才使用共享 __scope__ 分区。
+        self._schedule_context_refresh(platform, chat_id, memory_scope_id)
 
         logger.debug(f"[{platform}/{chat_id}] 添加消息 #{message_id}: {role}")
 
@@ -344,11 +453,11 @@ class MessageHistory:
         finally:
             conn.close()
 
-    def _schedule_context_refresh(self, platform: str, chat_id: str):
+    def _schedule_context_refresh(self, platform: str, chat_id: str, memory_scope_id: Optional[str] = None):
         """异步刷新滑动压缩上下文，失败时记录日志并不中断主流程。"""
         if not self.context_compressor:
             return
-        self._launch_background(self.context_compressor.refresh_context(platform, chat_id))
+        self._launch_background(self.context_compressor.refresh_context(platform, chat_id, memory_scope_id=memory_scope_id))
 
     def _launch_background(self, coro):
         """安全地启动后台任务，如无事件循环则直接运行。"""
@@ -549,20 +658,67 @@ class MessageHistory:
                 await self._generate_session_summary(platform, chat_id, session_id)
         elif task_type == "context_refresh":
             if self.context_compressor:
-                await self.context_compressor.refresh_context(platform, chat_id)
+                await self.context_compressor.refresh_context(
+                    platform, chat_id, memory_scope_id=self._lookup_scope_for_place(platform, chat_id)
+                )
         else:
             logger.warning("未知压缩重试任务类型: %s", task_type)
+
+    def _lookup_scope_for_place(self, platform: str, chat_id: str) -> Optional[str]:
+        """根据 (platform, chat_id) 反查其记忆作用域（取最近一条消息的 scope）。
+
+        用于无显式 scope 的内部重试路径，让重试的上下文刷新仍写入正确的共享分区。
+        """
+        try:
+            conn = sqlite3.connect(str(self.db_path))
+            cursor = conn.cursor()
+            cursor.execute(
+                """
+                SELECT memory_scope_id FROM messages
+                WHERE platform = ? AND chat_id = ? AND memory_scope_id IS NOT NULL
+                ORDER BY timestamp DESC LIMIT 1
+                """,
+                (platform, chat_id),
+            )
+            row = cursor.fetchone()
+            conn.close()
+            return row[0] if row and row[0] else None
+        except Exception:
+            return None
     
+    def _scope_filter(
+        self,
+        platform: str,
+        chat_id: str,
+        memory_scope_id: Optional[str],
+    ) -> Tuple[str, tuple]:
+        """返回 (where 片段, 参数) ：传入 memory_scope_id 则按共享作用域过滤，
+        否则退回旧的 (platform, chat_id) 分区（保证旧调用方行为不变）。
+
+        memory_scope_id 为内部受控值（来自身份层常量/绑定），不来自用户输入。
+        """
+        if memory_scope_id:
+            return "memory_scope_id = ?", (memory_scope_id,)
+        return "platform = ? AND chat_id = ?", (platform, chat_id)
+
     def get_context_messages(
         self,
         platform: str,
         chat_id: str,
         limit: Optional[int] = None,
-        include_summaries: bool = True
+        include_summaries: bool = True,
+        memory_scope_id: Optional[str] = None,
+        current_place_scope_id: Optional[str] = None,
     ) -> List[Dict]:
         """
         获取对话上下文消息
-        
+
+        跨平台接力：
+        - 传入 memory_scope_id → 按共享作用域聚合所有平台/窗口的历史（A 平台写、B 平台读）。
+        - 不传 → 退回旧的 (platform, chat_id) 分区，行为与改造前完全一致。
+        - 共享模式下，对“非当前地点”的消息注入来源标签 [place / 昵称]，当前地点消息保持原样，
+          以免破坏调用方对最后一条消息的去重比较。
+
         返回格式:
         [
             {"role": "system", "content": "[归档总结] ..."},
@@ -572,37 +728,45 @@ class MessageHistory:
             ...
         ]
         """
+        scope_where, scope_params = self._scope_filter(platform, chat_id, memory_scope_id)
+        scoped = bool(memory_scope_id)
+        # 当前地点：共享模式下用于决定哪些消息需要打来源标签。
+        current_place = current_place_scope_id or f"{platform}:{chat_id}"
+
         conn = sqlite3.connect(str(self.db_path))
         conn.row_factory = sqlite3.Row
         cursor = conn.cursor()
-        
+
         messages = []
-        
+
         # 1. 获取永久标记的消息
-        cursor.execute("""
+        cursor.execute(f"""
             SELECT * FROM messages
-            WHERE platform = ? AND chat_id = ? AND is_pinned = 1
+            WHERE {scope_where} AND is_pinned = 1
             ORDER BY timestamp ASC
-        """, (platform, chat_id))
-        
+        """, scope_params)
+
         pinned_messages = [dict(row) for row in cursor.fetchall()]
         if pinned_messages:
             for msg in pinned_messages:
+                content = msg["content"]
+                if scoped:
+                    content = self._apply_source_label(msg, current_place, content)
                 messages.append({
                     "role": msg["role"],
-                    "content": f"[📌 重要] {msg['content']}",
+                    "content": f"[📌 重要] {content}",
                     "timestamp": msg["timestamp"]
                 })
-        
+
         # 2. 获取归档总结 (Level 3)
         if include_summaries:
-            cursor.execute("""
+            cursor.execute(f"""
                 SELECT summary_text, message_count FROM summaries
-                WHERE platform = ? AND chat_id = ? AND level = 3
+                WHERE {scope_where} AND level = 3
                 ORDER BY timestamp DESC
                 LIMIT 1
-            """, (platform, chat_id))
-            
+            """, scope_params)
+
             archive_summary = cursor.fetchone()
             if archive_summary:
                 messages.append({
@@ -613,34 +777,37 @@ class MessageHistory:
 
         # 优先使用独立上下文数据库的滑动压缩结果
         if include_summaries and self.context_compressor:
-            compressed_segments = self.context_compressor.get_context_messages(platform, chat_id)
+            compressed_segments = self.context_compressor.get_context_messages(
+                platform, chat_id, memory_scope_id=memory_scope_id
+            )
             if compressed_segments:
                 messages.extend(compressed_segments)
                 logger.debug(f"[{platform}/{chat_id}] 使用上下文压缩库: {len(compressed_segments)} 段")
-        
+
         # 3. 获取压缩总结 (Level 1-2)
         if include_summaries:
-            cursor.execute("""
+            cursor.execute(f"""
                 SELECT summary_text, level, message_count, timestamp FROM summaries
-                WHERE platform = ? AND chat_id = ? AND level < 3
+                WHERE {scope_where} AND level < 3
                 ORDER BY timestamp ASC
-            """, (platform, chat_id))
-            
+            """, scope_params)
+
             for row in cursor.fetchall():
                 messages.append({
                     "role": "system",
                     "content": f"[💬 对话摘要，共{row['message_count']}条] {row['summary_text']}",
                     "timestamp": row["timestamp"]
                 })
-        
+
         # 4. 获取原始消息（最近的）
         actual_limit = limit or self.raw_window
-        cursor.execute("""
+        cursor.execute(f"""
             SELECT * FROM messages
-            WHERE platform = ? AND chat_id = ? AND is_archived = 0 AND is_pinned = 0
+            WHERE {scope_where} AND is_archived = 0 AND is_pinned = 0
             ORDER BY timestamp DESC
             LIMIT ?
-        """, (platform, chat_id, actual_limit))
+        """, scope_params + (actual_limit,))
+
         
         raw_messages = [dict(row) for row in cursor.fetchall()]
         raw_messages.reverse()  # 按时间正序
@@ -680,22 +847,57 @@ class MessageHistory:
                 platform_ids = [platform_ids]
             platform_ids = [str(pid) for pid in platform_ids if pid is not None]
 
+            content = msg["content"]
+            if scoped:
+                content = self._apply_source_label(msg, current_place, content)
+
             messages.append({
                 "role": msg["role"],
-                "content": msg["content"],
+                "content": content,
                 "timestamp": msg["timestamp"],
                 "message_id": msg["id"],
                 "metadata": md,
                 "platform_message_ids": platform_ids,
+                "place_scope_id": msg.get("place_scope_id"),
+                "actor_display_name": msg.get("actor_display_name"),
+                "source_platform": msg.get("platform"),
             })
-        
+
         conn.close()
-        
+
         # 按时间排序（归档总结在最前，然后是压缩总结，最后是原始消息）
         messages.sort(key=lambda x: x.get("timestamp", 0))
-        
-        logger.info(f"[{platform}/{chat_id}] 获取上下文: {len(messages)} 条消息")
+
+        scope_tag = memory_scope_id if scoped else f"{platform}/{chat_id}"
+        logger.info(f"[{scope_tag}] 获取上下文: {len(messages)} 条消息")
         return messages
+
+    @staticmethod
+    def _apply_source_label(msg: Dict[str, Any], current_place: str, content: str) -> str:
+        """共享作用域下，为来自“非当前地点”的消息打来源标签 [place / 昵称]。
+
+        当前地点的消息保持原文，避免破坏调用方对最后一条消息内容的去重比较。
+        标签加在时间戳之后、正文之前，不影响时间戳剥离逻辑。
+        """
+        place = str(msg.get("place_scope_id") or "").strip()
+        if not place:
+            src_platform = msg.get("platform") or ""
+            src_chat = msg.get("chat_id") or ""
+            place = f"{src_platform}:{src_chat}" if src_platform else ""
+        # 当前地点或无地点信息：不打标签
+        if not place or place == current_place:
+            return content
+
+        actor = str(msg.get("actor_display_name") or "").strip()
+        label = f"[来自 {place} / {actor}]" if actor else f"[来自 {place}]"
+
+        text = content or ""
+        # 把标签插到时间戳标记之后，保持 [时间] [来自 ...] 正文 的顺序。
+        ts_pattern = "] "
+        if text.startswith("[") and ts_pattern in text:
+            head, rest = text.split(ts_pattern, 1)
+            return f"{head}{ts_pattern}{label} {rest}"
+        return f"{label} {text}"
 
     # ------------------------------------------------------------------
     # 日志查询辅助
@@ -706,23 +908,38 @@ class MessageHistory:
         chat_id: str,
         start_ts: float,
         end_ts: float,
+        memory_scope_id: Optional[str] = None,
     ) -> List[Dict[str, Any]]:
-        """获取指定时间戳区间内的原始消息（来自镜像库）。"""
+        """获取指定时间戳区间内的原始消息（来自镜像库）。
+
+        传入 memory_scope_id 时按共享作用域聚合所有平台（跨平台接力，如每日总结）。
+        """
         if not self.message_log:
             return []
 
         conn = sqlite3.connect(str(self.message_log.db_path))
         conn.row_factory = sqlite3.Row
         cursor = conn.cursor()
-        cursor.execute(
-            """
-            SELECT role, raw_content, timestamp, metadata
-            FROM raw_messages
-            WHERE platform = ? AND chat_id = ? AND timestamp >= ? AND timestamp < ?
-            ORDER BY timestamp ASC
-            """,
-            (platform, chat_id, start_ts, end_ts),
-        )
+        if memory_scope_id:
+            cursor.execute(
+                """
+                SELECT role, raw_content, timestamp, metadata
+                FROM raw_messages
+                WHERE memory_scope_id = ? AND timestamp >= ? AND timestamp < ?
+                ORDER BY timestamp ASC
+                """,
+                (memory_scope_id, start_ts, end_ts),
+            )
+        else:
+            cursor.execute(
+                """
+                SELECT role, raw_content, timestamp, metadata
+                FROM raw_messages
+                WHERE platform = ? AND chat_id = ? AND timestamp >= ? AND timestamp < ?
+                ORDER BY timestamp ASC
+                """,
+                (platform, chat_id, start_ts, end_ts),
+            )
         rows = [dict(row) for row in cursor.fetchall()]
         conn.close()
         return rows
@@ -803,12 +1020,17 @@ class MessageHistory:
             start_id = messages_to_compress[0]["id"]
             end_id = messages_to_compress[-1]["id"]
             timestamp = datetime.now().timestamp()
-            
+
+            # 总结继承源消息的作用域，保证共享模式下能检索到（缺失则归入默认共享作用域）。
+            seg_scope = messages_to_compress[0].get("memory_scope_id") or DEFAULT_MEMORY_SCOPE_ID
+            seg_place = messages_to_compress[0].get("place_scope_id") or f"{platform}:{chat_id}"
+
             cursor.execute("""
-                INSERT INTO summaries (platform, chat_id, level, start_message_id, end_message_id, 
-                                     summary_text, message_count, timestamp)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-            """, (platform, chat_id, 1, start_id, end_id, summary, len(messages_to_compress), timestamp))
+                INSERT INTO summaries (platform, chat_id, level, start_message_id, end_message_id,
+                                     summary_text, message_count, timestamp, memory_scope_id, place_scope_id)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """, (platform, chat_id, 1, start_id, end_id, summary, len(messages_to_compress), timestamp,
+                  seg_scope, seg_place))
             
             # 标记消息为已归档
             cursor.execute("""
@@ -873,12 +1095,17 @@ class MessageHistory:
             end_id = level1_summaries[-1]["end_message_id"]
             total_count = sum(s["message_count"] for s in level1_summaries)
             timestamp = datetime.now().timestamp()
-            
+
+            # 归档总结继承一级总结的作用域。
+            arc_scope = level1_summaries[0].get("memory_scope_id") or DEFAULT_MEMORY_SCOPE_ID
+            arc_place = level1_summaries[0].get("place_scope_id") or f"{platform}:{chat_id}"
+
             cursor.execute("""
                 INSERT INTO summaries (platform, chat_id, level, start_message_id, end_message_id,
-                                     summary_text, message_count, timestamp)
-                VALUES (?, ?, 3, ?, ?, ?, ?, ?)
-            """, (platform, chat_id, 3, start_id, end_id, archive_summary, total_count, timestamp))
+                                     summary_text, message_count, timestamp, memory_scope_id, place_scope_id)
+                VALUES (?, ?, 3, ?, ?, ?, ?, ?, ?, ?)
+            """, (platform, chat_id, 3, start_id, end_id, archive_summary, total_count, timestamp,
+                  arc_scope, arc_place))
             
             # 删除已归档的一级总结
             cursor.execute("""
@@ -927,28 +1154,35 @@ class MessageHistory:
         chat_id: str,
         trigger_type: str = "user",
         metadata: Optional[Dict] = None,
+        memory_scope_id: Optional[str] = None,
     ) -> Optional[int]:
         """
         关闭当前对话段落：将所有未分配 session 的消息归入一个新的 session。
 
         当 AI 从 ONLINE 进入 SEMI_ONLINE 时由 controller 调用。
 
+        跨平台接力：传入 memory_scope_id 时，按共享作用域关闭**整段连续对话**
+        （跨所有平台/窗口），而不是只关闭单平台那一段——否则在一个平台收尾会把
+        另一个平台正在延续的对话错误切断。不传则退回旧的单平台分区行为。
+
         :param platform: 平台标识
         :param chat_id: 聊天 ID
         :param trigger_type: 触发来源 ('user', 'proactive', 'alarm')
         :param metadata: 额外元数据
+        :param memory_scope_id: 共享记忆作用域（跨平台接力）
         :return: 新创建的 session_id，如果没有未分配消息则返回 None
         """
+        scope_where, scope_params = self._scope_filter(platform, chat_id, memory_scope_id)
         conn = sqlite3.connect(str(self.db_path))
         cursor = conn.cursor()
 
         try:
             # 查找所有未分配 session 的消息（session_id IS NULL）
-            cursor.execute("""
-                SELECT id, timestamp FROM messages
-                WHERE platform = ? AND chat_id = ? AND session_id IS NULL
+            cursor.execute(f"""
+                SELECT id, timestamp, memory_scope_id, place_scope_id FROM messages
+                WHERE {scope_where} AND session_id IS NULL
                 ORDER BY timestamp ASC
-            """, (platform, chat_id))
+            """, scope_params)
 
             unassigned = cursor.fetchall()
             if not unassigned:
@@ -960,15 +1194,20 @@ class MessageHistory:
             started_at = unassigned[0][1]      # 第一条消息的时间戳
             ended_at = unassigned[-1][1]        # 最后一条消息的时间戳
             message_count = len(msg_ids)
+            # session 记录继承作用域：优先消息携带的作用域，否则用传入值/默认。
+            seg_scope = unassigned[0][2] or memory_scope_id or DEFAULT_MEMORY_SCOPE_ID
+            seg_place = unassigned[0][3] or f"{platform}:{chat_id}"
 
             metadata_json = json.dumps(metadata) if metadata else None
 
             # 创建 session 记录
             cursor.execute("""
                 INSERT INTO conversation_sessions
-                    (platform, chat_id, started_at, ended_at, message_count, trigger_type, metadata)
-                VALUES (?, ?, ?, ?, ?, ?, ?)
-            """, (platform, chat_id, started_at, ended_at, message_count, trigger_type, metadata_json))
+                    (platform, chat_id, started_at, ended_at, message_count, trigger_type, metadata,
+                     memory_scope_id, place_scope_id)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """, (platform, chat_id, started_at, ended_at, message_count, trigger_type, metadata_json,
+                  seg_scope, seg_place))
 
             session_id = cursor.lastrowid
             if session_id is None:
@@ -976,11 +1215,11 @@ class MessageHistory:
                 conn.close()
                 return None
 
-            # 批量更新消息的 session_id
-            cursor.execute("""
+            # 批量更新消息的 session_id（按相同作用域过滤）
+            cursor.execute(f"""
                 UPDATE messages SET session_id = ?
-                WHERE platform = ? AND chat_id = ? AND session_id IS NULL
-            """, (session_id, platform, chat_id))
+                WHERE {scope_where} AND session_id IS NULL
+            """, (session_id,) + scope_params)
 
             conn.commit()
             logger.info(
@@ -1015,11 +1254,13 @@ class MessageHistory:
             conn.row_factory = sqlite3.Row
             cursor = conn.cursor()
 
+            # 按 session_id 取（全局唯一主键）：跨平台关闭的段落可能含多个平台的消息，
+            # 不能再用 (platform, chat_id) 过滤，否则会漏掉其他平台的消息。
             cursor.execute("""
                 SELECT role, content FROM messages
-                WHERE platform = ? AND chat_id = ? AND session_id = ?
+                WHERE session_id = ?
                 ORDER BY timestamp ASC
-            """, (platform, chat_id, session_id))
+            """, (session_id,))
 
             messages = cursor.fetchall()
             conn.close()
@@ -1094,21 +1335,24 @@ class MessageHistory:
         self,
         platform: str,
         chat_id: str,
+        memory_scope_id: Optional[str] = None,
     ) -> List[Dict]:
         """
         获取当前活跃对话段落的所有消息（session_id IS NULL）。
-        
+
         这些是尚未被 close_session 封闭的消息，代表正在进行中的对话段落。
+        传入 memory_scope_id 时按共享作用域聚合所有平台的活跃消息（跨平台接力）。
         """
+        scope_where, scope_params = self._scope_filter(platform, chat_id, memory_scope_id)
         conn = sqlite3.connect(str(self.db_path))
         conn.row_factory = sqlite3.Row
         cursor = conn.cursor()
 
-        cursor.execute("""
+        cursor.execute(f"""
             SELECT * FROM messages
-            WHERE platform = ? AND chat_id = ? AND session_id IS NULL
+            WHERE {scope_where} AND session_id IS NULL
             ORDER BY timestamp ASC
-        """, (platform, chat_id))
+        """, scope_params)
 
         messages = [dict(row) for row in cursor.fetchall()]
         conn.close()
@@ -1120,32 +1364,35 @@ class MessageHistory:
         chat_id: str,
         since_timestamp: float,
         role: Optional[str] = None,
+        memory_scope_id: Optional[str] = None,
     ) -> List[Dict]:
         """
         获取指定时间戳之后的消息。
-        
+
         Args:
             platform: 平台标识
             chat_id: 聊天 ID
             since_timestamp: 时间戳（获取此时间之后的消息）
             role: 可选，只获取指定角色的消息（如 'user'）
+            memory_scope_id: 可选，按共享作用域聚合所有平台（跨平台接力）
         """
+        scope_where, scope_params = self._scope_filter(platform, chat_id, memory_scope_id)
         conn = sqlite3.connect(str(self.db_path))
         conn.row_factory = sqlite3.Row
         cursor = conn.cursor()
 
         if role:
-            cursor.execute("""
+            cursor.execute(f"""
                 SELECT * FROM messages
-                WHERE platform = ? AND chat_id = ? AND timestamp > ? AND role = ?
+                WHERE {scope_where} AND timestamp > ? AND role = ?
                 ORDER BY timestamp ASC
-            """, (platform, chat_id, since_timestamp, role))
+            """, scope_params + (since_timestamp, role))
         else:
-            cursor.execute("""
+            cursor.execute(f"""
                 SELECT * FROM messages
-                WHERE platform = ? AND chat_id = ? AND timestamp > ?
+                WHERE {scope_where} AND timestamp > ?
                 ORDER BY timestamp ASC
-            """, (platform, chat_id, since_timestamp))
+            """, scope_params + (since_timestamp,))
 
         messages = [dict(row) for row in cursor.fetchall()]
         conn.close()
@@ -1156,18 +1403,20 @@ class MessageHistory:
         platform: str,
         chat_id: str,
         limit: int = 10,
+        memory_scope_id: Optional[str] = None,
     ) -> List[Dict]:
-        """获取最近的对话段落列表。"""
+        """获取最近的对话段落列表。传入 memory_scope_id 时跨平台聚合。"""
+        scope_where, scope_params = self._scope_filter(platform, chat_id, memory_scope_id)
         conn = sqlite3.connect(str(self.db_path))
         conn.row_factory = sqlite3.Row
         cursor = conn.cursor()
 
-        cursor.execute("""
+        cursor.execute(f"""
             SELECT * FROM conversation_sessions
-            WHERE platform = ? AND chat_id = ?
+            WHERE {scope_where}
             ORDER BY ended_at DESC
             LIMIT ?
-        """, (platform, chat_id, limit))
+        """, scope_params + (limit,))
 
         sessions = [dict(row) for row in cursor.fetchall()]
         conn.close()
@@ -1202,57 +1451,58 @@ class MessageHistory:
         conn.close()
         return row[0] if row else None
     
-    def get_statistics(self, platform: str, chat_id: str) -> Dict:
-        """获取消息统计信息"""
+    def get_statistics(self, platform: str, chat_id: str, memory_scope_id: Optional[str] = None) -> Dict:
+        """获取消息统计信息。传入 memory_scope_id 时统计整个共享作用域（跨平台）。"""
+        scope_where, scope_params = self._scope_filter(platform, chat_id, memory_scope_id)
         conn = sqlite3.connect(str(self.db_path))
         cursor = conn.cursor()
-        
+
         # 原始消息数
-        cursor.execute("""
+        cursor.execute(f"""
             SELECT COUNT(*) FROM messages
-            WHERE platform = ? AND chat_id = ? AND is_archived = 0 AND is_pinned = 0
-        """, (platform, chat_id))
+            WHERE {scope_where} AND is_archived = 0 AND is_pinned = 0
+        """, scope_params)
         raw_count = cursor.fetchone()[0]
-        
+
         # 已归档消息数
-        cursor.execute("""
+        cursor.execute(f"""
             SELECT COUNT(*) FROM messages
-            WHERE platform = ? AND chat_id = ? AND is_archived = 1
-        """, (platform, chat_id))
+            WHERE {scope_where} AND is_archived = 1
+        """, scope_params)
         archived_count = cursor.fetchone()[0]
-        
+
         # 永久标记消息数
-        cursor.execute("""
+        cursor.execute(f"""
             SELECT COUNT(*) FROM messages
-            WHERE platform = ? AND chat_id = ? AND is_pinned = 1
-        """, (platform, chat_id))
+            WHERE {scope_where} AND is_pinned = 1
+        """, scope_params)
         pinned_count = cursor.fetchone()[0]
-        
+
         # 总结数量
-        cursor.execute("""
+        cursor.execute(f"""
             SELECT level, COUNT(*) as count FROM summaries
-            WHERE platform = ? AND chat_id = ?
+            WHERE {scope_where}
             GROUP BY level
-        """, (platform, chat_id))
-        
+        """, scope_params)
+
         summaries = {row[0]: row[1] for row in cursor.fetchall()}
-        
+
         # 对话段落数
-        cursor.execute("""
+        cursor.execute(f"""
             SELECT COUNT(*) FROM conversation_sessions
-            WHERE platform = ? AND chat_id = ?
-        """, (platform, chat_id))
+            WHERE {scope_where}
+        """, scope_params)
         session_count = cursor.fetchone()[0]
-        
+
         # 当前未分配 session 的消息数（活跃对话中）
-        cursor.execute("""
+        cursor.execute(f"""
             SELECT COUNT(*) FROM messages
-            WHERE platform = ? AND chat_id = ? AND session_id IS NULL
-        """, (platform, chat_id))
+            WHERE {scope_where} AND session_id IS NULL
+        """, scope_params)
         active_message_count = cursor.fetchone()[0]
-        
+
         conn.close()
-        
+
         return {
             "raw_messages": raw_count,
             "archived_messages": archived_count,
@@ -1263,44 +1513,72 @@ class MessageHistory:
             "total_sessions": session_count,
             "active_messages": active_message_count,
         }
-    
-    def clear_chat_history(self, platform: str, chat_id: str, keep_pinned: bool = True):
-        """清除聊天历史（包括对话段落记录）"""
+
+    def clear_chat_history(
+        self,
+        platform: str,
+        chat_id: str,
+        keep_pinned: bool = True,
+        memory_scope_id: Optional[str] = None,
+    ):
+        """清除聊天历史（包括对话段落记录）。
+
+        跨平台接力：传入 memory_scope_id 时清除整个共享作用域的历史
+        （即所有平台的共享聊天记录），而不是只清当前平台的分区。
+        镜像库/压缩库目前仍按 (platform, chat_id) 物理分区，会逐一清理本作用域涉及的地点。
+        """
+        scope_where, scope_params = self._scope_filter(platform, chat_id, memory_scope_id)
         conn = sqlite3.connect(str(self.db_path))
         cursor = conn.cursor()
-        
-        if keep_pinned:
-            cursor.execute("""
-                DELETE FROM messages WHERE platform = ? AND chat_id = ? AND is_pinned = 0
-            """, (platform, chat_id))
-        else:
-            cursor.execute("""
-                DELETE FROM messages WHERE platform = ? AND chat_id = ?
-            """, (platform, chat_id))
-        
-        cursor.execute("""
-            DELETE FROM summaries WHERE platform = ? AND chat_id = ?
-        """, (platform, chat_id))
-        
-        cursor.execute("""
-            DELETE FROM conversation_sessions WHERE platform = ? AND chat_id = ?
-        """, (platform, chat_id))
 
-        cursor.execute("""
-            DELETE FROM compression_retry_queue WHERE platform = ? AND chat_id = ?
-        """, (platform, chat_id))
-        
+        # 共享模式下，先收集本作用域涉及的所有 (platform, chat_id) 地点，
+        # 以便同步清理按地点物理分区的镜像库与压缩库。
+        place_pairs: List[Tuple[str, str]] = []
+        if memory_scope_id:
+            cursor.execute(
+                "SELECT DISTINCT platform, chat_id FROM messages WHERE memory_scope_id = ?",
+                (memory_scope_id,),
+            )
+            place_pairs = [(row[0], row[1]) for row in cursor.fetchall()]
+        if not place_pairs:
+            place_pairs = [(platform, chat_id)]
+
+        if keep_pinned:
+            cursor.execute(f"""
+                DELETE FROM messages WHERE {scope_where} AND is_pinned = 0
+            """, scope_params)
+        else:
+            cursor.execute(f"""
+                DELETE FROM messages WHERE {scope_where}
+            """, scope_params)
+
+        cursor.execute(f"""
+            DELETE FROM summaries WHERE {scope_where}
+        """, scope_params)
+
+        cursor.execute(f"""
+            DELETE FROM conversation_sessions WHERE {scope_where}
+        """, scope_params)
+
+        # 重试队列按 (platform, chat_id) 分区，逐地点清理。
+        for p, c in place_pairs:
+            cursor.execute("""
+                DELETE FROM compression_retry_queue WHERE platform = ? AND chat_id = ?
+            """, (p, c))
+
         conn.commit()
         conn.close()
-        try:
-            self.message_log.clear_chat(platform, chat_id)
-        except Exception:
-            logger.warning(f"[{platform}/{chat_id}] 清理消息镜像失败", exc_info=True)
-        try:
-            self.context_compressor.clear_chat(platform, chat_id)
-        except Exception:
-            logger.warning(f"[{platform}/{chat_id}] 清理压缩上下文失败", exc_info=True)
-        logger.info(f"[{platform}/{chat_id}] 聊天历史已清除 (保留标记: {keep_pinned})")
+        for p, c in place_pairs:
+            try:
+                self.message_log.clear_chat(p, c)
+            except Exception:
+                logger.warning(f"[{p}/{c}] 清理消息镜像失败", exc_info=True)
+            try:
+                self.context_compressor.clear_chat(p, c)
+            except Exception:
+                logger.warning(f"[{p}/{c}] 清理压缩上下文失败", exc_info=True)
+        scope_tag = memory_scope_id if memory_scope_id else f"{platform}/{chat_id}"
+        logger.info(f"[{scope_tag}] 聊天历史已清除 (保留标记: {keep_pinned}, 涉及地点: {len(place_pairs)})")
 
     def clear_all_history(self, include_pinned: bool = False):
         """清除所有聊天历史（包括对话段落记录）"""

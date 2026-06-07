@@ -17,6 +17,9 @@ from brain.prompts import load_identity_context
 
 logger = logging.getLogger(__name__)
 
+# 与 message_history.DEFAULT_MEMORY_SCOPE_ID / conversation_identity 保持一致。
+DEFAULT_MEMORY_SCOPE_ID = "relationship:owner:default"
+
 
 # ---------------------------------------------------------------------------
 # 默认路径
@@ -64,6 +67,8 @@ class MessageLog:
                 raw_content TEXT NOT NULL,
                 timestamp REAL NOT NULL,
                 metadata TEXT,
+                memory_scope_id TEXT,
+                place_scope_id TEXT,
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
             """
@@ -74,8 +79,47 @@ class MessageLog:
             ON raw_messages(platform, chat_id, timestamp DESC)
             """
         )
+        # idx_raw_messages_scope 在 _migrate_db 中、确保 memory_scope_id 列存在后再建。
+        self._migrate_db(conn)
         conn.commit()
         conn.close()
+
+    def _migrate_db(self, conn: sqlite3.Connection):
+        """为旧镜像库补充作用域列并回填（非破坏性，自动检测）。"""
+        cursor = conn.cursor()
+        cursor.execute("PRAGMA table_info(raw_messages)")
+        cols = {row[1] for row in cursor.fetchall()}
+        if "memory_scope_id" not in cols:
+            logger.info("数据库迁移: 为 raw_messages 添加 memory_scope_id 列")
+            cursor.execute("ALTER TABLE raw_messages ADD COLUMN memory_scope_id TEXT")
+        if "place_scope_id" not in cols:
+            cursor.execute("ALTER TABLE raw_messages ADD COLUMN place_scope_id TEXT")
+        conn.commit()
+        try:
+            cursor.execute(
+                """
+                UPDATE raw_messages SET memory_scope_id = ?
+                WHERE memory_scope_id IS NULL OR memory_scope_id = ''
+                """,
+                (DEFAULT_MEMORY_SCOPE_ID,),
+            )
+            cursor.execute(
+                """
+                UPDATE raw_messages SET place_scope_id = platform || ':' || chat_id
+                WHERE place_scope_id IS NULL OR place_scope_id = ''
+                """
+            )
+            conn.commit()
+        except sqlite3.OperationalError as e:
+            logger.warning("回填 raw_messages 作用域列失败: %s", e)
+        # 作用域列已就绪，创建索引。
+        cursor.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_raw_messages_scope
+            ON raw_messages(memory_scope_id, timestamp DESC)
+            """
+        )
+        conn.commit()
 
     def add_message(
         self,
@@ -87,14 +131,18 @@ class MessageLog:
         raw_content: str,
         timestamp: float,
         metadata: Optional[Dict] = None,
+        memory_scope_id: Optional[str] = None,
+        place_scope_id: Optional[str] = None,
     ) -> None:
         metadata_json = json.dumps(metadata) if metadata else None
+        resolved_scope = memory_scope_id or DEFAULT_MEMORY_SCOPE_ID
+        resolved_place = place_scope_id or f"{platform}:{chat_id}"
         conn = sqlite3.connect(str(self.db_path))
         cursor = conn.cursor()
         cursor.execute(
             """
-            INSERT INTO raw_messages (message_id, platform, chat_id, role, content_with_timestamp, raw_content, timestamp, metadata)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            INSERT INTO raw_messages (message_id, platform, chat_id, role, content_with_timestamp, raw_content, timestamp, metadata, memory_scope_id, place_scope_id)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 message_id,
@@ -105,24 +153,43 @@ class MessageLog:
                 raw_content,
                 timestamp,
                 metadata_json,
+                resolved_scope,
+                resolved_place,
             ),
         )
         conn.commit()
         conn.close()
 
-    def get_recent_messages(self, platform: str, chat_id: str, limit: int = 20) -> List[Dict]:
+    def get_recent_messages(
+        self,
+        platform: str,
+        chat_id: str,
+        limit: int = 20,
+        memory_scope_id: Optional[str] = None,
+    ) -> List[Dict]:
         conn = sqlite3.connect(str(self.db_path))
         conn.row_factory = sqlite3.Row
         cursor = conn.cursor()
-        cursor.execute(
-            """
-            SELECT * FROM raw_messages
-            WHERE platform = ? AND chat_id = ?
-            ORDER BY timestamp DESC
-            LIMIT ?
-            """,
-            (platform, chat_id, limit),
-        )
+        if memory_scope_id:
+            cursor.execute(
+                """
+                SELECT * FROM raw_messages
+                WHERE memory_scope_id = ?
+                ORDER BY timestamp DESC
+                LIMIT ?
+                """,
+                (memory_scope_id, limit),
+            )
+        else:
+            cursor.execute(
+                """
+                SELECT * FROM raw_messages
+                WHERE platform = ? AND chat_id = ?
+                ORDER BY timestamp DESC
+                LIMIT ?
+                """,
+                (platform, chat_id, limit),
+            )
         rows = [dict(row) for row in cursor.fetchall()]
         conn.close()
         return rows
@@ -205,6 +272,7 @@ class ContextCompressor:
                 message_ids TEXT NOT NULL,  -- JSON array
                 source_timestamp REAL NOT NULL,
                 updated_at REAL NOT NULL,
+                memory_scope_id TEXT,
                 UNIQUE(platform, chat_id, slot)
             )
             """
@@ -215,22 +283,62 @@ class ContextCompressor:
             ON context_segments(platform, chat_id, slot)
             """
         )
+        self._migrate_db(conn)
         conn.commit()
         conn.close()
 
-    async def refresh_context(self, platform: str, chat_id: str) -> None:
-        """按对话段落(session)重新生成压缩上下文。"""
+    def _migrate_db(self, conn: sqlite3.Connection):
+        """为旧压缩库补充 memory_scope_id 列（非破坏性，自动检测）。"""
+        cursor = conn.cursor()
+        cursor.execute("PRAGMA table_info(context_segments)")
+        cols = {row[1] for row in cursor.fetchall()}
+        if "memory_scope_id" not in cols:
+            logger.info("数据库迁移: 为 context_segments 添加 memory_scope_id 列")
+            cursor.execute("ALTER TABLE context_segments ADD COLUMN memory_scope_id TEXT")
+            conn.commit()
+            try:
+                cursor.execute(
+                    """
+                    UPDATE context_segments SET memory_scope_id = ?
+                    WHERE memory_scope_id IS NULL OR memory_scope_id = ''
+                    """,
+                    (DEFAULT_MEMORY_SCOPE_ID,),
+                )
+                conn.commit()
+            except sqlite3.OperationalError as e:
+                logger.warning("回填 context_segments 作用域列失败: %s", e)
+
+    @staticmethod
+    def _scope_partition(platform: str, chat_id: str, memory_scope_id: Optional[str]) -> tuple[str, str]:
+        """共享模式下，压缩片段统一存放在规范作用域分区，避免被单平台 (platform, chat_id) 切分。"""
+        if memory_scope_id:
+            return ("__scope__", memory_scope_id)
+        return (platform, chat_id)
+
+    @staticmethod
+    def _msg_scope_filter(platform: str, chat_id: str, memory_scope_id: Optional[str]) -> tuple[str, tuple]:
+        """构建查询 messages/conversation_sessions 表的作用域过滤条件。"""
+        if memory_scope_id:
+            return "memory_scope_id = ?", (memory_scope_id,)
+        return "platform = ? AND chat_id = ?", (platform, chat_id)
+
+    async def refresh_context(self, platform: str, chat_id: str, memory_scope_id: Optional[str] = None) -> None:
+        """按对话段落(session)重新生成压缩上下文。
+
+        跨平台接力：传入 memory_scope_id 时，按共享作用域聚合所有平台的段落生成压缩，
+        并存放在规范作用域分区，让任意平台都能读到同一份压缩上下文。
+        """
         try:
             if not self.history_db_path:
                 logger.warning("ContextCompressor 未配置 history_db_path，跳过段压缩")
                 return
 
-            segment_refs = self._get_recent_segment_refs(platform, chat_id, limit=10)
+            segment_refs = self._get_recent_segment_refs(platform, chat_id, limit=10, memory_scope_id=memory_scope_id)
             if not segment_refs:
                 self._mark_refresh_success(platform, chat_id)
                 return
 
-            existing = self._load_existing(platform, chat_id)
+            existing = self._load_existing(platform, chat_id, memory_scope_id=memory_scope_id)
             slots: List[Dict] = []
 
             for idx, seg_ref in enumerate(segment_refs):
@@ -238,7 +346,7 @@ class ContextCompressor:
                 if slot > 10:
                     break
 
-                seg_text, message_count = self._build_segment_text(platform, chat_id, seg_ref)
+                seg_text, message_count = self._build_segment_text(platform, chat_id, seg_ref, memory_scope_id=memory_scope_id)
                 if not seg_text:
                     continue
 
@@ -298,7 +406,7 @@ class ContextCompressor:
                     group_refs = segment_refs[6:10]
                     if not group_refs:
                         break
-                    group_data = [self._build_segment_text(platform, chat_id, r) for r in group_refs]
+                    group_data = [self._build_segment_text(platform, chat_id, r, memory_scope_id=memory_scope_id) for r in group_refs]
                     group_texts = [t for t, c in group_data if t]
                     group_counts = [c for t, c in group_data if t]
                     if not group_texts:
@@ -324,7 +432,7 @@ class ContextCompressor:
                     )
                     break
 
-            self._persist_segments(platform, chat_id, slots)
+            self._persist_segments(platform, chat_id, slots, memory_scope_id=memory_scope_id)
             self._mark_refresh_success(platform, chat_id)
         except Exception as e:
             self._enqueue_refresh_retry(platform, chat_id, e)
@@ -338,10 +446,15 @@ class ContextCompressor:
         if self.success_callback:
             self.success_callback("context_refresh", platform, chat_id, None)
 
-    def _get_recent_segment_refs(self, platform: str, chat_id: str, limit: int = 10) -> List[Dict]:
-        """获取最近对话段（含当前活跃段）引用，按最新在前返回。"""
+    def _get_recent_segment_refs(self, platform: str, chat_id: str, limit: int = 10, memory_scope_id: Optional[str] = None) -> List[Dict]:
+        """获取最近对话段（含当前活跃段）引用，按最新在前返回。
+
+        传入 memory_scope_id 时按共享作用域聚合所有平台的段落。
+        """
         if not self.history_db_path:
             return []
+
+        msg_where, msg_params = self._msg_scope_filter(platform, chat_id, memory_scope_id)
 
         conn = sqlite3.connect(str(self.history_db_path))
         conn.row_factory = sqlite3.Row
@@ -350,23 +463,23 @@ class ContextCompressor:
         refs: List[Dict] = []
 
         cursor.execute(
-            """
+            f"""
             SELECT id, timestamp FROM messages
-            WHERE platform = ? AND chat_id = ? AND session_id IS NULL
+            WHERE {msg_where} AND session_id IS NULL
             ORDER BY timestamp DESC
             LIMIT 1
             """,
-            (platform, chat_id),
+            msg_params,
         )
         active = cursor.fetchone()
         if active:
             cursor.execute(
-                """
+                f"""
                 SELECT id FROM messages
-                WHERE platform = ? AND chat_id = ? AND session_id IS NULL
+                WHERE {msg_where} AND session_id IS NULL
                 ORDER BY timestamp ASC
                 """,
-                (platform, chat_id),
+                msg_params,
             )
             active_ids = [int(r[0]) for r in cursor.fetchall()]
             refs.append(
@@ -378,13 +491,13 @@ class ContextCompressor:
             )
 
         cursor.execute(
-            """
+            f"""
             SELECT id, ended_at, message_count FROM conversation_sessions
-            WHERE platform = ? AND chat_id = ?
+            WHERE {msg_where}
             ORDER BY ended_at DESC
             LIMIT ?
             """,
-            (platform, chat_id, limit),
+            msg_params + (limit,),
         )
         for row in cursor.fetchall():
             refs.append(
@@ -400,10 +513,12 @@ class ContextCompressor:
         refs.sort(key=lambda x: float(x.get("source_timestamp", 0)), reverse=True)
         return refs[:limit]
 
-    def _build_segment_text(self, platform: str, chat_id: str, seg_ref: Dict) -> tuple[str, int]:
+    def _build_segment_text(self, platform: str, chat_id: str, seg_ref: Dict, memory_scope_id: Optional[str] = None) -> tuple[str, int]:
         """将一个段落引用展开为可供 summary 模型处理的文本，同时返回消息条数。"""
         if not self.history_db_path:
             return "", 0
+
+        msg_where, msg_params = self._msg_scope_filter(platform, chat_id, memory_scope_id)
 
         conn = sqlite3.connect(str(self.history_db_path))
         conn.row_factory = sqlite3.Row
@@ -412,12 +527,12 @@ class ContextCompressor:
         kind = seg_ref.get("kind")
         if kind == "active":
             cursor.execute(
-                """
+                f"""
                 SELECT role, content FROM messages
-                WHERE platform = ? AND chat_id = ? AND session_id IS NULL
+                WHERE {msg_where} AND session_id IS NULL
                 ORDER BY timestamp ASC
                 """,
-                (platform, chat_id),
+                msg_params,
             )
             rows = cursor.fetchall()
             conn.close()
@@ -430,13 +545,14 @@ class ContextCompressor:
             conn.close()
             return "", 0
 
+        # 已关闭段落按 session_id（全局唯一主键）取，跨平台合并的段落也能完整取到。
         cursor.execute(
             """
             SELECT role, content FROM messages
-            WHERE platform = ? AND chat_id = ? AND session_id = ?
+            WHERE session_id = ?
             ORDER BY timestamp ASC
             """,
-            (platform, chat_id, int(session_id)),
+            (int(session_id),),
         )
         rows = cursor.fetchall()
         conn.close()
@@ -444,7 +560,8 @@ class ContextCompressor:
             return "", 0
         return "\n".join([f"{r['role']}: {r['content']}" for r in rows]), len(rows)
 
-    def _load_existing(self, platform: str, chat_id: str) -> Dict[int, Dict]:
+    def _load_existing(self, platform: str, chat_id: str, memory_scope_id: Optional[str] = None) -> Dict[int, Dict]:
+        part_platform, part_chat = self._scope_partition(platform, chat_id, memory_scope_id)
         conn = sqlite3.connect(str(self.db_path))
         conn.row_factory = sqlite3.Row
         cursor = conn.cursor()
@@ -453,7 +570,7 @@ class ContextCompressor:
             SELECT * FROM context_segments
             WHERE platform = ? AND chat_id = ?
             """,
-            (platform, chat_id),
+            (part_platform, part_chat),
         )
         rows = {int(row["slot"]): dict(row) for row in cursor.fetchall()}
         conn.close()
@@ -603,26 +720,28 @@ class ContextCompressor:
             return text
         return text[:max_length] + "..."
 
-    def _persist_segments(self, platform: str, chat_id: str, slots: List[Dict]) -> None:
+    def _persist_segments(self, platform: str, chat_id: str, slots: List[Dict], memory_scope_id: Optional[str] = None) -> None:
+        part_platform, part_chat = self._scope_partition(platform, chat_id, memory_scope_id)
         conn = sqlite3.connect(str(self.db_path))
         cursor = conn.cursor()
         now = datetime.now().timestamp()
         for seg in slots:
             cursor.execute(
                 """
-                INSERT INTO context_segments (platform, chat_id, slot, segment_type, role, content, message_ids, source_timestamp, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                INSERT INTO context_segments (platform, chat_id, slot, segment_type, role, content, message_ids, source_timestamp, updated_at, memory_scope_id)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(platform, chat_id, slot) DO UPDATE SET
                     segment_type=excluded.segment_type,
                     role=excluded.role,
                     content=excluded.content,
                     message_ids=excluded.message_ids,
                     source_timestamp=excluded.source_timestamp,
-                    updated_at=excluded.updated_at
+                    updated_at=excluded.updated_at,
+                    memory_scope_id=excluded.memory_scope_id
                 """,
                 (
-                    platform,
-                    chat_id,
+                    part_platform,
+                    part_chat,
                     seg["slot"],
                     seg["segment_type"],
                     seg["role"],
@@ -630,12 +749,14 @@ class ContextCompressor:
                     json.dumps(seg.get("source_keys", [])),
                     seg.get("source_timestamp", now),
                     now,
+                    memory_scope_id,
                 ),
             )
         conn.commit()
         conn.close()
 
-    def get_context_messages(self, platform: str, chat_id: str) -> List[Dict]:
+    def get_context_messages(self, platform: str, chat_id: str, memory_scope_id: Optional[str] = None) -> List[Dict]:
+        part_platform, part_chat = self._scope_partition(platform, chat_id, memory_scope_id)
         conn = sqlite3.connect(str(self.db_path))
         conn.row_factory = sqlite3.Row
         cursor = conn.cursor()
@@ -645,7 +766,7 @@ class ContextCompressor:
             WHERE platform = ? AND chat_id = ?
             ORDER BY slot DESC
             """,
-            (platform, chat_id),
+            (part_platform, part_chat),
         )
         rows = [dict(row) for row in cursor.fetchall()]
         conn.close()
@@ -662,14 +783,21 @@ class ContextCompressor:
             )
         return messages
 
-    def clear_chat(self, platform: str, chat_id: str) -> None:
-        """删除指定平台会话的压缩上下文片段。"""
+    def clear_chat(self, platform: str, chat_id: str, memory_scope_id: Optional[str] = None) -> None:
+        """删除指定会话的压缩上下文片段。传入 memory_scope_id 时清理规范作用域分区。"""
         conn = sqlite3.connect(str(self.db_path))
         cursor = conn.cursor()
+        # 物理地点分区
         cursor.execute(
             "DELETE FROM context_segments WHERE platform = ? AND chat_id = ?",
             (platform, chat_id),
         )
+        # 规范作用域分区（共享模式写入处）
+        if memory_scope_id:
+            cursor.execute(
+                "DELETE FROM context_segments WHERE platform = ? AND chat_id = ?",
+                ("__scope__", memory_scope_id),
+            )
         conn.commit()
         conn.close()
 

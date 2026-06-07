@@ -119,7 +119,9 @@ class SchedulerMixin:
         try:
             history = getattr(self, "message_history", None)
             if history:
-                msgs = history.get_messages_between(platform, storage_id, start_ts, end_ts)
+                msgs = history.get_messages_between(
+                    platform, storage_id, start_ts, end_ts, memory_scope_id=identity.memory_scope_id
+                )
         except Exception as e:
             logger.error(f"每日总结：读取消息失败: {e}")
             msgs = []
@@ -342,7 +344,9 @@ class SchedulerMixin:
         """
         try:
             identity = self._identity_for_runtime_key(chat_id)
-            msgs = self.message_history.get_current_segment_messages(identity.platform, identity.storage_id) or []
+            msgs = self.message_history.get_current_segment_messages(
+                identity.platform, identity.storage_id, memory_scope_id=identity.memory_scope_id
+            ) or []
         except Exception as e:
             logger.debug(f"[{chat_id}] 读取当前段消息失败，无法做告别短路: {e}")
             return False
@@ -508,6 +512,7 @@ class SchedulerMixin:
                 platform=identity.platform,
                 chat_id=identity.storage_id,
                 trigger_type="user",
+                memory_scope_id=identity.memory_scope_id,
             )
             if session_id:
                 logger.info(f"[{chat_id}] 对话段落 #{session_id} 已封闭")
@@ -531,7 +536,9 @@ class SchedulerMixin:
 
         identity = self._identity_for_runtime_key(chat_id)
         storage_id = identity.storage_id
-        current_segment_msgs = self.message_history.get_current_segment_messages(identity.platform, storage_id)
+        current_segment_msgs = self.message_history.get_current_segment_messages(
+            identity.platform, storage_id, memory_scope_id=identity.memory_scope_id
+        )
         recent_msgs = current_segment_msgs[-10:] if current_segment_msgs else []
         recent_conversation = "\n".join(
             f"{'用户' if m['role'] == 'user' else 'AI'}: {m['content']}"
@@ -604,7 +611,9 @@ class SchedulerMixin:
 
         identity = self._identity_for_runtime_key(chat_id)
         storage_id = identity.storage_id
-        current_segment_msgs = self.message_history.get_current_segment_messages(identity.platform, storage_id)
+        current_segment_msgs = self.message_history.get_current_segment_messages(
+            identity.platform, storage_id, memory_scope_id=identity.memory_scope_id
+        )
         recent_msgs = current_segment_msgs[-10:] if current_segment_msgs else []
         recent_conversation = "\n".join(
             f"{'用户' if m['role'] == 'user' else 'AI'}: {m['content']}"
@@ -641,7 +650,9 @@ class SchedulerMixin:
                     chat_id=storage_id,
                     role="assistant",
                     content=response,
-                    user_id="assistant"
+                    user_id="assistant",
+                    memory_scope_id=identity.memory_scope_id,
+                    place_scope_id=identity.place_scope_id,
                 )
                 session = self.sessions.setdefault(chat_id, {"history": [], "interrupted_thought": "", "pending_text": ""})
                 session_history = session.setdefault("history", [])
@@ -673,7 +684,9 @@ class SchedulerMixin:
 
         identity = self._identity_for_runtime_key(chat_id)
         storage_id = identity.storage_id
-        current_segment_msgs = self.message_history.get_current_segment_messages(identity.platform, storage_id)
+        current_segment_msgs = self.message_history.get_current_segment_messages(
+            identity.platform, storage_id, memory_scope_id=identity.memory_scope_id
+        )
         recent_msgs = current_segment_msgs[-10:] if current_segment_msgs else []
         recent_conversation = "\n".join(
             f"{'用户' if m['role'] == 'user' else 'AI'}: {m['content']}"
@@ -711,7 +724,9 @@ class SchedulerMixin:
                     chat_id=storage_id,
                     role="assistant",
                     content=response,
-                    user_id="assistant"
+                    user_id="assistant",
+                    memory_scope_id=identity.memory_scope_id,
+                    place_scope_id=identity.place_scope_id,
                 )
                 session = self.sessions.setdefault(chat_id, {"history": [], "interrupted_thought": "", "pending_text": ""})
                 session_history = session.setdefault("history", [])
@@ -839,7 +854,10 @@ class SchedulerMixin:
         # 触发前提取完整对话线索，确保 trigger 消息基于完整上下文继续生成
         recent_hint = ""
         try:
-            db_context = self.message_history.get_context_messages(platform, storage_id)
+            db_context = self.message_history.get_context_messages(
+                platform, storage_id,
+                memory_scope_id=identity.memory_scope_id, current_place_scope_id=identity.place_scope_id,
+            )
             recent_msgs = db_context if db_context else []
             hint_lines = []
             for m in recent_msgs:
@@ -891,6 +909,8 @@ class SchedulerMixin:
                 role="assistant",
                 content=user_reply,
                 user_id="assistant",
+                memory_scope_id=identity.memory_scope_id,
+                place_scope_id=identity.place_scope_id,
             )
         else:
             logger.info(f"[{chat_id}] 主动消息生成为空，跳过发送")

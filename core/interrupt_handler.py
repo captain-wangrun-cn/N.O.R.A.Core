@@ -58,7 +58,10 @@ class InterruptHandlerMixin:
         recent_history = []
         try:
             identity = self._identity_for_runtime_key(chat_id)
-            db_context = self.message_history.get_context_messages(identity.platform, identity.storage_id)
+            db_context = self.message_history.get_context_messages(
+                identity.platform, identity.storage_id,
+                memory_scope_id=identity.memory_scope_id, current_place_scope_id=identity.place_scope_id,
+            )
             if len(db_context) > 20:
                 db_context = db_context[-20:]
             recent_history = [
@@ -192,7 +195,9 @@ class InterruptHandlerMixin:
         identity = self._identity_for_runtime_key(chat_id)
         platform = identity.platform
         storage_id = identity.storage_id
-        
+        memory_scope_id = identity.memory_scope_id
+        place_scope_id = identity.place_scope_id
+
         # 设置打断标记，防止 finally 块自动处理排队消息
         session = self.sessions.setdefault(chat_id, {"history": [], "interrupted_thought": "", "pending_text": ""})
         session["_interrupted_by_frontend"] = True
@@ -241,14 +246,16 @@ class InterruptHandlerMixin:
                 await self._send_platform_message(chat_id, reply)
                 self.message_history.add_message(
                     platform=platform, chat_id=storage_id,
-                    role="assistant", content=reply
+                    role="assistant", content=reply,
+                    memory_scope_id=memory_scope_id, place_scope_id=place_scope_id,
                 )
             elif reason == "change":
                 reply = "好，马上切换～"
                 await self._send_platform_message(chat_id, reply)
                 self.message_history.add_message(
                     platform=platform, chat_id=storage_id,
-                    role="assistant", content=reply
+                    role="assistant", content=reply,
+                    memory_scope_id=memory_scope_id, place_scope_id=place_scope_id,
                 )
                 # 启动新任务
                 context = {

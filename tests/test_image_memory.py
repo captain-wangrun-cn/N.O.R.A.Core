@@ -8,6 +8,7 @@ Tests for image memory system:
 import os
 import re
 import tempfile
+from unittest.mock import MagicMock
 
 import pytest
 
@@ -948,3 +949,188 @@ def test_search_images_text_query_and_keyword():
     ids = [r["image_id"] for r in results]
     assert ids[0] == "img_ocr1"  # OCR 优先
     assert "img_sem1" in ids
+
+
+# ---------------------------------------------------------------------------
+# 8. Phase 3: 跨平台共享作用域 (memory_scope_id)
+# ---------------------------------------------------------------------------
+
+SCOPE = "relationship:owner:default"
+
+
+def _bare_store():
+    """构造一个绕过 __init__ 的 ImageStore，仅挂载所需依赖。"""
+    from unittest.mock import MagicMock
+    from memory.image_store import ImageStore
+
+    store = ImageStore.__new__(ImageStore)
+    store.mongo_col = MagicMock()
+    store.qdrant = None
+    store.embed_client = MagicMock()
+    store.embed_client.enabled = True
+    store.enabled = True
+    return store
+
+
+def test_scope_payload_builds_fields_and_derives_place():
+    """_scope_payload：有 scope 时写字段并由 platform:chat_id 推导 place_scope_id。"""
+    from memory.image_store import ImageStore
+
+    fields = ImageStore._scope_payload(
+        memory_scope_id=SCOPE,
+        owner_id="owner:default",
+        relationship_id=SCOPE,
+        actor_display_name="张三",
+        platform="telegram",
+        chat_id="123",
+    )
+    assert fields["memory_scope_id"] == SCOPE
+    assert fields["place_scope_id"] == "telegram:123"
+    assert fields["owner_id"] == "owner:default"
+    assert fields["actor_display_name"] == "张三"
+
+
+def test_scope_payload_empty_without_scope():
+    """_scope_payload：无 memory_scope_id 时返回空，保持旧记录形态。"""
+    from memory.image_store import ImageStore
+
+    assert ImageStore._scope_payload(platform="telegram", chat_id="123") == {}
+
+
+def test_add_optional_context_filters_scope_mode_ignores_platform():
+    """scope 模式：只按 memory_scope_id 过滤（旧记录放行），忽略 platform/chat_id。"""
+    from memory.image_store import ImageStore
+
+    query = ImageStore._add_optional_context_filters(
+        {},
+        platform="telegram",
+        chat_id="chat-1",
+        storage_id="storage-1",
+        memory_scope_id=SCOPE,
+    )
+    assert "$and" in query
+    # 只有一个过滤条件：memory_scope_id（带旧记录回退）
+    assert len(query["$and"]) == 1
+    or_clause = query["$and"][0]["$or"]
+    assert {"memory_scope_id": SCOPE} in or_clause
+    # 旧记录缺字段也放行
+    assert {"memory_scope_id": {"$exists": False}} in or_clause
+
+
+def test_payload_matches_context_scope_mode_allows_legacy_and_blocks_mismatch():
+    """_payload_matches_context scope 模式：旧记录放行、同 scope 命中、异 scope 拦截。"""
+    from memory.image_store import ImageStore
+
+    # 旧记录（无 memory_scope_id）放行
+    assert ImageStore._payload_matches_context({"image_id": "old"}, memory_scope_id=SCOPE)
+    # 同 scope 命中
+    assert ImageStore._payload_matches_context(
+        {"memory_scope_id": SCOPE}, memory_scope_id=SCOPE
+    )
+    # 异 scope 拦截
+    assert not ImageStore._payload_matches_context(
+        {"memory_scope_id": "relationship:other"}, memory_scope_id=SCOPE
+    )
+
+
+def test_search_by_time_range_scope_mode_filters_by_scope():
+    """search_by_time_range scope 模式：按 memory_scope_id 过滤，不带 platform/chat_id。"""
+    store = _bare_store()
+    mock_cursor = MagicMock()
+    mock_cursor.sort.return_value = mock_cursor
+    mock_cursor.limit.return_value = iter([])
+    store.mongo_col.find.return_value = mock_cursor
+
+    store.search_by_time_range(
+        user_id="user123",
+        platform="telegram",
+        chat_id="chat-1",
+        storage_id="user123",
+        memory_scope_id=SCOPE,
+    )
+
+    query_arg = store.mongo_col.find.call_args[0][0]
+    assert "$and" in query_arg
+    # scope 模式只有一个 $or 过滤组，且是 memory_scope_id
+    assert len(query_arg["$and"]) == 1
+    assert {"memory_scope_id": SCOPE} in query_arg["$and"][0]["$or"]
+
+
+def test_search_by_semantic_scope_mode_aggregates_cross_platform():
+    """search_by_semantic scope 模式：跨平台聚合，旧记录放行，异 scope 排除。"""
+    from types import SimpleNamespace
+
+    store = _bare_store()
+    store.mongo_col = None
+    store.qdrant = MagicMock()
+    store.embed_client.get_embedding.return_value = [0.1, 0.2]
+
+    store.qdrant.query_points.return_value = SimpleNamespace(points=[
+        SimpleNamespace(payload={"image_id": "tg", "memory_scope_id": SCOPE}, score=0.9),
+        SimpleNamespace(payload={"image_id": "web", "memory_scope_id": SCOPE}, score=0.8),
+        SimpleNamespace(payload={"image_id": "legacy"}, score=0.7),  # 旧记录放行
+        SimpleNamespace(payload={"image_id": "other", "memory_scope_id": "relationship:other"}, score=0.6),
+    ])
+
+    results = store.search_by_semantic("猫", user_id="user123", memory_scope_id=SCOPE)
+    ids = [item["image_id"] for item in results]
+    assert ids == ["tg", "web", "legacy"]
+    assert "other" not in ids
+
+
+def test_search_images_threads_memory_scope_id():
+    """search_images 应把 memory_scope_id 透传给底层检索方法。"""
+    store = _bare_store()
+    store.search_by_semantic = MagicMock(return_value=[{"image_id": "img1"}])
+    store._enrich_with_mongo = MagicMock(side_effect=lambda r: r)
+
+    store.search_images(keyword="猫", memory_scope_id=SCOPE)
+
+    call_kwargs = store.search_by_semantic.call_args[1]
+    assert call_kwargs["memory_scope_id"] == SCOPE
+
+
+def test_save_image_stub_persists_scope_fields():
+    """save_image_stub 应把 memory_scope_id/place_scope_id 写入 Mongo 文档。"""
+    store = _bare_store()
+
+    store.save_image_stub(
+        image_id="img_stub1",
+        file_path="/tmp/x.png",
+        user_id="user123",
+        chat_id="123",
+        platform="telegram",
+        storage_id="user123",
+        memory_scope_id=SCOPE,
+    )
+
+    doc = store.mongo_col.replace_one.call_args[0][1]
+    assert doc["memory_scope_id"] == SCOPE
+    assert doc["place_scope_id"] == "telegram:123"
+
+
+def test_update_image_tags_inherits_scope_from_stub():
+    """update_image_tags 未显式传 scope 时，应继承占位记录里已有的 memory_scope_id。"""
+    store = _bare_store()
+    store.qdrant = None  # 不写向量
+    # 模拟占位记录已带 scope
+    store.mongo_col.find_one.return_value = {
+        "image_id": "img1",
+        "file_path": "/tmp/x.png",
+        "user_id": "user123",
+        "chat_id": "123",
+        "storage_id": "user123",
+        "platform": "telegram",
+        "memory_scope_id": SCOPE,
+        "place_scope_id": "telegram:123",
+        "timestamp": 1700000000.0,
+    }
+    result = MagicMock()
+    result.matched_count = 1
+    store.mongo_col.update_one.return_value = result
+
+    store.update_image_tags(image_id="img1", tags="猫, 室内")
+
+    set_doc = store.mongo_col.update_one.call_args[0][1]["$set"]
+    assert set_doc["memory_scope_id"] == SCOPE
+    assert set_doc["place_scope_id"] == "telegram:123"

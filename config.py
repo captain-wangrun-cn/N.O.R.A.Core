@@ -266,6 +266,21 @@ def get_logging_config():
     return cfg.get("logging", {}) or {}
 
 
+def get_owner_config() -> dict:
+    """获取主人识别配置。
+
+    结构：
+      owner:
+        identities:
+          - platform: telegram
+            user_id: "123456"
+            display_name: "..."   # 可选
+    缺省返回空 dict（启用纯自动绑定）。
+    """
+    cfg = _safe_config()
+    return cfg.get("owner", {}) or {}
+
+
 def get_nora_preferences() -> dict:
     """获取 Nora 偏好设置，并补齐默认值。"""
     cfg = _safe_config()

@@ -22,10 +22,13 @@ class TriggerManager:
         notify_callback: TriggerNotifyCallback,
         default_chat_id: str = "",
         default_chat_target: Optional[Dict[str, Any]] = None,
+        resolve_delivery_callback: Optional[Callable[[str], str]] = None,
     ):
         self._notify_callback = notify_callback
         self.default_chat_id = default_chat_id
         self.default_chat_target = dict(default_chat_target or {})
+        # 投递目标解析：trigger 事件默认发到最近活跃私聊端，不可用回退 default_chat_id。
+        self._resolve_delivery_callback = resolve_delivery_callback
         self._triggers: List[BaseTrigger] = []
         self._is_running = False
 
@@ -78,7 +81,7 @@ class TriggerManager:
         logger.info("TriggerManager 已停止")
 
     async def _handle_event(self, event: TriggerEvent) -> None:
-        chat_id = event.chat_id or self.default_chat_id
+        chat_id = self._resolve_delivery_target(event)
         if not chat_id:
             logger.warning(
                 f"[{event.trigger_name}] 丢弃事件：未配置 chat_id。event_type={event.event_type}"
@@ -88,6 +91,25 @@ class TriggerManager:
         reason = event.reason.strip() if event.reason else f"trigger event: {event.event_type}"
         logger.info(f"[{event.trigger_name}] 分发事件: event_type={event.event_type}, chat_id={chat_id}")
         await self._notify_callback(chat_id, reason, event.event_type)
+
+    def _resolve_delivery_target(self, event: TriggerEvent) -> str:
+        """决定 trigger 事件投递到哪个 chat_id。
+
+        - 事件自带显式 chat_id：原样投递（明确目标，不重定向）。
+        - 否则默认投到最近活跃的私聊端，不可用回退 default_chat_id
+          （语义已改为 fallback delivery target）。
+        """
+        explicit = (event.chat_id or "").strip()
+        if explicit:
+            return explicit
+        if self._resolve_delivery_callback is not None:
+            try:
+                resolved = (self._resolve_delivery_callback(self.default_chat_id) or "").strip()
+                if resolved:
+                    return resolved
+            except Exception as e:
+                logger.warning(f"[{event.trigger_name}] 解析最近活跃投递端失败，回退默认: {e}")
+        return (self.default_chat_id or "").strip()
 
     async def health_check(self) -> Dict[str, Any]:
         details = []

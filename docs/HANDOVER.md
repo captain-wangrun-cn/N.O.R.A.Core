@@ -1,9 +1,27 @@
 ## 项目概览
 - 仓库：N.O.R.A.Core（branch: main）
 - 目标：多平台智能体内核，包含 LLM 适配、工具/技能体系、成本追踪、记忆/RAG。
-- 当前状态：可运行，自测通过；已完成图片记忆链路（入库/检索/回查再分析）、`view_media` 工具增强、CLI 高危清理保护。
+- 当前状态：可运行，自测通过；已完成图片记忆链路（入库/检索/回查再分析）、`view_media` 工具增强、CLI 高危清理保护、**跨平台接力 + 主人/访客分离（五层身份模型，全 5 Phase 完成）**。
 
-## 近期关键改动（截至 2026-05-25）
+## 近期关键改动（截至 2026-06-06）
+
+### 🌐 跨平台接力 + 主人/访客分离 — 2026-06-06（全 5 Phase 完成）
+
+把 N.O.R.A 从"多平台各自一段上下文"改成"**同一个 Nora 在不同地方说话**"，并把"用户即主人"拆成**主人 (owner)** 与**说话人 (actor)**。完整设计见 [跨平台接力与五层身份模型](./architecture/cross-platform-relay.md)。
+
+- **Phase 1 身份层**：`core/conversation_identity.py` 扩五层身份（`owner_id`/`relationship_id`/`memory_scope_id`/`place_scope_id`/`actor_display_name`/`is_owner`）；新建 `core/owner_registry.py` + `data/owner_bindings.json` 最小主人识别（私聊首位自动绑定、群聊非绑定即访客、config 预声明）。
+- **Phase 2 共享上下文 + 迁移**：`memory/message_history.py` / `memory/context_store.py` 三表 + 镜像/压缩库新增 `memory_scope_id`/`place_scope_id`/`actor_display_name` 列，读取按 `memory_scope_id` 分区、旧键 fallback；启动自动 `ALTER TABLE` 迁移，旧行补默认 scope，非破坏性。`close_session` 改按共享 scope 关闭连续对话。
+- **Phase 3 RAG/媒体/工具上下文**：`memory/rag.py`/`vector.py`/`image_store.py` payload 加同套 scope 字段，检索按 `memory_scope_id` 过滤、旧记录回退；`view_media` 注入 `memory_scope_id` 跨平台找回图，精确回查仍走 `platform+platform_message_id+chat_id` 不串图。
+- **Phase 4 主动消息投递**：新建 `core/delivery_target_store.py` + `data/delivery_target_state.json`，**仅记私聊端**（群聊活跃不更新，绝不自动发进群）；`ProactiveScheduler`/`TriggerManager` 注入 `resolve_delivery_callback`，闹钟原样投递不重定向、proactive/trigger 默认投最近活跃端回退 `default_chat_id`（语义降级为 fallback）。
+- **Phase 5 Prompt + 文档**：`brain/templates/system.jinja` 新增 §0.5 跨平台接力准则 + §5 主人/访客边界 + `data/memory/people/` 自主人物记忆区；`brain/prompts.py` 的 `load_identity_context`/`get_system_prompt` 注入 `<current_speaker>`（主人私聊不注入、主人群聊提示得体性、访客提示边界），`_ensure_workspace_identity_files` 确保 `people/` 目录；架构文档新增本文 + 更新 message_history/image-memory 主键语义 + identity_files 主人/访客 + 修复根 `onboarding/` 空目录误导。
+
+**涉及文件**：`core/conversation_identity.py`、`core/owner_registry.py`、`core/delivery_target_store.py`、`memory/message_history.py`、`memory/context_store.py`、`memory/rag.py`、`memory/vector.py`、`memory/image_store.py`、`core/back_brain.py`、`core/front_brain.py`、`core/message_handler.py`、`core/scheduler.py`、`triggers/manager.py`、`core/controller.py`、`brain/prompts.py`、`brain/templates/system.jinja`、`config.py`、`config.example.yml` + 测试与文档。
+
+**部署注意**：Phase 2/3 涉及 SQLite/Mongo/Qdrant schema 迁移——上生产 `sp.wris.me` 前必须备份 `message_history.db`/`message_log.db`/`context_compression.db`。`data/owner_bindings.json`、`data/delivery_target_state.json` 是纯新增运行时状态，无迁移、非破坏性。
+
+**测试基线**：全量 `pytest` = 183 passed / 16 failed；16 个失败为既有基线（CLI 定价 ×3、context_pricing ×5、cost_tracker ×2、message_history_retry_queue ×2[缺 pytest-asyncio]、routing ×3、timezone ×1），与本次改动无关。
+
+## 早期关键改动（截至 2026-05-25）
 
 ### 🛠️ 八项修复与增强 — 2026-05-25
 

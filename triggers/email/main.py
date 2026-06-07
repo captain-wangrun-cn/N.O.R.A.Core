@@ -221,7 +221,12 @@ class EmailTrigger(BaseTrigger):
             if target:
                 platform = str(target.get("platform") or "telegram")
                 storage_id = str(target.get("storage_id") or target.get("chat_id") or "")
-                db_context = self.message_history.get_context_messages(platform, storage_id)
+                # 跨平台接力：按共享记忆作用域读取历史（缺失则回退默认共享作用域）。
+                scope_id = str(target.get("memory_scope_id") or "relationship:owner:default")
+                place_id = str(target.get("place_scope_id") or f"{platform}:{storage_id}")
+                db_context = self.message_history.get_context_messages(
+                    platform, storage_id, memory_scope_id=scope_id, current_place_scope_id=place_id
+                )
                 history = [
                     {
                         "role": str(msg.get("role", "")).strip(),

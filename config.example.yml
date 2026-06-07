@@ -31,6 +31,16 @@ network:
 telegram:
   bot_token: "YOUR_TELEGRAM_BOT_TOKEN"
 
+# 主人识别（跨平台接力）
+# Nora 是同一个连续的人；owner 用来认出"哪个账号是主人"。
+# 留空则启用纯自动绑定：每个平台的第一个私聊者会被自动绑为主人。
+# 也可在此预声明主人身份，启动时注入（群聊里只有匹配身份才算主人，其余为访客）。
+owner:
+  identities: []
+    # - platform: telegram
+    #   user_id: "123456789"
+    #   display_name: "主人"   # 可选，仅备注用
+
 llm:
   # 默认提供商（当某个 alias 未显式绑定 provider 时使用）
   provider: "gemini_main"

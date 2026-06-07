@@ -171,9 +171,15 @@ class BackBrainMixin:
         platform: str,
         platform_chat_id: str,
         storage_id: str,
+        memory_scope_id: str = "",
+        place_scope_id: str = "",
     ) -> Dict[str, Any]:
         """Fill implicit per-conversation tool arguments without overriding explicit filters."""
         if tool_name == "view_media":
+            # 跨平台接力：默认注入共享 memory_scope_id，让 Nora 跨平台找回之前发过的图/视频。
+            # 仍保留 platform/chat_id/storage_id 作为来源回查与旧记录兼容（scope 模式下检索层会忽略它们）。
+            if memory_scope_id and not str(tool_args.get("memory_scope_id", "")).strip():
+                tool_args["memory_scope_id"] = memory_scope_id
             if not str(tool_args.get("platform", "")).strip():
                 tool_args["platform"] = platform
             if not str(tool_args.get("chat_id", "")).strip():
@@ -196,6 +202,10 @@ class BackBrainMixin:
         text = context["text"]
         chat_type = identity.chat_type
         user_name = context.get("user_name", "User")
+        # 跨平台接力作用域字段
+        memory_scope_id = identity.memory_scope_id
+        place_scope_id = identity.place_scope_id
+        actor_display_name = identity.actor_display_name
 
         # 解析多模态输入：把 [image: ...] 对应的本地图片读取为模型可用内容
         provided_images = context.get("multimodal_images") or []
@@ -237,6 +247,11 @@ class BackBrainMixin:
                         platform=platform,
                         platform_message_id=context.get("platform_message_id"),
                         storage_id=storage_id,
+                        memory_scope_id=memory_scope_id,
+                        place_scope_id=place_scope_id,
+                        owner_id=identity.owner_id,
+                        relationship_id=identity.relationship_id,
+                        actor_display_name=actor_display_name,
                     )
                 )
 
@@ -255,6 +270,11 @@ class BackBrainMixin:
                         platform_message_id=context.get("platform_message_id"),
                         media_type="video",
                         storage_id=storage_id,
+                        memory_scope_id=memory_scope_id,
+                        place_scope_id=place_scope_id,
+                        owner_id=identity.owner_id,
+                        relationship_id=identity.relationship_id,
+                        actor_display_name=actor_display_name,
                     )
                 )
 
@@ -309,8 +329,11 @@ class BackBrainMixin:
                     content=message_content,
                     user_id=user_id,
                     metadata=user_metadata or None,
+                    memory_scope_id=memory_scope_id,
+                    place_scope_id=place_scope_id,
+                    actor_display_name=actor_display_name,
                 )
-            
+
             # --- 1. RAG 记忆检索 (Memory Retrieval) ---
             rag_context = ""
             if self.rag.enabled:
@@ -325,6 +348,7 @@ class BackBrainMixin:
                     chat_id=platform_chat_id,
                     storage_id=storage_id,
                     chat_type=chat_type,
+                    memory_scope_id=memory_scope_id,
                 )
                 if rag_context:
                     logger.info(f"[{chat_id}] RAG 命中: {len(rag_context.splitlines())} lines.")
@@ -494,6 +518,9 @@ class BackBrainMixin:
                 instructions,
                 platform=self.adapter.platform_name,
                 custom_scope="coder" if not multimodal_images else "image",
+                actor_display_name=actor_display_name,
+                is_owner=identity.is_owner,
+                chat_type=chat_type,
             )
 
             # --- 3. 执行循环 (Tool Execution Loop) ---
@@ -506,7 +533,9 @@ class BackBrainMixin:
             last_turn_llm = active_llm
             
             # 临时历史，从数据库加载持久化上下文
-            db_context = self.message_history.get_context_messages(platform, storage_id)
+            db_context = self.message_history.get_context_messages(
+                platform, storage_id, memory_scope_id=memory_scope_id, current_place_scope_id=place_scope_id
+            )
 
             # 避免重复注入：清理历史尾部与当前轮次重合的消息
             # 可能的尾部结构： [user(当前消息)], 或 [user(当前消息), assistant(前脑/忙碌回复)]
@@ -842,6 +871,8 @@ class BackBrainMixin:
                             platform=platform,
                             platform_chat_id=platform_chat_id,
                             storage_id=storage_id,
+                            memory_scope_id=memory_scope_id,
+                            place_scope_id=place_scope_id,
                         )
                     # --- report_progress 拦截 ---
                     if tool_name == "report_progress" and isinstance(tool_args, dict):
@@ -856,6 +887,8 @@ class BackBrainMixin:
                                     role="assistant",
                                     content=f"⏳ {progress_msg}",
                                     user_id="assistant",
+                                    memory_scope_id=memory_scope_id,
+                                    place_scope_id=place_scope_id,
                                 )
                             except Exception as e:
                                 logger.debug(f"[{chat_id}] 发送进度消息失败: {e}")
@@ -1354,6 +1387,8 @@ class BackBrainMixin:
                     content=final_response_buffer,
                     user_id="assistant",
                     metadata=metadata,
+                    memory_scope_id=memory_scope_id,
+                    place_scope_id=place_scope_id,
                 )
             
             # --- 4.6 图片记忆存储 (Image Memory Storage) ---
@@ -1384,6 +1419,11 @@ class BackBrainMixin:
                             platform=platform,
                             platform_message_id=context.get("platform_message_id"),
                             storage_id=storage_id,
+                            memory_scope_id=memory_scope_id,
+                            place_scope_id=place_scope_id,
+                            owner_id=identity.owner_id,
+                            relationship_id=identity.relationship_id,
+                            actor_display_name=actor_display_name,
                         )
                     )
                     ocr_info = f", ocr_text='{ocr_text[:40]}...'" if ocr_text else ""
@@ -1435,6 +1475,11 @@ class BackBrainMixin:
                                 platform=platform,
                                 platform_message_id=context.get("platform_message_id"),
                                 storage_id=storage_id,
+                                memory_scope_id=memory_scope_id,
+                                place_scope_id=place_scope_id,
+                                owner_id=identity.owner_id,
+                                relationship_id=identity.relationship_id,
+                                actor_display_name=actor_display_name,
                             )
                         )
                         logger.info(f"[{chat_id}] 视频 {vid_id} 标签已补充: '{tags[:60]}...'")
@@ -1450,14 +1495,19 @@ class BackBrainMixin:
                             "chat_id": platform_chat_id,
                             "storage_id": storage_id,
                             "chat_type": chat_type,
+                            "memory_scope_id": memory_scope_id,
+                            "place_scope_id": place_scope_id,
+                            "owner_id": identity.owner_id,
+                            "relationship_id": identity.relationship_id,
+                            "actor_display_name": actor_display_name,
                         },
                     )
                 )
-                
+
                 full_assistant_turn = " ".join([h['content'] for h in temp_history if h['role'] == 'assistant'])
                 if final_response_buffer and final_response_buffer not in full_assistant_turn:
                     full_assistant_turn += " " + final_response_buffer
-                
+
                 if full_assistant_turn.strip():
                     asyncio.create_task(
                         self._async_save_memory(
@@ -1469,6 +1519,10 @@ class BackBrainMixin:
                                 "chat_id": platform_chat_id,
                                 "storage_id": storage_id,
                                 "chat_type": chat_type,
+                                "memory_scope_id": memory_scope_id,
+                                "place_scope_id": place_scope_id,
+                                "owner_id": identity.owner_id,
+                                "relationship_id": identity.relationship_id,
                             },
                         )
                     )

@@ -121,8 +121,8 @@ AI 进入 SEMI_ONLINE 状态
 | 字段        | 类型                | 说明                            |
 | ----------- | ------------------- | ------------------------------- |
 | id          | INTEGER PRIMARY KEY | 自增主键                        |
-| platform    | TEXT                | 平台标识 (telegram, discord 等) |
-| chat_id     | TEXT                | 聊天 ID                         |
+| platform    | TEXT                | 平台标识 (telegram, discord 等)，**来源地点标签** |
+| chat_id     | TEXT                | 聊天 ID（= `storage_id`，兼容期来源标签）        |
 | user_id     | TEXT                | 用户 ID                         |
 | role        | TEXT                | 'user', 'assistant', 'system'   |
 | content     | TEXT                | 消息内容                        |
@@ -131,6 +131,14 @@ AI 进入 SEMI_ONLINE 状态
 | is_pinned   | INTEGER             | 是否永久标记 (0/1)              |
 | is_archived | INTEGER             | 是否已归档 (0/1)                |
 | session_id  | INTEGER             | 所属对话段落 ID (NULL=当前活跃) |
+| memory_scope_id | TEXT            | **共享上下文主键**（跨平台接力）：历史读取按它分区；缺省 `relationship:owner:default` |
+| place_scope_id  | TEXT            | 来源地点 `{platform}:{chat_id}`，用于回查某平台/窗口原始上下文 |
+| actor_display_name | TEXT         | 说话人昵称，注入上下文时打来源标签 `[telegram:123 / 张三]` |
+
+> **主键语义（跨平台接力后）**：读取共享历史的主键是 `memory_scope_id`，不再是 `(platform, chat_id)`。
+> `platform`/`chat_id`/`storage_id` 退化为**来源地点标签**与兼容期 fallback —— 旧行迁移时 `memory_scope_id`
+> 统一补 `relationship:owner:default`、`place_scope_id` 由旧 `platform/chat_id` 生成。详见
+> [跨平台接力与五层身份模型](./cross-platform-relay.md)。
 
 ### summaries 表 (压缩总结)
 
@@ -159,6 +167,7 @@ AI 进入 SEMI_ONLINE 状态
 | summary       | TEXT                | 本段对话摘要 (异步生成，可能为 NULL)           |
 | trigger_type  | TEXT                | 触发来源: 'user', 'proactive', 'alarm'         |
 | metadata      | TEXT                | JSON 格式额外信息                              |
+| memory_scope_id | TEXT              | 共享对话作用域：`close_session` 按它关闭**连续对话**，而非按单平台孤立关闭 |
 
 ### compression_retry_queue 表（压缩失败重试队列）
 
