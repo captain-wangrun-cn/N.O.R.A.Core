@@ -238,10 +238,12 @@ class SchedulerMixin:
 
     def _update_scheduler_state(self, chat_id: str, busy: bool):
         """同步 controller 的忙碌状态到全局 AI 状态。"""
-        set_ai_backend_busy(busy)
         if busy:
+            set_ai_backend_busy(True)
             set_ai_presence(AIPresence.ONLINE)
             set_ai_generating(True)
+        else:
+            self._sync_global_backend_flags()
         state = get_ai_state_summary()
         logger.info(
             f"[{chat_id}] 同步在线状态: presence={state['presence']}, "
@@ -250,8 +252,7 @@ class SchedulerMixin:
 
     def _mark_scheduler_idle(self, chat_id: str, *, initial_delay: float | None = None):
         """标记 AI 生成完毕。保持 ONLINE 状态并启动对话延续定时器。"""
-        set_ai_generating(False)
-        set_ai_backend_busy(False)
+        self._sync_global_backend_flags()
         state = get_ai_state_summary()
         logger.info(
             f"[{chat_id}] 进入空闲跟进状态: presence={state['presence']}, "
@@ -407,9 +408,11 @@ class SchedulerMixin:
                     logger.debug(f"[{chat_id}] AI 状态非 ONLINE，对话延续循环退出")
                     return
 
-                status = self.worker_status.get(chat_id)
+                identity = self._identity_for_runtime_key(chat_id)
+                busy_runtime = self.get_busy_backend_runtime(identity.memory_scope_id)
+                status = self.worker_status.get(busy_runtime) if busy_runtime else self.worker_status.get(chat_id)
                 if status and status.busy:
-                    logger.debug(f"[{chat_id}] 后端忙碌，对话延续循环退出")
+                    logger.debug(f"[{chat_id}] 共享后端忙碌({busy_runtime or chat_id})，对话延续循环退出")
                     return
 
                 idle_secs = get_user_idle_seconds(chat_id)
@@ -504,8 +507,20 @@ class SchedulerMixin:
         """安全地从 ONLINE 过渡到 SEMI_ONLINE，同时关闭当前对话段落。"""
         identity = self._identity_for_runtime_key(chat_id)
         clear_conversation_tracking(chat_id)
-        set_ai_presence(AIPresence.SEMI_ONLINE)
         self._followup_timers.pop(chat_id, None)
+        self._followup_delay_override.pop(chat_id, None)
+
+        active_keys = self.get_active_runtime_keys(identity.memory_scope_id)
+        if active_keys:
+            set_ai_presence(AIPresence.ONLINE)
+            self._sync_global_backend_flags()
+            logger.info(
+                f"[{chat_id}] 当前地点已空闲，但共享作用域仍活跃: {active_keys}，暂不关闭全局消息段"
+            )
+            return
+
+        set_ai_presence(AIPresence.SEMI_ONLINE)
+        self._sync_global_backend_flags()
         
         try:
             session_id = self.message_history.close_session(
@@ -953,9 +968,19 @@ class SchedulerMixin:
                 "use_image_model": front_result.get("use_image_model", False),
             }
 
-            logger.info(f"[{chat_id}] 前脑标记需要后脑，启动轮询处理主动消息")
-            task = asyncio.create_task(self._run_polling_loop(backend_context))
-            self.generation_tasks[chat_id] = task
+            busy_runtime = self.get_busy_backend_runtime(identity.memory_scope_id)
+            queue = self._get_scope_queue_for_runtime(chat_id)
+            if busy_runtime or (queue and queue.size() > 0):
+                queue = self._get_scope_queue_for_runtime(chat_id, create=True)
+                await queue.enqueue({
+                    "context": backend_context,
+                    "text": backend_context.get("text", ""),
+                })
+                logger.info(f"[{chat_id}] 主动消息后脑任务已加入共享队列 (队列长度 {queue.size()})")
+            else:
+                logger.info(f"[{chat_id}] 前脑标记需要后脑，启动轮询处理主动消息")
+                task = asyncio.create_task(self._run_polling_loop(backend_context))
+                self.generation_tasks[chat_id] = task
         else:
             logger.info(f"[{chat_id}] 主动消息前脑已完成，无需后脑")
             self._mark_scheduler_idle(chat_id)

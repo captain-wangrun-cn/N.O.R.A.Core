@@ -1570,9 +1570,9 @@ class BackBrainMixin:
         finally:
             status.finish()
             followup_delay = context.get("_followup_initial_delay")
+            self.generation_tasks.pop(chat_id, None)
             self._mark_scheduler_idle(chat_id, initial_delay=followup_delay)
             if self.tui_callback: self.tui_callback("✅ Idle")
-            self.generation_tasks.pop(chat_id, None)
             # 仅在没有被"新图片打断"接管时清理后脑缓冲；被接管时上层会保留草稿
             if not context.get("_back_brain_handed_off", False):
                 self.back_brain_partial.pop(chat_id, None)

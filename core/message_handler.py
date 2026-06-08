@@ -23,7 +23,6 @@ from core.scheduler import (
     record_user_activity,
     get_ai_state_summary,
 )
-from core.worker_status import BackendTaskQueue
 import config
 
 logger = logging.getLogger(__name__)
@@ -48,7 +47,7 @@ class MessageHandlerMixin:
     def _append_busy_queue_summary(self, chat_id: str, reply: str) -> str:
         """后脑忙碌时，在给用户的回复后附带当前队列详情。"""
         text = (reply or "").strip()
-        queue = self.task_queues.get(chat_id)
+        queue = self._get_scope_queue_for_runtime(chat_id)
         queue_summary = queue.get_queue_summary() if queue else ""
         queue_block = queue_summary if queue_summary else "（暂无排队任务）"
 
@@ -247,9 +246,11 @@ class MessageHandlerMixin:
             return
 
         # --- 前后端分离逻辑 ---
-        status = self.worker_status.get(chat_id)
-        queue = self.task_queues.get(chat_id)
-        backend_busy_or_queued = bool((status and status.busy) or (queue and queue.size() > 0))
+        busy_runtime = self.get_busy_backend_runtime(memory_scope_id)
+        backend_runtime = busy_runtime or chat_id
+        status = self.worker_status.get(backend_runtime)
+        queue = self._get_scope_queue_for_runtime(chat_id)
+        backend_busy_or_queued = bool(busy_runtime or (queue and queue.size() > 0))
 
         if backend_busy_or_queued:
             # 后端忙碌：允许前脑继续生成，不强制回复“在忙”。
@@ -280,13 +281,13 @@ class MessageHandlerMixin:
                 context["_message_saved"] = True
 
                 # 收集旧后脑的输入快照与已生成草稿
-                prior_input = self.back_brain_input_context.get(chat_id) or {}
+                prior_input = self.back_brain_input_context.get(backend_runtime) or {}
                 prior_text = prior_input.get("text", "") or ""
                 prior_images = list(prior_input.get("multimodal_images") or [])
-                prior_partial = (self.back_brain_partial.get(chat_id) or "").strip()
+                prior_partial = (self.back_brain_partial.get(backend_runtime) or "").strip()
 
                 # 标记当前任务为"被图片合并打断"，让后脑 finally 不要清空缓冲
-                old_task = self.generation_tasks.get(chat_id)
+                old_task = self.generation_tasks.get(backend_runtime)
                 if status:
                     status_ctx = getattr(status, "context", None)
                 # 给旧后脑 context 打标记的最稳妥方式：直接 cancel 后清理 worker_status，由新任务替代
@@ -302,10 +303,10 @@ class MessageHandlerMixin:
                         await asyncio.wait_for(asyncio.shield(old_task), timeout=1.0)
                     except (asyncio.CancelledError, asyncio.TimeoutError, Exception):
                         pass
-                    self.generation_tasks.pop(chat_id, None)
+                    self.generation_tasks.pop(backend_runtime, None)
 
                 # 标记打断，避免旧任务的 finally 触发 _process_pending_messages
-                session = self.sessions.setdefault(chat_id, {"history": [], "interrupted_thought": "", "pending_text": ""})
+                session = self.sessions.setdefault(backend_runtime, {"history": [], "interrupted_thought": "", "pending_text": ""})
                 session["_interrupted_by_frontend"] = True
 
                 # 旧 worker_status 清理
@@ -339,8 +340,8 @@ class MessageHandlerMixin:
                     merged_context["_back_brain_prior_partial"] = prior_partial
                 merged_context["_message_saved"] = True
                 # 清理上一轮残留：旧 input_context 和 partial 我们已经吃掉了
-                self.back_brain_partial.pop(chat_id, None)
-                self.back_brain_input_context.pop(chat_id, None)
+                self.back_brain_partial.pop(backend_runtime, None)
+                self.back_brain_input_context.pop(backend_runtime, None)
 
                 task = asyncio.create_task(self._generate_response(merged_context))
                 self.generation_tasks[chat_id] = task
@@ -368,7 +369,7 @@ class MessageHandlerMixin:
                 place_scope_id=place_scope_id,
                 actor_display_name=actor_display_name,
             )
-            decision = await self._detect_interrupt_intent_and_reply(chat_id, text, status)
+            decision = await self._detect_interrupt_intent_and_reply(chat_id, text, status, backend_runtime=backend_runtime)
             action = decision.get("action", "queue")
             reply = decision.get("reply", "")
 
@@ -395,7 +396,7 @@ class MessageHandlerMixin:
                         place_scope_id=place_scope_id,
                     )
                     session_history.append({"role": "assistant", "content": reply})
-                await self._interrupt_backend(chat_id, reason=action, user_text=text, skip_reply=True)
+                await self._interrupt_backend(chat_id, reason=action, user_text=text, skip_reply=True, target_runtime_key=backend_runtime)
                 return
             elif action == "list_queue":
                 session_history.append({"role": "user", "content": message_content})
@@ -419,7 +420,7 @@ class MessageHandlerMixin:
                 return
             elif action == "cancel_queue":
                 session_history.append({"role": "user", "content": message_content})
-                queue = self.task_queues.get(chat_id)
+                queue = self._get_scope_queue_for_runtime(chat_id)
                 param = decision.get("param")
                 if queue and param:
                     removed_text = await queue.remove_by_index(param)
@@ -446,7 +447,7 @@ class MessageHandlerMixin:
                 return
             elif action == "clear_queue":
                 session_history.append({"role": "user", "content": message_content})
-                queue = self.task_queues.get(chat_id)
+                queue = self._get_scope_queue_for_runtime(chat_id)
                 if queue:
                     await queue.clear()
                     logger.info(f"[{chat_id}] 已清空所有排队任务")
@@ -534,9 +535,11 @@ class MessageHandlerMixin:
         user_reply = front_result.get("user_reply", "")
         should_reply = front_result.get("should_reply", True)
         send_front_reply = bool(user_reply and should_reply)
-        status = self.worker_status.get(chat_id)
-        queue = self.task_queues.get(chat_id)
-        backend_busy_or_queued = bool((status and status.busy) or (queue and queue.size() > 0))
+        busy_runtime = self.get_busy_backend_runtime(memory_scope_id)
+        backend_runtime = busy_runtime or chat_id
+        status = self.worker_status.get(backend_runtime)
+        queue = self._get_scope_queue_for_runtime(chat_id)
+        backend_busy_or_queued = bool(busy_runtime or (queue and queue.size() > 0))
 
         # 去除了：后脑忙碌时，只要要给用户发消息，就附带当前队列详情（避免聊天时泄漏队列信息）
 
@@ -611,9 +614,10 @@ class MessageHandlerMixin:
             if followup_delay is not None:
                 backend_context["_followup_initial_delay"] = followup_delay
 
-            status = self.worker_status.get(chat_id)
-            queue = self.task_queues.get(chat_id)
-            backend_busy_or_queued = bool((status and status.busy) or (queue and queue.size() > 0))
+            busy_runtime = self.get_busy_backend_runtime(memory_scope_id)
+            status = self.worker_status.get(busy_runtime) if busy_runtime else self.worker_status.get(chat_id)
+            queue = self._get_scope_queue_for_runtime(chat_id)
+            backend_busy_or_queued = bool(busy_runtime or (queue and queue.size() > 0))
             if backend_busy_or_queued:
                 queue_summary = queue.get_queue_summary() if queue else ""
                 progress_summary = status.get_summary() if status else ""
@@ -637,7 +641,7 @@ class MessageHandlerMixin:
                     return
 
                 logger.info(f"[{chat_id}] 前脑判定需要后脑，且内部确认通过，自动加入队列")
-                queue = self.task_queues.setdefault(chat_id, BackendTaskQueue())
+                queue = self._get_scope_queue_for_runtime(chat_id, create=True)
                 await queue.enqueue({
                     "context": backend_context,
                     "text": backend_context.get("text", ""),
@@ -766,9 +770,10 @@ class MessageHandlerMixin:
         place_scope_id = identity.place_scope_id
         session = self.sessions.setdefault(chat_id, {"history": [], "interrupted_thought": "", "pending_text": ""})
 
-        queue = self.task_queues.get(chat_id)
+        queue = self._get_scope_queue_for_runtime(chat_id)
         queue_summary = queue.get_queue_summary() if queue else ""
-        status = self.worker_status.get(chat_id)
+        busy_runtime = self.get_busy_backend_runtime(memory_scope_id)
+        status = self.worker_status.get(busy_runtime) if busy_runtime else self.worker_status.get(chat_id)
         progress_summary = status.get_summary() if status else ""
 
         session["pending_backend_enqueue"] = {
@@ -899,9 +904,10 @@ class MessageHandlerMixin:
 
         if decision == "confirm":
             backend_context = pending.get("backend_context") or {}
-            status = self.worker_status.get(chat_id)
-            if status and status.busy:
-                queue = self.task_queues.setdefault(chat_id, BackendTaskQueue())
+            busy_runtime = self.get_busy_backend_runtime(memory_scope_id)
+            status = self.worker_status.get(busy_runtime) if busy_runtime else self.worker_status.get(chat_id)
+            if busy_runtime or (status and status.busy):
+                queue = self._get_scope_queue_for_runtime(chat_id, create=True)
                 await queue.enqueue({
                     "context": backend_context,
                     "text": backend_context.get("text", ""),
@@ -1085,15 +1091,17 @@ class MessageHandlerMixin:
         platform = identity.platform
         storage_id = identity.storage_id
         memory_scope_id = identity.memory_scope_id
-        if chat_id in self.generation_tasks:
-            self.generation_tasks[chat_id].cancel()
-            await asyncio.sleep(0.1)
+        for runtime_key in self._runtime_keys_for_scope(memory_scope_id):
+            if runtime_key in self.generation_tasks:
+                self.generation_tasks[runtime_key].cancel()
+        await asyncio.sleep(0.1)
         self.sessions[chat_id] = {"history": [], "interrupted_thought": ""}
         self.message_history.clear_chat_history(platform, storage_id, keep_pinned=True, memory_scope_id=memory_scope_id)
-        status = self.worker_status.get(chat_id)
-        if status:
-            status.finish()
-        queue = self.task_queues.get(chat_id)
+        for runtime_key in self._runtime_keys_for_scope(memory_scope_id):
+            status = self.worker_status.get(runtime_key)
+            if status:
+                status.finish()
+        queue = self._get_scope_queue_for_runtime(chat_id)
         if queue:
             await queue.clear()
         await self._send_platform_message(chat_id, "N.O.R.A. Core 已启动。")
@@ -1114,16 +1122,18 @@ class MessageHandlerMixin:
         storage_id = identity.storage_id
         memory_scope_id = identity.memory_scope_id
         try:
-            if chat_id in self.generation_tasks:
-                self.generation_tasks[chat_id].cancel()
-                await asyncio.sleep(0.1)
+            for runtime_key in self._runtime_keys_for_scope(memory_scope_id):
+                if runtime_key in self.generation_tasks:
+                    self.generation_tasks[runtime_key].cancel()
+            await asyncio.sleep(0.1)
             self.sessions.pop(chat_id, None)
-            queue = self.task_queues.get(chat_id)
+            queue = self._get_scope_queue_for_runtime(chat_id)
             if queue:
                 await queue.clear()
-            status = self.worker_status.get(chat_id)
-            if status:
-                status.finish()
+            for runtime_key in self._runtime_keys_for_scope(memory_scope_id):
+                status = self.worker_status.get(runtime_key)
+                if status:
+                    status.finish()
             self.message_history.clear_chat_history(platform, storage_id, keep_pinned=False, memory_scope_id=memory_scope_id)
             await self._send_platform_message(chat_id, "✅ 已清空跨平台共享的聊天记录（所有平台/窗口的共享上下文）。")
             logger.info(f"[{chat_id}] 聊天历史已通过 /clear 命令清空（共享作用域 {memory_scope_id}）。")
@@ -1138,14 +1148,19 @@ class MessageHandlerMixin:
         memory_scope_id = identity.memory_scope_id
         place_scope_id = identity.place_scope_id
         try:
-            if chat_id in self.generation_tasks:
-                self.generation_tasks[chat_id].cancel()
+            busy_runtime = self.get_busy_backend_runtime(memory_scope_id) or chat_id
+            if busy_runtime in self.generation_tasks:
+                self.generation_tasks[busy_runtime].cancel()
                 await asyncio.sleep(0.1)
+            busy_session = self.sessions.setdefault(
+                busy_runtime, {"history": [], "interrupted_thought": "", "pending_text": ""}
+            )
+            busy_session["_interrupted_by_frontend"] = True
             self.sessions.pop(chat_id, None)
-            queue = self.task_queues.get(chat_id)
+            queue = self._get_scope_queue_for_runtime(chat_id)
             if queue:
                 await queue.clear()
-            status = self.worker_status.get(chat_id)
+            status = self.worker_status.get(busy_runtime)
             if status:
                 status.finish()
             self._cancel_followup_timer(chat_id)
@@ -1245,10 +1260,13 @@ class MessageHandlerMixin:
             lines = ["📊 **N.O.R.A. Core 状态报告**\n"]
             
             # 后脑状态
-            status = self.worker_status.get(chat_id)
+            busy_runtime = self.get_busy_backend_runtime(memory_scope_id)
+            status = self.worker_status.get(busy_runtime) if busy_runtime else self.worker_status.get(chat_id)
             if status and status.busy:
                 elapsed = int(time.time() - status.started_at)
                 lines.append("🧠 后脑 (Back Brain): 🔴 忙碌")
+                if busy_runtime and busy_runtime != chat_id:
+                    lines.append(f"  来源地点: {busy_runtime}")
                 lines.append(f"  任务: \"{status.original_query[:80]}\"")
                 lines.append(f"  阶段: {status.phase}")
                 if status.detail:
@@ -1318,7 +1336,7 @@ class MessageHandlerMixin:
                 lines.append("📅 Scheduler: 🔴 未启用")
             
             # 排队消息
-            queue = self.task_queues.get(chat_id)
+            queue = self._get_scope_queue_for_runtime(chat_id)
             if queue and queue.size() > 0:
                 lines.append(f"\n{queue.get_queue_summary()}")
             

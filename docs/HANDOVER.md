@@ -5,6 +5,23 @@
 
 ## 近期关键改动（截至 2026-06-08）
 
+### 🌐 多平台消息段 / Followup / 打断全局协调 — 2026-06-08
+
+在“同一个 Nora 在不同地方说话”的人格模型上，保持**消息段按 `memory_scope_id` 全局闭合**，不引入 `scene_scope_id`、不按平台拆段：
+
+- `core/controller.py` 新增 scope 级运行时 helper：按 `memory_scope_id` 聚合 runtime、查全局忙碌后脑、共享后脑队列、判断全局消息段是否 idle。
+- `core/scheduler_mixin.py` 的 `_transition_to_semi_online` 增加全局闭段 gate：单个平台 followup END 只清理本 runtime，若同 scope 仍有前脑/后脑/队列/followup/近期 activity，则保持 `ONLINE` 且暂不 `close_session`。
+- `core/message_handler.py` / `core/interrupt_handler.py` / `core/polling.py` 改为 scope 级后脑注意力与队列：任一平台可 stop/change/queue 当前共享后脑任务，队列跨平台可见，出队任务回到其原始 runtime。
+- `core/front_brain.py` 的后脑运行时状态注入改为 scope 级，让任一平台的前脑都能看到另一个平台正在处理的后脑任务。
+- 聚合器保持 `platform:chat_id` 隔离，不同平台输入不会在 3 秒缓冲内硬合并；共享连续性仍由 `ConversationIdentity.memory_scope_id` 负责。
+
+**验证**：
+- `.venv\Scripts\python.exe -m py_compile core\controller.py core\message_handler.py core\interrupt_handler.py core\polling.py core\scheduler_mixin.py core\front_brain.py core\back_brain.py`
+- `.venv\Scripts\python.exe -m pytest tests\test_scope_runtime_coordination.py tests\test_conversation_identity_and_aggregator.py tests\test_message_handler_stop_storage.py tests\test_followup_end_grace_delay.py tests\test_message_handler_ack.py tests\test_back_brain_tool_context.py tests\test_delivery_target.py tests\test_default_chat_target_store.py tests\test_message_history.py -q` → 43 passed, 1 known warning。
+- 全量 `.venv\Scripts\python.exe -m pytest -q` → 200 passed / 16 failed；失败项与既有基线一致（CLI/CostTracker/pytest-asyncio/routing/timezone）。
+
+---
+
 ### 🌉 Adapter 统一化 + Telegram 渐进拆分 — 2026-06-08
 
 参考 NoneBot2 的 Adapter/Event/Message 分层思想，但不引入完整 driver/Bot/API hook 系统，完成 NORA 轻量 adapter 标准化：

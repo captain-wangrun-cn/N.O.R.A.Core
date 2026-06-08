@@ -95,9 +95,11 @@ class FrontBrainMixin:
         """
         try:
             worker_status_map = getattr(self, "worker_status", None) or {}
-            queues_map = getattr(self, "task_queues", None) or {}
-            status = worker_status_map.get(chat_id) if isinstance(worker_status_map, dict) else None
-            queue = queues_map.get(chat_id) if isinstance(queues_map, dict) else None
+            identity = self._identity_for_runtime_key(chat_id)
+            busy_runtime = self.get_busy_backend_runtime(identity.memory_scope_id)
+            status_key = busy_runtime or chat_id
+            status = worker_status_map.get(status_key) if isinstance(worker_status_map, dict) else None
+            queue = self._get_scope_queue_for_runtime(chat_id)
         except Exception:
             return ""
 
@@ -110,6 +112,8 @@ class FrontBrainMixin:
 
         if busy:
             lines.append(f"- 后脑正在执行: {getattr(status, 'original_query', '')[:120]}")
+            if busy_runtime and busy_runtime != chat_id:
+                lines.append(f"  来源地点: {busy_runtime}")
             instr = (getattr(status, "task_instruction", "") or "").strip()
             if instr:
                 lines.append(f"  任务指示: {instr[:240]}")

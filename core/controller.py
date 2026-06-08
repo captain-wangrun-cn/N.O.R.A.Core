@@ -352,6 +352,97 @@ class NoraController(
     def _platform_for_key(self, chat_or_runtime_key: str) -> str:
         return self._identity_for_runtime_key(str(chat_or_runtime_key)).platform
 
+    def _scope_key_for_identity(self, identity: ConversationIdentity) -> str:
+        """Runtime queue key for one shared memory scope."""
+        return identity.memory_scope_id or identity.runtime_key
+
+    def _scope_key_for_runtime_key(self, runtime_key: str) -> str:
+        return self._scope_key_for_identity(self._identity_for_runtime_key(runtime_key))
+
+    def _get_scope_queue_for_runtime(self, runtime_key: str, create: bool = False) -> Optional[BackendTaskQueue]:
+        key = self._scope_key_for_runtime_key(runtime_key)
+        if create:
+            return self.task_queues.setdefault(key, BackendTaskQueue())
+        return self.task_queues.get(key)
+
+    def get_or_create_scope_queue(self, memory_scope_id: str) -> BackendTaskQueue:
+        """Return the backend task queue shared by a memory scope."""
+        return self.task_queues.setdefault(memory_scope_id, BackendTaskQueue())
+
+    def _runtime_keys_for_scope(self, memory_scope_id: str) -> list[str]:
+        keys = [
+            key for key, identity in self.conversation_identities.items()
+            if identity.memory_scope_id == memory_scope_id
+        ]
+        return sorted(set(keys))
+
+    def _has_pending_task(self, runtime_key: str) -> bool:
+        task = self.generation_tasks.get(runtime_key)
+        return bool(task and not task.done())
+
+    def _has_pending_front_task(self, runtime_key: str) -> bool:
+        task = self.front_brain_tasks.get(runtime_key)
+        return bool(task and not task.done())
+
+    def get_busy_backend_runtime(self, memory_scope_id: str) -> Optional[str]:
+        """Find the runtime currently occupying the shared backend attention."""
+        for key in self._runtime_keys_for_scope(memory_scope_id):
+            status = self.worker_status.get(key)
+            if status and status.busy:
+                return key
+            if self._has_pending_task(key):
+                return key
+        return None
+
+    def get_active_runtime_keys(self, memory_scope_id: str) -> list[str]:
+        """Return runtimes that still keep the shared conversation segment open."""
+        active: list[str] = []
+        for key in self._runtime_keys_for_scope(memory_scope_id):
+            if self._has_pending_front_task(key) or self._has_pending_task(key):
+                active.append(key)
+                continue
+            status = self.worker_status.get(key)
+            if status and status.busy:
+                active.append(key)
+                continue
+            queue = self._get_scope_queue_for_runtime(key)
+            if queue and queue.size() > 0:
+                active.append(key)
+                continue
+            follow_task = self._followup_timers.get(key)
+            if follow_task and not follow_task.done():
+                active.append(key)
+                continue
+            if key in self._followup_suspended_until_idle:
+                active.append(key)
+                continue
+            try:
+                from core.scheduler import get_user_idle_seconds
+                idle_secs = get_user_idle_seconds(key)
+            except Exception:
+                idle_secs = -1
+            if idle_secs >= 0 and idle_secs < self.FOLLOWUP_END_IDLE_SECONDS:
+                active.append(key)
+        return sorted(set(active))
+
+    def is_memory_scope_idle(self, memory_scope_id: str) -> bool:
+        return not self.get_active_runtime_keys(memory_scope_id)
+
+    def _sync_global_backend_flags(self):
+        """Keep global scheduler flags true while any runtime backend is still active."""
+        try:
+            from core.scheduler import set_ai_backend_busy, set_ai_generating
+            any_backend = any(
+                (status and status.busy) or self._has_pending_task(key)
+                for key, status in self.worker_status.items()
+            )
+            if not any_backend:
+                any_backend = any(self._has_pending_task(key) for key in self.generation_tasks)
+            set_ai_backend_busy(any_backend)
+            set_ai_generating(any_backend)
+        except Exception:
+            logger.debug("同步全局后脑状态失败", exc_info=True)
+
     async def _send_platform_message(self, chat_or_runtime_key: str, text: str, **kwargs):
         return await self.adapter.send_message(
             self._platform_chat_id(chat_or_runtime_key),

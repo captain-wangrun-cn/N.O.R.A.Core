@@ -201,7 +201,7 @@ class PollingMixin:
                     if need_follow:
                         context["_followup_initial_delay"] = self.FOLLOWUP_NEED_FOLLOW_DELAY
                     # 消费掉队列中对应的消息
-                    queue = self.task_queues.get(chat_id)
+                    queue = self._get_scope_queue_for_runtime(chat_id)
                     
                     logger.info(f"[{chat_id}] 轮询继续: 新指示='{new_instruction[:60]}...'")
                     continue
@@ -231,7 +231,7 @@ class PollingMixin:
 
     async def _process_pending_messages(self, chat_id: str):
         """后端完成后，从任务队列中取出下一个任务执行。逐个处理，不合并。"""
-        queue = self.task_queues.get(chat_id)
+        queue = self._get_scope_queue_for_runtime(chat_id)
         if not queue or queue.size() == 0:
             return
         
@@ -241,15 +241,16 @@ class PollingMixin:
             return
         
         context = item["context"]
+        identity = self._identity(context)
+        target_chat_id = identity.runtime_key
         remaining = queue.size()
-        logger.info(f"[{chat_id}] 开始处理队列中的下一个任务 (剩余 {remaining} 个): '{context.get('text', '')[:50]}'")
+        logger.info(f"[{target_chat_id}] 开始处理队列中的下一个任务 (剩余 {remaining} 个): '{context.get('text', '')[:50]}'")
         
         # 如果还有排队任务，通知用户
         if remaining > 0:
             try:
                 msg = f"📋 开始处理排队任务... (还有 {remaining} 个任务在等待)"
-                await self._send_platform_message(chat_id, msg, parse_media=False)
-                identity = self._identity(context)
+                await self._send_platform_message(target_chat_id, msg, parse_media=False)
                 self.message_history.add_message(
                     platform=identity.platform,
                     chat_id=identity.storage_id,
@@ -264,4 +265,4 @@ class PollingMixin:
         
         # 启动新任务处理（走完整的生成流程，finally 块会继续处理下一个）
         task = asyncio.create_task(self._run_polling_loop(context))
-        self.generation_tasks[chat_id] = task
+        self.generation_tasks[target_chat_id] = task

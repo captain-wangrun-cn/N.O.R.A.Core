@@ -8,7 +8,7 @@ Copyright © WR（captain-wangrun-cn） All rights reserved
 import asyncio
 import logging
 import re
-from typing import Dict, Any
+from typing import Dict, Any, Optional
 
 from brain.prompts import (
     get_soul_prompt,
@@ -33,7 +33,13 @@ class InterruptHandlerMixin:
             return ""
         return cls._TIMESTAMP_PATTERN.sub("", text).strip()
 
-    async def _detect_interrupt_intent_and_reply(self, chat_id: str, text: str, status: WorkerStatus) -> Dict[str, str]:
+    async def _detect_interrupt_intent_and_reply(
+        self,
+        chat_id: str,
+        text: str,
+        status: Optional[WorkerStatus],
+        backend_runtime: str = "",
+    ) -> Dict[str, str]:
         """
         用 smart 模型智能判断用户意图并生成回复。
         
@@ -43,10 +49,14 @@ class InterruptHandlerMixin:
                 "reply": "...",                          # 给用户的回复文案
             }
         """
-        progress = status.get_summary()
+        progress = (
+            status.get_summary()
+            if status
+            else "后脑当前没有正在执行的任务，但共享后脑队列里已有等待处理的任务。"
+        )
         
         # 获取当前队列摘要，让 AI 看到已排队的任务
-        queue = self.task_queues.get(chat_id)
+        queue = self._get_scope_queue_for_runtime(chat_id)
         queue_summary = queue.get_queue_summary() if queue else ""
         
         soul = get_soul_prompt()
@@ -157,7 +167,8 @@ class InterruptHandlerMixin:
                         elif action == "clear_queue":
                             reply = "好的，排队的任务都清掉了～"
                         else:
-                            reply = f"收到～ 我正在处理之前的请求（{status.phase}），完成后马上看你的新消息！"
+                            phase = status.phase if status else "排队任务"
+                            reply = f"收到～ 我正在处理之前的请求（{phase}），完成后马上看你的新消息！"
 
                     result = {"action": action, "reply": reply}
                     if action_param is not None:
@@ -172,7 +183,7 @@ class InterruptHandlerMixin:
 
             return {
                 "action": "queue",
-                "reply": f"收到～ 我正在处理之前的请求（{status.phase}），完成后马上看你的新消息！"
+                "reply": f"收到～ 我正在处理之前的请求（{status.phase if status else '排队任务'}），完成后马上看你的新消息！"
             }
         
         except Exception as e:
@@ -182,7 +193,14 @@ class InterruptHandlerMixin:
                 "reply": "收到～ 我正在忙着处理之前的请求，完成后会看你的新消息！"
             }
 
-    async def _interrupt_backend(self, chat_id: str, reason: str, user_text: str, skip_reply: bool = False):
+    async def _interrupt_backend(
+        self,
+        chat_id: str,
+        reason: str,
+        user_text: str,
+        skip_reply: bool = False,
+        target_runtime_key: str = "",
+    ):
         """
         前端打断后端：取消当前任务，清理状态，根据 reason 决定下一步。
         
@@ -193,17 +211,18 @@ class InterruptHandlerMixin:
         """
         logger.info(f"[{chat_id}] 前端打断后端: reason={reason}, text='{user_text[:50]}'")
         identity = self._identity_for_runtime_key(chat_id)
+        target_runtime_key = target_runtime_key or self.get_busy_backend_runtime(identity.memory_scope_id) or chat_id
         platform = identity.platform
         storage_id = identity.storage_id
         memory_scope_id = identity.memory_scope_id
         place_scope_id = identity.place_scope_id
 
         # 设置打断标记，防止 finally 块自动处理排队消息
-        session = self.sessions.setdefault(chat_id, {"history": [], "interrupted_thought": "", "pending_text": ""})
+        session = self.sessions.setdefault(target_runtime_key, {"history": [], "interrupted_thought": "", "pending_text": ""})
         session["_interrupted_by_frontend"] = True
         
         # 1. 取消后端任务
-        task = self.generation_tasks.get(chat_id)
+        task = self.generation_tasks.get(target_runtime_key)
         if task and not task.done():
             task.cancel()
             # 等待任务真正结束（短超时，避免阻塞前端过久）
@@ -211,15 +230,15 @@ class InterruptHandlerMixin:
                 await asyncio.wait_for(asyncio.shield(task), timeout=1.0)
             except (asyncio.CancelledError, asyncio.TimeoutError, Exception):
                 pass
-        self.generation_tasks.pop(chat_id, None)
+        self.generation_tasks.pop(target_runtime_key, None)
         
         # 2. 清理状态
-        status = self.worker_status.get(chat_id)
+        status = self.worker_status.get(target_runtime_key)
         if status:
             status.finish()
         
         # 3. 清空排队消息（用户已改变意图，旧队列失效）
-        queue = self.task_queues.get(chat_id)
+        queue = self._get_scope_queue_for_runtime(chat_id)
         if queue:
             await queue.clear()
 
@@ -236,6 +255,7 @@ class InterruptHandlerMixin:
                     "user_id": identity.actor_user_id,
                     "text": user_text,
                     "chat_type": identity.chat_type,
+                    "user_name": identity.actor_display_name,
                 }
                 task = asyncio.create_task(self._run_polling_loop(context))
                 self.generation_tasks[chat_id] = task
@@ -264,6 +284,7 @@ class InterruptHandlerMixin:
                     "user_id": identity.actor_user_id,
                     "text": user_text,
                     "chat_type": identity.chat_type,
+                    "user_name": identity.actor_display_name,
                 }
                 task = asyncio.create_task(self._run_polling_loop(context))
                 self.generation_tasks[chat_id] = task
