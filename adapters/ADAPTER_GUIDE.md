@@ -95,9 +95,17 @@ adapters/<platform>/
 }
 ```
 
+字段边界：
+
+- 顶层 `description` 描述这个 adapter 在 NORA 里的职责，例如消息接收、发送、媒体下载、命令按钮等。
+- `platform.name` 是对接的真实平台名称，会随平台描述一起注入给 Nora。
+- `platform.description` 只描述“这是一个什么平台”，不要写“本适配器如何对接”、Nora 人格、响应策略或实现细节。
+- 平台行为限制、群聊边界、安全隐私提示分别放进 `notes` / `privacy_notes` / `limits`，不要塞进 `platform.description`。
+
 ## 6. Prompt 分层
 
 - `adapters/PROMPT.md`：所有平台共享，描述跨平台人格连续性、通用媒体标记、`[SPLIT]`、不泄漏内部信息。
+- `metadata.json` 中的 `platform.name` 与 `platform.description`：自动注入给 Nora，让她知道当前对话发生在什么真实平台。
 - `adapters/<platform>/PROMPT.md`：只描述该平台的格式、长度、命令、群聊/私聊差异和媒体发送限制。
 - 不要在平台 prompt 中重写 Nora 人格；人格边界在 `SOUL.md` 和 `brain/templates/system.jinja`。
 

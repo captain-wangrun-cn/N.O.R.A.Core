@@ -18,12 +18,15 @@ NORA 的 adapter 是平台通信层：它负责把真实平台事件转换为核
 - `<platform>/metadata.json`：说明真实平台、协议、限制和隐私提示。
 - `<platform>/PROMPT.md`：平台专属格式和限制。
 
+`metadata.json` 里顶层 `description` 描述 adapter 职责；`platform.description` 只描述真实平台本身是什么。`platform.name` 和 `platform.description` 会作为当前平台事实注入给 Nora，平台行为和隐私边界放在 `notes`、`privacy_notes` 或平台 prompt 中。
+
 ## Prompt 分层
 
 `brain.prompts.load_adapter_prompt(platform)` 按顺序注入：
 
 1. `adapters/PROMPT.md`：通用 adapter 协议。
-2. `adapters/<platform>/PROMPT.md`：平台专属协议。
+2. `adapters/<platform>/metadata.json` 中的 `platform.name` 与 `platform.description`：当前真实平台事实。
+3. `adapters/<platform>/PROMPT.md`：平台专属协议。
 
 平台 prompt 不应重写人格，只描述平台格式、长度、命令、媒体和公开场景限制。
 

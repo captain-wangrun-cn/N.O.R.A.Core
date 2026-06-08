@@ -6,6 +6,7 @@ LastEditTime: 2026-03-05 00:00:00
 FilePath: \N.O.R.A.Core\brain\prompts.py
 '''
 from jinja2 import Environment, FileSystemLoader
+import json
 import os
 import sys  # Added sys import for path manipulation
 import logging
@@ -351,8 +352,41 @@ def get_lexicon_global_system_prompt_block() -> str:
     return f"【词库全局说明 (Lexicon Global Prompt)】\n{global_prompt}"
 
 
+def get_adapter_platform_metadata_prompt_block(platform: Optional[str] = None) -> str:
+    """读取 adapters/<platform>/metadata.json 中的平台名称与平台描述。"""
+    platform_id = str(platform or "").strip().lower()
+    if not platform_id:
+        return ""
+
+    metadata_path = os.path.join(PROJECT_ROOT, "adapters", platform_id, "metadata.json")
+    try:
+        if not os.path.exists(metadata_path):
+            return ""
+        with open(metadata_path, "r", encoding="utf-8") as f:
+            metadata = json.load(f)
+    except Exception as e:
+        logger.warning(f"读取 adapter metadata 失败 {metadata_path}: {e}")
+        return ""
+
+    platform_info = metadata.get("platform") if isinstance(metadata, dict) else None
+    if not isinstance(platform_info, dict):
+        return ""
+
+    platform_name = str(platform_info.get("name") or platform_id).strip()
+    platform_description = str(platform_info.get("description") or "").strip()
+    if not platform_name and not platform_description:
+        return ""
+
+    lines = ["【当前接入平台 (Adapter Platform Metadata)】"]
+    if platform_name:
+        lines.append(f"平台名称: {platform_name}")
+    if platform_description:
+        lines.append(f"平台描述: {platform_description}")
+    return "\n".join(lines)
+
+
 def load_adapter_prompt(platform: Optional[str] = None) -> str:
-    """读取通用 adapter prompt + 平台专属 prompt。"""
+    """读取通用 adapter prompt + 平台 metadata + 平台专属 prompt。"""
     blocks: list[str] = []
     global_prompt = _read_file_safe(ADAPTER_GLOBAL_PROMPT_FILE, max_chars=6000).strip()
     if global_prompt:
@@ -360,6 +394,10 @@ def load_adapter_prompt(platform: Optional[str] = None) -> str:
 
     platform_name = str(platform or "").strip().lower()
     if platform_name:
+        metadata_prompt = get_adapter_platform_metadata_prompt_block(platform_name)
+        if metadata_prompt:
+            blocks.append(metadata_prompt)
+
         prompt_path = os.path.join(PROJECT_ROOT, "adapters", platform_name, "PROMPT.md")
         platform_prompt = _read_file_safe(prompt_path, max_chars=6000).strip()
         if platform_prompt:
