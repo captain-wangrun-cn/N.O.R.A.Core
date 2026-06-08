@@ -1,7 +1,7 @@
 {
   "adapter_id": "telegram",
   "name": "Telegram Adapter",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "author": "CaptainCN (WR) + Nora",
   "entrypoint": "adapters.telegram:TelegramAdapter",
   "description": "N.O.R.A Core 的 Telegram Bot API 适配器，负责 Telegram 消息接收、聚合、媒体下载、命令按钮和平台消息发送。",
@@ -15,7 +15,9 @@
     "notes": [
       "私聊消息默认处理；群聊中暂时仅在 @机器人时处理。",
       "单条文本消息上限为 4096 字符，适配器会按边界拆分。",
-      "支持图片、视频、文档、贴纸下载到 workspace/data/telegram/ 后交给核心链路。"
+      "支持图片、视频、文档、贴纸下载到 workspace/data/telegram/ 后交给核心链路。",
+      "Bot API 不支持枚举完整普通成员名单；只能查询成员总数、管理员列表，或按已知 user_id 查询单个成员。",
+      "支持通过后脑工具调用部分群管 API，实际成功取决于机器人在群里的管理员权限。"
     ],
     "privacy_notes": [
       "群聊是公开场景，不应自动投递主动消息到群聊。",
@@ -31,11 +33,16 @@
     "supports_rich_media": true,
     "supports_reply": true,
     "supports_threads": false,
-    "supports_buttons": true
+    "supports_buttons": true,
+    "supports_chat_member_lookup": true,
+    "supports_chat_moderation": true,
+    "supports_member_tags": true
   },
   "limits": {
     "max_message_length": 4096,
     "photo_max_size_bytes": 10485760,
-    "document_max_size_bytes": 52428800
+    "document_max_size_bytes": 52428800,
+    "member_list": "Telegram Bot API cannot enumerate all regular members.",
+    "set_chat_member_tag": "Requires Bot API 9.5 and can_manage_tags administrator right."
   }
 }

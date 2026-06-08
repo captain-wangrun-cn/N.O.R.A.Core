@@ -264,9 +264,9 @@ class FrontBrainMixin:
             logger.warning("前脑 CUSTOM 注入失败，已忽略。", exc_info=True)
 
         try:
-            from brain.tools import TOOL_INTROS
-            if TOOL_INTROS:
-                tool_desc = "\n".join([f"- {name}: {intro}" for name, intro in TOOL_INTROS.items()])
+            tool_intros = self.tool_manager.get_tool_intros()
+            if tool_intros:
+                tool_desc = "\n".join([f"- {name}: {intro}" for name, intro in tool_intros.items()])
                 tool_intro_block = render_template('context_injection.jinja', 'tools', tool_desc=tool_desc)
         except Exception:
             logger.warning("前脑工具简介注入失败，已忽略。", exc_info=True)
@@ -660,9 +660,9 @@ class FrontBrainMixin:
         except Exception:
             logger.warning("前脑审查 CUSTOM 注入失败，已忽略。", exc_info=True)
         try:
-            from brain.tools import TOOL_INTROS
-            if TOOL_INTROS:
-                tool_desc = "\n".join([f"- {name}: {intro}" for name, intro in TOOL_INTROS.items()])
+            tool_intros = self.tool_manager.get_tool_intros()
+            if tool_intros:
+                tool_desc = "\n".join([f"- {name}: {intro}" for name, intro in tool_intros.items()])
                 tool_intro_block = render_template('context_injection.jinja', 'tools', tool_desc=tool_desc)
         except Exception:
             pass

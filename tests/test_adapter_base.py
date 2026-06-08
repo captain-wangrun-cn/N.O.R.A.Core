@@ -1,6 +1,7 @@
 import asyncio
 
 from adapters.base import (
+    AdapterToolSpec,
     AdapterEvent,
     AdapterMessage,
     BaseAdapter,
@@ -67,6 +68,31 @@ def test_base_adapter_loads_metadata():
     assert metadata.adapter_id == "telegram"
     assert metadata.platform.name == "Telegram"
     assert metadata.features["supports_rich_media"] is True
+    assert metadata.features["supports_chat_member_lookup"] is True
+
+
+def test_base_adapter_tools_default_empty():
+    adapter = DummyAdapter()
+
+    assert adapter.get_adapter_tools() == []
+
+
+def test_adapter_tool_spec_shape():
+    def sample_tool():
+        return "ok"
+
+    spec = AdapterToolSpec(
+        name="sample_tool",
+        callable=sample_tool,
+        intro="sample",
+        risk="high",
+        requires_owner_confirmation=True,
+        platform="dummy",
+    )
+
+    assert spec.name == "sample_tool"
+    assert spec.callable() == "ok"
+    assert spec.requires_owner_confirmation is True
 
 
 def test_dispatch_message_runs_hooks_and_handler():

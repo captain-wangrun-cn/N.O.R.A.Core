@@ -30,6 +30,7 @@ from .group_context import TelegramGroupContextMixin
 from .incoming import TelegramIncomingMixin
 from .reply import TelegramReplyMixin
 from .sender import TelegramSenderMixin
+from .tools import TelegramToolsMixin
 
 logger = logging.getLogger(__name__)
 
@@ -42,6 +43,7 @@ class TelegramAdapter(
     TelegramCleanupMixin,
     TelegramReplyMixin,
     TelegramSenderMixin,
+    TelegramToolsMixin,
     BaseAdapter,
 ):
     """Telegram 平台适配器。"""
@@ -69,6 +71,9 @@ class TelegramAdapter(
             supports_reply=True,
             supports_threads=False,
             supports_buttons=True,
+            supports_chat_member_lookup=True,
+            supports_chat_moderation=True,
+            supports_member_tags=True,
             max_message_length=TG_MSG_MAX_LENGTH,
         )
 

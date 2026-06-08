@@ -62,6 +62,27 @@ def telegram_user_name(update: Update) -> str:
     return user_id or "Unknown"
 
 
+def telegram_display_name(user: Any) -> str:
+    """Return a readable display name for a Telegram user-like object."""
+    if not user:
+        return ""
+    name_parts = [
+        part.strip()
+        for part in (
+            getattr(user, "first_name", "") or "",
+            getattr(user, "last_name", "") or "",
+        )
+        if part and part.strip()
+    ]
+    if name_parts:
+        return " ".join(name_parts)
+    username = getattr(user, "username", "") or ""
+    if username:
+        return f"@{username}"
+    user_id = getattr(user, "id", None)
+    return str(user_id) if user_id is not None else ""
+
+
 def strip_bot_mention(text: str, bot_username: str | None) -> str:
     """Remove trigger-only @bot mentions before handing text to the core model."""
     if not text or not bot_username:
@@ -111,6 +132,15 @@ def context_from_update(
     context = event.to_context()
     if platform_message_ids:
         context["platform_message_ids"] = [str(mid) for mid in platform_message_ids if mid is not None]
+    if telegram_message and telegram_message.reply_to_message:
+        reply_msg = telegram_message.reply_to_message
+        context["reply_to_message_id"] = str(reply_msg.message_id)
+        reply_user = getattr(reply_msg, "from_user", None)
+        if reply_user and getattr(reply_user, "id", None) is not None:
+            context["reply_to_user_id"] = str(reply_user.id)
+            reply_user_name = telegram_display_name(reply_user)
+            if reply_user_name:
+                context["reply_to_user_name"] = reply_user_name
     return context
 
 

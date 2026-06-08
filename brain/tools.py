@@ -14,7 +14,7 @@ import time
 import shlex
 from cryptography.fernet import Fernet
 from typing import List, Dict, Callable, Any, Optional
-from adapters.base import BaseAdapter
+from adapters.base import AdapterToolSpec, BaseAdapter
 from workspace_config import get_workspace_manager
 
 logger = logging.getLogger(__name__)
@@ -109,6 +109,8 @@ class ToolManager:
     def __init__(self, adapter: BaseAdapter, image_store=None, scheduler=None):
         self._tools: Dict[str, Callable] = {}
         self._schemas: List[Dict[str, Any]] = []
+        self._tool_intros: Dict[str, str] = dict(TOOL_INTROS)
+        self._adapter_tool_specs: Dict[str, AdapterToolSpec] = {}
         self.adapter = adapter
         self.image_store = image_store  # memory.image_store.ImageStore 实例
         self.scheduler = scheduler  # core.scheduler.ProactiveScheduler 实例
@@ -164,13 +166,44 @@ class ToolManager:
         # 进度共享工具（后脑写入，前脑可读取）
         self.register(self.store_progress_note)
         self.register(self.get_progress_note)
+        self._register_adapter_tools()
 
-    def register(self, func: Callable):
-        self._tools[func.__name__] = func
-        self._schemas.append(self._generate_schema(func))
+    def register(self, func: Callable, *, name: str | None = None, intro: str | None = None):
+        tool_name = name or func.__name__
+        self._tools[tool_name] = func
+        self._schemas.append(self._generate_schema(func, tool_name=tool_name))
+        if intro:
+            self._tool_intros[tool_name] = intro
+
+    def _register_adapter_tools(self):
+        """Register tools exposed by the active platform adapter."""
+        try:
+            specs = self.adapter.get_adapter_tools()
+        except Exception as e:
+            logger.warning(f"Adapter tool discovery failed: {e}", exc_info=True)
+            return
+
+        for spec in specs:
+            if not spec.name or not callable(spec.callable):
+                logger.warning(f"Skipping invalid adapter tool spec: {spec}")
+                continue
+            if spec.name in self._tools:
+                logger.warning(f"Skipping adapter tool '{spec.name}': name already registered")
+                continue
+            self._adapter_tool_specs[spec.name] = spec
+            self.register(spec.callable, name=spec.name, intro=spec.intro)
+            logger.info(
+                "Registered adapter tool: %s (platform=%s, risk=%s)",
+                spec.name,
+                spec.platform or getattr(self.adapter, "platform_name", ""),
+                spec.risk,
+            )
 
     def get_tool_schemas(self) -> List[Dict[str, Any]]:
         return self._schemas
+
+    def get_tool_intros(self) -> Dict[str, str]:
+        return dict(self._tool_intros)
 
     # ------------------------------------------------------------------
     # 进度共享工具
@@ -1406,15 +1439,15 @@ class ToolManager:
 
     # ------------------------------------------------------------------
 
-    def _generate_schema(self, func: Callable) -> Dict[str, Any]:
+    def _generate_schema(self, func: Callable, *, tool_name: str | None = None) -> Dict[str, Any]:
         """Generates a JSON schema for a function."""
         import typing
         sig = inspect.signature(func)
         doc = inspect.getdoc(func) or ""
         desc = doc.strip().split("\\n")[0]
         parameters = {"type": "OBJECT", "properties": {}, "required": []}
-        for name, param in sig.parameters.items():
-            if name == 'self': continue
+        for param_name, param in sig.parameters.items():
+            if param_name == 'self': continue
             
             # 解析类型注解，支持 Optional[X] (即 Union[X, None])
             annotation = param.annotation
@@ -1435,8 +1468,8 @@ class ToolManager:
             elif annotation == float:
                 param_type = "NUMBER"
             
-            parameters["properties"][name] = {"type": param_type}
+            parameters["properties"][param_name] = {"type": param_type}
             if param.default == inspect.Parameter.empty:
-                parameters["required"].append(name)
-        return {"name": func.__name__, "description": desc, "parameters": parameters}
+                parameters["required"].append(param_name)
+        return {"name": tool_name or func.__name__, "description": desc, "parameters": parameters}
 

@@ -12,6 +12,18 @@ MessageHandler = Callable[[Dict[str, Any]], Awaitable[Any] | Any]
 
 
 @dataclass(slots=True)
+class AdapterToolSpec:
+    """Adapter-provided tool exposed to the backend ToolManager."""
+
+    name: str
+    callable: Callable[..., Any]
+    intro: str
+    risk: str = "low"
+    requires_owner_confirmation: bool = False
+    platform: str = ""
+
+
+@dataclass(slots=True)
 class PlatformFeatures:
     """平台能力描述。"""
 
@@ -23,6 +35,9 @@ class PlatformFeatures:
     supports_reply: bool = True
     supports_threads: bool = False
     supports_buttons: bool = False
+    supports_chat_member_lookup: bool = False
+    supports_chat_moderation: bool = False
+    supports_member_tags: bool = False
     max_message_length: int | None = None
 
 
@@ -306,6 +321,10 @@ class BaseAdapter(ABC):
         if isinstance(message, MessageSegment):
             return message.to_text_marker()
         return str(message)
+
+    def get_adapter_tools(self) -> list[AdapterToolSpec]:
+        """Return tools this adapter wants to expose to the backend tool loop."""
+        return []
 
     @abstractmethod
     def run(self, message_handler: MessageHandler):

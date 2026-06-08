@@ -212,6 +212,7 @@ class BackBrainMixin:
         storage_id: str,
         memory_scope_id: str = "",
         place_scope_id: str = "",
+        context: Dict[str, Any] | None = None,
     ) -> Dict[str, Any]:
         """Fill implicit per-conversation tool arguments without overriding explicit filters."""
         if tool_name == "view_media":
@@ -228,6 +229,27 @@ class BackBrainMixin:
         if tool_name in {"set_alarm", "store_progress_note", "get_progress_note"}:
             if not str(tool_args.get("chat_id", "")).strip():
                 tool_args["chat_id"] = runtime_key
+        tool_manager = getattr(self, "tool_manager", None)
+        adapter_tool_specs = getattr(tool_manager, "_adapter_tool_specs", {})
+        if platform == "telegram" and tool_name in adapter_tool_specs:
+            if not str(tool_args.get("chat_id", "")).strip():
+                tool_args["chat_id"] = platform_chat_id
+            telegram_target_tools = {
+                "telegram_get_chat_member",
+                "telegram_mute_chat_member",
+                "telegram_unmute_chat_member",
+                "telegram_ban_chat_member",
+                "telegram_unban_chat_member",
+                "telegram_set_chat_administrator_custom_title",
+                "telegram_set_chat_member_tag",
+            }
+            if (
+                tool_name in telegram_target_tools
+                and not str(tool_args.get("user_id", "")).strip()
+                and context
+                and str(context.get("reply_to_user_id", "")).strip()
+            ):
+                tool_args["user_id"] = str(context.get("reply_to_user_id", "")).strip()
         return tool_args
 
     async def _generate_response(self, context: Dict[str, Any]):
@@ -427,9 +449,9 @@ class BackBrainMixin:
 
             # Inject Tools
             try:
-                from brain.tools import TOOL_INTROS
-                if TOOL_INTROS:
-                    tool_desc = "\n".join([f"- {name}: {intro}" for name, intro in TOOL_INTROS.items()])
+                tool_intros = self.tool_manager.get_tool_intros()
+                if tool_intros:
+                    tool_desc = "\n".join([f"- {name}: {intro}" for name, intro in tool_intros.items()])
                     instructions.append(
                         render_template('context_injection.jinja', 'tools', tool_desc=tool_desc)
                     )
@@ -918,6 +940,7 @@ class BackBrainMixin:
                             storage_id=storage_id,
                             memory_scope_id=memory_scope_id,
                             place_scope_id=place_scope_id,
+                            context=context,
                         )
                     # --- report_progress 拦截 ---
                     if tool_name == "report_progress" and isinstance(tool_args, dict):

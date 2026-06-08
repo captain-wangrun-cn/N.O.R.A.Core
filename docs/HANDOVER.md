@@ -5,6 +5,24 @@
 
 ## 近期关键改动（截至 2026-06-08）
 
+### 🛠️ Adapter 动态工具 + Telegram 群管工具 — 2026-06-08
+
+为 adapter 增加可向后脑暴露平台 API 的工具标准，并先在 Telegram 落地群聊查询/群管工具：
+
+- `adapters/base.py` 新增 `AdapterToolSpec`、`BaseAdapter.get_adapter_tools()`，`PlatformFeatures` 增加成员查询、群管、成员 tag 能力字段。
+- `brain/tools.py` 启动时注册当前 adapter tools，并通过 `ToolManager.get_tool_intros()` 把动态工具简介注入前脑/后脑。
+- `adapters/telegram/tools.py` 新增 Telegram Bot API 工具：成员总数、管理员列表、单成员查询、禁言/解除禁言、封禁/解封、管理员头衔、普通成员 tag。
+- Telegram reply context 现在补充 `reply_to_user_id/reply_to_user_name/reply_to_message_id`，后脑调用 Telegram 群管工具时会自动注入当前 `chat_id`，reply 场景会自动补目标 `user_id`。
+- Prompt/文档明确：Telegram Bot API 不支持枚举完整普通成员名单；高风险真实平台操作必须先向主人口头确认，若 `security.enabled=true` 仍会走安全审查模型。
+
+**验证**：
+- `.venv\Scripts\python.exe -m py_compile adapters\base.py adapters\telegram\main.py adapters\telegram\message.py adapters\telegram\tools.py brain\tools.py core\back_brain.py core\front_brain.py` 通过。
+- `.venv\Scripts\python.exe -m pytest tests\test_adapter_base.py tests\test_telegram_adapter_modules.py tests\test_adapter_prompt_loading.py tests\test_telegram_adapter_tools.py -q` → 39 passed。
+- `.venv\Scripts\python.exe -m pytest tests\test_nora_prefs_telegram.py tests\test_conversation_identity_and_aggregator.py tests\test_back_brain_tool_context.py -q` → 17 passed。
+- 全量 `.venv\Scripts\python.exe -m pytest -q` → 228 passed / 16 failed；失败项仍为既有基线（CLI/CostTracker/pytest-asyncio/routing/timezone）。
+
+---
+
 ### 🌐 多平台消息段 / Followup / 打断全局协调 — 2026-06-08
 
 在“同一个 Nora 在不同地方说话”的人格模型上，保持**消息段按 `memory_scope_id` 全局闭合**，不引入 `scene_scope_id`、不按平台拆段：

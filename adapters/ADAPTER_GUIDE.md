@@ -23,12 +23,26 @@
 
 - `platform_name`
 - `platform_features`
+- `get_adapter_tools()`
 - `edit_message(...)`
 - `delete_message(...)`
 - `on_startup()` / `on_ready()` / `on_shutdown()`
 - `before_message(context)` / `after_message(context, result)`
 
 `send_message()` 必须返回平台消息 ID 列表，即使实际只发送了一条消息。
+
+### Adapter Tools
+
+Adapter 可以通过 `get_adapter_tools()` 向后脑暴露平台能力。返回值是 `AdapterToolSpec` 列表：
+
+- `name`：工具名，建议用 `<platform>_<action>`，如 `telegram_get_chat_member`。
+- `callable`：同步或异步可调用对象，docstring 会生成工具 schema。
+- `intro`：一句话能力说明，会注入前脑/后脑。
+- `risk`：`low` / `medium` / `high`，供文档、安全策略和审计理解。
+- `requires_owner_confirmation`：真实平台副作用工具设为 `true`。
+- `platform`：平台名。
+
+高风险工具不要加入默认 `security.tool_whitelist`。如果 `security.enabled=true`，这些工具会继续经过安全审查模型。对于禁言、踢人、封禁、改群员 tag/头衔等真实平台副作用，prompt 必须要求 Nora 先向主人口头确认目标、动作和参数。
 
 ## 3. 推荐目录结构
 
@@ -61,6 +75,7 @@ adapters/<platform>/
 - `platform_message_id`: str，用于 reply、undo、媒体回查。
 - `platform_message_ids`: list[str]，聚合多条平台消息时使用。
 - `contributors`: list[dict]，群聊聚合多说话人时使用。
+- `reply_to_user_id` / `reply_to_user_name` / `reply_to_message_id`: reply 场景的被回复目标，便于平台工具定位操作对象。
 
 不要让 adapter 自行决定人格、记忆作用域或主人/访客关系；这些由 `core/conversation_identity.py` 统一处理。
 
@@ -156,11 +171,22 @@ class XxxAdapter(BaseAdapter):
         return None
 ```
 
-## 8. 自检清单
+## 8. Telegram 群管工具限制
+
+Telegram Bot API 不支持枚举完整普通成员名单，因此“成员名单”能力只能实现为：
+
+- `telegram_get_chat_member_count`：成员总数。
+- `telegram_get_chat_administrators`：管理员列表。
+- `telegram_get_chat_member`：按已知 `user_id` 查询单个成员。
+
+禁言、踢出/封禁、解封、设置管理员头衔、设置普通成员 tag 依赖机器人管理员权限。`setChatMemberTag` 是 Bot API 9.5 能力，如果当前 `python-telegram-bot` 版本没有封装方法，可以使用 `Bot.do_api_request("setChatMemberTag", ...)`。
+
+## 9. 自检清单
 
 - [ ] `run()` 保存了 `message_handler`。
 - [ ] 已在正确时机触发 `startup/on_ready/shutdown`。
 - [ ] `metadata.json` 说明了真实平台、能力、限制和隐私提示。
 - [ ] 平台事件通过 `AdapterEvent` 或等价 dict 输出统一字段。
 - [ ] `send_message()` 返回稳定的消息 ID 列表。
+- [ ] `get_adapter_tools()` 暴露的工具命名、docstring、风险等级和返回格式清晰。
 - [ ] 群聊响应条件、平台 message_id、媒体路径和撤回能力有测试或手动验证。

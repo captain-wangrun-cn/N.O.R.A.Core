@@ -8,6 +8,10 @@
 > 2026-03-11 更新：
 > - `brain/tools.py` 新增 `TOOL_INTROS`，为每个工具提供一句话简介，用于注入到前脑/后脑提示词。
 > - 工具简介仅用于**前脑路由判断**是否需要后脑；前脑禁止直接调用工具，所有执行在后脑完成。
+>
+> 2026-06-08 更新：
+> - `ToolManager` 会注册当前 adapter 的 `get_adapter_tools()` 返回值，平台 API 可以作为后脑工具动态暴露。
+> - Adapter 工具简介通过 `ToolManager.get_tool_intros()` 与内置工具一起注入前脑/后脑。
 
 ---
 
@@ -33,6 +37,18 @@
 16. `cancel_alarm`
 17. `read_secret_vault`
 18. `write_secret_vault`
+
+若当前平台 adapter 暴露了工具，还会追加平台工具。例如 Telegram adapter 会追加：
+
+- `telegram_get_chat_member_count`
+- `telegram_get_chat_administrators`
+- `telegram_get_chat_member`
+- `telegram_mute_chat_member`
+- `telegram_unmute_chat_member`
+- `telegram_ban_chat_member`
+- `telegram_unban_chat_member`
+- `telegram_set_chat_administrator_custom_title`
+- `telegram_set_chat_member_tag`
 
 ---
 
@@ -336,6 +352,37 @@ OCR文本为模型回复，并非外置OCR
 
 **作用**：取消指定闹钟。
 
+---
+
+## Telegram Adapter 工具
+
+**作用**：让后脑调用 Telegram Bot API 做群聊信息查询和群管操作。
+
+只读查询：
+
+- `telegram_get_chat_member_count(chat_id="")`
+- `telegram_get_chat_administrators(chat_id="")`
+- `telegram_get_chat_member(user_id, chat_id="")`
+
+群管操作：
+
+- `telegram_mute_chat_member(user_id, until_timestamp=0, chat_id="", reason="")`
+- `telegram_unmute_chat_member(user_id, chat_id="", reason="")`
+- `telegram_ban_chat_member(user_id, until_timestamp=0, revoke_messages=false, chat_id="", reason="")`
+- `telegram_unban_chat_member(user_id, only_if_banned=true, chat_id="", reason="")`
+- `telegram_set_chat_administrator_custom_title(user_id, custom_title, chat_id="")`
+- `telegram_set_chat_member_tag(user_id, tag="", chat_id="")`
+
+**返回**：JSON 字符串，包含 `ok`、`action`、`chat_id`、`target_user_id`、`result` 或 `error`。
+
+**限制**：
+
+- `chat_id=""` 时，后脑会注入当前 Telegram chat。
+- 如果用户 reply 某条消息并要求对该成员操作，后脑会优先把 `reply_to_user_id` 注入为 `user_id`。
+- Telegram Bot API 不支持枚举完整普通成员名单；只能查成员总数、管理员列表、或按已知 `user_id` 查单个成员。
+- `setChatMemberTag` 是 Bot API 9.5 能力；当前 `python-telegram-bot==21.0.1` 没封装时使用 `Bot.do_api_request("setChatMemberTag", ...)`。
+- 禁言、踢出/封禁、解封、改 tag/管理员头衔是真实平台高风险操作。Prompt 要求 Nora 先向主人口头确认；若 `security.enabled=true`，还会经过安全审查模型。
+
 ## 3. 路径与安全说明
 
 - 所有文件路径会通过 `_resolve_workspace_path` 标准化：支持绝对路径、`workspace/...`、相对路径。
@@ -353,3 +400,10 @@ OCR文本为模型回复，并非外置OCR
 3. 参数类型标注尽量精确（`Optional[int]`、`bool`、`float` 等）。
 4. 返回文本尽量结构化，便于 LLM 二次解析。
 5. 有副作用工具要增加安全护栏。
+
+新增平台工具时建议：
+
+1. 在 adapter 中覆盖 `get_adapter_tools()`，返回 `AdapterToolSpec`。
+2. 工具名使用 `<platform>_<action>`。
+3. 高风险真实平台操作设置 `risk="high"` 与 `requires_owner_confirmation=True`，并更新平台 prompt。
+4. 不要把高风险平台工具加入默认 `security.tool_whitelist`。
