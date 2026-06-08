@@ -20,6 +20,7 @@ from brain.prompts import (
     get_lazy_lexicon_user_prompt_block,
 )
 from skills.loader import SkillLoader
+from core.message_handler import group_message_content
 from core.routing import parse_front_brain_response, parse_front_brain_review
 import config
 
@@ -390,7 +391,7 @@ class FrontBrainMixin:
             db_context = db_context[-20:]
         
         # 去掉最后一条 user 消息（避免和 user_prompt 重复）
-        message_content = f"{user_name}: {text}" if chat_type != "private" else text
+        message_content = group_message_content(context, user_name, text, chat_type)
         if db_context:
             last_msg = db_context[-1]
             last_content = self._strip_timestamp_markers(str(last_msg.get("content", "")))

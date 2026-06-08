@@ -28,6 +28,42 @@ import config
 logger = logging.getLogger(__name__)
 
 
+def _context_platform_message_ids(context: Dict[str, Any]) -> List[str]:
+    """Return all platform message ids carried by an adapter context."""
+    raw_ids = context.get("platform_message_ids")
+    ids: List[str] = []
+    if isinstance(raw_ids, (list, tuple, set)):
+        ids.extend(str(mid) for mid in raw_ids if mid is not None)
+    elif raw_ids is not None:
+        ids.append(str(raw_ids))
+
+    single_id = context.get("platform_message_id")
+    if single_id is not None:
+        ids.append(str(single_id))
+
+    return list(dict.fromkeys(mid for mid in ids if mid))
+
+
+def _attach_platform_ids_to_media(items: List[Dict[str, Any]], platform_msg_ids: List[str]) -> List[Dict[str, Any]]:
+    """Attach per-media platform message ids by adapter order when available."""
+    if not items or not platform_msg_ids:
+        return items
+    for item, platform_msg_id in zip(items, platform_msg_ids):
+        if isinstance(item, dict) and not item.get("platform_message_id"):
+            item["platform_message_id"] = platform_msg_id
+    return items
+
+
+def group_message_content(context: Dict[str, Any], user_name: str, text: str, chat_type: str) -> str:
+    """Return persisted user content, avoiding duplicate names for aggregated group text."""
+    if str(chat_type or "private").lower() == "private":
+        return text
+    contributors = context.get("contributors") or []
+    if len(contributors) > 1:
+        return text
+    return f"{user_name}: {text}"
+
+
 class MessageHandlerMixin:
     """处理来自适配器的新消息 / 命令路由。"""
 
@@ -99,6 +135,9 @@ class MessageHandlerMixin:
             text = clean_text_v
 
         # 将清洗后的文本和多模态内容回填到 context
+        platform_msg_ids = _context_platform_message_ids(context)
+        _attach_platform_ids_to_media(multimodal_images, platform_msg_ids)
+        _attach_platform_ids_to_media(multimodal_videos, platform_msg_ids)
         context["text"] = text
         if multimodal_images:
             context["multimodal_images"] = multimodal_images
@@ -255,7 +294,7 @@ class MessageHandlerMixin:
         if backend_busy_or_queued:
             # 后端忙碌：允许前脑继续生成，不强制回复“在忙”。
             # 仅在有图片时直接排队，其他情况交由前脑处理并按需打断/切换。
-            message_content = f"{user_name}: {text}" if chat_type != "private" else text
+            message_content = group_message_content(context, user_name, text, chat_type)
 
             # 若包含真实图片/视频输入（已成功加载字节）：聚合器语义合入正在进行的后脑任务。
             #   - 后脑还没输出任何文本：cancel 旧后脑 → 把"旧图 + 新图"合并 → 立即重启一次后脑。
@@ -263,9 +302,9 @@ class MessageHandlerMixin:
             # 不再发硬编码"已排队"提示——行为对齐前脑文本聚合器的精神。
             if image_input_detected or video_input_detected:
                 user_metadata = {}
-                platform_msg_id = context.get("platform_message_id")
-                if platform_msg_id:
-                    user_metadata["platform_message_ids"] = [str(platform_msg_id)]
+                platform_msg_ids = _context_platform_message_ids(context)
+                if platform_msg_ids:
+                    user_metadata["platform_message_ids"] = platform_msg_ids
 
                 self.message_history.add_message(
                     platform=platform,
@@ -354,9 +393,9 @@ class MessageHandlerMixin:
             # 普通 queue 场景不再强制提示“在忙”，让前脑即时回复。
             logger.info(f"[{chat_id}] 后端忙碌（允许前脑即时回复），记录消息后进行意图检测")
             user_metadata = {}
-            platform_msg_id = context.get("platform_message_id")
-            if platform_msg_id:
-                user_metadata["platform_message_ids"] = [str(platform_msg_id)]
+            platform_msg_ids = _context_platform_message_ids(context)
+            if platform_msg_ids:
+                user_metadata["platform_message_ids"] = platform_msg_ids
 
             self.message_history.add_message(
                 platform=platform,
@@ -498,12 +537,12 @@ class MessageHandlerMixin:
 
         # --- 前脑优先路由 (Front-Brain-First) ---
         # 1) 保存用户消息到数据库（保证前脑能读到历史）
-        message_content = f"{user_name}: {text}" if chat_type != "private" else text
+        message_content = group_message_content(context, user_name, text, chat_type)
         if not context.get("_message_saved"):
             user_metadata = {}
-            platform_msg_id = context.get("platform_message_id")
-            if platform_msg_id:
-                user_metadata["platform_message_ids"] = [str(platform_msg_id)]
+            platform_msg_ids = _context_platform_message_ids(context)
+            if platform_msg_ids:
+                user_metadata["platform_message_ids"] = platform_msg_ids
 
             self.message_history.add_message(
                 platform=platform,
@@ -879,12 +918,12 @@ class MessageHandlerMixin:
             logger.info(f"[{chat_id}] 待确认入队取消：用户开始了新话题或拒绝（判断为 ignore）")
             return False
 
-        message_content = f"{user_name}: {text}" if chat_type != "private" else text
+        message_content = group_message_content(context, user_name, text, chat_type)
 
         user_metadata = {}
-        platform_msg_id = context.get("platform_message_id")
-        if platform_msg_id:
-            user_metadata["platform_message_ids"] = [str(platform_msg_id)]
+        platform_msg_ids = _context_platform_message_ids(context)
+        if platform_msg_ids:
+            user_metadata["platform_message_ids"] = platform_msg_ids
 
         self.message_history.add_message(
             platform=platform,

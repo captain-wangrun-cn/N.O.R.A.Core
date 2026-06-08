@@ -14,6 +14,24 @@ logger = logging.getLogger(__name__)
 
 
 class TelegramReplyMixin:
+    def _pick_image_id_from_metadata(self, metadata: Dict[str, Any], reply_msg_id: str) -> Optional[str]:
+        """Pick the image/video id that belongs to the replied Telegram message when possible."""
+        if not isinstance(metadata, dict):
+            return None
+        by_platform_id = metadata.get("image_ids_by_platform_message_id") or {}
+        if isinstance(by_platform_id, dict):
+            exact = by_platform_id.get(str(reply_msg_id))
+            if exact:
+                return str(exact)
+        image_id = metadata.get("image_id")
+        if image_id:
+            return str(image_id)
+        image_ids = metadata.get("image_ids") or []
+        if isinstance(image_ids, list) and image_ids:
+            first = image_ids[0]
+            return str(first) if first else None
+        return None
+
     async def _extract_reply_info(self, message: Message) -> Optional[str]:
         """提取回复消息的信息"""
         if not message.reply_to_message:
@@ -44,13 +62,16 @@ class TelegramReplyMixin:
             if reply_msg_id == db_message_id or reply_msg_id in platform_ids:
                 logger.debug(f"[telegram] reply 命中历史消息: msg_id={reply_msg_id}, platform_ids={platform_ids}")
                 content = msg.get("content", "")
-                image_id = None
-                if isinstance(md, dict):
-                    image_id = md.get("image_id") or md.get("image_ids", [None])[0]
+                image_id = self._pick_image_id_from_metadata(md, reply_msg_id)
+                image_input = None
                 if image_id:
                     image_input = await self._image_id_to_image_input(image_id, reply_msg)
-                    if image_input:
-                        return f"{image_input}\n{content}" if content else image_input
+                if not image_input and reply_msg.photo:
+                    image_input = await self._image_input_from_platform_message_id(
+                        reply_msg, reply_chat_id, reply_msg_id, allow_redownload=True
+                    )
+                if image_input:
+                    return f"{image_input}\n{content}" if content else image_input
                 return content
 
         # 次级查找：回溯消息镜像库，扩大检索窗口，避免 raw_window 限制导致找不到
@@ -71,11 +92,16 @@ class TelegramReplyMixin:
 
                     if reply_msg_id in platform_ids:
                         content = row.get("raw_content") or row.get("content_with_timestamp") or ""
-                        image_id = md.get("image_id") or (md.get("image_ids") or [None])[0]
+                        image_id = self._pick_image_id_from_metadata(md, reply_msg_id)
+                        image_input = None
                         if image_id:
                             image_input = await self._image_id_to_image_input(image_id, reply_msg)
-                            if image_input:
-                                return f"{image_input}\n{content}" if content else image_input
+                        if not image_input and reply_msg.photo:
+                            image_input = await self._image_input_from_platform_message_id(
+                                reply_msg, reply_chat_id, reply_msg_id, allow_redownload=True
+                            )
+                        if image_input:
+                            return f"{image_input}\n{content}" if content else image_input
                         return content
         except Exception as e:
             logger.debug(f"[telegram] reply lookup in message_log failed: {e}")
@@ -85,28 +111,14 @@ class TelegramReplyMixin:
         # platform_message_id，ImageStore (MongoDB) 就还能拿回 file_path。
         if reply_msg.photo:
             try:
-                store = self._get_image_store()
-                if store is not None:
-                    doc = store.get_by_platform_message_id("telegram", reply_msg_id, chat_id=reply_chat_id)
-                    if doc:
-                        image_input = self._image_doc_to_image_input(doc)
-                        image_from_existing_store_file = bool(image_input)
-                        if not image_input and doc.get("image_id"):
-                            image_input = await self._image_id_to_image_input(doc["image_id"], reply_msg)
-                        if not image_input:
-                            image_input = await self._redownload_replied_photo_as_image_input(reply_msg)
-                        if image_input:
-                            if image_from_existing_store_file:
-                                image_input = self._with_historical_reply_image_note(image_input)
-                            image_id = doc.get("image_id", "")
-                            caption_text = (reply_msg.caption or "").strip()
-                            logger.info(
-                                f"[telegram] reply 历史图片在 message_history 找不到，"
-                                f"已通过 ImageStore 反查到图片文件" + (f" image_id={image_id}" if image_id else "")
-                            )
-                            if caption_text:
-                                return f"{image_input}\n{caption_text}"
-                            return image_input
+                image_input = await self._image_input_from_platform_message_id(
+                    reply_msg, reply_chat_id, reply_msg_id, allow_redownload=False
+                )
+                if image_input:
+                    caption_text = (reply_msg.caption or "").strip()
+                    if caption_text:
+                        return f"{image_input}\n{caption_text}"
+                    return image_input
             except Exception as e:
                 logger.debug(f"[telegram] reply 通过 ImageStore 反查图片文件失败: {e}")
 
@@ -198,6 +210,41 @@ class TelegramReplyMixin:
     def _with_historical_reply_image_note(self, image_input: str) -> str:
         """把历史图片输入和内部说明组合起来。"""
         return f"{image_input}\n{self._historical_reply_image_note()}"
+
+    async def _image_input_from_platform_message_id(
+        self,
+        reply_msg: Message,
+        reply_chat_id: str,
+        reply_msg_id: str,
+        *,
+        allow_redownload: bool,
+    ) -> Optional[str]:
+        """Resolve a replied Telegram photo via ImageStore, optionally redownloading as fallback."""
+        if not reply_msg.photo:
+            return None
+        store = self._get_image_store()
+        if store is not None:
+            doc = store.get_by_platform_message_id("telegram", reply_msg_id, chat_id=reply_chat_id)
+            if doc:
+                image_input = self._image_doc_to_image_input(doc)
+                image_from_existing_store_file = bool(image_input)
+                if not image_input and doc.get("image_id"):
+                    image_input = await self._image_id_to_image_input(str(doc["image_id"]), reply_msg)
+                if not image_input and allow_redownload:
+                    image_input = await self._redownload_replied_photo_as_image_input(reply_msg)
+                if image_input:
+                    if image_from_existing_store_file:
+                        image_input = self._with_historical_reply_image_note(image_input)
+                    image_id = doc.get("image_id", "")
+                    logger.info(
+                        f"[telegram] reply 历史图片已通过 ImageStore 反查到图片文件"
+                        + (f" image_id={image_id}" if image_id else "")
+                    )
+                    return image_input
+
+        if allow_redownload:
+            return await self._redownload_replied_photo_as_image_input(reply_msg)
+        return None
 
     async def _image_id_to_image_input(self, image_id: str, reply_msg: Message) -> Optional[str]:
         """

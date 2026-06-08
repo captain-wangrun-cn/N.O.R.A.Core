@@ -806,7 +806,7 @@
    - `controller` 使用 `storage_id`（私聊=用户ID，群聊=chat_id）隔离 MessageHistory/RAG；群聊消息前置用户名。
    - `MessageAggregator` 支持携带完整 context（chat_id/user_id/chat_type/user_name/text），回调签名改为 `on_complete(context)`。
    - `TelegramAdapter`：
-     - 支持群聊仅响应 @机器人 或 回复机器人；私聊始终响应。
+     - 群聊暂时仅响应 @机器人；单纯回复机器人不触发。已触发消息仍会提取 reply 内容；私聊始终响应。
      - 兼容非文本（图片/文件/贴纸/回调）聚合；修复 reply 提取 KeyError。
      - 获取 bot username（post_init）；link 发送前插入零宽空格规避安全过滤。
 
@@ -856,7 +856,7 @@
 - 适配新的 LLM 提供方时，流式 chunk 需包含 `usage`，字段结构与现有实现一致。
 - 脑口分离逻辑尚缺端到端自动化测试，可补充回归用例（队列、stop/change）。
 - 服务器需安装 `Pillow` 以支持图片压缩；本地 lint 对 `google-generativeai` 的 `GenerativeModel` 导出警告可忽略，线上运行正常。
-- Telegram 适配：确认机器人 username 可获取；群聊仅响应 @ 或回复；私聊已修复未响应问题。
+- Telegram 适配：确认机器人 username 可获取；群聊暂时仅响应 @，单纯回复不触发；私聊已修复未响应问题。
 - MessageAggregator 接口已改为 `add_message(chat_id, text, context)`，下游回调签名 `on_complete(context)`。
 - 身份文件主路径已迁移到 workspace（`workspace/SOUL.md`、`workspace/USER.md`、`workspace/data/memory/MEMORY.md`），旧路径仅作回退兼容。
 - 每日记忆（`workspace/data/memory/YYYY-MM-DD.md`）默认不自动注入；如业务需要可在 prompt 组装层手动恢复。
@@ -871,7 +871,7 @@
 - CLI 模型列表价格展示取决于自定义价格；缺价会提示手输。
 - 日志中是否能看到 `[Cost] provider/model: tokens = $cost`。
 - 后端忙碌时，新消息是否被 fast_llm 正确判定并回复（stop/change/queue）。
-- Telegram 私聊是否响应，群聊是否仅在 @ 机器人或回复时响应；消息是否带用户名；RAG/历史是否按 storage_id 隔离。
+- Telegram 私聊是否响应，群聊是否仅在 @ 机器人时响应；已触发消息的 reply 是否正常提取；消息是否带用户名；RAG/历史是否按 storage_id 隔离。
 - 生成阶段开始时 Telegram 是否立即出现 typing（而不是等首个 chunk）。
 - workspace 首次运行时是否自动复制 `SOUL.md`/`USER.md`/`MEMORY.md`。
 

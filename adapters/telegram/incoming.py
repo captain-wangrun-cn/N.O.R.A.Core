@@ -2,17 +2,40 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import mimetypes as _mt
 import os
-from typing import Any, Dict
 
 from telegram import Update
 from telegram.ext import ContextTypes
+
+from .message import context_from_update, has_bot_mention, strip_bot_mention
 
 logger = logging.getLogger(__name__)
 
 
 class TelegramIncomingMixin:
+    def _is_group_chat(self, update: Update) -> bool:
+        return bool(update.effective_chat and update.effective_chat.type in ["group", "supergroup"])
+
+    def _message_text_for_mention(self, update: Update) -> str:
+        if not update.message:
+            return ""
+        return update.message.text or update.message.caption or ""
+
+    def _has_bot_mention(self, update: Update) -> bool:
+        text_to_check = self._message_text_for_mention(update)
+        return has_bot_mention(text_to_check, self.bot_username)
+
+    def _is_known_media_group_continuation(self, update: Update) -> bool:
+        if not update.message:
+            return False
+        media_group_id = getattr(update.message, "media_group_id", None)
+        return bool(media_group_id and media_group_id in self._media_group_buffers)
+
+    def _strip_trigger_mention_if_group(self, update: Update, text: str) -> str:
+        if self._is_group_chat(update):
+            return strip_bot_mention(text, self.bot_username)
+        return text
+
     async def _should_process_message(self, update: Update) -> bool:
         """判断是否应该处理收到的消息。"""
         if not update.effective_chat:
@@ -26,18 +49,9 @@ class TelegramIncomingMixin:
         if update.effective_chat.type in ['group', 'supergroup']:
             if not update.message:
                 return False
-            
-            # 2a. 检查是否是回复机器人的消息
-            if update.message.reply_to_message and update.message.reply_to_message.from_user:
-                if update.message.reply_to_message.from_user.id == self.application.bot.id:
-                    return True
-            
-            # 2b. 检查是否 @机器人 (case-insensitive)
-            if self.bot_username:
-                # 检查文本消息或媒体消息的标题
-                text_to_check = update.message.text or update.message.caption or ""
-                if f"@{self.bot_username.lower()}" in text_to_check.lower():
-                    return True
+            if self._is_known_media_group_continuation(update):
+                return True
+            return self._has_bot_mention(update)
         
         # 默认不处理
         return False
@@ -51,6 +65,7 @@ class TelegramIncomingMixin:
         chat_id = str(update.effective_chat.id)
         self.current_chat_id = chat_id # Set current chat_id
         text = update.message.text if update.message else ""
+        text = self._strip_trigger_mention_if_group(update, text)
 
         
         # 如果是空消息（例如，只有一张图片），也需要继续处理
@@ -84,15 +99,7 @@ class TelegramIncomingMixin:
                 text = f"[转发自: {forward_info}]\n{text}"
         
         if self._aggregator:
-            full_context = {
-                "chat_id": chat_id,
-                "user_id": str(update.effective_user.id) if update.effective_user else chat_id,
-                "text": text,
-                "chat_type": update.effective_chat.type,
-                "user_name": update.effective_user.first_name if update.effective_user else "Unknown",
-                "platform": "telegram",
-                "platform_message_id": str(update.message.message_id) if update.message else None,
-            }
+            full_context = context_from_update(update, text)
             await self._aggregator.add_message(chat_id, text or "", full_context)
 
     async def _handle_photo(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -108,7 +115,7 @@ class TelegramIncomingMixin:
         if not update.message or not update.message.photo:
             return
         photo = update.message.photo[-1]  # 获取最高质量版本
-        caption = update.message.caption or ""
+        caption = self._strip_trigger_mention_if_group(update, update.message.caption or "")
         media_group_id = update.message.media_group_id
         
         # 下载图片
@@ -126,9 +133,9 @@ class TelegramIncomingMixin:
                     "photos": [],
                     "caption": "",
                     "chat_id": chat_id,
-                    "user_id": str(update.effective_user.id) if update.effective_user else chat_id,
+                    "update": update,
+                    "context": context_from_update(update, ""),
                     "chat_type": update.effective_chat.type,
-                    "user_name": update.effective_user.first_name if update.effective_user else "Unknown",
                     "reply_info": reply_info,
                     "platform": "telegram",
                     "message_ids": [],
@@ -158,15 +165,7 @@ class TelegramIncomingMixin:
                 text = f"[回复: {reply_info}]\n{text}"
             
             if self._aggregator:
-                full_context = {
-                    "chat_id": chat_id,
-                    "user_id": str(update.effective_user.id) if update.effective_user else chat_id,
-                    "text": text,
-                    "chat_type": update.effective_chat.type,
-                    "user_name": update.effective_user.first_name if update.effective_user else "Unknown",
-                    "platform": "telegram",
-                    "platform_message_id": str(update.message.message_id) if update.message else None,
-                }
+                full_context = context_from_update(update, text)
                 await self._aggregator.add_message(chat_id, text, full_context)
             
             logger.info(f"[{chat_id}] 收到图片: {rel_file_path}")
@@ -189,17 +188,17 @@ class TelegramIncomingMixin:
             text = f"[回复: {buf['reply_info']}]\n{text}"
         
         chat_id = buf["chat_id"]
-        platform_msg_id = buf.get("message_ids", [None])[0]
+        platform_ids = [str(mid) for mid in buf.get("message_ids", []) if mid is not None]
+        platform_msg_id = platform_ids[0] if platform_ids else None
         if self._aggregator:
-            full_context = {
-                "chat_id": chat_id,
-                "user_id": buf["user_id"],
-                "text": text,
-                "chat_type": buf["chat_type"],
-                "user_name": buf["user_name"],
-                "platform": buf.get("platform", "telegram"),
-                "platform_message_id": platform_msg_id,
-            }
+            full_context = dict(buf.get("context") or {})
+            full_context.update(
+                {
+                    "text": text,
+                    "platform_message_id": platform_msg_id,
+                    "platform_message_ids": platform_ids,
+                }
+            )
             await self._aggregator.add_message(chat_id, text, full_context)
         
         logger.info(f"[{chat_id}] 媒体组合并完成: {len(buf['photos'])} 个媒体 (group={media_group_id})")
@@ -221,7 +220,7 @@ class TelegramIncomingMixin:
         if not video:
             return
 
-        caption = update.message.caption or ""
+        caption = self._strip_trigger_mention_if_group(update, update.message.caption or "")
         file_id = video.file_id
         file_ext = ".mp4"
         if hasattr(video, "mime_type") and video.mime_type:
@@ -250,9 +249,9 @@ class TelegramIncomingMixin:
                     "photos": [],
                     "caption": "",
                     "chat_id": chat_id,
-                    "user_id": str(update.effective_user.id) if update.effective_user else chat_id,
+                    "update": update,
+                    "context": context_from_update(update, ""),
                     "chat_type": update.effective_chat.type,
-                    "user_name": update.effective_user.first_name if update.effective_user else "Unknown",
                     "reply_info": reply_info,
                     "platform": "telegram",
                     "message_ids": [],
@@ -279,15 +278,7 @@ class TelegramIncomingMixin:
                 text = f"[回复: {reply_info}]\n{text}"
 
             if self._aggregator:
-                full_context = {
-                    "chat_id": chat_id,
-                    "user_id": str(update.effective_user.id) if update.effective_user else chat_id,
-                    "text": text,
-                    "chat_type": update.effective_chat.type,
-                    "user_name": update.effective_user.first_name if update.effective_user else "Unknown",
-                    "platform": "telegram",
-                    "platform_message_id": str(update.message.message_id) if update.message else None,
-                }
+                full_context = context_from_update(update, text)
                 await self._aggregator.add_message(chat_id, text, full_context)
 
             logger.info(f"[{chat_id}] 收到视频: {rel_file_path}")
@@ -305,7 +296,7 @@ class TelegramIncomingMixin:
         if not update.message or not update.message.document:
             return
         document = update.message.document
-        caption = update.message.caption or ""
+        caption = self._strip_trigger_mention_if_group(update, update.message.caption or "")
         
         # 下载文档
         file = await document.get_file()
@@ -323,13 +314,7 @@ class TelegramIncomingMixin:
             text = f"[回复: {reply_info}]\n{text}"
         
         if self._aggregator:
-            full_context = {
-                "chat_id": chat_id,
-                "user_id": str(update.effective_user.id) if update.effective_user else chat_id,
-                "text": text,
-                "chat_type": update.effective_chat.type,
-                "user_name": update.effective_user.first_name if update.effective_user else "Unknown"
-            }
+            full_context = context_from_update(update, text)
             await self._aggregator.add_message(chat_id, text, full_context)
         
         logger.info(f"[{chat_id}] 收到文档: {rel_file_path}")
@@ -364,13 +349,7 @@ class TelegramIncomingMixin:
             text = f"[回复: {reply_info}]\n{text}"
         
         if self._aggregator:
-            full_context = {
-                "chat_id": chat_id,
-                "user_id": str(update.effective_user.id) if update.effective_user else chat_id,
-                "text": text,
-                "chat_type": update.effective_chat.type,
-                "user_name": update.effective_user.first_name if update.effective_user else "Unknown"
-            }
+            full_context = context_from_update(update, text)
             await self._aggregator.add_message(chat_id, text, full_context)
         
         logger.info(f"[{chat_id}] 收到贴纸: {rel_file_path}")

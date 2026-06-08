@@ -21,10 +21,49 @@ from brain.prompts import (
     get_lazy_lexicon_user_prompt_block,
 )
 from brain.multimodal import extract_image_payloads, extract_video_payloads
+from core.message_handler import group_message_content
 from core.worker_status import WorkerStatus
 import config
 
 logger = logging.getLogger(__name__)
+
+
+def _context_platform_message_ids(context: Dict[str, Any]) -> List[str]:
+    """Return all platform message ids carried by an adapter context."""
+    raw_ids = context.get("platform_message_ids")
+    ids: List[str] = []
+    if isinstance(raw_ids, (list, tuple, set)):
+        ids.extend(str(mid) for mid in raw_ids if mid is not None)
+    elif raw_ids is not None:
+        ids.append(str(raw_ids))
+
+    single_id = context.get("platform_message_id")
+    if single_id is not None:
+        ids.append(str(single_id))
+
+    return list(dict.fromkeys(mid for mid in ids if mid))
+
+
+def _media_platform_message_id(media: Dict[str, Any], fallback: Optional[str] = None) -> Optional[str]:
+    platform_msg_id = media.get("platform_message_id") if isinstance(media, dict) else None
+    if platform_msg_id is not None:
+        return str(platform_msg_id)
+    return fallback
+
+
+def _image_ids_by_platform_message_id(
+    images: List[Dict[str, Any]],
+    videos: List[Dict[str, Any]] | None = None,
+) -> Dict[str, str]:
+    mapping: Dict[str, str] = {}
+    for item in list(images or []) + list(videos or []):
+        if not isinstance(item, dict):
+            continue
+        platform_msg_id = item.get("platform_message_id")
+        media_id = item.get("image_id") or item.get("video_id")
+        if platform_msg_id is not None and media_id:
+            mapping[str(platform_msg_id)] = str(media_id)
+    return mapping
 
 
 class BackBrainMixin:
@@ -223,6 +262,8 @@ class BackBrainMixin:
             text = clean_text_v
         # 判断是否有可用的视频模型
         video_llm_available = getattr(self, "video_llm", None) is not None
+        platform_msg_ids = _context_platform_message_ids(context)
+        primary_platform_msg_id = platform_msg_ids[0] if platform_msg_ids else None
 
         # 记录本次后脑任务的输入快照：被"新图片到达"打断重启时需要把旧图+新图合并
         self.back_brain_input_context[chat_id] = {
@@ -245,7 +286,7 @@ class BackBrainMixin:
                         user_id=user_id,
                         chat_id=platform_chat_id,
                         platform=platform,
-                        platform_message_id=context.get("platform_message_id"),
+                        platform_message_id=_media_platform_message_id(img, primary_platform_msg_id),
                         storage_id=storage_id,
                         memory_scope_id=memory_scope_id,
                         place_scope_id=place_scope_id,
@@ -267,7 +308,7 @@ class BackBrainMixin:
                         user_id=user_id,
                         chat_id=platform_chat_id,
                         platform=platform,
-                        platform_message_id=context.get("platform_message_id"),
+                        platform_message_id=_media_platform_message_id(vid, primary_platform_msg_id),
                         media_type="video",
                         storage_id=storage_id,
                         memory_scope_id=memory_scope_id,
@@ -315,12 +356,11 @@ class BackBrainMixin:
             front_brain_handled = context.get("_front_brain_handled", False)
             message_saved = context.get("_message_saved", False)
             status.update("保存消息", "正在保存用户消息...")
-            message_content = f"{user_name}: {text}" if chat_type != "private" else text
+            message_content = group_message_content(context, user_name, text, chat_type)
             if not front_brain_handled and not message_saved:
                 user_metadata = {}
-                platform_msg_id = context.get("platform_message_id")
-                if platform_msg_id:
-                    user_metadata["platform_message_ids"] = [str(platform_msg_id)]
+                if platform_msg_ids:
+                    user_metadata["platform_message_ids"] = platform_msg_ids
 
                 self.message_history.add_message(
                     platform=platform,
@@ -1377,6 +1417,9 @@ class BackBrainMixin:
             # --- 4.5 保存助手回复到数据库 ---
             if final_response_buffer:
                 metadata = {"image_ids": [img.get("image_id") for img in multimodal_images] if multimodal_images else None}
+                media_id_map = _image_ids_by_platform_message_id(multimodal_images, multimodal_videos)
+                if media_id_map:
+                    metadata["image_ids_by_platform_message_id"] = media_id_map
                 if response_platform_ids:
                     metadata["platform_message_ids"] = response_platform_ids
 
@@ -1417,7 +1460,7 @@ class BackBrainMixin:
                             chat_id=platform_chat_id,
                             file_path=img["path"],
                             platform=platform,
-                            platform_message_id=context.get("platform_message_id"),
+                            platform_message_id=_media_platform_message_id(img, primary_platform_msg_id),
                             storage_id=storage_id,
                             memory_scope_id=memory_scope_id,
                             place_scope_id=place_scope_id,
@@ -1473,7 +1516,7 @@ class BackBrainMixin:
                                 chat_id=platform_chat_id,
                                 file_path=vid["path"],
                                 platform=platform,
-                                platform_message_id=context.get("platform_message_id"),
+                                platform_message_id=_media_platform_message_id(vid, primary_platform_msg_id),
                                 storage_id=storage_id,
                                 memory_scope_id=memory_scope_id,
                                 place_scope_id=place_scope_id,

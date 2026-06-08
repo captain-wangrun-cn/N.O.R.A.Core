@@ -12,41 +12,48 @@ from telegram.ext import ContextTypes
 
 import config
 from brain.llm import get_llm_client
+from .message import context_from_update, has_bot_mention, strip_bot_mention
 
 logger = logging.getLogger(__name__)
 
 
 class TelegramCommandsMixin:
-    async def _start_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+    def _command_should_process(self, update: Update) -> bool:
+        """Private commands always run; group commands require an explicit @bot mention."""
         if not update.effective_chat:
+            return False
+        if update.effective_chat.type == "private":
+            return True
+        if update.effective_chat.type not in ("group", "supergroup"):
+            return False
+        if not self.bot_username or not update.message:
+            return False
+        text = update.message.text or update.message.caption or ""
+        return has_bot_mention(text, self.bot_username)
+
+    def _command_text(self, update: Update, fallback: str) -> str:
+        text = update.message.text if update.message and update.message.text else fallback
+        if update.effective_chat and update.effective_chat.type in ("group", "supergroup"):
+            return strip_bot_mention(text, self.bot_username) or fallback
+        return text
+
+    def _command_context(self, update: Update, text: str) -> Dict[str, Any]:
+        return context_from_update(update, text)
+
+    async def _start_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        if not self._command_should_process(update):
             return
-        chat_id = str(update.effective_chat.id)
         if self._message_handler:
-            # Propagate start command as a special message
-            event_context = {
-                "platform": "telegram",
-                "chat_id": chat_id,
-                "user_id": str(update.effective_user.id) if update.effective_user else chat_id,
-                "text": "/start",
-                "chat_type": update.effective_chat.type,
-                "user_name": update.effective_user.first_name if update.effective_user else "Unknown"
-            }
+            event_context = self._command_context(update, self._command_text(update, "/start"))
             await self._message_handler(event_context)
 
     async def _clear_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        if not update.effective_chat:
+        if not self._command_should_process(update):
             return
         chat_id = str(update.effective_chat.id)
         # 优先交由 controller 统一清理（包含内存上下文）
         if self._message_handler:
-            event_context = {
-                "platform": "telegram",
-                "chat_id": chat_id,
-                "user_id": str(update.effective_user.id) if update.effective_user else chat_id,
-                "text": "/clear",
-                "chat_type": update.effective_chat.type,
-                "user_name": update.effective_user.first_name if update.effective_user else "Unknown"
-            }
+            event_context = self._command_context(update, self._command_text(update, "/clear"))
             await self._message_handler(event_context)
             return
 
@@ -63,19 +70,12 @@ class TelegramCommandsMixin:
                 await update.message.reply_text("❌ 清空历史记录时发生错误。")
 
     async def _stop_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        if not update.effective_chat:
+        if not self._command_should_process(update):
             return
         chat_id = str(update.effective_chat.id)
         # 交由 controller 统一停止前/后脑任务
         if self._message_handler:
-            event_context = {
-                "platform": "telegram",
-                "chat_id": chat_id,
-                "user_id": str(update.effective_user.id) if update.effective_user else chat_id,
-                "text": "/stop",
-                "chat_type": update.effective_chat.type,
-                "user_name": update.effective_user.first_name if update.effective_user else "Unknown"
-            }
+            event_context = self._command_context(update, self._command_text(update, "/stop"))
             await self._message_handler(event_context)
             return
         # fallback: 没有 controller 时提示
@@ -83,7 +83,7 @@ class TelegramCommandsMixin:
             await update.message.reply_text("⚠️ 当前无法停止任务。")
 
     async def _status_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        if not update.effective_chat:
+        if not self._command_should_process(update):
             return
         chat_id = str(update.effective_chat.id)
         
@@ -132,7 +132,7 @@ class TelegramCommandsMixin:
 
     async def _context_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """显示上下文窗口使用情况，透传给 controller。"""
-        if not update.effective_chat:
+        if not self._command_should_process(update):
             return
         chat_id = str(update.effective_chat.id)
         if not self._message_handler:
@@ -140,19 +140,12 @@ class TelegramCommandsMixin:
                 await update.message.reply_text("❌ 指令处理器未就绪。")
             return
 
-        event_context = {
-            "platform": "telegram",
-            "chat_id": chat_id,
-            "user_id": str(update.effective_user.id) if update.effective_user else chat_id,
-            "text": "/context",
-            "chat_type": update.effective_chat.type,
-            "user_name": update.effective_user.first_name if update.effective_user else "Unknown"
-        }
+        event_context = self._command_context(update, self._command_text(update, "/context"))
         await self._message_handler(event_context)
 
     async def _debug_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """切换 debug 模式，透传给 controller。"""
-        if not update.effective_chat:
+        if not self._command_should_process(update):
             return
         chat_id = str(update.effective_chat.id)
         if not self._message_handler:
@@ -160,19 +153,12 @@ class TelegramCommandsMixin:
                 await update.message.reply_text("❌ 指令处理器未就绪。")
             return
 
-        event_context = {
-            "platform": "telegram",
-            "chat_id": chat_id,
-            "user_id": str(update.effective_user.id) if update.effective_user else chat_id,
-            "text": "/debug",
-            "chat_type": update.effective_chat.type,
-            "user_name": update.effective_user.first_name if update.effective_user else "Unknown"
-        }
+        event_context = self._command_context(update, self._command_text(update, "/debug"))
         await self._message_handler(event_context)
 
     async def _debug_cleanup_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """调试清空入口：弹出危险操作按钮（需二次确认）。"""
-        if not update.effective_chat or not update.message:
+        if not self._command_should_process(update) or not update.message:
             return
 
         keyboard = InlineKeyboardMarkup([
@@ -194,7 +180,7 @@ class TelegramCommandsMixin:
 
     async def _model_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """展示模型切换按钮并允许保存配置。"""
-        if not update.effective_chat or not update.message:
+        if not self._command_should_process(update) or not update.message:
             return
 
         text, markup = self._build_model_alias_menu()
@@ -281,7 +267,7 @@ class TelegramCommandsMixin:
         - /regenerate_proactive append   (追加)
         - /regenerate_proactive replace  (覆盖，默认)
         """
-        if not update.effective_chat:
+        if not self._command_should_process(update):
             return
         chat_id = str(update.effective_chat.id)
         if not self._message_handler:
@@ -293,20 +279,12 @@ class TelegramCommandsMixin:
         if mode not in ("replace", "append"):
             mode = "replace"
 
-        # 透传为控制器命令，统一在 controller 层执行调度逻辑
-        event_context = {
-            "platform": "telegram",
-            "chat_id": chat_id,
-            "user_id": str(update.effective_user.id) if update.effective_user else chat_id,
-            "text": f"/regenerate_proactive {mode}",
-            "chat_type": update.effective_chat.type,
-            "user_name": update.effective_user.first_name if update.effective_user else "Unknown"
-        }
+        event_context = self._command_context(update, f"/regenerate_proactive {mode}")
         await self._message_handler(event_context)
 
     async def _schedule_today_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """查看今日主动消息计划。"""
-        if not update.effective_chat:
+        if not self._command_should_process(update):
             return
         chat_id = str(update.effective_chat.id)
         if not self._message_handler:
@@ -314,19 +292,12 @@ class TelegramCommandsMixin:
                 await update.message.reply_text("❌ 指令处理器未就绪。")
             return
 
-        event_context = {
-            "platform": "telegram",
-            "chat_id": chat_id,
-            "user_id": str(update.effective_user.id) if update.effective_user else chat_id,
-            "text": "/schedule_today",
-            "chat_type": update.effective_chat.type,
-            "user_name": update.effective_user.first_name if update.effective_user else "Unknown"
-        }
+        event_context = self._command_context(update, self._command_text(update, "/schedule_today"))
         await self._message_handler(event_context)
 
     async def _custom_scope_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """设置 CUSTOM.md 注入范围。"""
-        if not update.effective_chat:
+        if not self._command_should_process(update):
             return
         chat_id = str(update.effective_chat.id)
         if not self._message_handler:
@@ -348,7 +319,7 @@ class TelegramCommandsMixin:
 
     async def _nora_prefs_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """展示 Nora 偏好设置按钮。"""
-        if not update.effective_chat:
+        if not self._command_should_process(update):
             return
         chat_id = str(update.effective_chat.id)
 
@@ -366,7 +337,7 @@ class TelegramCommandsMixin:
 
     async def _set_stream_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """切换当前会话的输出模式。用法：/set_stream on|off，或点击按钮选择。"""
-        if not update.effective_chat:
+        if not self._command_should_process(update):
             return
         chat_id = str(update.effective_chat.id)
         if not self._message_handler:
@@ -376,14 +347,7 @@ class TelegramCommandsMixin:
 
         arg = (context.args[0].strip().lower() if context and context.args else "").replace("\n", " ")
         if arg in ("on", "off"):
-            event_context = {
-                "platform": "telegram",
-                "chat_id": chat_id,
-                "user_id": str(update.effective_user.id) if update.effective_user else chat_id,
-                "text": f"/set_stream {arg}",
-                "chat_type": update.effective_chat.type,
-                "user_name": update.effective_user.first_name if update.effective_user else "Unknown"
-            }
+            event_context = self._command_context(update, f"/set_stream {arg}")
             await self._message_handler(event_context)
             return
 
@@ -392,14 +356,7 @@ class TelegramCommandsMixin:
                 await update.message.reply_text("用法：/set_stream on|off（on=一次性输出，off=流式输出）")
             return
 
-        event_context = {
-            "platform": "telegram",
-            "chat_id": chat_id,
-            "user_id": str(update.effective_user.id) if update.effective_user else chat_id,
-            "text": "/set_stream",
-            "chat_type": update.effective_chat.type,
-            "user_name": update.effective_user.first_name if update.effective_user else "Unknown"
-        }
+        event_context = self._command_context(update, self._command_text(update, "/set_stream"))
         await self._message_handler(event_context)
 
         keyboard = InlineKeyboardMarkup([

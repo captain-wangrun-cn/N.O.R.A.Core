@@ -37,6 +37,18 @@ class MessageAggregator:
                 lines.append(text)
         return "\n".join(lines).strip()
 
+    def _context_platform_message_ids(self, context: Dict[str, Any]) -> list[str]:
+        raw_ids = context.get("platform_message_ids")
+        ids: list[str] = []
+        if isinstance(raw_ids, (list, tuple, set)):
+            ids.extend(str(mid) for mid in raw_ids if mid is not None)
+        elif raw_ids is not None:
+            ids.append(str(raw_ids))
+        single_id = context.get("platform_message_id")
+        if single_id is not None:
+            ids.append(str(single_id))
+        return list(dict.fromkeys(mid for mid in ids if mid))
+
     async def add_message(self, chat_id: str, text: str, context: Dict[str, Any]):
         """添加一条新消息到缓冲区。"""
         key = self._key_for(str(chat_id), context)
@@ -58,6 +70,7 @@ class MessageAggregator:
             "user_id": context.get("user_id"),
             "user_name": context.get("user_name"),
             "platform_message_id": platform_msg_id,
+            "platform_message_ids": self._context_platform_message_ids(context),
         })
         self._buffers[key] = self._format_parts(parts, context)
         
@@ -74,9 +87,15 @@ class MessageAggregator:
             {"user_id": part.get("user_id"), "user_name": part.get("user_name")}
             for part in parts
         ]
-        platform_ids = [str(part.get("platform_message_id")) for part in parts if part.get("platform_message_id")]
+        platform_ids = []
+        for part in parts:
+            part_ids = part.get("platform_message_ids") or []
+            if isinstance(part_ids, (list, tuple, set)):
+                platform_ids.extend(str(mid) for mid in part_ids if mid is not None)
+            elif part_ids:
+                platform_ids.append(str(part_ids))
         if platform_ids:
-            self._contexts[key]["platform_message_ids"] = platform_ids
+            self._contexts[key]["platform_message_ids"] = list(dict.fromkeys(platform_ids))
         
         self._timers[key] = asyncio.create_task(self._timer_expired(key))
 

@@ -9,11 +9,50 @@ from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.constants import ParseMode
 
 import config
+from .message import build_telegram_event
 
 logger = logging.getLogger(__name__)
 
 
 class TelegramCallbacksMixin:
+    def _callback_user_id(self, query) -> str:
+        if query and query.from_user and getattr(query.from_user, "id", None) is not None:
+            return str(query.from_user.id)
+        if query and query.message and query.message.chat:
+            return str(query.message.chat.id)
+        return ""
+
+    def _callback_user_name(self, query) -> str:
+        user_id = self._callback_user_id(query)
+        user = query.from_user if query else None
+        if not user:
+            return user_id or "Unknown"
+        name_parts = [
+            part.strip()
+            for part in (getattr(user, "first_name", "") or "", getattr(user, "last_name", "") or "")
+            if part and part.strip()
+        ]
+        if name_parts:
+            return " ".join(name_parts)
+        username = getattr(user, "username", "") or ""
+        if username:
+            return f"@{username}"
+        return user_id or "Unknown"
+
+    def _callback_context(self, query, text: str) -> dict[str, Any]:
+        chat = query.message.chat if query and query.message else None
+        callback_event_id = getattr(query, "id", None) if query else None
+        event = build_telegram_event(
+            chat_id=str(chat.id) if chat else "",
+            user_id=self._callback_user_id(query),
+            text=text,
+            chat_type=chat.type if chat else "private",
+            user_name=self._callback_user_name(query),
+            platform_message_id=str(callback_event_id) if callback_event_id is not None else None,
+            raw=query,
+        )
+        return event.to_context()
+
     async def _handle_callback(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """处理 inline keyboard 回调"""
         query = update.callback_query
@@ -70,13 +109,7 @@ class TelegramCallbacksMixin:
         text = f"[按钮点击: {callback_data}]"
         
         if self._aggregator:
-            full_context = {
-                "chat_id": chat_id,
-                "user_id": str(query.from_user.id) if query.from_user else chat_id,
-                "text": text,
-                "chat_type": query.message.chat.type if query.message else "private",
-                "user_name": query.from_user.first_name if query.from_user else "Unknown"
-            }
+            full_context = self._callback_context(query, text)
             await self._aggregator.add_message(chat_id, text, full_context)
         
         logger.info(f"[{chat_id}] 收到回调: {callback_data}")
@@ -152,20 +185,12 @@ class TelegramCallbacksMixin:
             return
 
         chat_id = str(query.message.chat.id)
-        user_id = str(query.from_user.id) if query.from_user else chat_id
         action = callback_data.split(":", 1)[1] if ":" in callback_data else ""
         if action not in ("on", "off"):
             await query.answer("未知选项", show_alert=True)
             return
 
-        event_context = {
-            "platform": "telegram",
-            "chat_id": chat_id,
-            "user_id": user_id,
-            "text": f"/set_stream {action}",
-            "chat_type": query.message.chat.type if query.message else "private",
-            "user_name": query.from_user.first_name if query.from_user else "Unknown",
-        }
+        event_context = self._callback_context(query, f"/set_stream {action}")
 
         await self._message_handler(event_context)
 
@@ -475,14 +500,7 @@ class TelegramCallbacksMixin:
             await query.edit_message_text(f"✅ 已更新 {alias} 模型为: {model_name}\n正在刷新模型...")
 
             if self._message_handler:
-                event_context = {
-                    "platform": "telegram",
-                    "chat_id": str(query.message.chat.id),
-                    "user_id": str(query.from_user.id) if query.from_user else str(query.message.chat.id),
-                    "text": "/reload_models",
-                    "chat_type": query.message.chat.type if query.message else "private",
-                    "user_name": query.from_user.first_name if query.from_user else "Unknown"
-                }
+                event_context = self._callback_context(query, "/reload_models")
                 await self._message_handler(event_context)
         except Exception as e:
             await query.edit_message_text(f"❌ 更新失败: {e}")

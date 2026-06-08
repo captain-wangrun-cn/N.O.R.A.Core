@@ -9,6 +9,7 @@ from core.conversation_identity import (
     conversation_target_dict,
     set_owner_resolver,
 )
+from core.message_handler import group_message_content
 
 
 def test_conversation_identity_private_vs_group_storage():
@@ -181,3 +182,46 @@ def test_aggregator_preserves_group_contributors():
         assert [c["user_id"] for c in context["contributors"]] == ["u1", "u2"]
 
     asyncio.run(run())
+
+
+def test_aggregator_preserves_context_platform_message_ids_from_media_group():
+    async def run():
+        completed = []
+
+        async def on_complete(context):
+            completed.append(context)
+
+        agg = MessageAggregator(timeout=0.01, on_complete=on_complete)
+        await agg.add_message(
+            "group-1",
+            "[image: a]\n[image: b]",
+            {
+                "platform": "telegram",
+                "chat_id": "group-1",
+                "user_id": "u1",
+                "user_name": "Alice",
+                "chat_type": "group",
+                "platform_message_id": "101",
+                "platform_message_ids": ["101", "102"],
+            },
+        )
+
+        await asyncio.sleep(0.03)
+
+        assert completed[0]["platform_message_ids"] == ["101", "102"]
+
+    asyncio.run(run())
+
+
+def test_group_message_content_does_not_double_prefix_multi_sender_aggregate():
+    context = {
+        "contributors": [
+            {"user_id": "u1", "user_name": "Alice"},
+            {"user_id": "u2", "user_name": "Bob"},
+        ]
+    }
+    text = "Alice: 第一条\nBob: 第二条"
+
+    assert group_message_content(context, "Bob", text, "group") == text
+    assert group_message_content({}, "Alice", "hello", "group") == "Alice: hello"
+    assert group_message_content({}, "Alice", "hello", "private") == "hello"
