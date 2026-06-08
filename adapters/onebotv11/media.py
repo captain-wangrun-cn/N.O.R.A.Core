@@ -39,6 +39,42 @@ class OneBotMediaMixin:
             logger.warning("[onebotv11] media download failed url=%s err=%s", url, exc)
             return None
 
+    async def _resolve_media_reference(
+        self,
+        data: dict[str, Any],
+        fallback_prefix: str,
+        *,
+        resolve_action: str = "",
+        resolve_params: dict[str, Any] | None = None,
+    ) -> str:
+        url = str(data.get("url") or "").strip()
+        file_value = str(data.get("file") or data.get("path") or "").strip()
+        if url:
+            local = await self._download_media_url(url, fallback_prefix)
+            return local or url
+
+        if resolve_action and file_value and hasattr(self, "call_api"):
+            params = {"file": file_value}
+            params.update(resolve_params or {})
+            try:
+                response = await self.call_api(resolve_action, params)
+                resolved_data = response.get("data") or {}
+                resolved = str(
+                    resolved_data.get("url")
+                    or resolved_data.get("file")
+                    or resolved_data.get("path")
+                    or ""
+                ).strip()
+                if resolved.startswith(("http://", "https://")):
+                    local = await self._download_media_url(resolved, fallback_prefix)
+                    return local or resolved
+                if resolved:
+                    return resolved
+            except Exception as exc:
+                logger.debug("[onebotv11] %s failed for media file=%s: %s", resolve_action, file_value, exc)
+
+        return file_value
+
     async def _segment_to_nora_text(self, segment: dict[str, Any]) -> str:
         segment_type = str(segment.get("type") or "")
         data = segment.get("data") or {}
@@ -50,21 +86,22 @@ class OneBotMediaMixin:
         if segment_type == "reply":
             return f"[回复消息ID: {data.get('id') or ''}]"
         if segment_type == "image":
-            url = str(data.get("url") or data.get("file") or "")
-            local = await self._download_media_url(str(data.get("url") or ""), "image")
-            return f"[image: {local or url}]"
+            media = await self._resolve_media_reference(data, "image", resolve_action="get_image")
+            return f"[image: {media}]"
         if segment_type == "video":
-            url = str(data.get("url") or data.get("file") or "")
-            local = await self._download_media_url(str(data.get("url") or ""), "video")
-            return f"[video: {local or url}]"
+            media = await self._resolve_media_reference(data, "video", resolve_action="get_file")
+            return f"[video: {media}]"
         if segment_type == "record":
-            url = str(data.get("url") or data.get("file") or "")
-            local = await self._download_media_url(str(data.get("url") or ""), "record")
-            return f"[file: {local or url}]"
+            media = await self._resolve_media_reference(
+                data,
+                "record",
+                resolve_action="get_record",
+                resolve_params={"out_format": "mp3"},
+            )
+            return f"[file: {media}]"
         if segment_type == "file":
-            url = str(data.get("url") or data.get("file") or "")
-            local = await self._download_media_url(str(data.get("url") or ""), "file")
-            return f"[file: {local or url}]"
+            media = await self._resolve_media_reference(data, "file", resolve_action="get_file")
+            return f"[file: {media}]"
         if segment_type == "face":
             return f"[QQ表情:{data.get('id') or ''}]"
         if segment_type == "forward":

@@ -305,9 +305,30 @@ class IncomingOnlyOneBot(OneBotV11Adapter):
         self._chat_types = {}
         self._last_incoming_contexts = {}
         self.current_chat_id = None
+        self.calls = []
 
     async def _enrich_group_context(self, context):
         return context
+
+    async def call_api(self, action, params=None):
+        self.calls.append((action, params or {}))
+        if action == "get_msg":
+            return {
+                "status": "ok",
+                "retcode": 0,
+                "data": {
+                    "message_id": params["message_id"],
+                    "sender": {"user_id": 30003, "card": "Bob", "nickname": "Bobby"},
+                    "message": [{"type": "text", "data": {"text": "old message"}}],
+                },
+            }
+        if action == "get_image":
+            return {
+                "status": "ok",
+                "retcode": 0,
+                "data": {"file": "data/onebotv11/resolved.jpg"},
+            }
+        return {"status": "ok", "retcode": 0, "data": {}}
 
 
 def test_onebot_group_mention_only_still_reaches_aggregator():
@@ -344,5 +365,117 @@ def test_onebot_group_mention_only_still_reaches_aggregator():
         assert context["user_id"] == "20002"
         assert context["user_name"] == "Alice"
         assert context["platform_message_id"] == "888"
+
+    asyncio.run(run())
+
+
+def test_onebot_group_reply_image_with_mention_includes_replied_media():
+    async def run():
+        adapter = IncomingOnlyOneBot()
+        captured = []
+
+        class FakeAggregator:
+            async def add_message(self, chat_id, text, context):
+                captured.append((chat_id, text, context))
+
+        async def fake_call_api(action, params=None):
+            adapter.calls.append((action, params or {}))
+            assert action == "get_msg"
+            return {
+                "status": "ok",
+                "retcode": 0,
+                "data": {
+                    "message_id": 777,
+                    "sender": {"user_id": 30003, "card": "Bob", "nickname": "Bobby"},
+                    "message": [
+                        {"type": "image", "data": {"file": "old.jpg", "url": "http://example.test/old.jpg"}},
+                        {"type": "text", "data": {"text": "旧图说明"}},
+                    ],
+                },
+            }
+
+        adapter.call_api = fake_call_api
+        adapter._aggregator = FakeAggregator()
+        event = {
+            "post_type": "message",
+            "message_type": "group",
+            "group_id": 10001,
+            "user_id": 20002,
+            "message_id": 889,
+            "sender": {"card": "Alice", "nickname": "Nick"},
+            "message": [
+                {"type": "reply", "data": {"id": "777"}},
+                {"type": "at", "data": {"qq": "999"}},
+                {"type": "text", "data": {"text": " 这张是什么"}},
+            ],
+        }
+
+        await adapter.handle_onebot_event(event)
+
+        assert len(captured) == 1
+        chat_id, text, context = captured[0]
+        assert chat_id == "10001"
+        assert "[回复内容]" in text
+        assert "[image: http://example.test/old.jpg]" in text
+        assert "旧图说明" in text
+        assert "这张是什么" in text
+        assert "回复消息ID" not in text
+        assert context["reply_to_message_id"] == "777"
+        assert context["reply_to_user_id"] == "30003"
+        assert context["reply_to_user_name"] == "Bob"
+        assert context["platform_message_ids"] == ["777", "889"]
+
+    asyncio.run(run())
+
+
+def test_onebot_reply_image_file_only_uses_get_image():
+    async def run():
+        adapter = IncomingOnlyOneBot()
+        captured = []
+
+        class FakeAggregator:
+            async def add_message(self, chat_id, text, context):
+                captured.append((chat_id, text, context))
+
+        adapter._aggregator = FakeAggregator()
+        event = {
+            "post_type": "message",
+            "message_type": "group",
+            "group_id": 10001,
+            "user_id": 20002,
+            "message_id": 890,
+            "sender": {"card": "Alice", "nickname": "Nick"},
+            "message": [
+                {"type": "reply", "data": {"id": "778"}},
+                {"type": "at", "data": {"qq": "999"}},
+            ],
+        }
+
+        async def fake_call_api(action, params=None):
+            adapter.calls.append((action, params or {}))
+            if action == "get_msg":
+                return {
+                    "status": "ok",
+                    "retcode": 0,
+                    "data": {
+                        "message_id": 778,
+                        "sender": {"user_id": 30003, "card": "Bob"},
+                        "message": [{"type": "image", "data": {"file": "abc.image"}}],
+                    },
+                }
+            if action == "get_image":
+                return {
+                    "status": "ok",
+                    "retcode": 0,
+                    "data": {"file": "data/onebotv11/abc.jpg"},
+                }
+            return {"status": "ok", "retcode": 0, "data": {}}
+
+        adapter.call_api = fake_call_api
+
+        await adapter.handle_onebot_event(event)
+
+        assert "[image: data/onebotv11/abc.jpg]" in captured[0][1]
+        assert ("get_image", {"file": "abc.image"}) in adapter.calls
 
     asyncio.run(run())

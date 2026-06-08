@@ -20,12 +20,18 @@
 - 修复 OneBot v11 与 Telegram 群聊中“单独艾特 Nora 没有正文”不响应的问题：
   - 根因是触发用的 `@Nora` / `@NoraBot` 被剥离后，剩余文本为空，随后被空消息过滤逻辑直接 `return`。
   - OB11/TG 现在会把这种 mention-only 触发转换为内部文本 `[群聊单独艾特: 用户只艾特了你，没有附加文字。请自然地回应。]`，继续进入聚合器和 controller；未艾特的群聊空消息仍不会触发。
+- 修复 OneBot v11 群聊中“回复图片/媒体并 @Nora”时拿不到被回复媒体的问题：
+  - 触发判断阶段仍轻量调用 `get_msg` 补 `reply_to_user_id/name`，确认消息确实要进入 Nora 后，才解析被回复消息内容，避免普通群 reply 也触发媒体下载。
+  - 被回复消息里的图片/视频/语音/文件会转换为 `[image: ...]` / `[video: ...]` / `[file: ...]` 注入当前输入；图片仅有 `file` 无 `url` 时会尝试 `get_image`，视频/文件尝试 `get_file`，语音尝试 `get_record`。
+  - 当前 context 会把被回复媒体消息 id 放进 `platform_message_ids`，便于图片入库和后续按原始 QQ message_id 反查。
 
 **验证**：
 - `.venv\Scripts\python.exe -m pytest tests\test_routing.py -q` → 24 passed。
 - `.venv\Scripts\python.exe -m pytest tests\test_onebotv11_adapter.py -q` → 13 passed。
 - `.venv\Scripts\python.exe -m py_compile core\routing.py tests\test_routing.py adapters\onebotv11\main.py adapters\onebotv11\sender.py tests\test_onebotv11_adapter.py` 通过。
 - `.venv\Scripts\python.exe -m pytest tests\test_onebotv11_adapter.py tests\test_telegram_adapter_modules.py -q` → 36 passed。
+- `.venv\Scripts\python.exe -m pytest tests\test_onebotv11_adapter.py -q` → 16 passed。
+- `.venv\Scripts\python.exe -m py_compile adapters\onebotv11\main.py adapters\onebotv11\media.py tests\test_onebotv11_adapter.py` 通过。
 
 ---
 

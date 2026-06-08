@@ -46,6 +46,10 @@ DEFAULT_CONFIG = {
 }
 
 MENTION_ONLY_TEXT = "[群聊单独艾特: 用户只艾特了你，没有附加文字。请自然地回应。]"
+HISTORICAL_REPLY_MEDIA_NOTE = (
+    "[系统备注] 用户回复的是一条历史 QQ 消息；如果上方包含 [image: ...]、[video: ...] 或 [file: ...]，"
+    "这些媒体就是被回复消息里的真实内容。不要复述本系统备注，直接根据被引用内容自然回答。"
+)
 
 
 class OneBotV11Adapter(
@@ -306,14 +310,19 @@ class OneBotV11Adapter(
         message_type = str(event.get("message_type") or "private")
         raw_message = str(event.get("raw_message") or "")
         segments = onebot_message_segments(event.get("message"), raw_message=raw_message)
-        await self._enrich_reply_context(event, segments)
+        await self._enrich_reply_context(event, segments, include_text=False)
         mention_only_trigger = message_type == "group" and is_at_self(segments, self.self_id)
         if not self._message_triggers_bot(event, segments):
             return
+        await self._enrich_reply_text(event)
         if message_type == "group":
             segments = remove_empty_text_edges(strip_at_self(segments, self.self_id))
+            segments = [seg for seg in segments if str(seg.get("type") or "") != "reply"]
 
         text = await self.segments_to_nora_text(segments)
+        reply_text = str(event.get("reply_to_text") or "").strip()
+        if reply_text:
+            text = f"[回复内容]\n{reply_text}\n[/回复内容]\n{text}".strip()
         if not text and mention_only_trigger:
             text = MENTION_ONLY_TEXT
         if not text:
@@ -323,6 +332,12 @@ class OneBotV11Adapter(
         context["self_id"] = self.self_id
         if event.get("reply_to_message_id") is not None:
             context["reply_to_message_id"] = str(event.get("reply_to_message_id"))
+            if event.get("reply_to_contains_media"):
+                platform_ids = [str(event.get("reply_to_message_id"))]
+                current_id = context.get("platform_message_id")
+                if current_id is not None and str(current_id) not in platform_ids:
+                    platform_ids.append(str(current_id))
+                context["platform_message_ids"] = platform_ids
         if event.get("reply_to_user_id") is not None:
             context["reply_to_user_id"] = str(event.get("reply_to_user_id"))
             context["reply_to_user_name"] = str(event.get("reply_to_user_name") or "")
@@ -335,7 +350,13 @@ class OneBotV11Adapter(
         if self._aggregator:
             await self._aggregator.add_message(chat_id, text, context)
 
-    async def _enrich_reply_context(self, event: dict[str, Any], segments: list[dict[str, Any]]) -> None:
+    async def _enrich_reply_context(
+        self,
+        event: dict[str, Any],
+        segments: list[dict[str, Any]],
+        *,
+        include_text: bool = True,
+    ) -> None:
         reply_id = ""
         for segment in segments:
             if str(segment.get("type") or "") == "reply":
@@ -347,6 +368,7 @@ class OneBotV11Adapter(
         try:
             response = await self.call_api("get_msg", {"message_id": int(reply_id)})
             data = response.get("data") or {}
+            event["_reply_message_data"] = data
             sender = data.get("sender") or {}
             user_id = sender.get("user_id")
             if user_id is not None:
@@ -354,8 +376,25 @@ class OneBotV11Adapter(
             name = sender.get("card") or sender.get("nickname") or ""
             if name:
                 event["reply_to_user_name"] = str(name)
+            if include_text:
+                await self._enrich_reply_text(event)
         except Exception as exc:
             logger.debug("[onebotv11] get reply message failed: %s", exc)
+
+    async def _enrich_reply_text(self, event: dict[str, Any]) -> None:
+        if event.get("reply_to_text"):
+            return
+        data = event.get("_reply_message_data")
+        if not isinstance(data, dict):
+            return
+        reply_segments = onebot_message_segments(data.get("message"), raw_message=str(data.get("raw_message") or ""))
+        reply_text = await self.segments_to_nora_text(reply_segments)
+        if not reply_text:
+            return
+        if any(str(segment.get("type") or "") in {"image", "video", "record", "file"} for segment in reply_segments):
+            reply_text = f"{reply_text}\n{HISTORICAL_REPLY_MEDIA_NOTE}"
+            event["reply_to_contains_media"] = True
+        event["reply_to_text"] = reply_text
 
     async def on_aggregator_complete(self, context: Dict[str, Any]):
         if not self._message_handler:
