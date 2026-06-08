@@ -133,6 +133,32 @@ def test_onebot_sender_builds_group_target_and_text_segments():
     ]
 
 
+def test_onebot_sender_parses_split_markers_before_sending():
+    adapter = SenderOnlyOneBot()
+
+    ids = asyncio.run(adapter.send_message("10001", "hello[SPLIT:0]world", parse_media=False))
+
+    assert ids == ["42", "42"]
+    assert adapter.calls == [
+        (
+            "send_msg",
+            {
+                "message_type": "group",
+                "group_id": 10001,
+                "message": [{"type": "text", "data": {"text": "hello"}}],
+            },
+        ),
+        (
+            "send_msg",
+            {
+                "message_type": "group",
+                "group_id": 10001,
+                "message": [{"type": "text", "data": {"text": "world"}}],
+            },
+        ),
+    ]
+
+
 class ContextInjectionProbe(BackBrainMixin):
     def __init__(self):
         async def onebot_tool(user_id: str, group_id: str = "", chat_id: str = ""):

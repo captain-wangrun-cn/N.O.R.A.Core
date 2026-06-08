@@ -3,6 +3,7 @@ from __future__ import annotations
 import logging
 import os
 import re
+import asyncio
 from pathlib import Path
 from typing import Any
 
@@ -15,6 +16,7 @@ _MEDIA_TAG_PATTERN = re.compile(
     r"\[(image|video|audio|voice|file|doc|document):\s*([^\]]+)\]",
     re.IGNORECASE,
 )
+_SPLIT_MARKER_PATTERN = re.compile(r"\[SPLIT(?::([0-9.]+))?\]", re.IGNORECASE)
 
 
 class OneBotSenderMixin:
@@ -140,12 +142,14 @@ class OneBotSenderMixin:
             return {"message_type": "group", "group_id": int(chat_id)}
         return {"message_type": "private", "user_id": int(chat_id)}
 
-    async def send_message(self, chat_id: str, text: str, **kwargs) -> list[str]:
-        parse_media = bool(kwargs.pop("parse_media", True))
-        chat_type = str(kwargs.pop("chat_type", "") or "")
-        target = self._chat_target_params(chat_id, chat_type=chat_type)
+    async def _send_onebot_message_once(
+        self,
+        target: dict[str, Any],
+        text: str,
+        *,
+        parse_media: bool,
+    ) -> list[str]:
         all_message_ids: list[str] = []
-
         segments = self._text_to_onebot_segments(text, parse_media=parse_media)
         chunks: list[list[dict[str, Any]]] = []
         current: list[dict[str, Any]] = []
@@ -180,6 +184,32 @@ class OneBotSenderMixin:
             if message_id is not None:
                 all_message_ids.append(str(message_id))
         return all_message_ids
+
+    async def send_message(self, chat_id: str, text: str, **kwargs) -> list[str]:
+        parse_media = bool(kwargs.pop("parse_media", True))
+        chat_type = str(kwargs.pop("chat_type", "") or "")
+        target = self._chat_target_params(chat_id, chat_type=chat_type)
+        raw_text = str(text or "")
+
+        if _SPLIT_MARKER_PATTERN.search(raw_text):
+            all_message_ids: list[str] = []
+            parts = _SPLIT_MARKER_PATTERN.split(raw_text)
+            for i in range(0, len(parts), 2):
+                part = parts[i].strip()
+                if part:
+                    msg_ids = await self._send_onebot_message_once(target, part, parse_media=parse_media)
+                    all_message_ids.extend(msg_ids)
+
+                if i + 1 < len(parts) and parts[i + 1] is not None:
+                    try:
+                        delay_val = float(parts[i + 1])
+                        if delay_val > 0:
+                            await asyncio.sleep(delay_val)
+                    except ValueError:
+                        pass
+            return all_message_ids
+
+        return await self._send_onebot_message_once(target, raw_text, parse_media=parse_media)
 
     async def start_typing(self, chat_id: str):
         _ = chat_id
