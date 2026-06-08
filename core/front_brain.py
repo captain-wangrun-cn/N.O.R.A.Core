@@ -18,6 +18,8 @@ from brain.prompts import (
     WORKSPACE_SCHEDULE_FILE,
     should_inject_custom,
     get_lazy_lexicon_user_prompt_block,
+    get_user_preferences_prompt_block,
+    load_adapter_prompt,
 )
 from skills.loader import SkillLoader
 from core.message_handler import group_message_content
@@ -240,6 +242,8 @@ class FrontBrainMixin:
         custom_block = ""
         tool_intro_block = ""
         skill_intro_block = ""
+        user_preferences_block = ""
+        platform_prompt_block = ""
 
         try:
             schedule_content = _read_file_safe(WORKSPACE_SCHEDULE_FILE)
@@ -262,6 +266,16 @@ class FrontBrainMixin:
                 )
         except Exception:
             logger.warning("前脑 CUSTOM 注入失败，已忽略。", exc_info=True)
+
+        try:
+            user_preferences_block = get_user_preferences_prompt_block()
+        except Exception:
+            logger.warning("前脑 Nora 偏好注入失败，已忽略。", exc_info=True)
+
+        try:
+            platform_prompt_block = load_adapter_prompt(platform)
+        except Exception:
+            logger.warning("前脑 adapter 平台协议注入失败，已忽略。", exc_info=True)
 
         try:
             tool_intros = self.tool_manager.get_tool_intros()
@@ -325,6 +339,8 @@ class FrontBrainMixin:
             'system',
             soul_prompt=soul_prompt,
             identity_context=identity_context,
+            user_preferences_block=user_preferences_block,
+            platform_prompt_block=platform_prompt_block,
             schedule_block=schedule_block,
             custom_block=custom_block,
             tool_intro_block=tool_intro_block,
@@ -529,6 +545,30 @@ class FrontBrainMixin:
         # 解析路由信号
         parsed = parse_front_brain_response(response_text)
 
+        # 如果前脑沿用旧格式，只输出 [NEED_BACKEND] 却没有任务指示，
+        # parse 层会拒绝升级。这里提醒一次，避免“看似叫了后脑但实际没触发”。
+        if (
+            "[NEED_BACKEND]" in str(response_text)
+            and not parsed.get("task_instruction")
+            and not parsed.get("needs_backend")
+        ):
+            logger.warning(f"[{chat_id}] 检测到 [NEED_BACKEND] 但缺少任务指示，提醒模型重试。")
+            await self._send_debug(chat_id, "⚠️ 前脑输出 [NEED_BACKEND] 但缺少任务指示，将提醒并重试一次。")
+
+            reminder_system_prompt = (
+                system_prompt
+                + "\n\n【重要提醒】如果你要把事情交给后脑执行，必须同时输出 "
+                  "[TASK_INSTRUCTION]...[/TASK_INSTRUCTION] 和 [NEED_BACKEND]。"
+                  "任务指示块要写清目标、约束和期望结果。"
+                  "如果无需后脑，请去掉 [NEED_BACKEND] 并直接聊天回复。"
+            )
+
+            try:
+                response_text, usage_data = await _run_with_retries(reminder_system_prompt)
+                parsed = parse_front_brain_response(response_text)
+            except Exception:
+                logger.warning(f"[{chat_id}] 前脑缺任务指示补救重试失败，保持原流程。", exc_info=True)
+
         # 如果前脑输出了任务指示但缺少后脑标记，提醒模型并重试一次
         if parsed.get("task_instruction") and not parsed.get("needs_backend"):
             logger.warning(f"[{chat_id}] 检测到任务指示但无 [NEED_BACKEND] 标记，提醒模型重试。")
@@ -639,6 +679,8 @@ class FrontBrainMixin:
         schedule_block = ""
         custom_block = ""
         tool_intro_block = ""
+        user_preferences_block = ""
+        platform_prompt_block = ""
         try:
             schedule_content = _read_file_safe(WORKSPACE_SCHEDULE_FILE)
             if schedule_content:
@@ -660,6 +702,14 @@ class FrontBrainMixin:
         except Exception:
             logger.warning("前脑审查 CUSTOM 注入失败，已忽略。", exc_info=True)
         try:
+            user_preferences_block = get_user_preferences_prompt_block()
+        except Exception:
+            logger.warning("前脑审查 Nora 偏好注入失败，已忽略。", exc_info=True)
+        try:
+            platform_prompt_block = load_adapter_prompt(platform)
+        except Exception:
+            logger.warning("前脑审查 adapter 平台协议注入失败，已忽略。", exc_info=True)
+        try:
             tool_intros = self.tool_manager.get_tool_intros()
             if tool_intros:
                 tool_desc = "\n".join([f"- {name}: {intro}" for name, intro in tool_intros.items()])
@@ -672,6 +722,8 @@ class FrontBrainMixin:
             'system',
             soul_prompt=soul_prompt,
             identity_context=identity_context,
+            user_preferences_block=user_preferences_block,
+            platform_prompt_block=platform_prompt_block,
             schedule_block=schedule_block,
             custom_block=custom_block,
             tool_intro_block=tool_intro_block,

@@ -9,6 +9,18 @@
 {{ identity_context }}
 {% endif %}
 
+{% if user_preferences_block %}
+
+---
+{{ user_preferences_block }}
+{% endif %}
+
+{% if platform_prompt_block %}
+
+---
+{{ platform_prompt_block }}
+{% endif %}
+
 {% if schedule_block %}
 
 ---
@@ -122,7 +134,7 @@
 	- 与 `[TASK_DONE]` 可叠加：任务完成且应当收尾时输出 `[TASK_DONE][SEMI_ONLINE]`。
 
 ### 必须：任务指示块
-必须给后脑追加更具体的执行指示，在回复中加入：
+如果需要后脑继续工作，必须给后脑追加更具体的执行指示，在回复中加入：
 ```
 [TASK_INSTRUCTION]
 <写给后脑的指令，越具体越好>
@@ -136,7 +148,7 @@
 - 没有遗留的后续工作
 
 ### 需要后脑继续（优先使用 action: continue）
-如果还需要后脑继续工作，在回复**末尾**添加 `action: continue`（或 `[CONTINUE]`）。避免使用 `[NEED_BACKEND]`，以防重复触发多个后脑任务。
+如果还需要后脑继续工作，在回复中加入任务指示块，并在回复**末尾**添加 `action: continue`（或 `[CONTINUE]`）。避免使用 `[NEED_BACKEND]`，以防重复触发多个后脑任务。
 - 用户在后脑工作期间发了**新的请求**需要工具/技能处理
 - 后脑的结果不完整，需要补充
 - 用户对后脑结果提出了修改意见
@@ -152,7 +164,9 @@
 
 后脑报告："执行 write_file 将代码写入 app.py，文件已保存。任务完成。"
 用户新消息："再帮我搜一下天气"
-→ 代码已经写好啦～[SPLIT]好的，我接着帮你查天气 [NEED_BACKEND]
+→ 代码已经写好啦～[SPLIT]好的，我接着帮你查天气[TASK_INSTRUCTION]
+查询用户当前位置或上下文中指定地区的天气；如果缺少地区，先基于上下文判断，无法判断则说明需要用户补充。
+[/TASK_INSTRUCTION] action: continue
 
 后脑报告："执行 view_media 检索用户媒体，找到2张猫猫图。路径: [image: /downloads/cat1.jpg] [image: /downloads/cat2.jpg]"
 用户新消息：（无）
@@ -160,7 +174,9 @@
 
 后脑报告："执行 edit_file 修改了代码，但遇到语法错误需要修复。"
 用户新消息：（无）
-→ 改了一部分但发现个小问题，我再修一下～ [NEED_BACKEND]
+→ 改了一部分但发现个小问题，我再修一下～[TASK_INSTRUCTION]
+继续检查并修复刚才修改后出现的语法错误，完成后运行相关验证。
+[/TASK_INSTRUCTION] action: continue
 
 后脑报告："搜索完成，未找到相关结果。"
 用户新消息："谢谢！"

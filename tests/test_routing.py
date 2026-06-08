@@ -39,7 +39,9 @@ def test_has_image_input_false_for_plain_text():
 # --- 前脑路由信号解析测试 ---
 
 def test_front_brain_needs_backend():
-    result = parse_front_brain_response("好的，让我来帮你查一下~ [NEED_BACKEND]")
+    result = parse_front_brain_response(
+        "好的，让我来帮你查一下~ [TASK_INSTRUCTION]查询新闻并整理摘要[/TASK_INSTRUCTION] [NEED_BACKEND]"
+    )
     assert result["needs_backend"] is True
     assert result["user_reply"] == "好的，让我来帮你查一下~"
     assert "[NEED_BACKEND]" not in result["user_reply"]
@@ -58,14 +60,18 @@ def test_front_brain_empty_response():
 
 
 def test_front_brain_backend_signal_at_end():
-    result = parse_front_brain_response("马上处理 ✨ [NEED_BACKEND]")
+    result = parse_front_brain_response(
+        "马上处理 ✨ [TASK_INSTRUCTION]写一个待办脚本[/TASK_INSTRUCTION] [NEED_BACKEND]"
+    )
     assert result["needs_backend"] is True
     assert result["user_reply"] == "马上处理 ✨"
 
 
 def test_front_brain_backend_signal_mid_text():
     """信号在文本中间的情况也应正常处理"""
-    result = parse_front_brain_response("好的 [NEED_BACKEND] 让我来看看")
+    result = parse_front_brain_response(
+        "好的 [NEED_BACKEND] 让我来看看 [TASK_INSTRUCTION]查看历史媒体并回答用户问题[/TASK_INSTRUCTION]"
+    )
     assert result["needs_backend"] is True
     assert "好的" in result["user_reply"]
     assert "让我来看看" in result["user_reply"]
