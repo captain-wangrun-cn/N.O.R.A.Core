@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import os
 import time
@@ -22,6 +23,7 @@ from .message import (
     onebot_event_to_adapter_event,
     onebot_message_segments,
     remove_empty_text_edges,
+    reply_id_from_event,
     strip_at_self,
 )
 from .sender import OneBotSenderMixin
@@ -310,8 +312,24 @@ class OneBotV11Adapter(
         message_type = str(event.get("message_type") or "private")
         raw_message = str(event.get("raw_message") or "")
         segments = onebot_message_segments(event.get("message"), raw_message=raw_message)
+        segment_reply_id = reply_id_from_event({}, segments)
+        raw_reply_segments = [seg for seg in onebot_message_segments(None, raw_message=raw_message) if str(seg.get("type") or "") == "reply"]
+        if not segment_reply_id and raw_reply_segments:
+            segments = raw_reply_segments + segments
+            logger.debug(
+                "[onebotv11] reply segment recovered from raw_message message_id=%s raw=%s",
+                event.get("message_id"),
+                raw_message,
+            )
         await self._enrich_reply_context(event, segments, include_text=False)
-        mention_only_trigger = message_type == "group" and is_at_self(segments, self.self_id)
+        has_reply = bool(event.get("reply_to_message_id"))
+        mention_only_trigger = message_type == "group" and is_at_self(segments, self.self_id) and not has_reply
+        if mention_only_trigger:
+            logger.debug(
+                "[onebotv11] mention-only trigger message_id=%s event=%s",
+                event.get("message_id"),
+                json.dumps(event, ensure_ascii=False, default=str)[:2000],
+            )
         if not self._message_triggers_bot(event, segments):
             return
         await self._enrich_reply_text(event)
@@ -357,11 +375,7 @@ class OneBotV11Adapter(
         *,
         include_text: bool = True,
     ) -> None:
-        reply_id = ""
-        for segment in segments:
-            if str(segment.get("type") or "") == "reply":
-                reply_id = str((segment.get("data") or {}).get("id") or "")
-                break
+        reply_id = reply_id_from_event(event, segments)
         if not reply_id:
             return
         event["reply_to_message_id"] = reply_id

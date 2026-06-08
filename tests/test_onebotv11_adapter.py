@@ -9,6 +9,7 @@ from adapters.onebotv11.message import (
     is_at_self,
     onebot_message_segments,
     plain_text_from_segments,
+    reply_id_from_event,
     strip_at_self,
 )
 from adapters.onebotv11.sender import OneBotSenderMixin
@@ -40,6 +41,12 @@ def test_onebot_message_helpers_parse_cq_and_at_self():
     assert is_at_self(stripped, "123") is False
     assert "你好" in plain_text_from_segments(stripped)
     assert any(seg["type"] == "image" for seg in segments)
+
+
+def test_onebot_reply_id_extraction_supports_raw_and_nested_variants():
+    assert reply_id_from_event({"raw_message": "[CQ:reply,id=777][CQ:at,qq=999]"}) == "777"
+    assert reply_id_from_event({"source": {"message_id": 778}}) == "778"
+    assert reply_id_from_event({"reply_to_message_id": 779}) == "779"
 
 
 def test_onebot_standard_tools_are_exposed_without_napcat():
@@ -425,6 +432,58 @@ def test_onebot_group_reply_image_with_mention_includes_replied_media():
         assert context["reply_to_user_id"] == "30003"
         assert context["reply_to_user_name"] == "Bob"
         assert context["platform_message_ids"] == ["777", "889"]
+
+    asyncio.run(run())
+
+
+def test_onebot_group_reply_image_when_reply_only_exists_in_raw_message():
+    async def run():
+        adapter = IncomingOnlyOneBot()
+        captured = []
+
+        class FakeAggregator:
+            async def add_message(self, chat_id, text, context):
+                captured.append((chat_id, text, context))
+
+        async def fake_call_api(action, params=None):
+            adapter.calls.append((action, params or {}))
+            assert action == "get_msg"
+            assert params == {"message_id": 777}
+            return {
+                "status": "ok",
+                "retcode": 0,
+                "data": {
+                    "message_id": 777,
+                    "sender": {"user_id": 30003, "card": "Bob"},
+                    "message": [{"type": "image", "data": {"url": "http://example.test/raw-reply.jpg"}}],
+                },
+            }
+
+        adapter.call_api = fake_call_api
+        adapter._aggregator = FakeAggregator()
+        event = {
+            "post_type": "message",
+            "message_type": "group",
+            "group_id": 10001,
+            "user_id": 20002,
+            "message_id": 891,
+            "raw_message": "[CQ:reply,id=777][CQ:at,qq=999]",
+            "sender": {"card": "Alice", "nickname": "Nick"},
+            "message": [
+                {"type": "at", "data": {"qq": "999"}},
+                {"type": "text", "data": {"text": " "}},
+            ],
+        }
+
+        await adapter.handle_onebot_event(event)
+
+        assert len(captured) == 1
+        text = captured[0][1]
+        context = captured[0][2]
+        assert text != MENTION_ONLY_TEXT
+        assert "[image: http://example.test/raw-reply.jpg]" in text
+        assert context["reply_to_message_id"] == "777"
+        assert context["platform_message_ids"] == ["777", "891"]
 
     asyncio.run(run())
 

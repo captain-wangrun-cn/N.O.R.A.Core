@@ -38,6 +38,8 @@
   - 触发判断阶段仍轻量调用 `get_msg` 补 `reply_to_user_id/name`，确认消息确实要进入 Nora 后，才解析被回复消息内容，避免普通群 reply 也触发媒体下载。
   - 被回复消息里的图片/视频/语音/文件会转换为 `[image: ...]` / `[video: ...]` / `[file: ...]` 注入当前输入；图片仅有 `file` 无 `url` 时会尝试 `get_image`，视频/文件尝试 `get_file`，语音尝试 `get_record`。
   - 当前 context 会把被回复媒体消息 id 放进 `platform_message_ids`，便于图片入库和后续按原始 QQ message_id 反查。
+  - 兼容 NapCat/OneBot 事件变体：reply id 不再只从数组消息段取，也会从 `raw_message` 的 `[CQ:reply,id=...]`、顶层 `reply_to_message_id/reply_message_id/...`、嵌套 `reply/source/quote` 中提取；当 `message` 数组漏掉 reply 段但 `raw_message` 仍有 CQ reply 时，会补入 reply 段再走 NoneBot2 类似的 `get_msg` 流程。
+  - mention-only fallback 现在不会覆盖 reply 场景；如果仍掉进单独艾特，debug 日志会输出该 OneBot event 的前 2000 字符，便于继续兼容具体实现字段。
 
 **验证**：
 - `.venv\Scripts\python.exe -m pytest tests\test_routing.py -q` → 24 passed。
@@ -46,6 +48,8 @@
 - `.venv\Scripts\python.exe -m pytest tests\test_onebotv11_adapter.py tests\test_telegram_adapter_modules.py -q` → 36 passed。
 - `.venv\Scripts\python.exe -m pytest tests\test_onebotv11_adapter.py -q` → 16 passed。
 - `.venv\Scripts\python.exe -m py_compile adapters\onebotv11\main.py adapters\onebotv11\media.py tests\test_onebotv11_adapter.py` 通过。
+- `.venv\Scripts\python.exe -m pytest tests\test_onebotv11_adapter.py -q` → 20 passed。
+- `.venv\Scripts\python.exe -m py_compile adapters\onebotv11\main.py adapters\onebotv11\message.py adapters\onebotv11\media.py tests\test_onebotv11_adapter.py` 通过。
 
 ---
 

@@ -70,6 +70,51 @@ def onebot_message_segments(message: Any, raw_message: str = "") -> list[dict[st
     return parse_cq_message(raw_message or "")
 
 
+def reply_id_from_segments(segments: Iterable[dict[str, Any]]) -> str:
+    """Return the OneBot reply message id carried by message segments, if any."""
+    for segment in segments:
+        if str(segment.get("type") or "") != "reply":
+            continue
+        data = segment.get("data") or {}
+        reply_id = str(data.get("id") or data.get("message_id") or "").strip()
+        if reply_id:
+            return reply_id
+    return ""
+
+
+def reply_id_from_event(event: dict[str, Any], segments: Iterable[dict[str, Any]] | None = None) -> str:
+    """Best-effort reply id extraction across OneBot/NapCat event variants."""
+    if segments is not None:
+        reply_id = reply_id_from_segments(segments)
+        if reply_id:
+            return reply_id
+
+    for key in (
+        "reply_to_message_id",
+        "reply_message_id",
+        "reply_id",
+        "source_message_id",
+        "quote_message_id",
+    ):
+        value = event.get(key)
+        if value is not None and str(value).strip():
+            return str(value).strip()
+
+    for key in ("reply", "source", "quote"):
+        nested = event.get(key)
+        if not isinstance(nested, dict):
+            continue
+        for nested_key in ("message_id", "id", "reply_id"):
+            value = nested.get(nested_key)
+            if value is not None and str(value).strip():
+                return str(value).strip()
+
+    raw_message = str(event.get("raw_message") or "")
+    if raw_message:
+        return reply_id_from_segments(parse_cq_message(raw_message))
+    return ""
+
+
 def plain_text_from_segments(segments: Iterable[dict[str, Any]]) -> str:
     parts: list[str] = []
     for segment in segments:
