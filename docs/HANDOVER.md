@@ -3,6 +3,25 @@
 - 目标：多平台智能体内核，包含 LLM 适配、工具/技能体系、成本追踪、记忆/RAG。
 - 当前状态：可运行，自测通过；已完成图片记忆链路（入库/检索/回查再分析）、`view_media` 工具增强、CLI 高危清理保护、**跨平台接力 + 主人/访客分离（五层身份模型，全 5 Phase 完成）**。
 
+## 近期关键改动（截至 2026-06-08）
+
+### 🌉 Adapter 统一化 + Telegram 渐进拆分 — 2026-06-08
+
+参考 NoneBot2 的 Adapter/Event/Message 分层思想，但不引入完整 driver/Bot/API hook 系统，完成 NORA 轻量 adapter 标准化：
+
+- `adapters/base.py` 新增 `AdapterMetadata`、`AdapterPlatformInfo`、`AdapterEvent`、`MessageSegment`、`AdapterMessage`，并保留原 `BaseAdapter.run/send_message/start_typing/stop_typing/edit/delete` 契约。
+- 新增 `adapters/PROMPT.md` 通用平台适配协议；`brain/prompts.py` 现在按“通用 adapter prompt → 平台专属 prompt”顺序注入。
+- `adapters/telegram/PROMPT.md` 收敛为 Telegram 专属格式/长度/群聊/媒体规则；新增 `adapters/telegram/metadata.json` 说明真实 Telegram 平台、能力、限制和隐私提示。
+- `adapters/telegram/main.py` 对外入口保持 `TelegramAdapter` 不变，内部拆分为 `constants.py`、`formatting.py`、`message.py`、`sender.py`、`incoming.py`、`reply.py`、`commands.py`、`callbacks.py`、`cleanup.py`。
+- 新增 `docs/architecture/adapter-system.md` 和更新 `adapters/ADAPTER_GUIDE.md`，作为后续 QQ/OneBot/Web 等新 adapter 的统一开发参考。
+
+**验证**：
+- `python -m py_compile adapters/base.py adapters/telegram/*.py brain/prompts.py` 通过。
+- `.venv\Scripts\python.exe -m pytest tests/test_adapter_base.py tests/test_adapter_prompt_loading.py -q` → 6 passed。
+- `.venv\Scripts\python.exe -m pytest tests/test_nora_prefs_telegram.py tests/test_conversation_identity_and_aggregator.py -q` → 11 passed。
+
+---
+
 ## 近期关键改动（截至 2026-06-06）
 
 ### 🌐 跨平台接力 + 主人/访客分离 — 2026-06-06（全 5 Phase 完成）

@@ -74,6 +74,7 @@ WORKSPACE_SCHEDULE_FILE = os.path.join(WORKSPACE_ROOT, "SCHEDULE.md")
 WORKSPACE_CUSTOM_FILE = os.path.join(WORKSPACE_ROOT, "CUSTOM.md")
 WORKSPACE_SECRET_FILE = os.path.join(WORKSPACE_ROOT, "SECRET.md")
 LEXICON_GLOBAL_PROMPT_FILE = os.path.join(PROJECT_ROOT, "lexicon", "PROMPT.md")
+ADAPTER_GLOBAL_PROMPT_FILE = os.path.join(PROJECT_ROOT, "adapters", "PROMPT.md")
 LEGACY_SOUL_FILE = os.path.join(PROJECT_ROOT, "SOUL.md")
 LEGACY_USER_FILE = os.path.join(PROJECT_ROOT, "USER.md")
 LEGACY_MEMORY_FILE = os.path.join(PROJECT_ROOT, "MEMORY.md")
@@ -350,6 +351,23 @@ def get_lexicon_global_system_prompt_block() -> str:
     return f"【词库全局说明 (Lexicon Global Prompt)】\n{global_prompt}"
 
 
+def load_adapter_prompt(platform: Optional[str] = None) -> str:
+    """读取通用 adapter prompt + 平台专属 prompt。"""
+    blocks: list[str] = []
+    global_prompt = _read_file_safe(ADAPTER_GLOBAL_PROMPT_FILE, max_chars=6000).strip()
+    if global_prompt:
+        blocks.append(f"【通用平台适配协议 (Adapter Prompt)】\n{global_prompt}")
+
+    platform_name = str(platform or "").strip().lower()
+    if platform_name:
+        prompt_path = os.path.join(PROJECT_ROOT, "adapters", platform_name, "PROMPT.md")
+        platform_prompt = _read_file_safe(prompt_path, max_chars=6000).strip()
+        if platform_prompt:
+            blocks.append(f"【{platform_name} 平台专属协议】\n{platform_prompt}")
+
+    return "\n\n".join(blocks)
+
+
 def get_lazy_lexicon_user_prompt_block(user_text: str, limit: int = 10) -> str:
     """根据用户输入返回懒加载词库命中注入块（用于 user prompt）。"""
     manager = get_lexicon_manager()
@@ -398,17 +416,7 @@ def get_system_prompt(
         persona_template = env.get_template('persona_nora.jinja')
         persona_prompt = persona_template.render()
     
-    # 尝试加载平台特定的 prompt
-    platform_prompt = ""
-    if platform:
-        # 直接尝试读取 adapters/{platform}/PROMPT.md
-        prompt_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), 'adapters', platform, 'PROMPT.md')
-        try:
-            if os.path.exists(prompt_path):
-                with open(prompt_path, 'r', encoding='utf-8') as f:
-                    platform_prompt = f.read()
-        except Exception as e:
-            print(f"Warning: Failed to load {platform} prompt: {e}")
+    platform_prompt = load_adapter_prompt(platform)
 
     # 加载身份与记忆上下文与自定义指令，注入到 instructions
     identity_context = load_identity_context(

@@ -58,9 +58,11 @@ N.O.R.A.Core/
 
 ### `adapters/`（平台适配）
 
-- `base.py`：平台适配器基类。
+- `base.py`：平台适配器基类 + `AdapterEvent` / `AdapterMessage` / `MessageSegment` 轻量标准层。
 - `aggregator.py`：连续消息聚合。
-- `telegram/`：Telegram 适配实现与平台提示。
+- `PROMPT.md`：通用平台适配协议（跨平台连续性、媒体标记、输出分层）。
+- `ADAPTER_GUIDE.md`：新增/维护 adapter 的开发指南。
+- `telegram/`：Telegram 适配实现，按 `main/incoming/sender/reply/commands/callbacks` 等职责拆分，含 `metadata.json` 与平台提示。
 
 ### `memory/`（记忆与数据）
 

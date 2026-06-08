@@ -1,0 +1,41 @@
+{
+  "adapter_id": "telegram",
+  "name": "Telegram Adapter",
+  "version": "0.2.0",
+  "author": "CaptainCN (WR) + Nora",
+  "entrypoint": "adapters.telegram:TelegramAdapter",
+  "description": "N.O.R.A Core 的 Telegram Bot API 适配器，负责 Telegram 消息接收、聚合、媒体下载、命令按钮和平台消息发送。",
+  "tags": ["telegram", "bot-api", "chat", "rich-media"],
+  "platform": {
+    "name": "Telegram",
+    "type": "instant_messaging",
+    "protocol": "Telegram Bot API via python-telegram-bot",
+    "official_website": "https://telegram.org/",
+    "description": "Telegram 是真实存在的即时通讯平台。本适配器对接 Telegram Bot API，让同一个 Nora 可以在 Telegram 私聊和群聊中说话。",
+    "notes": [
+      "私聊消息默认处理；群聊中仅在 @机器人或回复机器人消息时处理。",
+      "单条文本消息上限为 4096 字符，适配器会按边界拆分。",
+      "支持图片、视频、文档、贴纸下载到 workspace/data/telegram/ 后交给核心链路。"
+    ],
+    "privacy_notes": [
+      "群聊是公开场景，不应自动投递主动消息到群聊。",
+      "群聊中的说话人可能不是主人，必须配合 owner/actor 身份模型判断边界。",
+      "平台 message_id 仅用于回复、撤回和媒体回查，不代表人格或记忆作用域。"
+    ]
+  },
+  "features": {
+    "supports_edit_message": true,
+    "supports_delete_message": true,
+    "supports_reactions": false,
+    "supports_typing_indicator": true,
+    "supports_rich_media": true,
+    "supports_reply": true,
+    "supports_threads": false,
+    "supports_buttons": true
+  },
+  "limits": {
+    "max_message_length": 4096,
+    "photo_max_size_bytes": 10485760,
+    "document_max_size_bytes": 52428800
+  }
+}

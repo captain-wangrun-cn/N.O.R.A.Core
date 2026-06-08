@@ -220,6 +220,11 @@ flowchart TB
 - **[词库系统 (Lexicon System)](./lexicon-system.md)**
   - 轻量“词:含义”检索系统，支持常加载与懒加载双层词库。
 
+### 🌉 平台适配 (Adapters)
+
+- **[Adapter 系统](./adapter-system.md)**
+  - 轻量 Adapter/Event/Message 分层、metadata 清单、通用/平台 prompt 分层与 Telegram 拆分示例。
+
 ### 🛡️ 监控与运维 (Ops & Monitoring)
 
 - **[主动消息调度 (Proactive Scheduler)](./schedule-system.md)**

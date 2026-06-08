@@ -9,7 +9,7 @@
 ```
 用户发消息
   ↓
-adapters/telegram/main.py     收到原始消息
+adapters/telegram/            收到原始消息（incoming/message 模块标准化事件）
   ↓
 adapters/aggregator.py        聚合连续消息（3秒缓冲）
   ↓
@@ -89,6 +89,9 @@ core/controller.py            NoraController.handle_message()
 
 ### `adapters/base.py`
 - `BaseAdapter` — 平台适配器基类
+  - `AdapterEvent` / `AdapterMessage` / `MessageSegment`：轻量事件与消息段标准层
+  - `load_metadata()`：读取每个 adapter 的 `metadata.json`
+  - `dispatch_message()`：统一执行 before/handler/after 钩子
   - `send_message(chat_id, text)`, `start_typing(chat_id)` 等
 
 ### `triggers/base.py`
@@ -166,6 +169,7 @@ python tui.py
 | `brain/templates/system.jinja` | **主系统提示词** — 所有行为规则、协议、约定 |
 | `brain/templates/persona_nora.jinja` | 人设提示词回退（Nora 的性格，当 SOUL.md 不存在时使用） |
 | `brain/prompts.py` | 提示词组装逻辑 + 身份上下文加载 |
+| `adapters/PROMPT.md` | 通用平台适配协议：跨平台人格连续性、媒体标记、`[SPLIT]` |
 | `adapters/telegram/PROMPT.md` | Telegram 平台特定提示（格式、长度等） |
 
 > ⚠️ 修改行为时，优先改 `system.jinja`；修改性格/人设时，改 `SOUL.md`（优先）或 `persona_nora.jinja`（回退）。

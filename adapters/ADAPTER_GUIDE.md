@@ -1,37 +1,110 @@
 # Adapter 开发指南
 
-本指南面向在 `adapters/` 下新增平台适配器的开发者。
+本指南面向在 `adapters/` 下新增平台适配器的开发者。NORA 的 adapter 参考 NoneBot2 的 `Adapter / Event / Message` 分层思想，但保持轻量：不引入完整 driver、Bot API hook 或 pydantic 事件体系。
 
-## 1. 目标
+## 1. 组成
 
-`BaseAdapter` 现在只保留“最小消息收发能力 + 可扩展生命周期钩子”：
+- `BaseAdapter`：平台连接、生命周期、能力描述、消息发送。
+- `AdapterEvent`：平台输入事件的标准结构，最终转成 controller 兼容的 dict context。
+- `MessageSegment` / `AdapterMessage`：轻量消息段，支持文本和媒体，并能序列化为 NORA 现有 `[image: ...]` / `[file: ...]` 标记。
+- `metadata.json`：适配器清单，必须说明对接的真实平台、协议、能力、限制与隐私提示。
+- `PROMPT.md`：平台专属提示词，只写平台格式和限制；通用人格/媒体协议在 `adapters/PROMPT.md`。
 
-- 最小必须实现：
-  - `run(message_handler)`
-  - `send_message(chat_id, text, **kwargs)`
-  - `start_typing(chat_id)`
-  - `stop_typing(chat_id)`
-- 可选覆盖：
-  - `platform_name`
-  - `platform_features`
-  - `edit_message(...)`
-  - `delete_message(...)`
-  - `on_startup()` / `on_ready()` / `on_shutdown()`
-  - `before_message(context)` / `after_message(context, result)`
+## 2. 必需接口
 
-## 2. 推荐目录结构
+每个 adapter 子类必须实现：
 
-建议每个平台用一个子目录：
+- `run(message_handler)`
+- `send_message(chat_id, text, **kwargs) -> list[str]`
+- `start_typing(chat_id)`
+- `stop_typing(chat_id)`
 
-- `adapters/<platform>/__init__.py`
-- `adapters/<platform>/main.py`
-- `adapters/<platform>/PROMPT.md`（可选，平台提示词）
+可选覆盖：
 
-## 3. 最小实现模板
+- `platform_name`
+- `platform_features`
+- `edit_message(...)`
+- `delete_message(...)`
+- `on_startup()` / `on_ready()` / `on_shutdown()`
+- `before_message(context)` / `after_message(context, result)`
+
+`send_message()` 必须返回平台消息 ID 列表，即使实际只发送了一条消息。
+
+## 3. 推荐目录结构
+
+```text
+adapters/<platform>/
+├─ __init__.py
+├─ main.py          # 对外 Adapter 类
+├─ message.py       # 平台事件 -> AdapterEvent / AdapterMessage
+├─ sender.py        # 发送、编辑、删除、typing
+├─ constants.py     # 平台限制、媒体类型
+├─ metadata.json    # 必需
+└─ PROMPT.md        # 平台专属提示词
+```
+
+复杂平台可以继续拆 `commands.py`、`callbacks.py`、`reply.py`、`config.py`、`exception.py` 等。Telegram adapter 就是这种渐进拆分示例。
+
+## 4. Context 契约
+
+传给 controller 的 context 至少包含：
+
+- `platform`: str
+- `chat_id`: str
+- `user_id`: str
+- `text`: str
+- `chat_type`: str，如 `private` / `group`
+- `user_name`: str
+
+建议包含：
+
+- `platform_message_id`: str，用于 reply、undo、媒体回查。
+- `platform_message_ids`: list[str]，聚合多条平台消息时使用。
+- `contributors`: list[dict]，群聊聚合多说话人时使用。
+
+不要让 adapter 自行决定人格、记忆作用域或主人/访客关系；这些由 `core/conversation_identity.py` 统一处理。
+
+## 5. Metadata 清单
+
+每个 adapter 目录必须提供 `metadata.json`：
+
+```json
+{
+  "adapter_id": "telegram",
+  "name": "Telegram Adapter",
+  "version": "0.1.0",
+  "author": "CaptainCN (WR) + Nora",
+  "entrypoint": "adapters.telegram:TelegramAdapter",
+  "description": "适配器说明",
+  "platform": {
+    "name": "Telegram",
+    "type": "instant_messaging",
+    "protocol": "Telegram Bot API",
+    "official_website": "https://telegram.org/",
+    "description": "真实平台说明",
+    "notes": ["平台行为提示"],
+    "privacy_notes": ["隐私/群聊边界提示"]
+  },
+  "features": {
+    "supports_rich_media": true,
+    "supports_buttons": true
+  },
+  "limits": {
+    "max_message_length": 4096
+  }
+}
+```
+
+## 6. Prompt 分层
+
+- `adapters/PROMPT.md`：所有平台共享，描述跨平台人格连续性、通用媒体标记、`[SPLIT]`、不泄漏内部信息。
+- `adapters/<platform>/PROMPT.md`：只描述该平台的格式、长度、命令、群聊/私聊差异和媒体发送限制。
+- 不要在平台 prompt 中重写 Nora 人格；人格边界在 `SOUL.md` 和 `brain/templates/system.jinja`。
+
+## 7. 最小模板
 
 ```python
-from typing import Any, Dict
-from adapters.base import BaseAdapter, PlatformFeatures
+from adapters.base import AdapterEvent, BaseAdapter, PlatformFeatures
 
 
 class XxxAdapter(BaseAdapter):
@@ -50,11 +123,23 @@ class XxxAdapter(BaseAdapter):
     def run(self, message_handler):
         self._message_handler = message_handler
         # 启动平台 SDK / 事件循环
-        # 在适当时机调用 startup() / on_ready()
 
-    async def send_message(self, chat_id: str, text: str, **kwargs) -> str:
-        # 实际发送，返回 message_id
-        return "message-id"
+    async def on_platform_message(self, raw):
+        event = AdapterEvent(
+            platform=self.platform_name,
+            chat_id=str(raw.chat_id),
+            user_id=str(raw.user_id),
+            text=raw.text,
+            chat_type=raw.chat_type,
+            user_name=raw.user_name,
+            platform_message_id=str(raw.message_id),
+            raw=raw,
+        )
+        await self.dispatch_message(event)
+
+    async def send_message(self, chat_id: str, text: str, **kwargs) -> list[str]:
+        message_id = await real_platform_send(chat_id, text)
+        return [str(message_id)]
 
     async def start_typing(self, chat_id: str):
         return None
@@ -63,52 +148,11 @@ class XxxAdapter(BaseAdapter):
         return None
 ```
 
-## 4. 生命周期建议
-
-- 连接建立后调用：`await self.startup()`
-- 平台信息准备就绪后调用：`await self.on_ready()`
-- 进程退出或 SDK 停止时调用：`await self.shutdown()`
-
-说明：
-
-- `startup()` / `shutdown()` 会维护 `is_running` 状态。
-- 如需自定义启动/关闭逻辑，请覆盖 `on_startup()` / `on_shutdown()`，而不是直接改状态位。
-
-## 5. 消息钩子建议
-
-在把事件转发给控制器前后使用钩子：
-
-1. `processed = await self.before_message(context)`
-2. `result = await self._message_handler(processed)`
-3. `await self.after_message(processed, result)`
-
-适用场景：
-
-- 统一清洗输入（mention、reply 格式化）
-- 注入平台元数据
-- 埋点统计与审计日志
-
-## 6. 与 Controller 的契约
-
-传递给 `message_handler` 的 `context` 建议至少包含：
-
-- `chat_id`: str
-- `user_id`: str
-- `text`: str
-- `chat_type`: str（如 `private` / `group`）
-- `user_name`: str
-
-## 7. 开发约定（来自 onboarding）
-
-- 使用 `logging`，避免 `print`
-- 使用类型标注，尤其是公开方法
-- 导入顺序：标准库 → 第三方 → 项目内部
-- 改动适配器后，补充对应测试
-
 ## 8. 自检清单
 
-- [ ] `run()` 已保存 `message_handler`
-- [ ] 已在正确时机触发 `startup/on_ready/shutdown`
-- [ ] `send_message()` 返回稳定的消息 ID 字符串
-- [ ] `before_message/after_message` 不会吞异常（必要时记录日志）
-- [ ] `platform_features` 与实际能力一致
+- [ ] `run()` 保存了 `message_handler`。
+- [ ] 已在正确时机触发 `startup/on_ready/shutdown`。
+- [ ] `metadata.json` 说明了真实平台、能力、限制和隐私提示。
+- [ ] 平台事件通过 `AdapterEvent` 或等价 dict 输出统一字段。
+- [ ] `send_message()` 返回稳定的消息 ID 列表。
+- [ ] 群聊响应条件、平台 message_id、媒体路径和撤回能力有测试或手动验证。

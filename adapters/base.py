@@ -1,6 +1,11 @@
+from __future__ import annotations
+
+import inspect
+import json
 from abc import ABC, abstractmethod
-from dataclasses import asdict, dataclass
-from typing import Any, Awaitable, Callable, Dict, List
+from dataclasses import asdict, dataclass, field
+from pathlib import Path
+from typing import Any, Awaitable, Callable, Dict, Iterable, List, Mapping, Optional
 
 
 MessageHandler = Callable[[Dict[str, Any]], Awaitable[Any] | Any]
@@ -21,6 +26,221 @@ class PlatformFeatures:
     max_message_length: int | None = None
 
 
+@dataclass(slots=True)
+class AdapterPlatformInfo:
+    """适配器对接的真实平台信息。"""
+
+    name: str
+    type: str = "chat"
+    protocol: str = ""
+    official_website: str = ""
+    description: str = ""
+    notes: list[str] = field(default_factory=list)
+    privacy_notes: list[str] = field(default_factory=list)
+
+    @classmethod
+    def from_dict(cls, data: Mapping[str, Any] | None) -> "AdapterPlatformInfo":
+        data = data or {}
+        return cls(
+            name=str(data.get("name") or "unknown"),
+            type=str(data.get("type") or "chat"),
+            protocol=str(data.get("protocol") or ""),
+            official_website=str(data.get("official_website") or data.get("website") or ""),
+            description=str(data.get("description") or ""),
+            notes=[str(item) for item in data.get("notes", []) or []],
+            privacy_notes=[str(item) for item in data.get("privacy_notes", []) or []],
+        )
+
+
+@dataclass(slots=True)
+class AdapterMetadata:
+    """适配器元数据清单。"""
+
+    adapter_id: str
+    name: str
+    version: str
+    author: str
+    entrypoint: str
+    description: str = ""
+    platform: AdapterPlatformInfo = field(default_factory=lambda: AdapterPlatformInfo(name="unknown"))
+    features: dict[str, Any] = field(default_factory=dict)
+    limits: dict[str, Any] = field(default_factory=dict)
+    tags: list[str] = field(default_factory=list)
+    raw: dict[str, Any] = field(default_factory=dict)
+
+    @classmethod
+    def from_dict(cls, data: Mapping[str, Any] | None) -> "AdapterMetadata":
+        data = dict(data or {})
+        return cls(
+            adapter_id=str(data.get("adapter_id") or data.get("id") or "unknown"),
+            name=str(data.get("name") or data.get("adapter_id") or "unknown"),
+            version=str(data.get("version") or "0.0.0"),
+            author=str(data.get("author") or "unknown"),
+            entrypoint=str(data.get("entrypoint") or ""),
+            description=str(data.get("description") or ""),
+            platform=AdapterPlatformInfo.from_dict(data.get("platform")),
+            features=dict(data.get("features") or {}),
+            limits=dict(data.get("limits") or {}),
+            tags=[str(item) for item in data.get("tags", []) or []],
+            raw=data,
+        )
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+
+@dataclass(slots=True)
+class MessageSegment:
+    """通用轻量消息段，参考 NoneBot MessageSegment 但保持 NORA 文本标记兼容。"""
+
+    type: str
+    data: dict[str, Any] = field(default_factory=dict)
+
+    @classmethod
+    def text(cls, text: str) -> "MessageSegment":
+        return cls("text", {"text": text})
+
+    @classmethod
+    def image(cls, path: str) -> "MessageSegment":
+        return cls("image", {"path": path})
+
+    @classmethod
+    def video(cls, path: str) -> "MessageSegment":
+        return cls("video", {"path": path})
+
+    @classmethod
+    def audio(cls, path: str) -> "MessageSegment":
+        return cls("audio", {"path": path})
+
+    @classmethod
+    def file(cls, path: str) -> "MessageSegment":
+        return cls("file", {"path": path})
+
+    @classmethod
+    def sticker(cls, emoji: str = "", set_name: str = "", path: str = "") -> "MessageSegment":
+        return cls("sticker", {"emoji": emoji, "set_name": set_name, "path": path})
+
+    @classmethod
+    def reply(cls, text: str) -> "MessageSegment":
+        return cls("reply", {"text": text})
+
+    def is_text(self) -> bool:
+        return self.type == "text"
+
+    def to_text_marker(self) -> str:
+        if self.type == "text":
+            return str(self.data.get("text") or "")
+        if self.type == "reply":
+            return f"[回复: {self.data.get('text') or ''}]"
+        if self.type == "sticker":
+            emoji = str(self.data.get("emoji") or "")
+            set_name = str(self.data.get("set_name") or "")
+            path = str(self.data.get("path") or "")
+            label = f"[sticker: {emoji} from {set_name}]".strip()
+            return f"{label}\n[file: {path}]" if path else label
+        if self.type in {"image", "video", "audio", "file", "doc"}:
+            return f"[{self.type}: {self.data.get('path') or self.data.get('url') or ''}]"
+        return f"[{self.type}: {self.data}]"
+
+    def __str__(self) -> str:
+        return self.to_text_marker()
+
+
+class AdapterMessage(list[MessageSegment]):
+    """通用消息序列，可转换回 NORA 现有文本协议。"""
+
+    def __init__(self, message: str | MessageSegment | Iterable[MessageSegment] | None = None):
+        super().__init__()
+        if message is None:
+            return
+        if isinstance(message, str):
+            self.append(MessageSegment.text(message))
+        elif isinstance(message, MessageSegment):
+            self.append(message)
+        else:
+            self.extend(message)
+
+    def append(self, item: str | MessageSegment) -> None:  # type: ignore[override]
+        if isinstance(item, str):
+            item = MessageSegment.text(item)
+        super().append(item)
+
+    def extend(self, items: Iterable[str | MessageSegment]) -> None:  # type: ignore[override]
+        for item in items:
+            self.append(item)
+
+    def extract_plain_text(self) -> str:
+        return "".join(str(segment.data.get("text") or "") for segment in self if segment.is_text())
+
+    def to_text(self) -> str:
+        parts = [segment.to_text_marker() for segment in self]
+        return "\n".join(part for part in parts if part).strip()
+
+    def __str__(self) -> str:
+        return self.to_text()
+
+
+@dataclass(slots=True)
+class AdapterEvent:
+    """标准输入事件，向 controller 输出时保持 dict context 兼容。"""
+
+    platform: str
+    chat_id: str
+    user_id: str
+    text: str = ""
+    chat_type: str = "private"
+    user_name: str = "Unknown"
+    platform_message_id: str | None = None
+    message: AdapterMessage | None = None
+    raw: Any = None
+    metadata: dict[str, Any] = field(default_factory=dict)
+
+    @classmethod
+    def from_context(cls, context: Mapping[str, Any], default_platform: str = "unknown") -> "AdapterEvent":
+        message = context.get("message")
+        adapter_message = message if isinstance(message, AdapterMessage) else None
+        text = str(context.get("text") or (adapter_message.to_text() if adapter_message else ""))
+        chat_id = str(context.get("chat_id") or "")
+        return cls(
+            platform=str(context.get("platform") or default_platform),
+            chat_id=chat_id,
+            user_id=str(context.get("user_id") or chat_id),
+            text=text,
+            chat_type=str(context.get("chat_type") or "private"),
+            user_name=str(context.get("user_name") or "Unknown"),
+            platform_message_id=(
+                str(context.get("platform_message_id"))
+                if context.get("platform_message_id") is not None
+                else None
+            ),
+            message=adapter_message,
+            raw=context.get("raw"),
+            metadata=dict(context.get("metadata") or {}),
+        )
+
+    def get_plaintext(self) -> str:
+        return self.message.extract_plain_text() if self.message else self.text
+
+    def to_context(self) -> dict[str, Any]:
+        context = {
+            "platform": self.platform,
+            "chat_id": self.chat_id,
+            "user_id": self.user_id,
+            "text": self.text or (self.message.to_text() if self.message else ""),
+            "chat_type": self.chat_type,
+            "user_name": self.user_name,
+        }
+        if self.platform_message_id is not None:
+            context["platform_message_id"] = self.platform_message_id
+        if self.message is not None:
+            context["message"] = self.message
+        if self.raw is not None:
+            context["raw"] = self.raw
+        if self.metadata:
+            context["metadata"] = self.metadata
+        return context
+
+
 class BaseAdapter(ABC):
     """平台适配器基础抽象层。"""
 
@@ -28,6 +248,7 @@ class BaseAdapter(ABC):
         self.current_chat_id: str | None = None
         self._message_handler: MessageHandler | None = None
         self._is_running: bool = False
+        self._metadata_cache: AdapterMetadata | None = None
 
     @property
     def platform_name(self) -> str:
@@ -40,8 +261,51 @@ class BaseAdapter(ABC):
         return PlatformFeatures()
 
     @property
+    def metadata(self) -> AdapterMetadata:
+        return self.load_metadata()
+
+    @property
     def is_running(self) -> bool:
         return self._is_running
+
+    def load_metadata(self) -> AdapterMetadata:
+        """读取 adapters/<platform>/metadata.json；缺失时返回最小元数据。"""
+        metadata_cache = getattr(self, "_metadata_cache", None)
+        if metadata_cache is not None:
+            return metadata_cache
+
+        metadata_path = Path(__file__).resolve().parent / self.platform_name / "metadata.json"
+        data: dict[str, Any] = {}
+        if metadata_path.exists():
+            try:
+                data = json.loads(metadata_path.read_text(encoding="utf-8"))
+            except Exception:
+                data = {}
+        if not data:
+            data = {
+                "adapter_id": self.platform_name,
+                "name": self.platform_name,
+                "version": "0.0.0",
+                "author": "unknown",
+                "entrypoint": f"adapters.{self.platform_name}:Adapter",
+                "platform": {"name": self.platform_name},
+            }
+        self._metadata_cache = AdapterMetadata.from_dict(data)
+        return self._metadata_cache
+
+    def normalize_event(self, event_or_context: AdapterEvent | Mapping[str, Any]) -> AdapterEvent:
+        """把平台事件或旧 dict context 标准化为 AdapterEvent。"""
+        if isinstance(event_or_context, AdapterEvent):
+            return event_or_context
+        return AdapterEvent.from_context(event_or_context, default_platform=self.platform_name)
+
+    def format_message(self, message: AdapterMessage | MessageSegment | str) -> str:
+        """将通用消息结构转换为 NORA 当前文本协议。"""
+        if isinstance(message, AdapterMessage):
+            return message.to_text()
+        if isinstance(message, MessageSegment):
+            return message.to_text_marker()
+        return str(message)
 
     @abstractmethod
     def run(self, message_handler: MessageHandler):
@@ -68,6 +332,17 @@ class BaseAdapter(ABC):
         """钩子：消息处理后触发。"""
         return None
 
+    async def dispatch_message(self, event_or_context: AdapterEvent | Mapping[str, Any]) -> Any:
+        """标准消息分发：normalize -> before hook -> handler -> after hook。"""
+        if not self._message_handler:
+            return None
+        context = self.normalize_event(event_or_context).to_context()
+        processed_context = await self.before_message(context)
+        maybe_result = self._message_handler(processed_context)
+        result = await maybe_result if inspect.isawaitable(maybe_result) else maybe_result
+        await self.after_message(processed_context, result)
+        return result
+
     async def shutdown(self) -> None:
         """生命周期：适配器关闭时触发。"""
         self._is_running = False
@@ -84,6 +359,7 @@ class BaseAdapter(ABC):
             "platform": self.platform_name,
             "running": self._is_running,
             "features": asdict(self.platform_features),
+            "metadata": self.metadata.to_dict(),
         }
 
     @abstractmethod
