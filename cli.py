@@ -146,11 +146,15 @@ def detect_embedding_dimensions(base_url: str, api_key: str, model: str) -> Opti
     return None
 
 
-def get_model_price_info(provider: str, model_name: str) -> str:
+def get_model_price_info(
+    provider: str,
+    model_name: str,
+    custom_prices: Optional[Dict[str, Dict[str, float]]] = None,
+) -> str:
     """获取模型的价格信息（用于显示）"""
     from core.cost_tracker import CostTracker
     
-    tracker = CostTracker(db_path=":memory:")  # 仅用于查询价格
+    tracker = CostTracker(db_path=":memory:", custom_prices=custom_prices or {})  # 仅用于查询价格
     prices = tracker.get_model_price(provider, model_name)
     
     if not prices:
@@ -900,9 +904,11 @@ class StepModels(ConfigStep):
             return questionary.text(t('wizard.manual_prompt', role=role_name), default=default_model or "").ask()
         
         # 为每个模型添加价格信息
+        cost_cfg = self.state.get('cost_tracking', {}) or {}
+        custom_prices = cost_cfg.get('custom_prices', {}) or {}
         choices_with_prices = []
         for model in model_list:
-            price_info = get_model_price_info(provider, model)
+            price_info = get_model_price_info(provider, model, custom_prices=custom_prices)
             display_name = f"{model}{price_info}" if price_info else model
             choices_with_prices.append(questionary.Choice(title=display_name, value=model))
         
@@ -983,7 +989,11 @@ class StepModels(ConfigStep):
         self.state['models'] = models
 
         # 记录选定模型的价格用于后续配置写入
-        tracker = CostTracker(db_path=":memory:")
+        cost_cfg = self.state.get('cost_tracking', {}) or {}
+        tracker = CostTracker(
+            db_path=":memory:",
+            custom_prices=cost_cfg.get('custom_prices', {}) or {},
+        )
         model_prices = {}
         for model_alias, model_name in models.items():
             # 同一个模型可能被多个 role 复用（如 smart/fast 选同一模型）

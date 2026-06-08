@@ -43,9 +43,9 @@ class CostTracker:
             cfg = config.get_config() if hasattr(config, "get_config") else {}
             self.custom_prices = (
                 cfg.get("cost_tracking", {}).get("custom_prices", {}) if cfg else {}
-            )
+            ) or {}
         else:
-            self.custom_prices = custom_prices
+            self.custom_prices = custom_prices or {}
 
         # 缓存已提示过的缺失价格模型，避免重复警告刷屏
         self._warned_models = set()
