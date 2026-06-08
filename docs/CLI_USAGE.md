@@ -35,9 +35,12 @@ python cli.py history
 启动时可选择 adapter：
 
 ```bash
+python main.py --no-tui --adapter auto
 python main.py --no-tui --adapter telegram
 python main.py --no-tui --adapter onebotv11
 ```
+
+`--adapter auto` 是默认值，会使用第一个看起来已配置的平台；未使用的平台可以保持 `config.json` 缺失或占位状态。
 
 ## RAG 数据清理（高危）
 

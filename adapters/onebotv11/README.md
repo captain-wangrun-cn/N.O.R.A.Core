@@ -12,6 +12,14 @@ OneBot v11 adapter 用于连接 QQ/OneBot 实现，例如 NapCat、Lagrange、go
 python main.py --no-tui --adapter onebotv11
 ```
 
+也可以使用默认自动选择：
+
+```bash
+python main.py --no-tui --adapter auto
+```
+
+`auto` 会跳过未配置或仍是占位值的其他平台 adapter。
+
 ## config.json
 
 ```json

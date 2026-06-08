@@ -18,7 +18,7 @@ from telegram.ext import (
 
 from adapters.aggregator import MessageAggregator
 from adapters.base import BaseAdapter, PlatformFeatures
-from adapters.config_utils import adapter_config_path, load_adapter_config
+from adapters.config_utils import adapter_config_path, is_placeholder_value, load_adapter_config
 from memory.message_history import MessageHistory
 from workspace_config import get_workspace_manager
 
@@ -84,13 +84,9 @@ class TelegramAdapter(
             {"bot_token": "YOUR_TELEGRAM_BOT_TOKEN"},
         )
         token = str(adapter_config.get("bot_token") or "").strip()
-        if not token:
+        if is_placeholder_value(token):
             raise ValueError(
-                f"Telegram bot_token not found. Please edit {adapter_config_path('telegram')}."
-            )
-        if token == "YOUR_TELEGRAM_BOT_TOKEN":
-            raise ValueError(
-                f"Telegram bot_token is still the placeholder. Please edit {adapter_config_path('telegram')}."
+                f"Telegram bot_token is missing or still a placeholder. Please edit {adapter_config_path('telegram')}."
             )
 
         workspace_manager = get_workspace_manager()

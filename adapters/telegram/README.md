@@ -18,6 +18,8 @@ python main.py --adapter telegram
 python main.py --no-tui --adapter telegram
 ```
 
+如果你不使用 Telegram，可以保持本目录的 `config.json` 缺失或占位；默认 `--adapter auto` 不会强制校验未启用的平台。
+
 ## config.json
 
 ```json

@@ -119,6 +119,7 @@ python cli.py --configure
 
 # 运行主程序
 python main.py
+python main.py --no-tui --adapter auto
 python main.py --no-tui --adapter onebotv11
 
 # Telegram 指令（运行后在聊天中）

@@ -52,7 +52,7 @@ N.O.R.A.Core 是一个主要 AI 助手框架，旨在提供个人陪伴和一点
 
 - Python 3.12+
 - 可访问的 LLM API（Gemini / OpenAI 或兼容 OpenAI 的网关）
-- 平台 adapter 配置：例如 Telegram Token 写入 `adapters/telegram/config.json`，OneBot v11 连接写入 `adapters/onebotv11/config.json`
+- 至少配置一个平台 adapter：例如 Telegram Token 写入 `adapters/telegram/config.json`，OneBot v11 连接写入 `adapters/onebotv11/config.json`
 
 > Windows 用户建议额外安装 `tzdata`，避免时区数据库缺失导致 `ZoneInfo` 报错。
 
