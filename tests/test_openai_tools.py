@@ -10,6 +10,7 @@ Copyright © WR（captain-wangrun-cn） All rights reserved
 import json
 import sys
 import os
+import asyncio
 
 # 添加项目根目录到 path
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
@@ -227,6 +228,78 @@ def test_convert_history_unknown_role():
     assert result[0]["role"] == "user"
     
     print("✅ test_convert_history_unknown_role passed")
+
+
+def test_filter_supported_kwargs_drops_unsupported_fields():
+    from brain.providers.openai import OpenAIProvider
+
+    def fake_stream(*, model=None, input=None, instructions=None):
+        return None
+
+    payload = {
+        "model": "gpt-5",
+        "input": [],
+        "instructions": "hi",
+        "stream": True,
+        "max_output_tokens": 256,
+    }
+
+    filtered = OpenAIProvider._filter_supported_kwargs(fake_stream, payload)
+    assert "stream" not in filtered
+    assert "max_output_tokens" not in filtered
+    assert filtered["model"] == "gpt-5"
+    assert filtered["instructions"] == "hi"
+
+
+def test_chat_stream_responses_api_uses_create_streaming_payload():
+    from brain.providers.openai import OpenAIProvider
+
+    captured = {}
+
+    class _DummyResponses:
+        async def create(self, *, model=None, input=None, instructions=None, max_output_tokens=None, tools=None, stream=None):
+            captured["kwargs"] = {
+                "model": model,
+                "input": input,
+                "instructions": instructions,
+                "max_output_tokens": max_output_tokens,
+                "tools": tools,
+                "stream": stream,
+            }
+
+            class _DummyStream:
+                def __aiter__(self):
+                    async def _iter():
+                        if False:
+                            yield None
+                    return _iter()
+
+            return _DummyStream()
+
+    provider = object.__new__(OpenAIProvider)
+    provider.use_responses_api = True
+    provider.model = "gpt-5"
+    provider.max_output_tokens = 128
+    provider.client = type("DummyClient", (), {"responses": _DummyResponses()})()
+    provider.last_usage = None
+    provider._with_retry = lambda fn, max_retries=3, base_delay=1.0: fn()
+    provider._convert_history_for_responses = OpenAIProvider._convert_history_for_responses
+    provider._convert_tools_schema_for_responses = OpenAIProvider._convert_tools_schema_for_responses
+    provider.strip_stream_think_segment = lambda text, in_think: (text, in_think)
+
+    async def _collect():
+        chunks = []
+        async for chunk in provider.chat_stream("sys", "hello", [], tools=None):
+            chunks.append(chunk)
+        return chunks
+
+    result = asyncio.run(_collect())
+
+    assert result == []
+    assert "kwargs" in captured
+    assert captured["kwargs"]["model"] == "gpt-5"
+    assert captured["kwargs"]["instructions"] == "sys"
+    assert captured["kwargs"]["stream"] is True
 
 
 def test_empty_promise_detection():

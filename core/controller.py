@@ -53,6 +53,7 @@ from core.conversation_identity import (
     resolve_platform,
     runtime_key_for,
 )
+from core.routing import sanitize_user_visible_text
 from triggers import TriggerManager
 from triggers.factory import build_triggers
 import config
@@ -444,6 +445,9 @@ class NoraController(
             logger.debug("同步全局后脑状态失败", exc_info=True)
 
     async def _send_platform_message(self, chat_or_runtime_key: str, text: str, **kwargs):
+        text = sanitize_user_visible_text(text)
+        if not text:
+            return []
         return await self.adapter.send_message(
             self._platform_chat_id(chat_or_runtime_key),
             text,

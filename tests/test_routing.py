@@ -5,7 +5,12 @@ LastEditors: WR(captain-wangrun-cn)
 LastEditTime: 2026-04-16 13:39:03
 FilePath: \N.O.R.A.Core\tests\test_routing.py
 '''
-from core.routing import parse_route_decision_response, has_image_input, parse_front_brain_response
+from core.routing import (
+    parse_route_decision_response,
+    has_image_input,
+    parse_front_brain_response,
+    sanitize_user_visible_text,
+)
 
 
 def test_parse_route_backend():
@@ -135,3 +140,17 @@ def test_front_brain_retract_message_signal_supports_nth_from_end():
     result = parse_front_brain_response("我把前两条收一下。[RETRACT_MESSAGE:-2]")
     assert result["retract_message_target"] == "-2"
     assert result["user_reply"] == "我把前两条收一下。"
+
+
+def test_front_brain_strips_internal_routing_notes_from_user_reply():
+    result = parse_front_brain_response(
+        "我去看一下。\n\n[内部备注·上一轮路由记录]\n已触发后脑接管处理。\n已下达后脑任务指示: 更新SOUL.md"
+    )
+    assert result["user_reply"] == "我去看一下。"
+
+
+def test_sanitize_user_visible_text_removes_internal_and_system_notes():
+    cleaned = sanitize_user_visible_text(
+        "先这样。\n\n[系统备注] 这段仅供模型参考。\n\n[内部备注·上一轮路由记录]\n已触发后脑接管处理。"
+    )
+    assert cleaned == "先这样。"

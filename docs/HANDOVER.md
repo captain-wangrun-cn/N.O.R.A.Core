@@ -3,6 +3,28 @@
 - 目标：多平台智能体内核，包含 LLM 适配、工具/技能体系、成本追踪、记忆/RAG。
 - 当前状态：可运行，自测通过；已完成图片记忆链路（入库/检索/回查再分析）、`view_media` 工具增强、CLI 高危清理保护、**跨平台接力 + 主人/访客分离（五层身份模型，全 5 Phase 完成）**。
 
+## 近期关键改动（截至 2026-06-09）
+
+### 🩹 前脑内部备注泄漏 + OpenAI Responses Stream 兼容 + CLI 本地数据清理补齐 — 2026-06-09
+
+- 修复前脑/审查上下文中供模型阅读的 `[内部备注·上一轮路由记录]`、`[系统备注]` 偶发被模型原样复述给用户的问题：
+  - `core/routing.py` 新增 `sanitize_user_visible_text()`，统一剥离内部备注块与时间戳。
+  - `parse_front_brain_response()` / `parse_front_brain_review()` 现在在解析后统一清洗用户可见文本。
+  - `core/message_handler.py::_send_split_message()` 与 `core/controller.py::_send_platform_message()` 再加一层发送前清洗，作为跨 Telegram / OneBot v11 的最终兜底。
+- 修复 OpenAI Responses API 流式调用在当前 SDK（本地为 `openai 2.17.0`）下报错 `AsyncResponses.stream() got an unexpected keyword argument 'stream'`：
+  - `brain/providers/openai.py` 的 Responses 分支改为 `responses.create(stream=True)`。
+  - 新增按函数签名过滤 kwargs 的兼容层，避免不同 SDK / OpenAI 兼容端点的参数差异再次触发异常。
+- CLI 补齐“清空本地数据文件”能力：
+  - 新增 `python cli.py history clear-data`，覆盖 `message_history.db`、`message_log.db`、`context_compression.db`，并可选清理 `cost_tracker.db`。
+  - 历史管理菜单新增“🗃️ 清空本地数据文件”，采用二次确认（输入 `DELETE LOCAL DATA`）。
+  - `docs/CLI_USAGE.md` 与 `docs/onboarding/QUICK_REFERENCE.md` 已同步更新，修正旧 `--show-history` / `--clear-history` 口径。
+
+**验证**：
+- `.venv\Scripts\python.exe -m pytest tests\test_routing.py tests\test_openai_tools.py tests\test_cli_data_cleanup.py tests\test_message_history_clear_cascade.py -q` → 35 passed。
+- `.venv\Scripts\python.exe -m py_compile core\routing.py core\message_handler.py core\controller.py brain\providers\openai.py cli.py tests\test_routing.py tests\test_openai_tools.py tests\test_cli_data_cleanup.py` 通过。
+
+---
+
 ## 近期关键改动（截至 2026-06-08）
 
 ### 🔌 Telegram 配置迁移 + OneBot v11/NapCat Adapter — 2026-06-08

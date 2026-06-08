@@ -289,6 +289,76 @@ def clear_history_chat(chat_id: str, platform: str = "telegram", include_pinned:
     logger.info("✅ 已清理聊天 %s/%s (包含标记: %s)", platform, chat_id, include_pinned)
 
 
+def get_local_data_paths() -> Dict[str, Path]:
+    """收集当前工作区中常见的本地数据文件路径。"""
+    mh, history_db = _load_message_history()
+    cost_tracker = CostTracker()
+    return {
+        "chat_history": history_db,
+        "message_log": Path(mh.message_log.db_path),
+        "context_compression": Path(mh.context_compressor.db_path),
+        "cost_tracker": Path(cost_tracker.db_path),
+    }
+
+
+def clear_local_data_files(include_costs: bool = True):
+    """清空本地 SQLite 数据文件并重建表结构。"""
+    data_paths = get_local_data_paths()
+    if not include_costs:
+        data_paths.pop("cost_tracker", None)
+
+    existing = {name: path for name, path in data_paths.items() if path.exists()}
+    if not existing:
+        logger.info("ℹ️  未发现可清理的本地数据文件。")
+        return
+
+    logger.warning("⚠️ 即将清空以下本地数据文件（仅 SQLite，本地不可恢复）:")
+    for name, path in existing.items():
+        logger.warning("- %s: %s", name, path)
+
+    confirm = questionary.confirm(
+        "确认继续清空这些本地数据文件？",
+        default=False,
+    ).ask()
+    if not confirm:
+        logger.info("❌ 操作已取消。")
+        return
+
+    second_confirm = questionary.text(
+        "二次确认：请输入 DELETE LOCAL DATA 才会执行：",
+        default="",
+    ).ask()
+    if second_confirm != "DELETE LOCAL DATA":
+        logger.info("❌ 二次确认未通过，操作已取消。")
+        return
+
+    mh, _ = _load_message_history()
+    deleted: List[str] = []
+    failed: List[str] = []
+
+    for name, path in existing.items():
+        try:
+            path.unlink(missing_ok=True)
+            deleted.append(name)
+        except Exception as e:
+            failed.append(f"{name}: {e}")
+
+    # 重建数据库结构，保证清理后可直接运行。
+    try:
+        mh._init_db()
+        mh.message_log._init_db()
+        mh.context_compressor._init_db()
+        if include_costs:
+            CostTracker()._init_db()
+    except Exception as e:
+        failed.append(f"reinit: {e}")
+
+    if deleted:
+        logger.info("✅ 已清空本地数据文件: %s", ", ".join(deleted))
+    if failed:
+        logger.error("❌ 部分清理失败: %s", " | ".join(failed))
+
+
 def history_menu():
     """交互式聊天记录管理"""
     mh, db_path = _load_message_history()
@@ -299,6 +369,7 @@ def history_menu():
             "🧹 清空全部 (包含标记)",
             "🧹 按聊天清理 (保留标记)",
             "🧹 按聊天清理 (包含标记)",
+            "🗃️ 清空本地数据文件",
             "⬅️ 返回主菜单",
         ]
 
@@ -331,6 +402,14 @@ def history_menu():
                 continue
             include_pinned = choice.endswith("包含标记)")
             clear_history_chat(chat_id=selected[1], platform=selected[0], include_pinned=include_pinned)
+        elif choice == "🗃️ 清空本地数据文件":
+            include_costs = questionary.confirm(
+                "是否同时清空成本记录数据库？",
+                default=True,
+            ).ask()
+            if include_costs is None:
+                continue
+            clear_local_data_files(include_costs=include_costs)
 
 
 # --- 向导步骤 ---
@@ -1708,6 +1787,8 @@ def main():
     clear_parser.add_argument("--chat-id", type=str, help="要清理的聊天 ID")
     clear_parser.add_argument("--platform", type=str, default="telegram", help="平台名称")
     clear_parser.add_argument("--include-pinned", action="store_true", help="同时清理已标记的消息")
+    data_parser = history_subparsers.add_parser("clear-data", help="清空本地 SQLite 数据文件")
+    data_parser.add_argument("--keep-costs", action="store_true", help="保留成本记录数据库")
 
     args = parser.parse_args()
 
@@ -1733,6 +1814,8 @@ def main():
                 clear_history_chat(args.chat_id, args.platform, args.include_pinned)
             else:
                 print("请指定 --all 或 --chat-id")
+        elif args.history_command == "clear-data":
+            clear_local_data_files(include_costs=not args.keep_costs)
         else:
             history_menu()
     else:

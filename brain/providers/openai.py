@@ -1,6 +1,7 @@
 import asyncio
 import openai
 import json
+import inspect
 from typing import Any, List, Dict, Optional
 from openai import APIConnectionError, APITimeoutError, RateLimitError, APIStatusError
 import logging
@@ -79,6 +80,20 @@ class OpenAIProvider(BaseLLM):
 
     async def _responses_create(self, **kwargs):
         return await self._with_retry(lambda: self.client.responses.create(**kwargs))
+
+    @staticmethod
+    def _filter_supported_kwargs(callable_obj, payload: Dict[str, Any]) -> Dict[str, Any]:
+        """按目标 callable 的签名过滤 kwargs，兼容不同 OpenAI SDK 版本。"""
+        try:
+            sig = inspect.signature(callable_obj)
+        except (TypeError, ValueError):
+            return payload
+
+        if any(param.kind == inspect.Parameter.VAR_KEYWORD for param in sig.parameters.values()):
+            return payload
+
+        allowed = set(sig.parameters.keys())
+        return {key: value for key, value in payload.items() if key in allowed}
 
     def _extract_response_text(self, response: Any) -> str:
         output_text = getattr(response, "output_text", None)
@@ -413,7 +428,8 @@ class OpenAIProvider(BaseLLM):
             if tools:
                 payload["tools"] = self._convert_tools_schema_for_responses(tools)
             try:
-                stream = await self._with_retry(lambda: self.client.responses.stream(**payload))
+                stream_payload = self._filter_supported_kwargs(self.client.responses.create, payload)
+                stream = await self._with_retry(lambda: self.client.responses.create(**stream_payload))
             except Exception as e:
                 logger.error(f"OpenAI Responses Stream Error: {e}", exc_info=True)
                 yield {"type": "text", "content": "Sorry, an error occurred during streaming."}
@@ -424,37 +440,36 @@ class OpenAIProvider(BaseLLM):
             in_think_block = False
             input_tokens = 0
             output_tokens = 0
-            async with stream as response_stream:
-                async for event in response_stream:
-                    event_type = getattr(event, "type", "")
-                    if event_type == "response.output_text.delta":
-                        delta = getattr(event, "delta", "") or ""
-                        visible_text, in_think_block = self.strip_stream_think_segment(delta, in_think_block)
-                        if visible_text:
-                            yield {"type": "text", "content": visible_text}
-                    elif event_type == "response.function_call_arguments.delta":
-                        call_id = getattr(event, "call_id", "")
-                        pending_args[call_id] = pending_args.get(call_id, "") + (getattr(event, "delta", "") or "")
-                    elif event_type == "response.function_call_arguments.done":
-                        call_id = getattr(event, "call_id", "")
-                        name = pending_names.get(call_id) or getattr(event, "name", "")
-                        raw_args = pending_args.get(call_id, "") or getattr(event, "arguments", "{}")
-                        try:
-                            parsed_args = json.loads(raw_args) if raw_args else {}
-                        except Exception:
-                            parsed_args = {}
-                        yield {"type": "tool_call", "name": name, "args": parsed_args}
-                    elif event_type == "response.output_item.added":
-                        item = getattr(event, "item", None)
-                        if getattr(item, "type", "") == "function_call":
-                            call_id = getattr(item, "call_id", "")
-                            pending_names[call_id] = getattr(item, "name", "")
-                    elif event_type == "response.completed":
-                        response = getattr(event, "response", None)
-                        usage = getattr(response, "usage", None) if response else None
-                        if usage:
-                            input_tokens = getattr(usage, "input_tokens", 0) or 0
-                            output_tokens = getattr(usage, "output_tokens", 0) or 0
+            async for event in stream:
+                event_type = getattr(event, "type", "")
+                if event_type == "response.output_text.delta":
+                    delta = getattr(event, "delta", "") or ""
+                    visible_text, in_think_block = self.strip_stream_think_segment(delta, in_think_block)
+                    if visible_text:
+                        yield {"type": "text", "content": visible_text}
+                elif event_type == "response.function_call_arguments.delta":
+                    call_id = getattr(event, "call_id", "")
+                    pending_args[call_id] = pending_args.get(call_id, "") + (getattr(event, "delta", "") or "")
+                elif event_type == "response.function_call_arguments.done":
+                    call_id = getattr(event, "call_id", "")
+                    name = pending_names.get(call_id) or getattr(event, "name", "")
+                    raw_args = pending_args.get(call_id, "") or getattr(event, "arguments", "{}")
+                    try:
+                        parsed_args = json.loads(raw_args) if raw_args else {}
+                    except Exception:
+                        parsed_args = {}
+                    yield {"type": "tool_call", "name": name, "args": parsed_args}
+                elif event_type == "response.output_item.added":
+                    item = getattr(event, "item", None)
+                    if getattr(item, "type", "") == "function_call":
+                        call_id = getattr(item, "call_id", "")
+                        pending_names[call_id] = getattr(item, "name", "")
+                elif event_type == "response.completed":
+                    response = getattr(event, "response", None)
+                    usage = getattr(response, "usage", None) if response else None
+                    if usage:
+                        input_tokens = getattr(usage, "input_tokens", 0) or 0
+                        output_tokens = getattr(usage, "output_tokens", 0) or 0
             if input_tokens or output_tokens:
                 self.last_usage = {"input_tokens": input_tokens, "output_tokens": output_tokens}
                 yield {"type": "usage", "input_tokens": input_tokens, "output_tokens": output_tokens}

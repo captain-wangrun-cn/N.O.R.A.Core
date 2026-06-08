@@ -130,10 +130,15 @@ python main.py --no-tui --adapter onebotv11
 # /undo （撤销上一条前脑发送的消息；删除消息历史与镜像库，若记录了平台 message_id 且平台支持，会尝试删除聊天界面消息）
 
 # 查看聊天记录统计
-python cli.py --show-history
+python cli.py history stats
 
 # 清理聊天记录
-python cli.py --clear-history
+python cli.py history clear --all
+python cli.py history clear --chat-id <chat_id> --platform telegram
+
+# 清理本地数据文件（消息历史 / 镜像库 / 上下文压缩库 / 可选成本库）
+python cli.py history clear-data
+python cli.py history clear-data --keep-costs
 
 # 查看成本
 python view_costs.py --today

@@ -77,6 +77,14 @@ _TIMESTAMP_PATTERN = re.compile(
     r"\[\d{4}-\d{2}-\d{2} \d{2}:\d{2}(?::\d{2})?(?: [^\]]+)?\]\s*",
     re.IGNORECASE,
 )
+_INTERNAL_NOTE_BLOCK_PATTERN = re.compile(
+    r"\[内部备注[^\]]*\][\s\S]*?(?=(?:\n\s*\n)|$)",
+    re.IGNORECASE,
+)
+_SYSTEM_NOTE_BLOCK_PATTERN = re.compile(
+    r"\[系统备注\][\s\S]*?(?=(?:\n\s*\n)|$)",
+    re.IGNORECASE,
+)
 
 
 def _strip_timestamp_markers(text: str) -> str:
@@ -84,6 +92,18 @@ def _strip_timestamp_markers(text: str) -> str:
     if not text:
         return ""
     return _TIMESTAMP_PATTERN.sub("", text).strip()
+
+
+def sanitize_user_visible_text(text: str) -> str:
+    """清理不应暴露给用户的内部备注/控制标记。"""
+    if not text:
+        return ""
+
+    cleaned = _INTERNAL_NOTE_BLOCK_PATTERN.sub("", text)
+    cleaned = _SYSTEM_NOTE_BLOCK_PATTERN.sub("", cleaned)
+    cleaned = _strip_timestamp_markers(cleaned)
+    cleaned = re.sub(r"\n{3,}", "\n\n", cleaned)
+    return cleaned.strip()
 
 
 def parse_front_brain_response(response_text: str) -> dict:
@@ -158,10 +178,7 @@ def parse_front_brain_response(response_text: str) -> dict:
     user_reply = _RETRACT_MESSAGE_PATTERN.sub("", user_reply)
     user_reply = _USE_IMAGE_MODEL_PATTERN.sub("", user_reply)
     user_reply = _TASK_INSTRUCTION_PATTERN.sub("", user_reply)
-    user_reply = user_reply.strip()
-    user_reply = _strip_timestamp_markers(user_reply)
-    # 清理多余空行
-    user_reply = re.sub(r'\n{3,}', '\n\n', user_reply)
+    user_reply = sanitize_user_visible_text(user_reply)
 
     if not should_reply:
         user_reply = ""
@@ -251,9 +268,7 @@ def parse_front_brain_review(response_text: str) -> dict:
     # 清理 continue 标记文本，避免泄漏给用户
     user_reply = _CONTINUE_PATTERN.sub("", user_reply)
     user_reply = _TASK_INSTRUCTION_PATTERN.sub("", user_reply)
-    user_reply = user_reply.strip()
-    user_reply = _strip_timestamp_markers(user_reply)
-    user_reply = re.sub(r'\n{3,}', '\n\n', user_reply)
+    user_reply = sanitize_user_visible_text(user_reply)
 
     if not should_reply:
         user_reply = ""

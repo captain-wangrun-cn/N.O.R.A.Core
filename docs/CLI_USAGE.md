@@ -24,7 +24,11 @@ python cli.py wizard
 python cli.py status
 python cli.py test-qdrant
 python cli.py test-rag
-python cli.py history
+python cli.py history stats
+python cli.py history clear --all
+python cli.py history clear --chat-id 123456 --platform telegram
+python cli.py history clear-data
+python cli.py history clear-data --keep-costs
 ```
 
 平台 adapter 的私有配置不由 CLI 向导写入，请编辑对应目录的 `config.json`：
@@ -64,6 +68,28 @@ python main.py --no-tui --adapter onebotv11
 3. 第二次确认（必须输入 `DELETE ALL`）
 
 若二次确认不匹配，则直接取消，不执行删除。
+
+## 本地数据文件清理
+
+在“💬 聊天记录管理”菜单中，新增“🗃️ 清空本地数据文件”，或直接使用：
+
+```bash
+python cli.py history clear-data
+python cli.py history clear-data --keep-costs
+```
+
+当前会清理并重建这些本地 SQLite 文件：
+
+- `workspace/data/memory/message_history.db`
+- `workspace/data/memory/message_log.db`
+- `workspace/data/memory/context_compression.db`
+- `workspace/cost_tracker.db`（可通过 `--keep-costs` 保留）
+
+保护机制：
+
+1. 列出将删除的文件
+2. 第一次确认
+3. 第二次确认（必须输入 `DELETE LOCAL DATA`）
 
 ## 相关文件
 

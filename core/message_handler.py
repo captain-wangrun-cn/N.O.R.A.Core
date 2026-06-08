@@ -13,7 +13,7 @@ from typing import Dict, Any, List, Optional
 
 from brain.multimodal import extract_image_payloads, extract_video_payloads
 from brain.prompts import render_template, get_soul_prompt, load_identity_context
-from core.routing import has_image_input
+from core.routing import has_image_input, sanitize_user_visible_text
 from core.conversation_identity import conversation_target_dict
 from core.default_chat_id_store import save_default_chat_target
 from core.delivery_target_store import update_last_active_target
@@ -1101,6 +1101,9 @@ class MessageHandlerMixin:
     async def _send_split_message(self, chat_id: str, text: str) -> list[str]:
         """按 [SPLIT] 或 [SPLIT:delay] 规则发送消息，返回平台消息 ID 列表。"""
         sent_message_ids: list[str] = []
+        text = sanitize_user_visible_text(text)
+        if not text:
+            return sent_message_ids
         # _SPLIT_MARKER_PATTERN 现在返回 [text_part, delay_str, text_part, ...]
         parts = self._SPLIT_MARKER_PATTERN.split(text)
 
