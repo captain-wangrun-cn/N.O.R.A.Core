@@ -5,6 +5,20 @@
 
 ## 近期关键改动（截至 2026-06-09）
 
+### ⚡ OneBot v11 WebSocket 入站延迟优化 — 2026-06-09
+
+- 修复 OneBot v11 正向/反向 WebSocket 入站消息偶发延迟数秒到十几秒的问题：
+  - 根因：WS `listen()` 收到 event 后直接 `await adapter.handle_onebot_event()`；事件处理中又会调用同一条 WS 的 `get_msg` / `get_group_info` / `get_file` 等 API，API echo 响应也依赖 `listen()` 继续读包，形成“接收循环等待事件处理，事件处理等待接收循环”的阻塞。
+  - `adapters/onebotv11/client.py` 改为收到 event 后创建后台任务处理，接收循环立即继续读取后续包和 API echo；这与 nonebot2 onebot adapter 的事件投递方式一致。
+  - 为避免后台化带来同一群/私聊消息乱序，客户端按会话键（group/user）串行事件任务：同一 chat 保序，跨 chat 并行，WS 收包不被阻塞。
+  - 关闭连接/重连时会取消并收敛后台事件任务，异常统一记录日志，避免静默丢错。
+
+**验证**：
+- `.venv\Scripts\python.exe -m pytest tests\test_onebotv11_adapter.py -q` → 17 passed。
+- `.venv\Scripts\python.exe -m py_compile adapters\onebotv11\client.py tests\test_onebotv11_adapter.py` 通过。
+
+---
+
 ### 💬 OneBot v11 群上下文 + QQ 回复/艾特标记 + 来源标签防泄漏 — 2026-06-09
 
 - 修复跨平台来源标签被模型复述到用户侧的问题：

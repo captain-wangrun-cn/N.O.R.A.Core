@@ -3,6 +3,7 @@ import json
 from types import SimpleNamespace
 
 from adapters.base import AdapterToolSpec
+from adapters.onebotv11.client import OneBotWebSocketClient
 from adapters.onebotv11.main import MENTION_ONLY_TEXT, OneBotV11Adapter
 from adapters.onebotv11.message import (
     is_at_self,
@@ -477,5 +478,79 @@ def test_onebot_reply_image_file_only_uses_get_image():
 
         assert "[image: data/onebotv11/abc.jpg]" in captured[0][1]
         assert ("get_image", {"file": "abc.image"}) in adapter.calls
+
+    asyncio.run(run())
+
+
+def test_onebot_client_dispatches_events_without_blocking_echo_results():
+    async def run():
+        class FakeWs:
+            def __init__(self):
+                self.closed = False
+                self.sent = []
+
+            async def send_str(self, data):
+                self.sent.append(json.loads(data))
+
+        class EventCallsApiAdapter:
+            def __init__(self):
+                self.client = OneBotWebSocketClient(self)
+                self.client.ws = FakeWs()
+                self.handled = asyncio.Event()
+
+            async def handle_onebot_event(self, payload):
+                response = await self.client.call_api("get_msg", {"message_id": payload["message_id"]}, timeout=1)
+                assert response["data"]["message_id"] == payload["message_id"]
+                self.handled.set()
+
+        adapter = EventCallsApiAdapter()
+        event_payload = {"post_type": "message", "message_id": 123}
+
+        await adapter.client.handle_payload(event_payload)
+        await asyncio.sleep(0)
+
+        assert len(adapter.client.event_tasks) == 1
+        assert len(adapter.client.ws.sent) == 1
+        echo = adapter.client.ws.sent[0]["echo"]
+
+        await adapter.client.handle_payload(
+            {
+                "status": "ok",
+                "retcode": 0,
+                "echo": echo,
+                "data": {"message_id": 123},
+            }
+        )
+        await asyncio.wait_for(adapter.handled.wait(), timeout=0.2)
+
+    asyncio.run(run())
+
+
+def test_onebot_client_keeps_same_chat_events_ordered():
+    async def run():
+        class OrderedAdapter:
+            def __init__(self):
+                self.client = OneBotWebSocketClient(self)
+                self.first_can_finish = asyncio.Event()
+                self.handled = []
+
+            async def handle_onebot_event(self, payload):
+                if payload["message_id"] == 1:
+                    await self.first_can_finish.wait()
+                self.handled.append(payload["message_id"])
+
+        adapter = OrderedAdapter()
+        await adapter.client.handle_payload(
+            {"post_type": "message", "message_type": "group", "group_id": 10001, "message_id": 1}
+        )
+        await adapter.client.handle_payload(
+            {"post_type": "message", "message_type": "group", "group_id": 10001, "message_id": 2}
+        )
+        await asyncio.sleep(0)
+
+        assert adapter.handled == []
+        adapter.first_can_finish.set()
+        await asyncio.gather(*adapter.client.event_tasks)
+        assert adapter.handled == [1, 2]
 
     asyncio.run(run())

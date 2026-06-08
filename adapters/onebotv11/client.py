@@ -26,6 +26,8 @@ class OneBotWebSocketClient:
         self.ws = None
         self.session: ClientSession | None = None
         self.pending: dict[str, asyncio.Future] = {}
+        self.event_tasks: set[asyncio.Task] = set()
+        self._event_chains: dict[str, asyncio.Task] = {}
         self._lock = asyncio.Lock()
 
     @property
@@ -67,7 +69,54 @@ class OneBotWebSocketClient:
                 future.set_result(payload)
             return
         if isinstance(payload, dict) and payload.get("post_type"):
-            await self.adapter.handle_onebot_event(payload)
+            self.dispatch_event(payload)
+
+    def dispatch_event(self, payload: dict[str, Any]) -> asyncio.Task:
+        """Handle incoming events in the background so API echo packets keep flowing."""
+        key = self._event_key_for(payload)
+        previous = self._event_chains.get(key) if key else None
+        if previous and previous.done():
+            previous = None
+
+        if key:
+            task = asyncio.create_task(self._run_event_in_order(payload, previous))
+            self._event_chains[key] = task
+        else:
+            task = asyncio.create_task(self.adapter.handle_onebot_event(payload))
+        self.event_tasks.add(task)
+        task.add_done_callback(self._on_event_task_done)
+        return task
+
+    @staticmethod
+    def _event_key_for(payload: dict[str, Any]) -> str:
+        if str(payload.get("post_type") or "") != "message":
+            return ""
+        message_type = str(payload.get("message_type") or "private")
+        if message_type == "group" and payload.get("group_id") is not None:
+            return f"group:{payload.get('group_id')}"
+        if payload.get("user_id") is not None:
+            return f"{message_type}:{payload.get('user_id')}"
+        return ""
+
+    async def _run_event_in_order(self, payload: dict[str, Any], previous: asyncio.Task | None) -> None:
+        if previous:
+            try:
+                await previous
+            except Exception:
+                pass
+        await self.adapter.handle_onebot_event(payload)
+
+    def _on_event_task_done(self, task: asyncio.Task) -> None:
+        self.event_tasks.discard(task)
+        for key, chained_task in list(self._event_chains.items()):
+            if chained_task is task:
+                self._event_chains.pop(key, None)
+        if task.cancelled():
+            return
+        try:
+            task.result()
+        except Exception:
+            logger.exception("[onebotv11] event handling task failed.")
 
     async def call_api(
         self,
@@ -98,6 +147,13 @@ class OneBotWebSocketClient:
         return response
 
     async def close(self) -> None:
+        for task in list(self.event_tasks):
+            if not task.done():
+                task.cancel()
+        if self.event_tasks:
+            await asyncio.gather(*self.event_tasks, return_exceptions=True)
+        self.event_tasks.clear()
+        self._event_chains.clear()
         for future in list(self.pending.values()):
             if not future.done():
                 future.cancel()
