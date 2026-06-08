@@ -337,14 +337,6 @@ class ConfigStep:
     def run(self):
         raise NotImplementedError
 
-class StepTelegram(ConfigStep):
-    def run(self):
-        self.state['telegram_token'] = questionary.password(
-            t('wizard.token_prompt'),
-            default=self.state.get("telegram_token", "")
-        ).ask()
-        return self.state['telegram_token'] is not None
-
 class StepWorkspace(ConfigStep):
     def run(self):
         workspace_def = self.state.get('workspace', {}).get('root_path', '~/.nora/workspace')
@@ -1161,7 +1153,6 @@ def run_wizard():
                 provider_default = next(iter(providers.keys()))
 
             state = {
-                'telegram_token': cfg.get("telegram", {}).get("bot_token"),
                 'workspace': cfg.get("workspace", {}),
                 'network': cfg.get("network", {}) or ({'proxy': cfg.get('proxy', {})} if cfg.get('proxy') else {}),
                 'provider': provider_default,
@@ -1174,7 +1165,12 @@ def run_wizard():
                 'cost_tracking': cfg.get("cost_tracking", {'enabled': True})
             }
 
-    steps = [StepTelegram, StepWorkspace, StepProxy, StepProvider, StepAPIKeys, StepDatabase, StepEmbedding, StepTavily, StepTimezone, StepModels, StepOutputLimit, StepCostTracking]
+    questionary.print(
+        "平台 adapter 的私有配置请编辑对应目录下的 config.json，例如 adapters/telegram/config.json。",
+        style="bold yellow",
+    )
+
+    steps = [StepWorkspace, StepProxy, StepProvider, StepAPIKeys, StepDatabase, StepEmbedding, StepTavily, StepTimezone, StepModels, StepOutputLimit, StepCostTracking]
     current_step = 0
     
     while current_step < len(steps):
@@ -1196,7 +1192,6 @@ def run_wizard():
     final_config: Dict[str, Any] = {
         'workspace': state.get('workspace', {'root_path': '~/.nora/workspace'}),
         'network': state.get('network', {}),
-        'telegram': {'bot_token': state.get('telegram_token')},
         'llm': {
             'provider': state.get('provider'),
             'providers': state.get('providers', {}),

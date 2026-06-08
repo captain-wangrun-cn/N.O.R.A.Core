@@ -10,7 +10,6 @@ warnings.filterwarnings("ignore", category=FutureWarning, module="google.generat
 import config
 from brain.logging_config import setup_logging as setup_unified_logging, get_chat_logger
 from core.controller import NoraController
-from adapters.telegram import TelegramAdapter
 
 class TuiLogHandler(logging.Handler):
     """Custom handler to forward logs to TUI display."""
@@ -40,7 +39,20 @@ def setup_logging_with_tui(tui_app):
     root_logger = logging.getLogger()
     root_logger.addHandler(tui_handler)
 
-def run_bot_logic(tui_app, tui_ready_event):
+def create_adapter(adapter_name: str):
+    normalized = (adapter_name or "telegram").strip().lower()
+    if normalized == "telegram":
+        from adapters.telegram import TelegramAdapter
+
+        return TelegramAdapter()
+    if normalized in {"onebotv11", "onebot", "onebot-11", "qq"}:
+        from adapters.onebotv11 import OneBotV11Adapter
+
+        return OneBotV11Adapter()
+    raise ValueError(f"Unsupported adapter: {adapter_name}")
+
+
+def run_bot_logic(tui_app, tui_ready_event, adapter_name: str = "telegram"):
     """Contains the core bot logic, runs in a separate thread."""
     tui_ready_event.wait() # Wait for the TUI to be ready
     
@@ -49,7 +61,7 @@ def run_bot_logic(tui_app, tui_ready_event):
     
     logging.info("TUI is ready. Initializing N.O.R.A. Core in background thread...")
     try:
-        adapter = TelegramAdapter()
+        adapter = create_adapter(adapter_name)
         controller = NoraController(adapter, tui_callback=lambda text: tui_app.call_from_thread(tui_app.update_status, text))
         
         # 注册 on_ready 钩子：适配器就绪后启动 scheduler + triggers
@@ -71,7 +83,7 @@ class NoraTUI:
     """Placeholder for type hints; real class is loaded lazily when TUI is enabled."""
 
 
-def run_with_tui():
+def run_with_tui(adapter_name: str = "telegram"):
     """Application entry point with TUI."""
     try:
         from tui import TUI as TextualTUI  # Lazy import to avoid dependency in headless mode
@@ -98,13 +110,13 @@ def run_with_tui():
     app = NoraTUI(tui_ready_event)
     setup_logging_with_tui(app)
 
-    bot_thread = threading.Thread(target=run_bot_logic, args=(app, tui_ready_event), daemon=True)
+    bot_thread = threading.Thread(target=run_bot_logic, args=(app, tui_ready_event, adapter_name), daemon=True)
     bot_thread.start()
 
     app.run()
 
 
-def run_headless(console_level=logging.INFO):
+def run_headless(console_level=logging.INFO, adapter_name: str = "telegram"):
     """Run bot without TUI (pure command-line)."""
     try:
         config.load_config()
@@ -121,7 +133,7 @@ def run_headless(console_level=logging.INFO):
         logging.info(f"[STATUS] {text}")
 
     try:
-        adapter = TelegramAdapter()
+        adapter = create_adapter(adapter_name)
         controller = NoraController(adapter, tui_callback=headless_status_callback)
         
         # 注册 on_ready 钩子：适配器就绪后启动 scheduler + triggers
@@ -147,14 +159,20 @@ def main():
         default="INFO",
         help="无 TUI 模式下的控制台日志级别",
     )
+    parser.add_argument(
+        "--adapter",
+        choices=["telegram", "onebotv11"],
+        default="telegram",
+        help="选择平台适配器",
+    )
 
     args = parser.parse_args()
 
     if args.no_tui:
         level = getattr(logging, args.console_level.upper(), logging.INFO)
-        run_headless(console_level=level)
+        run_headless(console_level=level, adapter_name=args.adapter)
     else:
-        run_with_tui()
+        run_with_tui(adapter_name=args.adapter)
 
 if __name__ == '__main__':
     main()

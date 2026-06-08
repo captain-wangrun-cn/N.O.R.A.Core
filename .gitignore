@@ -2,6 +2,7 @@ __pycache__/
 *.pyc
 .env
 config.yml
+adapters/*/config.json
 .DS_Store
 .vscode/
 .idea/

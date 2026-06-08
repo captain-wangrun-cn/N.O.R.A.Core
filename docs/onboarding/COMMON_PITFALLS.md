@@ -69,6 +69,10 @@
 
 ## 5. Telegram 适配
 
+### ⚠️ Telegram Token 不在全局 config.yml
+- Telegram 的 `bot_token` 已迁移到 `adapters/telegram/config.json`。
+- `python cli.py --configure` 不再询问 Telegram Token；新 adapter 也应使用自己目录下的 `config.json`。
+
 ### ⚠️ 消息长度限制
 - Telegram 单条消息上限 4096 字符。超长文本由 `_split_long_text()` 自动按段落/行/字符边界切割。
 - 与 `[SPLIT]` 是两套独立机制：`[SPLIT]` 是语义分段，`_split_long_text` 是硬限制兜底。
@@ -76,6 +80,13 @@
 ### ⚠️ 群聊响应条件
 - 群聊中暂时只有被 @机器人时才响应；单纯回复机器人不会触发。已触发消息仍会像私聊一样提取 reply 内容。
 - `storage_id` 隔离：私聊用 user_id，群聊用 chat_id。
+
+## 5.1 OneBot v11 适配
+
+- OneBot v11 配置在 `adapters/onebotv11/config.json`，支持正向 WebSocket (`connection_type="websocket"`) 和反向 WebSocket (`connection_type="reverse"`)。
+- NapCat 扩展 API 默认不暴露；只有 `enable_napcat_api=true` 时，后脑才会看到 `onebotv11_napcat_*` 工具。
+- 群聊默认只处理 @机器人或回复机器人消息；可通过 `group_message_policy` 调整。
+- 群管/撤回/全员禁言/改群名片等真实 QQ 操作必须先向主人确认，且实际成功取决于登录号权限和 OneBot 实现。
 
 ---
 

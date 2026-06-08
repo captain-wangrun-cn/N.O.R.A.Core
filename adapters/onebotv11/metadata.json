@@ -1,0 +1,45 @@
+{
+  "adapter_id": "onebotv11",
+  "name": "OneBot v11 Adapter",
+  "version": "0.1.0",
+  "author": "CaptainCN (WR) + Nora",
+  "entrypoint": "adapters.onebotv11:OneBotV11Adapter",
+  "description": "N.O.R.A Core 的 OneBot v11 适配器，负责通过 WebSocket 接收 QQ/OneBot 消息、下载媒体、发送消息并暴露标准 OneBot 与可选 NapCat 扩展工具。",
+  "tags": ["onebot", "onebot-v11", "qq", "napcat", "websocket"],
+  "platform": {
+    "name": "QQ / OneBot v11",
+    "type": "instant_messaging",
+    "protocol": "OneBot v11 over WebSocket",
+    "official_website": "https://github.com/botuniverse/onebot-11",
+    "description": "OneBot v11 是用于连接 QQ 机器人实现与上层应用的通信协议，常见实现包括 NapCat、Lagrange、go-cqhttp 等。",
+    "notes": [
+      "私聊消息默认处理；群聊默认在 @机器人或回复机器人消息时处理。",
+      "OneBot v11 消息支持 CQ 码和数组消息段，本适配器内部统一使用数组消息段发送。",
+      "标准 OneBot v11 支持群成员列表、群成员信息、禁言、踢出、设置群名片、设置专属头衔等 API，实际成功取决于登录号权限。",
+      "NapCat 扩展 API 只在 adapters/onebotv11/config.json 中 enable_napcat_api=true 时暴露给后脑。"
+    ],
+    "privacy_notes": [
+      "QQ群聊是公开场景，不应自动投递主动消息到群聊。",
+      "群聊中的说话人可能不是主人，必须配合 owner/actor 身份模型判断隐私边界。",
+      "QQ 号、群号、message_id 仅用于消息投递、回复、撤回和平台工具，不代表人格或记忆作用域。"
+    ]
+  },
+  "features": {
+    "supports_edit_message": false,
+    "supports_delete_message": true,
+    "supports_reactions": false,
+    "supports_typing_indicator": false,
+    "supports_rich_media": true,
+    "supports_reply": true,
+    "supports_threads": false,
+    "supports_buttons": false,
+    "supports_chat_member_lookup": true,
+    "supports_chat_moderation": true,
+    "supports_member_tags": false
+  },
+  "limits": {
+    "max_message_length": 4500,
+    "member_list": "OneBot v11 can request get_group_member_list, but implementations may return cached or partial fields.",
+    "napcat_api": "NapCat extension APIs are implementation-specific and require enable_napcat_api=true."
+  }
+}

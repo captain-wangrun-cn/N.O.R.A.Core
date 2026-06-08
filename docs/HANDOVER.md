@@ -5,6 +5,20 @@
 
 ## 近期关键改动（截至 2026-06-08）
 
+### 🔌 Telegram 配置迁移 + OneBot v11/NapCat Adapter — 2026-06-08
+
+- Telegram `bot_token` 从全局 `config.yml` 迁移到 `adapters/telegram/config.json`；CLI 配置向导不再询问 Telegram token。
+- 新增 adapter 私有配置约定：每个 adapter 使用自己目录下的 `config.json` + `config.example.json`，文档已更新。
+- 新增 `adapters/onebotv11/`：支持 OneBot v11 正向 WebSocket 与反向 WebSocket、私聊/群聊消息接收、@/reply 群聊触发、媒体下载到 `workspace/data/onebotv11/`、文本/媒体消息发送、撤回。
+- OneBot v11 adapter 暴露标准工具：登录/状态/版本、群信息/群列表/群成员/群成员列表/群荣誉/好友列表/消息/合并转发查询，以及点赞、撤回、禁言、踢人、全员禁言、管理员、群名片、群名、退群、专属头衔等高风险群管工具。
+- `adapters/onebotv11/config.json` 中 `enable_napcat_api=true` 时额外暴露 `onebotv11_napcat_*` 工具：戳一戳、已读、好友历史、自定义表情、AI 语音角色/生成/发送、合并转发等 NapCat 扩展 API。
+- `main.py` 新增 `--adapter telegram|onebotv11`，默认 Telegram。
+- 后脑 adapter tool 上下文注入从 Telegram 特例泛化：当前平台工具会按签名自动补 `chat_id`/`group_id`，reply 场景自动补 `user_id`。
+
+**验证**：见本次会话最终记录。
+
+---
+
 ### 🛠️ Adapter 动态工具 + Telegram 群管工具 — 2026-06-08
 
 为 adapter 增加可向后脑暴露平台 API 的工具标准，并先在 Telegram 落地群聊查询/群管工具：

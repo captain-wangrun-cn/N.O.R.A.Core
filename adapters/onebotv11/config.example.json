@@ -1,0 +1,14 @@
+{
+  "connection_type": "websocket",
+  "websocket_url": "ws://127.0.0.1:6700/",
+  "reverse_host": "127.0.0.1",
+  "reverse_port": 6701,
+  "reverse_path": "/onebot/v11",
+  "access_token": "",
+  "self_id": "",
+  "nickname": "Nora",
+  "group_message_policy": "at_or_reply",
+  "enable_napcat_api": false,
+  "download_media": true,
+  "reconnect_interval_seconds": 5
+}

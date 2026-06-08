@@ -1,0 +1,193 @@
+from __future__ import annotations
+
+import html
+import re
+from typing import Any, Iterable
+
+from adapters.base import AdapterEvent, AdapterMessage, MessageSegment
+
+
+_CQ_PATTERN = re.compile(r"\[CQ:(?P<type>[a-zA-Z0-9_.-]+)(?P<params>(?:,[^\]]*)?)\]")
+
+
+def cq_escape(value: str) -> str:
+    return (
+        str(value)
+        .replace("&", "&amp;")
+        .replace("[", "&#91;")
+        .replace("]", "&#93;")
+        .replace(",", "&#44;")
+    )
+
+
+def cq_unescape(value: str) -> str:
+    return html.unescape(str(value))
+
+
+def parse_cq_params(raw: str) -> dict[str, str]:
+    params: dict[str, str] = {}
+    raw = (raw or "").lstrip(",")
+    if not raw:
+        return params
+    for part in raw.split(","):
+        if not part or "=" not in part:
+            continue
+        key, value = part.split("=", 1)
+        params[key] = cq_unescape(value)
+    return params
+
+
+def parse_cq_message(raw_message: str) -> list[dict[str, Any]]:
+    """Parse a OneBot CQ-code string into array message segments."""
+    result: list[dict[str, Any]] = []
+    cursor = 0
+    for match in _CQ_PATTERN.finditer(raw_message or ""):
+        if match.start() > cursor:
+            text = raw_message[cursor:match.start()]
+            if text:
+                result.append({"type": "text", "data": {"text": cq_unescape(text)}})
+        result.append(
+            {
+                "type": match.group("type"),
+                "data": parse_cq_params(match.group("params") or ""),
+            }
+        )
+        cursor = match.end()
+    if cursor < len(raw_message or ""):
+        text = raw_message[cursor:]
+        if text:
+            result.append({"type": "text", "data": {"text": cq_unescape(text)}})
+    return result or [{"type": "text", "data": {"text": raw_message or ""}}]
+
+
+def onebot_message_segments(message: Any, raw_message: str = "") -> list[dict[str, Any]]:
+    if isinstance(message, list):
+        return [seg for seg in message if isinstance(seg, dict)]
+    if isinstance(message, dict):
+        return [message]
+    if isinstance(message, str):
+        return parse_cq_message(message)
+    return parse_cq_message(raw_message or "")
+
+
+def plain_text_from_segments(segments: Iterable[dict[str, Any]]) -> str:
+    parts: list[str] = []
+    for segment in segments:
+        segment_type = str(segment.get("type") or "")
+        data = segment.get("data") or {}
+        if segment_type == "text":
+            parts.append(str(data.get("text") or ""))
+        elif segment_type == "at":
+            qq = str(data.get("qq") or "")
+            parts.append(f"@{qq}" if qq else "@")
+        elif segment_type == "face":
+            parts.append(f"[表情:{data.get('id') or ''}]")
+        elif segment_type == "reply":
+            parts.append(f"[回复:{data.get('id') or ''}]")
+        elif segment_type in {"image", "record", "video", "file"}:
+            label = {
+                "image": "图片",
+                "record": "语音",
+                "video": "视频",
+                "file": "文件",
+            }.get(segment_type, segment_type)
+            parts.append(f"[{label}:{data.get('file') or data.get('url') or ''}]")
+        else:
+            parts.append(f"[{segment_type}:{data}]")
+    return "".join(parts).strip()
+
+
+def segment_to_onebot(segment: MessageSegment) -> dict[str, Any]:
+    if segment.type == "text":
+        return {"type": "text", "data": {"text": str(segment.data.get("text") or "")}}
+    if segment.type == "image":
+        return {"type": "image", "data": {"file": str(segment.data.get("path") or "")}}
+    if segment.type == "video":
+        return {"type": "video", "data": {"file": str(segment.data.get("path") or "")}}
+    if segment.type in {"audio", "voice"}:
+        return {"type": "record", "data": {"file": str(segment.data.get("path") or "")}}
+    if segment.type in {"file", "doc", "document"}:
+        return {"type": "file", "data": {"file": str(segment.data.get("path") or "")}}
+    if segment.type == "reply":
+        return {"type": "reply", "data": {"id": str(segment.data.get("id") or segment.data.get("text") or "")}}
+    return {"type": segment.type, "data": dict(segment.data or {})}
+
+
+def onebot_message_from_adapter(message: AdapterMessage | MessageSegment | str) -> list[dict[str, Any]]:
+    if isinstance(message, AdapterMessage):
+        return [segment_to_onebot(segment) for segment in message]
+    if isinstance(message, MessageSegment):
+        return [segment_to_onebot(message)]
+    return [{"type": "text", "data": {"text": str(message or "")}}]
+
+
+def sender_display_name(sender: dict[str, Any], fallback_user_id: str = "") -> str:
+    card = str(sender.get("card") or "").strip()
+    nickname = str(sender.get("nickname") or "").strip()
+    return card or nickname or str(fallback_user_id or "Unknown")
+
+
+def is_at_self(segments: Iterable[dict[str, Any]], self_id: str) -> bool:
+    if not self_id:
+        return False
+    for segment in segments:
+        if str(segment.get("type") or "") != "at":
+            continue
+        qq = str((segment.get("data") or {}).get("qq") or "")
+        if qq == str(self_id):
+            return True
+    return False
+
+
+def strip_at_self(segments: Iterable[dict[str, Any]], self_id: str) -> list[dict[str, Any]]:
+    if not self_id:
+        return [dict(seg) for seg in segments]
+    stripped: list[dict[str, Any]] = []
+    for segment in segments:
+        if str(segment.get("type") or "") == "at" and str((segment.get("data") or {}).get("qq") or "") == str(self_id):
+            continue
+        stripped.append(dict(segment))
+    return stripped
+
+
+def remove_empty_text_edges(segments: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    while segments and segments[0].get("type") == "text":
+        data = dict(segments[0].get("data") or {})
+        text = str(data.get("text") or "").lstrip()
+        if text:
+            data["text"] = text
+            segments[0]["data"] = data
+            break
+        segments.pop(0)
+    while segments and segments[-1].get("type") == "text":
+        data = dict(segments[-1].get("data") or {})
+        text = str(data.get("text") or "").rstrip()
+        if text:
+            data["text"] = text
+            segments[-1]["data"] = data
+            break
+        segments.pop()
+    return segments
+
+
+def onebot_event_to_adapter_event(
+    event: dict[str, Any],
+    *,
+    text: str,
+    message: AdapterMessage | None = None,
+) -> AdapterEvent:
+    message_type = str(event.get("message_type") or "private")
+    chat_id = str(event.get("group_id") if message_type == "group" else event.get("user_id") or "")
+    user_id = str(event.get("user_id") or chat_id)
+    sender = event.get("sender") or {}
+    return AdapterEvent(
+        platform="onebotv11",
+        chat_id=chat_id,
+        user_id=user_id,
+        text=text or (message.to_text() if message else ""),
+        chat_type="group" if message_type == "group" else "private",
+        user_name=sender_display_name(sender, user_id),
+        platform_message_id=str(event.get("message_id")) if event.get("message_id") is not None else None,
+        raw=event,
+        message=message,
+    )

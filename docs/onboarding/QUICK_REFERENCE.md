@@ -31,7 +31,8 @@ core/controller.py            NoraController.handle_message()
 
 | 配置项 | 位置 | 说明 |
 |--------|------|------|
-| Telegram Token | `config.yml` → `telegram.bot_token` | |
+| Telegram Token | `adapters/telegram/config.json` → `bot_token` | 不写入全局 `config.yml` |
+| OneBot v11 连接 | `adapters/onebotv11/config.json` | `websocket_url` / `access_token` / `enable_napcat_api` |
 | LLM Provider | `config.yml` → `llm.provider` | `gemini` 或 `openai` |
 | API Keys | `config.yml` → `llm.api_keys.*` | |
 | 模型别名 | `config.yml` → `llm.models.*` | `smart` / `fast` / `coder` / `summary` |
@@ -118,6 +119,7 @@ python cli.py --configure
 
 # 运行主程序
 python main.py
+python main.py --no-tui --adapter onebotv11
 
 # Telegram 指令（运行后在聊天中）
 # /regenerate_proactive [replace|append]
@@ -171,6 +173,7 @@ python tui.py
 | `brain/prompts.py` | 提示词组装逻辑 + 身份上下文加载 |
 | `adapters/PROMPT.md` | 通用平台适配协议：跨平台人格连续性、媒体标记、`[SPLIT]` |
 | `adapters/telegram/PROMPT.md` | Telegram 平台特定提示（格式、长度等） |
+| `adapters/onebotv11/PROMPT.md` | OneBot v11 / QQ 平台特定提示（群聊、CQ/媒体、工具限制） |
 
 > ⚠️ 修改行为时，优先改 `system.jinja`；修改性格/人设时，改 `SOUL.md`（优先）或 `persona_nora.jinja`（回退）。
 

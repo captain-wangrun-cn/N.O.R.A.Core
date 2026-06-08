@@ -36,6 +36,7 @@
 - **不提交** `config.yml`、`.env`（已在 `.gitignore`）
 - 新增配置项时，同步更新 `config.example.yml`
 - 配置读取统一走 `config.py` 的 helper 函数（如 `get_message_history_config()`）
+- 平台 adapter 的私有配置放在对应目录的 `config.json`，并提供 `config.example.json`；不要把 token、access token、websocket URL 等 adapter 私有项塞回全局 `config.yml`。例如 Telegram 使用 `adapters/telegram/config.json`，OneBot v11 使用 `adapters/onebotv11/config.json`。
 
 ---
 

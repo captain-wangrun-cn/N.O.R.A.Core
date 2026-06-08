@@ -27,6 +27,18 @@ python cli.py test-rag
 python cli.py history
 ```
 
+平台 adapter 的私有配置不由 CLI 向导写入，请编辑对应目录的 `config.json`：
+
+- Telegram: `adapters/telegram/config.json`
+- OneBot v11: `adapters/onebotv11/config.json`
+
+启动时可选择 adapter：
+
+```bash
+python main.py --no-tui --adapter telegram
+python main.py --no-tui --adapter onebotv11
+```
+
 ## RAG 数据清理（高危）
 
 在菜单“🧹 清理 RAG 数据”中，当前支持：

@@ -16,9 +16,9 @@ from telegram.ext import (
     filters,
 )
 
-import config
 from adapters.aggregator import MessageAggregator
 from adapters.base import BaseAdapter, PlatformFeatures
+from adapters.config_utils import adapter_config_path, load_adapter_config
 from memory.message_history import MessageHistory
 from workspace_config import get_workspace_manager
 
@@ -79,9 +79,19 @@ class TelegramAdapter(
 
     def __init__(self):
         super().__init__()
-        token = config.get_telegram_token()
+        adapter_config = load_adapter_config(
+            "telegram",
+            {"bot_token": "YOUR_TELEGRAM_BOT_TOKEN"},
+        )
+        token = str(adapter_config.get("bot_token") or "").strip()
         if not token:
-            raise ValueError("Telegram Bot Token not found in config.")
+            raise ValueError(
+                f"Telegram bot_token not found. Please edit {adapter_config_path('telegram')}."
+            )
+        if token == "YOUR_TELEGRAM_BOT_TOKEN":
+            raise ValueError(
+                f"Telegram bot_token is still the placeholder. Please edit {adapter_config_path('telegram')}."
+            )
 
         workspace_manager = get_workspace_manager()
         self.workspace_root = str(workspace_manager.root)
@@ -101,6 +111,8 @@ class TelegramAdapter(
 
     def run(self, message_handler: Callable[[Dict[str, Any]], Any]):
         self._message_handler = message_handler
+        import config
+
         app_config = config.get_config()
         interaction_config = app_config.get("interaction", {}) if app_config else {}
         buffer_timeout = interaction_config.get("buffer_timeout", 3.0)

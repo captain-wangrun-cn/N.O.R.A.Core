@@ -6,6 +6,7 @@ Copyright © WR（captain-wangrun-cn） All rights reserved
 """后脑 Mixin — _generate_response 工具循环 + 文本处理工具方法。"""
 
 import asyncio
+import inspect
 import logging
 import os
 import re
@@ -231,20 +232,35 @@ class BackBrainMixin:
                 tool_args["chat_id"] = runtime_key
         tool_manager = getattr(self, "tool_manager", None)
         adapter_tool_specs = getattr(tool_manager, "_adapter_tool_specs", {})
-        if platform == "telegram" and tool_name in adapter_tool_specs:
-            if not str(tool_args.get("chat_id", "")).strip():
+        adapter_spec = adapter_tool_specs.get(tool_name)
+        if adapter_spec and getattr(adapter_spec, "platform", platform) == platform:
+            spec_callable = getattr(adapter_spec, "callable", None)
+            try:
+                params = set(inspect.signature(spec_callable).parameters) if spec_callable else set()
+            except Exception:
+                params = set()
+            if not params and platform == "telegram":
+                params = {"chat_id"}
+                if tool_name in {
+                    "telegram_get_chat_member",
+                    "telegram_mute_chat_member",
+                    "telegram_unmute_chat_member",
+                    "telegram_ban_chat_member",
+                    "telegram_unban_chat_member",
+                    "telegram_set_chat_administrator_custom_title",
+                    "telegram_set_chat_member_tag",
+                }:
+                    params.add("user_id")
+            if "chat_id" in params and not str(tool_args.get("chat_id", "")).strip():
                 tool_args["chat_id"] = platform_chat_id
-            telegram_target_tools = {
-                "telegram_get_chat_member",
-                "telegram_mute_chat_member",
-                "telegram_unmute_chat_member",
-                "telegram_ban_chat_member",
-                "telegram_unban_chat_member",
-                "telegram_set_chat_administrator_custom_title",
-                "telegram_set_chat_member_tag",
-            }
             if (
-                tool_name in telegram_target_tools
+                "group_id" in params
+                and str(context.get("chat_type", "") if context else "").lower() in {"group", "supergroup"}
+                and not str(tool_args.get("group_id", "")).strip()
+            ):
+                tool_args["group_id"] = platform_chat_id
+            if (
+                "user_id" in params
                 and not str(tool_args.get("user_id", "")).strip()
                 and context
                 and str(context.get("reply_to_user_id", "")).strip()

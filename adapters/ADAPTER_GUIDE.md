@@ -9,6 +9,7 @@
 - `MessageSegment` / `AdapterMessage`：轻量消息段，支持文本和媒体，并能序列化为 NORA 现有 `[image: ...]` / `[file: ...]` 标记。
 - `metadata.json`：适配器清单，必须说明对接的真实平台、协议、能力、限制与隐私提示。
 - `PROMPT.md`：平台专属提示词，只写平台格式和限制；通用人格/媒体协议在 `adapters/PROMPT.md`。
+- `config.json`：适配器私有可编辑配置，必须放在对应 adapter 目录下，并提供 `config.example.json`；不要把平台 token、access token、websocket 地址等私有项放进全局 `config.yml`。
 
 ## 2. 必需接口
 
@@ -49,6 +50,8 @@ Adapter 可以通过 `get_adapter_tools()` 向后脑暴露平台能力。返回�
 ```text
 adapters/<platform>/
 ├─ __init__.py
+├─ config.json      # 用户本地编辑的 adapter 私有配置
+├─ config.example.json
 ├─ main.py          # 对外 Adapter 类
 ├─ message.py       # 平台事件 -> AdapterEvent / AdapterMessage
 ├─ sender.py        # 发送、编辑、删除、typing

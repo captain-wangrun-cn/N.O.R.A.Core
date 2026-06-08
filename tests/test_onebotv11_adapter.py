@@ -1,0 +1,180 @@
+import asyncio
+import json
+from types import SimpleNamespace
+
+from adapters.base import AdapterToolSpec
+from adapters.onebotv11.main import OneBotV11Adapter
+from adapters.onebotv11.message import (
+    is_at_self,
+    onebot_message_segments,
+    plain_text_from_segments,
+    strip_at_self,
+)
+from adapters.onebotv11.sender import OneBotSenderMixin
+from adapters.onebotv11.tools import OneBotV11ToolsMixin
+from core.back_brain import BackBrainMixin
+
+
+class ToolOnlyOneBot(OneBotV11ToolsMixin):
+    def __init__(self, enable_napcat_api=False):
+        self.current_chat_id = "10001"
+        self._chat_types = {"10001": "group"}
+        self.enable_napcat_api = enable_napcat_api
+        self.calls = []
+
+    async def call_api(self, action, params=None):
+        self.calls.append((action, params or {}))
+        return {"status": "ok", "retcode": 0, "data": {"action": action, "params": params or {}}}
+
+
+def _loads(result):
+    return json.loads(result)
+
+
+def test_onebot_message_helpers_parse_cq_and_at_self():
+    segments = onebot_message_segments("[CQ:at,qq=123] 你好[CQ:image,file=a.jpg,url=http://x/a.jpg]")
+
+    assert is_at_self(segments, "123") is True
+    stripped = strip_at_self(segments, "123")
+    assert is_at_self(stripped, "123") is False
+    assert "你好" in plain_text_from_segments(stripped)
+    assert any(seg["type"] == "image" for seg in segments)
+
+
+def test_onebot_standard_tools_are_exposed_without_napcat():
+    adapter = ToolOnlyOneBot(enable_napcat_api=False)
+
+    tools = adapter.get_adapter_tools()
+    names = {tool.name for tool in tools}
+
+    assert "onebotv11_get_group_member_list" in names
+    assert "onebotv11_set_group_ban" in names
+    assert "onebotv11_napcat_send_poke" not in names
+    assert all(isinstance(tool, AdapterToolSpec) for tool in tools)
+    assert next(tool for tool in tools if tool.name == "onebotv11_set_group_ban").risk == "high"
+
+
+def test_onebot_napcat_tools_are_optional():
+    adapter = ToolOnlyOneBot(enable_napcat_api=True)
+
+    names = {tool.name for tool in adapter.get_adapter_tools()}
+
+    assert "onebotv11_napcat_send_poke" in names
+    assert "onebotv11_napcat_get_ai_characters" in names
+
+
+def test_onebot_group_tools_use_current_group_and_reply_user_shape():
+    adapter = ToolOnlyOneBot()
+
+    result = _loads(asyncio.run(adapter.onebotv11_get_group_member_info("20002")))
+    ban = _loads(asyncio.run(adapter.onebotv11_set_group_ban("20002", duration=60, reason="spam")))
+
+    assert result["ok"] is True
+    assert ban["ok"] is True
+    assert ban["reason"] == "spam"
+    assert adapter.calls == [
+        (
+            "get_group_member_info",
+            {"group_id": 10001, "user_id": 20002, "no_cache": False},
+        ),
+        (
+            "set_group_ban",
+            {"group_id": 10001, "user_id": 20002, "duration": 60},
+        ),
+    ]
+
+
+def test_onebot_tool_error_returns_json():
+    adapter = ToolOnlyOneBot()
+
+    result = _loads(asyncio.run(adapter.onebotv11_get_group_member_info("not-a-number")))
+
+    assert result["ok"] is False
+    assert "user_id must be numeric" in result["error"]
+
+
+def test_onebot_napcat_send_poke_prefers_current_group():
+    adapter = ToolOnlyOneBot(enable_napcat_api=True)
+
+    result = _loads(asyncio.run(adapter.onebotv11_napcat_send_poke("20002")))
+
+    assert result["ok"] is True
+    assert adapter.calls == [("send_poke", {"user_id": 20002, "group_id": 10001})]
+
+
+class SenderOnlyOneBot(OneBotSenderMixin):
+    def __init__(self):
+        self.workspace_root = "D:/workspace"
+        self.downloads_dir = "D:/workspace/downloads"
+        self.data_dir = "D:/workspace/data"
+        self._chat_types = {"10001": "group", "20002": "private"}
+        self.calls = []
+
+    async def call_api(self, action, params=None):
+        self.calls.append((action, params or {}))
+        return {"status": "ok", "retcode": 0, "data": {"message_id": 42}}
+
+
+def test_onebot_sender_builds_group_target_and_text_segments():
+    adapter = SenderOnlyOneBot()
+
+    ids = asyncio.run(adapter.send_message("10001", "hello", parse_media=False))
+
+    assert ids == ["42"]
+    assert adapter.calls == [
+        (
+            "send_msg",
+            {
+                "message_type": "group",
+                "group_id": 10001,
+                "message": [{"type": "text", "data": {"text": "hello"}}],
+            },
+        )
+    ]
+
+
+class ContextInjectionProbe(BackBrainMixin):
+    def __init__(self):
+        async def onebot_tool(user_id: str, group_id: str = "", chat_id: str = ""):
+            return "ok"
+
+        self.tool_manager = SimpleNamespace(
+            _adapter_tool_specs={
+                "onebotv11_set_group_ban": SimpleNamespace(
+                    platform="onebotv11",
+                    callable=onebot_tool,
+                )
+            }
+        )
+
+
+def test_current_tool_context_injects_onebot_group_and_reply_user():
+    probe = ContextInjectionProbe()
+
+    args = probe._inject_current_tool_context(
+        "onebotv11_set_group_ban",
+        {},
+        runtime_key="onebotv11:10001",
+        platform="onebotv11",
+        platform_chat_id="10001",
+        storage_id="10001",
+        context={"chat_type": "group", "reply_to_user_id": "20002"},
+    )
+
+    assert args["chat_id"] == "10001"
+    assert args["group_id"] == "10001"
+    assert args["user_id"] == "20002"
+
+
+class InitOnlyOneBot(OneBotV11Adapter):
+    def __init__(self):
+        pass
+
+
+def test_onebot_metadata_loads_without_connection():
+    adapter = InitOnlyOneBot()
+
+    metadata = adapter.load_metadata()
+
+    assert metadata.adapter_id == "onebotv11"
+    assert metadata.platform.name == "QQ / OneBot v11"

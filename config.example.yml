@@ -28,8 +28,10 @@ network:
     # all: "socks5://127.0.0.1:7890"
     # no_proxy: "127.0.0.1,localhost,.local"
 
-telegram:
-  bot_token: "YOUR_TELEGRAM_BOT_TOKEN"
+# 平台 adapter 私有配置放在各自目录的 config.json 中，不写入全局 config.yml。
+# 例如：
+#   - adapters/telegram/config.json -> bot_token
+#   - adapters/onebotv11/config.json -> websocket_url / access_token / enable_napcat_api
 
 # 主人识别（跨平台接力）
 # Nora 是同一个连续的人；owner 用来认出"哪个账号是主人"。

@@ -125,10 +125,6 @@ def get_proxy_config():
     return legacy_proxy
 
 # --- Helper accessors ---
-def get_telegram_token():
-    cfg = _safe_config()
-    return cfg.get("telegram", {}).get("bot_token")
-
 def get_llm_provider():
     cfg = _safe_config()
     return cfg.get("llm", {}).get("provider", "gemini")

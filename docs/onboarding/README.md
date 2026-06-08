@@ -64,6 +64,7 @@
 | 消息历史/压缩 | `memory/message_history.py` |
 | RAG | `memory/rag.py`, `memory/vector.py`, `memory/embed.py` |
 | Telegram 适配 | `adapters/telegram/main.py` |
+| OneBot v11 适配 | `adapters/onebotv11/main.py` |
 | 外部触发器系统 | `triggers/` |
 | 技能加载 | `skills/loader.py` |
 | 成本跟踪 | `core/cost_tracker.py`, `view_costs.py` |
