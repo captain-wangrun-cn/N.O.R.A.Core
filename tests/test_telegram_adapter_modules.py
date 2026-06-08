@@ -6,6 +6,7 @@ from adapters.telegram.constants import FILE_PATTERN, TG_MSG_MAX_LENGTH
 from adapters.telegram.formatting import _markdown_to_html, _split_long_text
 from adapters.telegram.message import context_from_update, has_bot_mention, media_message, strip_bot_mention
 from adapters.telegram.main import TelegramAdapter
+from brain.prompts import load_identity_context
 from core.back_brain import _image_ids_by_platform_message_id
 from core.message_handler import _attach_platform_ids_to_media
 
@@ -80,8 +81,11 @@ def _fake_update(
     username="alice",
     message_id=456,
     reply_to_message=None,
+    chat_title="测试群",
 ):
     chat = SimpleNamespace(id=-100 if chat_type != "private" else user_id, type=chat_type)
+    if chat_type != "private":
+        chat.title = chat_title
     user = SimpleNamespace(
         id=user_id,
         first_name=first_name,
@@ -103,7 +107,13 @@ def _fake_update(
 class _IncomingOnlyTelegram(TelegramAdapter):
     def __init__(self):
         self.bot_username = "NoraBot"
-        self.application = SimpleNamespace(bot=SimpleNamespace(id=999))
+        class FakeBot:
+            id = 999
+
+            async def get_chat_member_count(self, chat_id):
+                return 42
+
+        self.application = SimpleNamespace(bot=FakeBot())
 
 
 def test_context_from_update_includes_sender_identity_and_platform_message_id():
@@ -169,6 +179,10 @@ def test_group_processing_accepts_bot_mention_and_strips_before_aggregation():
         assert context["user_name"] == "Alice Smith"
         assert context["chat_type"] == "group"
         assert context["platform_message_id"] == "777"
+        assert context["chat_title"] == "测试群"
+        assert context["group_member_count"] == 42
+        assert context["group_online_count"] is None
+        assert context["group_online_count_status"] == "unavailable:telegram_bot_api"
 
     asyncio.run(run())
 
@@ -212,6 +226,7 @@ def test_media_group_flush_preserves_all_platform_message_ids():
                 "photos": ["[image: data/telegram/a.jpg]", "[image: data/telegram/b.jpg]"],
                 "caption": "caption",
                 "chat_id": "-100",
+                "update": update,
                 "context": context_from_update(update, ""),
                 "chat_type": "group",
                 "reply_info": None,
@@ -225,6 +240,8 @@ def test_media_group_flush_preserves_all_platform_message_ids():
 
         assert captured[0]["platform_message_id"] == "101"
         assert captured[0]["platform_message_ids"] == ["101", "102"]
+        assert captured[0]["chat_title"] == "测试群"
+        assert captured[0]["group_member_count"] == 42
 
     asyncio.run(run())
 
@@ -337,31 +354,58 @@ def test_group_command_requires_mention_and_context_strips_mention():
         assert calls[0]["user_id"] == "123"
         assert calls[0]["user_name"] == "Alice Smith"
         assert calls[0]["platform_message_id"] == "802"
+        assert calls[0]["chat_title"] == "测试群"
+        assert calls[0]["group_member_count"] == 42
 
     asyncio.run(run())
 
 
 def test_callback_context_includes_sender_identity_and_platform_message_id():
-    adapter = _IncomingOnlyTelegram()
-    query = SimpleNamespace(
-        id="cb-909",
-        from_user=SimpleNamespace(
-            id=321,
-            first_name="Carol",
-            last_name="Jones",
-            username="carol",
-        ),
-        message=SimpleNamespace(
-            message_id=909,
-            chat=SimpleNamespace(id=-100, type="group"),
-        ),
+    async def run():
+        adapter = _IncomingOnlyTelegram()
+        query = SimpleNamespace(
+            id="cb-909",
+            from_user=SimpleNamespace(
+                id=321,
+                first_name="Carol",
+                last_name="Jones",
+                username="carol",
+            ),
+            message=SimpleNamespace(
+                message_id=909,
+                chat=SimpleNamespace(id=-100, type="group", title="按钮群"),
+            ),
+        )
+
+        context = await adapter._callback_context(query, "/set_stream on")
+
+        assert context["platform"] == "telegram"
+        assert context["chat_id"] == "-100"
+        assert context["user_id"] == "321"
+        assert context["user_name"] == "Carol Jones"
+        assert context["chat_type"] == "group"
+        assert context["platform_message_id"] == "cb-909"
+        assert context["chat_title"] == "按钮群"
+        assert context["group_member_count"] == 42
+
+    asyncio.run(run())
+
+
+def test_identity_context_includes_group_chat_scene_counts():
+    block = load_identity_context(
+        include_schedule=False,
+        actor_display_name="Alice",
+        is_owner=False,
+        chat_type="group",
+        chat_title="测试群",
+        group_member_count=42,
+        group_member_count_status="ok",
+        group_online_count=None,
+        group_online_count_status="unavailable:telegram_bot_api",
     )
 
-    context = adapter._callback_context(query, "/set_stream on")
-
-    assert context["platform"] == "telegram"
-    assert context["chat_id"] == "-100"
-    assert context["user_id"] == "321"
-    assert context["user_name"] == "Carol Jones"
-    assert context["chat_type"] == "group"
-    assert context["platform_message_id"] == "cb-909"
+    assert "<current_chat>" in block
+    assert "群聊名称：测试群" in block
+    assert "群成员总数：42" in block
+    assert "当前在线人数：未知（unavailable:telegram_bot_api）" in block
+    assert "不要臆测具体在线人数" in block

@@ -96,6 +96,18 @@ class MessageAggregator:
                 platform_ids.append(str(part_ids))
         if platform_ids:
             self._contexts[key]["platform_message_ids"] = list(dict.fromkeys(platform_ids))
+        for field in (
+            "chat_title",
+            "chat_username",
+            "group_title",
+            "group_display_name",
+            "group_member_count",
+            "group_member_count_status",
+            "group_online_count",
+            "group_online_count_status",
+        ):
+            if field in context:
+                self._contexts[key][field] = context.get(field)
         
         self._timers[key] = asyncio.create_task(self._timer_expired(key))
 

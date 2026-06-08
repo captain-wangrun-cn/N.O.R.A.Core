@@ -227,6 +227,11 @@ class FrontBrainMixin:
             actor_display_name=identity.actor_display_name,
             is_owner=identity.is_owner,
             chat_type=chat_type,
+            chat_title=str(context.get("chat_title") or context.get("group_title") or ""),
+            group_member_count=context.get("group_member_count"),
+            group_member_count_status=str(context.get("group_member_count_status") or ""),
+            group_online_count=context.get("group_online_count"),
+            group_online_count_status=str(context.get("group_online_count_status") or ""),
         )
 
         # 可选注入块默认空串：下面这些块都是按条件/try 注入，
@@ -625,6 +630,11 @@ class FrontBrainMixin:
             actor_display_name=identity.actor_display_name,
             is_owner=identity.is_owner,
             chat_type=chat_type,
+            chat_title=str(context.get("chat_title") or context.get("group_title") or ""),
+            group_member_count=context.get("group_member_count"),
+            group_member_count_status=str(context.get("group_member_count_status") or ""),
+            group_online_count=context.get("group_online_count"),
+            group_online_count_status=str(context.get("group_online_count_status") or ""),
         )
         schedule_block = ""
         custom_block = ""

@@ -7,7 +7,7 @@ import os
 from telegram import Update
 from telegram.ext import ContextTypes
 
-from .message import context_from_update, has_bot_mention, strip_bot_mention
+from .message import has_bot_mention, strip_bot_mention
 
 logger = logging.getLogger(__name__)
 
@@ -99,7 +99,7 @@ class TelegramIncomingMixin:
                 text = f"[转发自: {forward_info}]\n{text}"
         
         if self._aggregator:
-            full_context = context_from_update(update, text)
+            full_context = await self._context_from_update_with_group(update, text)
             await self._aggregator.add_message(chat_id, text or "", full_context)
 
     async def _handle_photo(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -134,7 +134,7 @@ class TelegramIncomingMixin:
                     "caption": "",
                     "chat_id": chat_id,
                     "update": update,
-                    "context": context_from_update(update, ""),
+                    "context": await self._context_from_update_with_group(update, ""),
                     "chat_type": update.effective_chat.type,
                     "reply_info": reply_info,
                     "platform": "telegram",
@@ -165,7 +165,7 @@ class TelegramIncomingMixin:
                 text = f"[回复: {reply_info}]\n{text}"
             
             if self._aggregator:
-                full_context = context_from_update(update, text)
+                full_context = await self._context_from_update_with_group(update, text)
                 await self._aggregator.add_message(chat_id, text, full_context)
             
             logger.info(f"[{chat_id}] 收到图片: {rel_file_path}")
@@ -199,6 +199,10 @@ class TelegramIncomingMixin:
                     "platform_message_ids": platform_ids,
                 }
             )
+            source_update = buf.get("update")
+            source_chat = getattr(source_update, "effective_chat", None)
+            if source_chat is not None:
+                full_context = await self._enrich_group_context(full_context, source_chat, update=source_update)
             await self._aggregator.add_message(chat_id, text, full_context)
         
         logger.info(f"[{chat_id}] 媒体组合并完成: {len(buf['photos'])} 个媒体 (group={media_group_id})")
@@ -250,7 +254,7 @@ class TelegramIncomingMixin:
                     "caption": "",
                     "chat_id": chat_id,
                     "update": update,
-                    "context": context_from_update(update, ""),
+                    "context": await self._context_from_update_with_group(update, ""),
                     "chat_type": update.effective_chat.type,
                     "reply_info": reply_info,
                     "platform": "telegram",
@@ -278,7 +282,7 @@ class TelegramIncomingMixin:
                 text = f"[回复: {reply_info}]\n{text}"
 
             if self._aggregator:
-                full_context = context_from_update(update, text)
+                full_context = await self._context_from_update_with_group(update, text)
                 await self._aggregator.add_message(chat_id, text, full_context)
 
             logger.info(f"[{chat_id}] 收到视频: {rel_file_path}")
@@ -314,7 +318,7 @@ class TelegramIncomingMixin:
             text = f"[回复: {reply_info}]\n{text}"
         
         if self._aggregator:
-            full_context = context_from_update(update, text)
+            full_context = await self._context_from_update_with_group(update, text)
             await self._aggregator.add_message(chat_id, text, full_context)
         
         logger.info(f"[{chat_id}] 收到文档: {rel_file_path}")
@@ -349,7 +353,7 @@ class TelegramIncomingMixin:
             text = f"[回复: {reply_info}]\n{text}"
         
         if self._aggregator:
-            full_context = context_from_update(update, text)
+            full_context = await self._context_from_update_with_group(update, text)
             await self._aggregator.add_message(chat_id, text, full_context)
         
         logger.info(f"[{chat_id}] 收到贴纸: {rel_file_path}")

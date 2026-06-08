@@ -37,14 +37,15 @@ class TelegramCommandsMixin:
             return strip_bot_mention(text, self.bot_username) or fallback
         return text
 
-    def _command_context(self, update: Update, text: str) -> Dict[str, Any]:
-        return context_from_update(update, text)
+    async def _command_context(self, update: Update, text: str) -> Dict[str, Any]:
+        context = context_from_update(update, text)
+        return await self._enrich_group_context(context, update.effective_chat, update=update)
 
     async def _start_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not self._command_should_process(update):
             return
         if self._message_handler:
-            event_context = self._command_context(update, self._command_text(update, "/start"))
+            event_context = await self._command_context(update, self._command_text(update, "/start"))
             await self._message_handler(event_context)
 
     async def _clear_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -53,7 +54,7 @@ class TelegramCommandsMixin:
         chat_id = str(update.effective_chat.id)
         # 优先交由 controller 统一清理（包含内存上下文）
         if self._message_handler:
-            event_context = self._command_context(update, self._command_text(update, "/clear"))
+            event_context = await self._command_context(update, self._command_text(update, "/clear"))
             await self._message_handler(event_context)
             return
 
@@ -75,7 +76,7 @@ class TelegramCommandsMixin:
         chat_id = str(update.effective_chat.id)
         # 交由 controller 统一停止前/后脑任务
         if self._message_handler:
-            event_context = self._command_context(update, self._command_text(update, "/stop"))
+            event_context = await self._command_context(update, self._command_text(update, "/stop"))
             await self._message_handler(event_context)
             return
         # fallback: 没有 controller 时提示
@@ -140,7 +141,7 @@ class TelegramCommandsMixin:
                 await update.message.reply_text("❌ 指令处理器未就绪。")
             return
 
-        event_context = self._command_context(update, self._command_text(update, "/context"))
+        event_context = await self._command_context(update, self._command_text(update, "/context"))
         await self._message_handler(event_context)
 
     async def _debug_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -153,7 +154,7 @@ class TelegramCommandsMixin:
                 await update.message.reply_text("❌ 指令处理器未就绪。")
             return
 
-        event_context = self._command_context(update, self._command_text(update, "/debug"))
+        event_context = await self._command_context(update, self._command_text(update, "/debug"))
         await self._message_handler(event_context)
 
     async def _debug_cleanup_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -279,7 +280,7 @@ class TelegramCommandsMixin:
         if mode not in ("replace", "append"):
             mode = "replace"
 
-        event_context = self._command_context(update, f"/regenerate_proactive {mode}")
+        event_context = await self._command_context(update, f"/regenerate_proactive {mode}")
         await self._message_handler(event_context)
 
     async def _schedule_today_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -292,7 +293,7 @@ class TelegramCommandsMixin:
                 await update.message.reply_text("❌ 指令处理器未就绪。")
             return
 
-        event_context = self._command_context(update, self._command_text(update, "/schedule_today"))
+        event_context = await self._command_context(update, self._command_text(update, "/schedule_today"))
         await self._message_handler(event_context)
 
     async def _custom_scope_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -347,7 +348,7 @@ class TelegramCommandsMixin:
 
         arg = (context.args[0].strip().lower() if context and context.args else "").replace("\n", " ")
         if arg in ("on", "off"):
-            event_context = self._command_context(update, f"/set_stream {arg}")
+            event_context = await self._command_context(update, f"/set_stream {arg}")
             await self._message_handler(event_context)
             return
 
@@ -356,7 +357,7 @@ class TelegramCommandsMixin:
                 await update.message.reply_text("用法：/set_stream on|off（on=一次性输出，off=流式输出）")
             return
 
-        event_context = self._command_context(update, self._command_text(update, "/set_stream"))
+        event_context = await self._command_context(update, self._command_text(update, "/set_stream"))
         await self._message_handler(event_context)
 
         keyboard = InlineKeyboardMarkup([

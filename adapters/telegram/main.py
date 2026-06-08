@@ -26,6 +26,7 @@ from .callbacks import TelegramCallbacksMixin
 from .cleanup import TelegramCleanupMixin
 from .commands import TelegramCommandsMixin
 from .constants import FILE_PATTERN, MEDIA_TYPES, TG_MSG_MAX_LENGTH
+from .group_context import TelegramGroupContextMixin
 from .incoming import TelegramIncomingMixin
 from .reply import TelegramReplyMixin
 from .sender import TelegramSenderMixin
@@ -35,6 +36,7 @@ logger = logging.getLogger(__name__)
 
 class TelegramAdapter(
     TelegramCommandsMixin,
+    TelegramGroupContextMixin,
     TelegramIncomingMixin,
     TelegramCallbacksMixin,
     TelegramCleanupMixin,

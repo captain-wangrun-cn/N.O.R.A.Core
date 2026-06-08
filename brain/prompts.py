@@ -170,6 +170,11 @@ def load_identity_context(
     actor_display_name: str = "",
     is_owner: bool = True,
     chat_type: str = "private",
+    chat_title: str = "",
+    group_member_count: Optional[int] = None,
+    group_member_count_status: str = "",
+    group_online_count: Optional[int] = None,
+    group_online_count_status: str = "",
 ) -> str:
     """
     加载 SOUL.md + USER.md + MEMORY.md (+ SCHEDULE.md) 组成身份上下文。
@@ -179,6 +184,9 @@ def load_identity_context(
         actor_display_name: 当前这轮说话人的昵称（用于"是谁在说话"判断）。
         is_owner: 当前说话人是否为主人。默认 True 以兼容旧调用（私聊即主人）。
         chat_type: 当前会话类型（private/group/...），用于决定是否提示群聊得体性。
+        chat_title: 当前群聊/会话显示名。
+        group_member_count: Telegram 群成员总数；未知时为 None。
+        group_online_count: Telegram 群在线人数；Bot API 通常不可用，未知时为 None。
     """
     _ensure_workspace_identity_files()
 
@@ -213,6 +221,17 @@ def load_identity_context(
     )
     if speaker_block:
         sections.append(speaker_block)
+
+    chat_block = _build_current_chat_block(
+        chat_type=chat_type,
+        chat_title=chat_title,
+        group_member_count=group_member_count,
+        group_member_count_status=group_member_count_status,
+        group_online_count=group_online_count,
+        group_online_count_status=group_online_count_status,
+    )
+    if chat_block:
+        sections.append(chat_block)
 
     if not sections:
         return ""
@@ -385,6 +404,45 @@ def get_adapter_platform_metadata_prompt_block(platform: Optional[str] = None) -
     return "\n".join(lines)
 
 
+def _format_optional_count(value: Optional[int], status: str = "") -> str:
+    if value is None:
+        return f"未知（{status}）" if status else "未知"
+    return str(value)
+
+
+def _build_current_chat_block(
+    *,
+    chat_type: str = "private",
+    chat_title: str = "",
+    group_member_count: Optional[int] = None,
+    group_member_count_status: str = "",
+    group_online_count: Optional[int] = None,
+    group_online_count_status: str = "",
+) -> str:
+    chat_type_value = str(chat_type or "private").strip().lower()
+    if chat_type_value in ("", "private"):
+        return ""
+
+    title = (chat_title or "").strip() or "（未提供群名）"
+    member_count = _format_optional_count(group_member_count, group_member_count_status)
+    online_count = _format_optional_count(group_online_count, group_online_count_status)
+
+    lines = [
+        "<current_chat>",
+        f"当前聊天类型：{chat_type_value}",
+        f"群聊名称：{title}",
+        f"群成员总数：{member_count}",
+        f"当前在线人数：{online_count}",
+    ]
+    if group_online_count is None:
+        lines.append(
+            "注意：Telegram Bot API 通常不提供群聊实时在线人数；如果这里显示未知/不可用，"
+            "不要臆测具体在线人数，也不要把未知说成确定数字。"
+        )
+    lines.append("</current_chat>")
+    return "\n".join(lines)
+
+
 def load_adapter_prompt(platform: Optional[str] = None) -> str:
     """读取通用 adapter prompt + 平台 metadata + 平台专属 prompt。"""
     blocks: list[str] = []
@@ -433,6 +491,11 @@ def get_system_prompt(
     actor_display_name: str = "",
     is_owner: bool = True,
     chat_type: str = "private",
+    chat_title: str = "",
+    group_member_count: Optional[int] = None,
+    group_member_count_status: str = "",
+    group_online_count: Optional[int] = None,
+    group_online_count_status: str = "",
 ) -> str:
     """
     使用 Jinja2 模板渲染最终的 System Prompt。
@@ -443,6 +506,7 @@ def get_system_prompt(
         actor_display_name: 当前说话人昵称（主人/访客分离用）
         is_owner: 当前说话人是否为主人（默认 True 兼容旧调用）
         chat_type: 会话类型（private/group），决定群聊得体性提示
+        chat_title: 当前群聊显示名。
     """
     _ensure_workspace_identity_files()
 
@@ -461,6 +525,11 @@ def get_system_prompt(
         actor_display_name=actor_display_name,
         is_owner=is_owner,
         chat_type=chat_type,
+        chat_title=chat_title,
+        group_member_count=group_member_count,
+        group_member_count_status=group_member_count_status,
+        group_online_count=group_online_count,
+        group_online_count_status=group_online_count_status,
     )
     custom_prompt = load_custom_prompt() if should_inject_custom(custom_scope, custom_scopes) else ""
     all_instructions = list(instructions or [])

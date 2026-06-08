@@ -203,12 +203,19 @@ def test_aggregator_preserves_context_platform_message_ids_from_media_group():
                 "chat_type": "group",
                 "platform_message_id": "101",
                 "platform_message_ids": ["101", "102"],
+                "chat_title": "测试群",
+                "group_member_count": 42,
+                "group_online_count": None,
+                "group_online_count_status": "unavailable:telegram_bot_api",
             },
         )
 
         await asyncio.sleep(0.03)
 
         assert completed[0]["platform_message_ids"] == ["101", "102"]
+        assert completed[0]["chat_title"] == "测试群"
+        assert completed[0]["group_member_count"] == 42
+        assert completed[0]["group_online_count"] is None
 
     asyncio.run(run())
 

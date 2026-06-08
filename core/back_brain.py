@@ -561,6 +561,11 @@ class BackBrainMixin:
                 actor_display_name=actor_display_name,
                 is_owner=identity.is_owner,
                 chat_type=chat_type,
+                chat_title=str(context.get("chat_title") or context.get("group_title") or ""),
+                group_member_count=context.get("group_member_count"),
+                group_member_count_status=str(context.get("group_member_count_status") or ""),
+                group_online_count=context.get("group_online_count"),
+                group_online_count_status=str(context.get("group_online_count_status") or ""),
             )
 
             # --- 3. 执行循环 (Tool Execution Loop) ---

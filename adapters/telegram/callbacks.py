@@ -39,7 +39,7 @@ class TelegramCallbacksMixin:
             return f"@{username}"
         return user_id or "Unknown"
 
-    def _callback_context(self, query, text: str) -> dict[str, Any]:
+    def _callback_base_context(self, query, text: str) -> dict[str, Any]:
         chat = query.message.chat if query and query.message else None
         callback_event_id = getattr(query, "id", None) if query else None
         event = build_telegram_event(
@@ -52,6 +52,11 @@ class TelegramCallbacksMixin:
             raw=query,
         )
         return event.to_context()
+
+    async def _callback_context(self, query, text: str) -> dict[str, Any]:
+        context = self._callback_base_context(query, text)
+        chat = query.message.chat if query and query.message else None
+        return await self._enrich_group_context(context, chat)
 
     async def _handle_callback(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """处理 inline keyboard 回调"""
@@ -109,7 +114,7 @@ class TelegramCallbacksMixin:
         text = f"[按钮点击: {callback_data}]"
         
         if self._aggregator:
-            full_context = self._callback_context(query, text)
+            full_context = await self._callback_context(query, text)
             await self._aggregator.add_message(chat_id, text, full_context)
         
         logger.info(f"[{chat_id}] 收到回调: {callback_data}")
@@ -190,7 +195,7 @@ class TelegramCallbacksMixin:
             await query.answer("未知选项", show_alert=True)
             return
 
-        event_context = self._callback_context(query, f"/set_stream {action}")
+        event_context = await self._callback_context(query, f"/set_stream {action}")
 
         await self._message_handler(event_context)
 
@@ -500,7 +505,7 @@ class TelegramCallbacksMixin:
             await query.edit_message_text(f"✅ 已更新 {alias} 模型为: {model_name}\n正在刷新模型...")
 
             if self._message_handler:
-                event_context = self._callback_context(query, "/reload_models")
+                event_context = await self._callback_context(query, "/reload_models")
                 await self._message_handler(event_context)
         except Exception as e:
             await query.edit_message_text(f"❌ 更新失败: {e}")
