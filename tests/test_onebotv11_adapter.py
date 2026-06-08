@@ -3,7 +3,7 @@ import json
 from types import SimpleNamespace
 
 from adapters.base import AdapterToolSpec
-from adapters.onebotv11.main import OneBotV11Adapter
+from adapters.onebotv11.main import MENTION_ONLY_TEXT, OneBotV11Adapter
 from adapters.onebotv11.message import (
     is_at_self,
     onebot_message_segments,
@@ -295,3 +295,54 @@ def test_onebot_group_context_injects_group_title_and_counts():
     assert enriched["group_member_count_status"] == "ok"
     assert enriched["group_online_count"] is None
     assert enriched["group_online_count_status"] == "unavailable:onebotv11_standard"
+
+
+class IncomingOnlyOneBot(OneBotV11Adapter):
+    def __init__(self):
+        self.self_id = "999"
+        self.group_message_policy = "at_or_reply"
+        self.download_media = False
+        self._chat_types = {}
+        self._last_incoming_contexts = {}
+        self.current_chat_id = None
+
+    async def _enrich_group_context(self, context):
+        return context
+
+
+def test_onebot_group_mention_only_still_reaches_aggregator():
+    async def run():
+        adapter = IncomingOnlyOneBot()
+        captured = []
+
+        class FakeAggregator:
+            async def add_message(self, chat_id, text, context):
+                captured.append((chat_id, text, context))
+
+        adapter._aggregator = FakeAggregator()
+        event = {
+            "post_type": "message",
+            "message_type": "group",
+            "group_id": 10001,
+            "user_id": 20002,
+            "message_id": 888,
+            "sender": {"card": "Alice", "nickname": "Nick"},
+            "message": [
+                {"type": "at", "data": {"qq": "999"}},
+                {"type": "text", "data": {"text": " "}},
+            ],
+        }
+
+        await adapter.handle_onebot_event(event)
+
+        assert len(captured) == 1
+        chat_id, text, context = captured[0]
+        assert chat_id == "10001"
+        assert text == MENTION_ONLY_TEXT
+        assert context["text"] == MENTION_ONLY_TEXT
+        assert context["chat_type"] == "group"
+        assert context["user_id"] == "20002"
+        assert context["user_name"] == "Alice"
+        assert context["platform_message_id"] == "888"
+
+    asyncio.run(run())

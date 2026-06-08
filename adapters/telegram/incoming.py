@@ -11,6 +11,8 @@ from .message import has_bot_mention, strip_bot_mention
 
 logger = logging.getLogger(__name__)
 
+MENTION_ONLY_TEXT = "[群聊单独艾特: 用户只艾特了你，没有附加文字。请自然地回应。]"
+
 
 class TelegramIncomingMixin:
     def _is_group_chat(self, update: Update) -> bool:
@@ -64,8 +66,11 @@ class TelegramIncomingMixin:
             return
         chat_id = str(update.effective_chat.id)
         self.current_chat_id = chat_id # Set current chat_id
+        mention_only_trigger = self._is_group_chat(update) and self._has_bot_mention(update)
         text = update.message.text if update.message else ""
         text = self._strip_trigger_mention_if_group(update, text)
+        if not text and mention_only_trigger:
+            text = MENTION_ONLY_TEXT
 
         
         # 如果是空消息（例如，只有一张图片），也需要继续处理

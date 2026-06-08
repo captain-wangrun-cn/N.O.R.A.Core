@@ -4,6 +4,7 @@ from types import SimpleNamespace
 from adapters.base import MessageSegment
 from adapters.telegram.constants import FILE_PATTERN, TG_MSG_MAX_LENGTH
 from adapters.telegram.formatting import _markdown_to_html, _split_long_text
+from adapters.telegram.incoming import MENTION_ONLY_TEXT
 from adapters.telegram.message import context_from_update, has_bot_mention, media_message, strip_bot_mention
 from adapters.telegram.main import TelegramAdapter
 from brain.prompts import load_identity_context
@@ -183,6 +184,39 @@ def test_group_processing_accepts_bot_mention_and_strips_before_aggregation():
         assert context["group_member_count"] == 42
         assert context["group_online_count"] is None
         assert context["group_online_count_status"] == "unavailable:telegram_bot_api"
+
+    asyncio.run(run())
+
+
+def test_group_mention_only_still_reaches_aggregator():
+    async def run():
+        adapter = _IncomingOnlyTelegram()
+        captured = []
+
+        class FakeAggregator:
+            async def add_message(self, chat_id, text, context):
+                captured.append((chat_id, text, context))
+
+        adapter._aggregator = FakeAggregator()
+        adapter.current_chat_id = None
+
+        async def fake_extract_reply_info(message):
+            return None
+
+        adapter._extract_reply_info = fake_extract_reply_info
+        update = _fake_update(chat_type="group", text="@NoraBot", message_id=779)
+
+        await adapter._handle_incoming_message(update, None)
+
+        assert len(captured) == 1
+        chat_id, text, context = captured[0]
+        assert chat_id == "-100"
+        assert text == MENTION_ONLY_TEXT
+        assert context["text"] == MENTION_ONLY_TEXT
+        assert context["chat_type"] == "group"
+        assert context["user_id"] == "123"
+        assert context["user_name"] == "Alice Smith"
+        assert context["platform_message_id"] == "779"
 
     asyncio.run(run())
 

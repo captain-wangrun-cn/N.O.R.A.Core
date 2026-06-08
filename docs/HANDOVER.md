@@ -17,11 +17,15 @@
   - `[reply]` 回复最近一条入站 QQ 消息；`[reply: message_id]` 回复指定 OneBot message_id。
   - `[at: QQ号]` 艾特指定 QQ；`[at:current]` 艾特当前说话人；`[at:reply]` 艾特被当前消息 reply 的对象。
   - `adapters/onebotv11/PROMPT.md` 已教模型使用这些标记，sender 会转成 OneBot 数组消息段，不要求模型手写 CQ 码。
+- 修复 OneBot v11 与 Telegram 群聊中“单独艾特 Nora 没有正文”不响应的问题：
+  - 根因是触发用的 `@Nora` / `@NoraBot` 被剥离后，剩余文本为空，随后被空消息过滤逻辑直接 `return`。
+  - OB11/TG 现在会把这种 mention-only 触发转换为内部文本 `[群聊单独艾特: 用户只艾特了你，没有附加文字。请自然地回应。]`，继续进入聚合器和 controller；未艾特的群聊空消息仍不会触发。
 
 **验证**：
 - `.venv\Scripts\python.exe -m pytest tests\test_routing.py -q` → 24 passed。
 - `.venv\Scripts\python.exe -m pytest tests\test_onebotv11_adapter.py -q` → 13 passed。
 - `.venv\Scripts\python.exe -m py_compile core\routing.py tests\test_routing.py adapters\onebotv11\main.py adapters\onebotv11\sender.py tests\test_onebotv11_adapter.py` 通过。
+- `.venv\Scripts\python.exe -m pytest tests\test_onebotv11_adapter.py tests\test_telegram_adapter_modules.py -q` → 36 passed。
 
 ---
 

@@ -45,6 +45,8 @@ DEFAULT_CONFIG = {
     "reconnect_interval_seconds": 5,
 }
 
+MENTION_ONLY_TEXT = "[群聊单独艾特: 用户只艾特了你，没有附加文字。请自然地回应。]"
+
 
 class OneBotV11Adapter(
     OneBotMediaMixin,
@@ -305,12 +307,15 @@ class OneBotV11Adapter(
         raw_message = str(event.get("raw_message") or "")
         segments = onebot_message_segments(event.get("message"), raw_message=raw_message)
         await self._enrich_reply_context(event, segments)
+        mention_only_trigger = message_type == "group" and is_at_self(segments, self.self_id)
         if not self._message_triggers_bot(event, segments):
             return
         if message_type == "group":
             segments = remove_empty_text_edges(strip_at_self(segments, self.self_id))
 
         text = await self.segments_to_nora_text(segments)
+        if not text and mention_only_trigger:
+            text = MENTION_ONLY_TEXT
         if not text:
             return
         adapter_event = onebot_event_to_adapter_event(event, text=text)
