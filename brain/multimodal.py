@@ -118,9 +118,32 @@ def _compress_video(input_path: str, max_bytes: int) -> bytes:
             pass
 
 
+def _sniff_video_mime(path: str) -> Optional[str]:
+    """Best-effort video MIME detection for platform downloads with generic extensions."""
+    try:
+        with open(path, "rb") as f:
+            header = f.read(512)
+    except Exception:
+        return None
+
+    if len(header) >= 12 and header[4:8] == b"ftyp":
+        return "video/mp4"
+    if header.startswith(b"\x1a\x45\xdf\xa3"):
+        return "video/webm"
+    if header.startswith(b"RIFF") and header[8:12] == b"AVI ":
+        return "video/x-msvideo"
+    if header.startswith(b"FLV"):
+        return "video/x-flv"
+    if header.startswith(b"\x30\x26\xb2\x75\x8e\x66\xcf\x11\xa6\xd9\x00\xaa\x00\x62\xce\x6c"):
+        return "video/x-ms-wmv"
+    return None
+
+
 def _load_video_bytes(resolved: str) -> Tuple[Optional[bytes], Optional[str], Optional[str]]:
     """读取视频文件，过大时自动 ffmpeg 压缩。返回 (bytes, mime_type, error_message)。"""
     mime_type, _ = mimetypes.guess_type(resolved)
+    if not mime_type or not mime_type.startswith("video/"):
+        mime_type = _sniff_video_mime(resolved)
     if not mime_type or not mime_type.startswith("video/"):
         return None, None, f"文件并非视频: {resolved}"
 

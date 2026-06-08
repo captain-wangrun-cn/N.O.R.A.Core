@@ -40,6 +40,10 @@
   - 当前 context 会把被回复媒体消息 id 放进 `platform_message_ids`，便于图片入库和后续按原始 QQ message_id 反查。
   - 兼容 NapCat/OneBot 事件变体：reply id 不再只从数组消息段取，也会从 `raw_message` 的 `[CQ:reply,id=...]`、顶层 `reply_to_message_id/reply_message_id/...`、嵌套 `reply/source/quote` 中提取；当 `message` 数组漏掉 reply 段但 `raw_message` 仍有 CQ reply 时，会补入 reply 段再走 NoneBot2 类似的 `get_msg` 流程。
   - mention-only fallback 现在不会覆盖 reply 场景；如果仍掉进单独艾特，debug 日志会输出该 OneBot event 的前 2000 字符，便于继续兼容具体实现字段。
+- 修复 OneBot/NapCat 回复视频已落盘但无法理解的问题：
+  - NapCat 可能把视频下载成 `video_xxx.bin`，此前 `brain.multimodal._load_video_bytes()` 只靠扩展名/MIME 判断，导致真实视频被判定为“文件并非视频”并跳过。
+  - 多模态层现在会对通用扩展名文件做视频容器头探测，支持 MP4/WebM/AVI/FLV/WMV；`[video: ...bin]` 只要文件内容是视频，就会进入视频模型。
+  - OneBot reply 媒体系统备注不再包含字面量 `[image: ...]` / `[video: ...]`，避免被多模态正则误当成真实媒体标签加载。
 
 **验证**：
 - `.venv\Scripts\python.exe -m pytest tests\test_routing.py -q` → 24 passed。
@@ -50,6 +54,8 @@
 - `.venv\Scripts\python.exe -m py_compile adapters\onebotv11\main.py adapters\onebotv11\media.py tests\test_onebotv11_adapter.py` 通过。
 - `.venv\Scripts\python.exe -m pytest tests\test_onebotv11_adapter.py -q` → 20 passed。
 - `.venv\Scripts\python.exe -m py_compile adapters\onebotv11\main.py adapters\onebotv11\message.py adapters\onebotv11\media.py tests\test_onebotv11_adapter.py` 通过。
+- `.venv\Scripts\python.exe -m pytest tests\test_multimodal_input.py tests\test_onebotv11_adapter.py -q` → 23 passed。
+- `.venv\Scripts\python.exe -m py_compile brain\multimodal.py adapters\onebotv11\main.py tests\test_multimodal_input.py` 通过。
 
 ---
 

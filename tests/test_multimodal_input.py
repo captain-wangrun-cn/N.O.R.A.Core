@@ -1,6 +1,6 @@
 import base64
 
-from brain.multimodal import extract_image_payloads
+from brain.multimodal import extract_image_payloads, extract_video_payloads
 from brain.providers.openai import OpenAIProvider
 
 
@@ -34,3 +34,19 @@ def test_openai_build_user_content_with_images():
     assert content[0]["text"] == "看图说话"
     assert content[1]["type"] == "image_url"
     assert content[1]["image_url"]["url"].startswith("data:image/png;base64,")
+
+
+def test_extract_video_payloads_sniffs_mp4_when_extension_is_bin(tmp_path):
+    video_path = tmp_path / "video_payload.bin"
+    video_bytes = b"\x00\x00\x00\x18ftypmp42" + b"\x00" * 32
+    video_path.write_bytes(video_bytes)
+
+    clean_text, videos = extract_video_payloads(f"[video: {video_path}]\n看看这个视频")
+
+    assert "[video:" not in clean_text
+    assert "看看这个视频" in clean_text
+    assert len(videos) == 1
+    assert videos[0]["path"].endswith("video_payload.bin")
+    assert videos[0]["mime_type"] == "video/mp4"
+    assert videos[0]["bytes"] == video_bytes
+    assert videos[0]["base64"] == base64.b64encode(video_bytes).decode("utf-8")
