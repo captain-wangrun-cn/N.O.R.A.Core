@@ -108,6 +108,13 @@ class SenderOnlyOneBot(OneBotSenderMixin):
         self.downloads_dir = "D:/workspace/downloads"
         self.data_dir = "D:/workspace/data"
         self._chat_types = {"10001": "group", "20002": "private"}
+        self._last_incoming_contexts = {
+            "10001": {
+                "platform_message_id": "555",
+                "user_id": "20002",
+                "reply_to_user_id": "30003",
+            }
+        }
         self.calls = []
 
     async def call_api(self, action, params=None):
@@ -159,6 +166,49 @@ def test_onebot_sender_parses_split_markers_before_sending():
     ]
 
 
+def test_onebot_sender_parses_reply_and_at_segments():
+    adapter = SenderOnlyOneBot()
+
+    ids = asyncio.run(adapter.send_message("10001", "[reply][at:current] 收到啦"))
+
+    assert ids == ["42"]
+    assert adapter.calls == [
+        (
+            "send_msg",
+            {
+                "message_type": "group",
+                "group_id": 10001,
+                "message": [
+                    {"type": "reply", "data": {"id": "555"}},
+                    {"type": "at", "data": {"qq": "20002"}},
+                    {"type": "text", "data": {"text": " 收到啦"}},
+                ],
+            },
+        )
+    ]
+
+
+def test_onebot_sender_parses_explicit_reply_and_reply_at_target():
+    adapter = SenderOnlyOneBot()
+
+    asyncio.run(adapter.send_message("10001", "[reply:666][at:reply] 我看到了"))
+
+    assert adapter.calls == [
+        (
+            "send_msg",
+            {
+                "message_type": "group",
+                "group_id": 10001,
+                "message": [
+                    {"type": "reply", "data": {"id": "666"}},
+                    {"type": "at", "data": {"qq": "30003"}},
+                    {"type": "text", "data": {"text": " 我看到了"}},
+                ],
+            },
+        )
+    ]
+
+
 class ContextInjectionProbe(BackBrainMixin):
     def __init__(self):
         async def onebot_tool(user_id: str, group_id: str = "", chat_id: str = ""):
@@ -204,3 +254,44 @@ def test_onebot_metadata_loads_without_connection():
 
     assert metadata.adapter_id == "onebotv11"
     assert metadata.platform.name == "QQ / OneBot v11"
+
+
+class GroupContextOneBot(OneBotV11Adapter):
+    def __init__(self):
+        self._group_context_cache_data = {}
+        self.calls = []
+
+    async def call_api(self, action, params=None):
+        self.calls.append((action, params or {}))
+        return {
+            "status": "ok",
+            "retcode": 0,
+            "data": {
+                "group_name": "测试群",
+                "member_count": 12,
+                "max_member_count": 200,
+            },
+        }
+
+
+def test_onebot_group_context_injects_group_title_and_counts():
+    adapter = GroupContextOneBot()
+    context = {
+        "platform": "onebotv11",
+        "chat_id": "10001",
+        "user_id": "20002",
+        "chat_type": "group",
+        "user_name": "群名片",
+        "text": "你好",
+    }
+
+    enriched = asyncio.run(adapter._enrich_group_context(context))
+
+    assert enriched["user_name"] == "群名片"
+    assert enriched["chat_title"] == "测试群"
+    assert enriched["group_title"] == "测试群"
+    assert enriched["group_display_name"] == "测试群"
+    assert enriched["group_member_count"] == 12
+    assert enriched["group_member_count_status"] == "ok"
+    assert enriched["group_online_count"] is None
+    assert enriched["group_online_count_status"] == "unavailable:onebotv11_standard"

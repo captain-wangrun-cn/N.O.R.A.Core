@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import time
 from typing import Any, Callable, Dict
 
 from aiohttp import web
@@ -53,6 +54,8 @@ class OneBotV11Adapter(
 ):
     """OneBot v11 adapter using WebSocket/Reverse WebSocket."""
 
+    GROUP_CONTEXT_CACHE_TTL_SECONDS = 300
+
     @property
     def platform_name(self) -> str:
         return "onebotv11"
@@ -98,6 +101,8 @@ class OneBotV11Adapter(
         self._aggregator: MessageAggregator | None = None
         self.message_history = MessageHistory()
         self._chat_types: dict[str, str] = {}
+        self._group_context_cache_data: dict[str, dict[str, Any]] = {}
+        self._last_incoming_contexts: dict[str, dict[str, str]] = {}
         self._runner: web.AppRunner | None = None
         self._site: web.TCPSite | None = None
         self._ready_fired = False
@@ -221,6 +226,77 @@ class OneBotV11Adapter(
         reply_to_me = str(event.get("reply_to_user_id") or "") == str(self.self_id)
         return bool(reply_to_me)
 
+    @staticmethod
+    def _optional_int(value: Any) -> int | None:
+        if value is None or value == "":
+            return None
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            return None
+
+    async def _get_group_context_snapshot(self, group_id: str) -> dict[str, Any]:
+        group_id = str(group_id or "").strip()
+        if not group_id:
+            return {"status": "unavailable:no_group_id"}
+
+        now = time.time()
+        cached = self._group_context_cache_data.get(group_id)
+        if cached and now - float(cached.get("ts", 0.0)) < self.GROUP_CONTEXT_CACHE_TTL_SECONDS:
+            return dict(cached.get("data") or {})
+
+        try:
+            response = await self.call_api("get_group_info", {"group_id": int(group_id), "no_cache": False})
+            data = response.get("data") or {}
+            snapshot = {
+                "status": "ok",
+                "group_name": str(data.get("group_name") or "").strip(),
+                "member_count": self._optional_int(data.get("member_count")),
+                "max_member_count": self._optional_int(data.get("max_member_count")),
+            }
+        except Exception as exc:
+            snapshot = {"status": f"error:{type(exc).__name__}"}
+            logger.debug("[onebotv11] get_group_info failed for group_id=%s: %s", group_id, exc)
+
+        self._group_context_cache_data[group_id] = {"ts": now, "data": snapshot}
+        return snapshot
+
+    async def _enrich_group_context(self, context: dict[str, Any]) -> dict[str, Any]:
+        if str(context.get("chat_type") or "").lower() != "group":
+            return context
+
+        enriched = dict(context)
+        group_id = str(enriched.get("chat_id") or "").strip()
+        snapshot = await self._get_group_context_snapshot(group_id)
+        group_name = str(snapshot.get("group_name") or "").strip()
+        if group_name:
+            enriched["chat_title"] = group_name
+            enriched["group_title"] = group_name
+            enriched["group_display_name"] = group_name
+
+        enriched["group_member_count"] = snapshot.get("member_count")
+        enriched["group_member_count_status"] = str(snapshot.get("status") or "unknown")
+        enriched["group_max_member_count"] = snapshot.get("max_member_count")
+        enriched["group_online_count"] = None
+        enriched["group_online_count_status"] = "unavailable:onebotv11_standard"
+        return enriched
+
+    def _remember_incoming_context(self, chat_id: str, context: dict[str, Any]) -> None:
+        remembered: dict[str, str] = {}
+        for key in (
+            "platform_message_id",
+            "user_id",
+            "user_name",
+            "reply_to_message_id",
+            "reply_to_user_id",
+            "reply_to_user_name",
+        ):
+            value = context.get(key)
+            if value is not None and str(value).strip():
+                remembered[key] = str(value)
+        if remembered:
+            self._last_incoming_contexts[str(chat_id)] = remembered
+
     async def handle_onebot_event(self, event: dict[str, Any]) -> None:
         post_type = str(event.get("post_type") or "")
         if post_type != "message":
@@ -245,10 +321,12 @@ class OneBotV11Adapter(
         if event.get("reply_to_user_id") is not None:
             context["reply_to_user_id"] = str(event.get("reply_to_user_id"))
             context["reply_to_user_name"] = str(event.get("reply_to_user_name") or "")
+        context = await self._enrich_group_context(context)
 
         chat_id = context["chat_id"]
         self.current_chat_id = chat_id
         self._chat_types[chat_id] = context["chat_type"]
+        self._remember_incoming_context(chat_id, context)
         if self._aggregator:
             await self._aggregator.add_message(chat_id, text, context)
 

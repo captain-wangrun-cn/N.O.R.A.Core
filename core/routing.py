@@ -85,6 +85,10 @@ _SYSTEM_NOTE_BLOCK_PATTERN = re.compile(
     r"\[系统备注\][\s\S]*?(?=(?:\n\s*\n)|$)",
     re.IGNORECASE,
 )
+_SOURCE_LABEL_PATTERN = re.compile(
+    r"\[来自\s+[A-Za-z0-9_.-]+:[^\]\s/]+(?:\s*/\s*[^\]]+)?\]\s*",
+    re.IGNORECASE,
+)
 
 
 def _strip_timestamp_markers(text: str) -> str:
@@ -102,6 +106,7 @@ def sanitize_user_visible_text(text: str) -> str:
     cleaned = _INTERNAL_NOTE_BLOCK_PATTERN.sub("", text)
     cleaned = _SYSTEM_NOTE_BLOCK_PATTERN.sub("", cleaned)
     cleaned = _strip_timestamp_markers(cleaned)
+    cleaned = _SOURCE_LABEL_PATTERN.sub("", cleaned)
     cleaned = re.sub(r"\n{3,}", "\n\n", cleaned)
     return cleaned.strip()
 

@@ -154,3 +154,13 @@ def test_sanitize_user_visible_text_removes_internal_and_system_notes():
         "先这样。\n\n[系统备注] 这段仅供模型参考。\n\n[内部备注·上一轮路由记录]\n已触发后脑接管处理。"
     )
     assert cleaned == "先这样。"
+
+
+def test_sanitize_user_visible_text_removes_source_labels():
+    cleaned = sanitize_user_visible_text("[来自 onebotv11:749042488] 你好\n你好，大半夜的还没睡呢")
+    assert cleaned == "你好\n你好，大半夜的还没睡呢"
+
+
+def test_sanitize_user_visible_text_removes_source_labels_with_actor():
+    cleaned = sanitize_user_visible_text("[来自 telegram:user_a / 张三] 远端消息")
+    assert cleaned == "远端消息"

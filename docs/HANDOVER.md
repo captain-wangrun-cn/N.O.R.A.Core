@@ -5,6 +5,26 @@
 
 ## 近期关键改动（截至 2026-06-09）
 
+### 💬 OneBot v11 群上下文 + QQ 回复/艾特标记 + 来源标签防泄漏 — 2026-06-09
+
+- 修复跨平台来源标签被模型复述到用户侧的问题：
+  - `core/routing.py::sanitize_user_visible_text()` 现在会剥离 `[来自 platform:chat_id / 昵称]` 这类内部来源标签。
+  - `adapters/PROMPT.md` 明确来源标签只供模型理解消息出处，禁止原样复述。
+- OneBot v11 入站群聊上下文补齐到接近 Telegram：
+  - 群聊/私聊均继续从 `sender.card` / `sender.nickname` 写入 `user_name`（发送人显示名）。
+  - 群聊会调用并缓存 `get_group_info`，注入 `chat_title` / `group_title` / `group_display_name` / `group_member_count`，在线人数标记为 OneBot v11 标准不可用。
+- OneBot v11 出站新增 QQ 控制标记：
+  - `[reply]` 回复最近一条入站 QQ 消息；`[reply: message_id]` 回复指定 OneBot message_id。
+  - `[at: QQ号]` 艾特指定 QQ；`[at:current]` 艾特当前说话人；`[at:reply]` 艾特被当前消息 reply 的对象。
+  - `adapters/onebotv11/PROMPT.md` 已教模型使用这些标记，sender 会转成 OneBot 数组消息段，不要求模型手写 CQ 码。
+
+**验证**：
+- `.venv\Scripts\python.exe -m pytest tests\test_routing.py -q` → 24 passed。
+- `.venv\Scripts\python.exe -m pytest tests\test_onebotv11_adapter.py -q` → 13 passed。
+- `.venv\Scripts\python.exe -m py_compile core\routing.py tests\test_routing.py adapters\onebotv11\main.py adapters\onebotv11\sender.py tests\test_onebotv11_adapter.py` 通过。
+
+---
+
 ### 🩹 前脑内部备注泄漏 + OpenAI Responses Stream 兼容 + CLI 本地数据清理补齐 — 2026-06-09
 
 - 修复前脑/审查上下文中供模型阅读的 `[内部备注·上一轮路由记录]`、`[系统备注]` 偶发被模型原样复述给用户的问题：

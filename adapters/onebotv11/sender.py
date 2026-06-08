@@ -16,6 +16,10 @@ _MEDIA_TAG_PATTERN = re.compile(
     r"\[(image|video|audio|voice|file|doc|document):\s*([^\]]+)\]",
     re.IGNORECASE,
 )
+_CONTROL_TAG_PATTERN = re.compile(
+    r"\[(reply|at)(?::\s*([^\]]+))?\]",
+    re.IGNORECASE,
+)
 _SPLIT_MARKER_PATTERN = re.compile(r"\[SPLIT(?::([0-9.]+))?\]", re.IGNORECASE)
 
 
@@ -102,23 +106,68 @@ class OneBotSenderMixin:
             return {"type": "record", "data": {"file": file_value}}
         return {"type": "file", "data": {"file": file_value}}
 
-    def _text_to_onebot_segments(self, text: str, *, parse_media: bool = True) -> list[dict[str, Any]]:
+    def _last_incoming_context(self, chat_id: str) -> dict[str, str]:
+        contexts = getattr(self, "_last_incoming_contexts", {}) or {}
+        return dict(contexts.get(str(chat_id)) or {})
+
+    def _resolve_reply_id(self, raw_value: str, chat_id: str) -> str:
+        value = str(raw_value or "").strip()
+        if value:
+            return value
+        recent = self._last_incoming_context(chat_id)
+        return str(recent.get("platform_message_id") or recent.get("reply_to_message_id") or "").strip()
+
+    def _resolve_at_user_id(self, raw_value: str, chat_id: str) -> str:
+        value = str(raw_value or "").strip()
+        recent = self._last_incoming_context(chat_id)
+        if value.lower() in {"", "current", "sender", "user"}:
+            return str(recent.get("user_id") or "").strip()
+        if value.lower() in {"reply", "replied"}:
+            return str(recent.get("reply_to_user_id") or "").strip()
+        return value.lstrip("@").strip()
+
+    def _control_segment(self, tag_type: str, raw_value: str, chat_id: str) -> dict[str, Any] | None:
+        kind = tag_type.lower()
+        if kind == "reply":
+            reply_id = self._resolve_reply_id(raw_value, chat_id)
+            if reply_id:
+                return {"type": "reply", "data": {"id": reply_id}}
+            return None
+        if kind == "at":
+            user_id = self._resolve_at_user_id(raw_value, chat_id)
+            if user_id:
+                return {"type": "at", "data": {"qq": user_id}}
+            return None
+        return None
+
+    def _text_to_onebot_segments(self, text: str, *, parse_media: bool = True, chat_id: str = "") -> list[dict[str, Any]]:
         if not parse_media:
             return [{"type": "text", "data": {"text": str(text or "")}}]
 
         segments: list[dict[str, Any]] = []
         cursor = 0
         missing: list[str] = []
-        for match in _MEDIA_TAG_PATTERN.finditer(text or ""):
+        marker_pattern = re.compile(
+            rf"{_MEDIA_TAG_PATTERN.pattern}|{_CONTROL_TAG_PATTERN.pattern}",
+            re.IGNORECASE,
+        )
+        for match in marker_pattern.finditer(text or ""):
             if match.start() > cursor:
                 before = text[cursor:match.start()]
                 if before:
                     segments.append({"type": "text", "data": {"text": before}})
-            segment = self._media_segment(match.group(1), match.group(2))
-            if segment:
-                segments.append(segment)
+            tag_type = str(match.group(1) or match.group(3) or "")
+            tag_value = str(match.group(2) or match.group(4) or "")
+            if tag_type.lower() in {"reply", "at"}:
+                segment = self._control_segment(tag_type, tag_value, chat_id)
+                if segment:
+                    segments.append(segment)
             else:
-                missing.append(match.group(2).strip())
+                segment = self._media_segment(tag_type, tag_value)
+                if segment:
+                    segments.append(segment)
+                else:
+                    missing.append(tag_value.strip())
             cursor = match.end()
         if cursor < len(text or ""):
             rest = text[cursor:]
@@ -150,12 +199,14 @@ class OneBotSenderMixin:
         parse_media: bool,
     ) -> list[str]:
         all_message_ids: list[str] = []
-        segments = self._text_to_onebot_segments(text, parse_media=parse_media)
+        target_chat_id = str(target.get("group_id") or target.get("user_id") or "")
+        segments = self._text_to_onebot_segments(text, parse_media=parse_media, chat_id=target_chat_id)
         chunks: list[list[dict[str, Any]]] = []
         current: list[dict[str, Any]] = []
         current_text_len = 0
         for segment in segments:
-            if segment.get("type") == "text":
+            segment_type = str(segment.get("type") or "")
+            if segment_type == "text":
                 text_value = str((segment.get("data") or {}).get("text") or "")
                 for part in self._split_text(text_value):
                     if current and current_text_len + len(part) > ONEBOT_MSG_MAX_LENGTH:
@@ -164,12 +215,22 @@ class OneBotSenderMixin:
                         current_text_len = 0
                     current.append({"type": "text", "data": {"text": part}})
                     current_text_len += len(part)
+            elif segment_type in {"reply", "at"}:
+                current.append(segment)
             else:
-                if current:
+                control_prefix = [seg for seg in current if str(seg.get("type") or "") in {"reply", "at"}]
+                has_visible_text = any(str(seg.get("type") or "") == "text" for seg in current)
+                if current and has_visible_text:
                     chunks.append(current)
                     current = []
                     current_text_len = 0
-                chunks.append([segment])
+                if control_prefix and not has_visible_text:
+                    current = control_prefix + [segment]
+                    chunks.append(current)
+                    current = []
+                    current_text_len = 0
+                else:
+                    chunks.append([segment])
         if current:
             chunks.append(current)
         if not chunks:
