@@ -882,7 +882,7 @@ class StepModels(ConfigStep):
         if provider_type == "gemini":
             if provider_cfg.get("base_url"):
                 return None  # 自定义地址无法自动获取模型列表，走手动输入
-            return get_gemini_models(api_key, provider_cfg.get("base_url"))
+            return get_gemini_models(api_key)
         if provider_type == "openai":
             return get_openai_models(api_key, provider_cfg.get("base_url"))
         if provider_type == "anthropic":
@@ -1179,7 +1179,7 @@ def run_wizard():
 
         if not success: # User pressed Ctrl+C
             print(t('wizard.aborted_message'))
-            return
+            return False
         
         # 检查是否选择了 "返回"
         if state.get('provider') == t('wizard.back_option'):
@@ -1245,11 +1245,38 @@ def run_wizard():
     print(yaml.dump(final_config, indent=2, allow_unicode=True))
 
     if questionary.confirm(t('wizard.save_confirm')).ask():
-        with open(config_file, 'w', encoding='utf-8') as f:
-            yaml.dump(final_config, f, indent=2, allow_unicode=True)
+        import config as config_loader
+
+        config_loader.save_config(final_config)
         print(t('wizard.success_message', file=config_file))
+        return True
     else:
         print(t('wizard.aborted_message'))
+        return False
+
+
+def ensure_config_exists(auto_configure: bool = True) -> bool:
+    """确保 config.yml 存在；缺失时可自动进入配置向导。"""
+    config_file = "config.yml"
+    if os.path.exists(config_file):
+        return True
+
+    if not auto_configure:
+        return False
+
+    print(f"⚠️ 未检测到配置文件 {config_file}。")
+    print("现在将启动配置向导，配置完成后会自动创建并保存该文件。")
+
+    wizard_completed = run_wizard()
+    if not wizard_completed:
+        print("⚠️ 配置未完成，当前操作已取消。")
+        return False
+
+    if not os.path.exists(config_file):
+        print(f"⚠️ 配置向导已结束，但未生成 {config_file}，当前操作已取消。")
+        return False
+
+    return True
 
 
 # --- RAG/Qdrant 管理功能 ---
@@ -1674,10 +1701,8 @@ def main():
 
     args = parser.parse_args()
 
-    # 无配置文件时给出友好引导（wizard 允许直接运行）
-    if args.command != "wizard" and not os.path.exists("config.yml"):
-        print("⚠️ 未检测到配置文件 config.yml。")
-        print("请先使用配置功能创建配置文件：")
+    # 无配置文件时自动进入首次配置流程
+    if args.command != "wizard" and not ensure_config_exists():
         return
 
     if args.command == "wizard":
@@ -1710,7 +1735,8 @@ if __name__ == "__main__":
         # 兜底：防止遗漏路径触发原始异常堆栈
         if "config.yml" in str(e):
             print("⚠️ 未检测到配置文件 config.yml。")
-            print("请先使用配置功能创建配置文件：")
-            print("  python cli.py wizard")
+            print("现在将启动配置向导，配置完成后会自动创建并保存该文件。")
+            if not ensure_config_exists():
+                print("⚠️ 配置未完成，程序已退出。")
         else:
             raise
