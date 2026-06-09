@@ -47,3 +47,22 @@ def test_progress_note_injects_runtime_key():
     args = _inject("store_progress_note", {"step": "检索", "explanation": "正在查"})
 
     assert args["chat_id"] == "telegram:group-1"
+
+
+def test_repeated_tool_call_hints_on_third_and_forces_on_fifth():
+    session = {}
+
+    assert BackBrainMixin._record_repeated_tool_call(session, "read_file:a.py") == (1, "none")
+    assert BackBrainMixin._record_repeated_tool_call(session, "read_file:a.py") == (2, "none")
+    assert BackBrainMixin._record_repeated_tool_call(session, "read_file:a.py") == (3, "hint")
+    assert BackBrainMixin._record_repeated_tool_call(session, "read_file:a.py") == (4, "none")
+    assert BackBrainMixin._record_repeated_tool_call(session, "read_file:a.py") == (5, "force")
+
+
+def test_repeated_tool_call_resets_for_different_target():
+    session = {}
+
+    BackBrainMixin._record_repeated_tool_call(session, "read_file:a.py")
+    BackBrainMixin._record_repeated_tool_call(session, "read_file:a.py")
+
+    assert BackBrainMixin._record_repeated_tool_call(session, "read_file:b.py") == (1, "none")

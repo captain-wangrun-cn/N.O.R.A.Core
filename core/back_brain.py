@@ -71,6 +71,10 @@ class BackBrainMixin:
     """后脑工具循环执行 + 文本清洗工具方法。"""
 
     _TIMESTAMP_PATTERN = re.compile(r"\[\d{4}-\d{2}-\d{2} \d{2}:\d{2}\]\s*")
+    TOOL_LOOP_HINT_COUNT = 3
+    TOOL_LOOP_FORCE_COUNT = 5
+    EDIT_FILE_HINT_COUNT = 3
+    EDIT_FILE_FORCE_COUNT = 5
 
     # ------------------------------------------------------------------
     # 文本清洗 class methods
@@ -160,6 +164,59 @@ class BackBrainMixin:
     # ------------------------------------------------------------------
     # 后脑主循环
     # ------------------------------------------------------------------
+
+    @classmethod
+    def _record_repeated_tool_call(cls, session: Dict[str, Any], loop_key: str) -> tuple[int, str]:
+        """Track consecutive calls to the same tool target.
+
+        Returns (call_count, action), where action is one of:
+        - none: below the hint threshold
+        - hint: third consecutive call; warn but allow the tool call
+        - force: fifth consecutive call; intervene before another repeat
+        """
+        last_loop_key = session.get("last_loop_key")
+        if last_loop_key and last_loop_key == loop_key:
+            call_count = int(session.get("tool_loop_call_count", 1) or 1) + 1
+        else:
+            call_count = 1
+
+        session["last_loop_key"] = loop_key
+        session["tool_loop_call_count"] = call_count
+        # Compatibility for older debug/status code that treated this as repeat count.
+        session["tool_call_loop_counter"] = max(0, call_count - 1)
+
+        if call_count >= cls.TOOL_LOOP_FORCE_COUNT:
+            return call_count, "force"
+        if call_count == cls.TOOL_LOOP_HINT_COUNT:
+            return call_count, "hint"
+        return call_count, "none"
+
+    @staticmethod
+    def _reset_repeated_tool_call(session: Dict[str, Any]) -> None:
+        session["tool_loop_call_count"] = 0
+        session["tool_call_loop_counter"] = 0
+
+    @staticmethod
+    def _trim_history(history: List[Dict[str, Any]], *, max_items: int = 40) -> List[Dict[str, Any]]:
+        if len(history) <= max_items:
+            return history
+        return history[-max_items:]
+
+    def _sync_backend_work_history(
+        self,
+        session: Dict[str, Any],
+        history: List[Dict[str, Any]],
+        *,
+        in_polling_mode: bool,
+    ) -> None:
+        if in_polling_mode:
+            session["_polling_backend_history"] = list(history)
+        else:
+            session["history"] = list(history)
+
+    @staticmethod
+    def _clear_polling_backend_history(session: Dict[str, Any]) -> None:
+        session.pop("_polling_backend_history", None)
 
     async def _ask_front_brain_continue(
         self, chat_id: str, current_turn: int,
@@ -592,6 +649,17 @@ class BackBrainMixin:
                     "4. 保持客观、简洁、信息密度高。前脑会将你的报告转化为自然对话回复用户。"
                 )
 
+                previous_backend_result = str(context.get("_polling_previous_backend_result") or "").strip()
+                if previous_backend_result:
+                    if len(previous_backend_result) > 6000:
+                        previous_backend_result = previous_backend_result[:6000] + "\n...（上一轮报告已截断）"
+                    instructions.append(
+                        "【轮询接力上下文】\n"
+                        "上一轮后脑已经完成了以下工作报告。请把它当作已完成进展接着做，"
+                        "不要从头重复已经做过的步骤；如果上一轮暴露了错误或缺口，优先沿着缺口继续修复。\n"
+                        f"{previous_backend_result}"
+                    )
+
             system_prompt = get_system_prompt(
                 instructions,
                 platform=self.adapter.platform_name,
@@ -633,11 +701,22 @@ class BackBrainMixin:
                 if db_context and db_context[-1].get("role") == "user" and str(db_context[-1].get("content", "")) == message_content:
                     db_context.pop()
 
-            temp_history = [
-                {"role": msg["role"], "content": msg["content"]}
-                for msg in db_context
-                if msg["role"] in ("user", "assistant", "system")
-            ]
+            in_polling_mode = context.get("_in_polling_loop", False)
+            polling_backend_history = list(session.get("_polling_backend_history") or [])
+            if in_polling_mode and polling_backend_history:
+                temp_history = [
+                    {"role": h.get("role", ""), "content": h.get("content", "")}
+                    for h in polling_backend_history
+                    if h.get("role") in ("user", "assistant", "system")
+                ]
+                logger.debug(f"[{chat_id}] 轮询模式沿用后脑临时上下文: {len(temp_history)} 条")
+            else:
+                temp_history = [
+                    {"role": msg["role"], "content": msg["content"]}
+                    for msg in db_context
+                    if msg["role"] in ("user", "assistant", "system")
+                ]
+            polling_history_insert_at = len(temp_history)
 
             # Typing 状态跟踪（在所有 turns 中保持）
             typing_started = False
@@ -649,7 +728,6 @@ class BackBrainMixin:
             # 工具回查媒体（view_media return_image=true）注入到下一轮多模态输入
             pending_tool_multimodal_images: List[Dict[str, Any]] = []
             pending_tool_multimodal_videos: List[Dict[str, Any]] = []
-            in_polling_mode = context.get("_in_polling_loop", False)
             no_reply = context.get("no_reply", False)
             # 记录最后一次 image 回合的原始输出，便于检测空输出/标签结构异常
             last_image_raw_output: Optional[str] = None
@@ -875,7 +953,21 @@ class BackBrainMixin:
                     if tool_name == "edit_file" and isinstance(tool_args, dict):
                         edit_target = tool_args.get("path", "")
                         file_edit_counts[edit_target] = file_edit_counts.get(edit_target, 0) + 1
-                        if file_edit_counts[edit_target] >= 3:
+                        if file_edit_counts[edit_target] == self.EDIT_FILE_HINT_COUNT:
+                            logger.warning(
+                                f"[{chat_id}] 对文件 {edit_target} 的 edit_file 调用已达 "
+                                f"{file_edit_counts[edit_target]} 次，仅提示检查是否需要继续。"
+                            )
+                            temp_history.append({
+                                "role": "user",
+                                "content": render_template(
+                                    'loop_interventions.jinja',
+                                    'edit_file_overuse_hint',
+                                    file_path=edit_target,
+                                    count=file_edit_counts[edit_target],
+                                )
+                            })
+                        elif file_edit_counts[edit_target] >= self.EDIT_FILE_FORCE_COUNT:
                             logger.warning(f"[{chat_id}] 对文件 {edit_target} 的 edit_file 调用已达 {file_edit_counts[edit_target]} 次，强制引导使用 write_file。")
                             temp_history.append({
                                 "role": "user",
@@ -885,56 +977,57 @@ class BackBrainMixin:
                             file_edit_counts[edit_target] = 0
                             force_no_tools = True
                             continue
-                    
-                    last_loop_key = session.get("last_loop_key")
-                    
-                    if last_loop_key and last_loop_key == loop_key:
-                        session["tool_call_loop_counter"] = session.get("tool_call_loop_counter", 0) + 1
-                    else:
-                        session["tool_call_loop_counter"] = 0
-                    
-                    session["last_loop_key"] = loop_key
 
-                    if session["tool_call_loop_counter"] >= 2:
-                        _high_tolerance_tools = {"execute_skill"}
-                        _threshold = 5 if tool_name in _high_tolerance_tools else 2
-
-                        if session["tool_call_loop_counter"] < _threshold:
-                            pass
-                        elif tool_name == "read_file":
-                            logger.warning(f"[{chat_id}] 检测到工具调用循环: {loop_key} 已连续调用 {session['tool_call_loop_counter']+1} 次。")
+                    loop_call_count, loop_action = self._record_repeated_tool_call(session, loop_key)
+                    if loop_action == "hint":
+                        logger.warning(
+                            f"[{chat_id}] 检测到工具可能重复: {loop_key} 已连续调用 {loop_call_count} 次，仅提示。"
+                        )
+                        temp_history.append({
+                            "role": "user",
+                            "content": render_template(
+                                'loop_interventions.jinja',
+                                'tool_loop_soft_hint',
+                                tool_name=tool_name,
+                                loop_key=loop_key,
+                                count=loop_call_count,
+                            )
+                        })
+                    elif loop_action == "force":
+                        if tool_name == "read_file":
+                            logger.warning(f"[{chat_id}] 检测到工具调用循环: {loop_key} 已连续调用 {loop_call_count} 次。")
                             temp_history.append({
                                 "role": "user",
                                 "content": render_template('loop_interventions.jinja', 'read_file_loop')
                             })
-                            session["tool_call_loop_counter"] = 0
+                            self._reset_repeated_tool_call(session)
                             force_no_tools = True
                             continue
                         elif tool_name == "edit_file":
-                            logger.warning(f"[{chat_id}] 检测到工具调用循环: {loop_key} 已连续调用 {session['tool_call_loop_counter']+1} 次。")
+                            logger.warning(f"[{chat_id}] 检测到工具调用循环: {loop_key} 已连续调用 {loop_call_count} 次。")
                             temp_history.append({
                                 "role": "user",
                                 "content": render_template('loop_interventions.jinja', 'edit_file_loop')
                             })
-                            session["tool_call_loop_counter"] = 0
+                            self._reset_repeated_tool_call(session)
                             force_no_tools = True
                             continue
                         elif tool_name == "execute_skill":
-                            logger.warning(f"[{chat_id}] 检测到 execute_skill 工具调用循环: {loop_key} 已连续调用 {session['tool_call_loop_counter']+1} 次。正在引导自查。")
+                            logger.warning(f"[{chat_id}] 检测到 execute_skill 工具调用循环: {loop_key} 已连续调用 {loop_call_count} 次。正在引导自查。")
                             temp_history.append({
                                 "role": "user",
                                 "content": render_template('loop_interventions.jinja', 'execute_skill_loop')
                             })
-                            session["tool_call_loop_counter"] = 0
+                            self._reset_repeated_tool_call(session)
                             force_no_tools = True
                             continue
                         else:
-                            logger.warning(f"[{chat_id}] 检测到工具调用循环: {loop_key} 已连续调用 {session['tool_call_loop_counter']+1} 次。正在引导总结。")
+                            logger.warning(f"[{chat_id}] 检测到工具调用循环: {loop_key} 已连续调用 {loop_call_count} 次。正在引导总结。")
                             temp_history.append({
                                 "role": "user",
                                 "content": render_template('loop_interventions.jinja', 'generic_tool_loop')
                             })
-                            session["tool_call_loop_counter"] = 0
+                            self._reset_repeated_tool_call(session)
                             force_no_tools = True
                             continue
                     
@@ -1061,8 +1154,8 @@ class BackBrainMixin:
                     
                     temp_history.append({"role": "user", "content": f"【Tool Output for {tool_name}】\n{truncated_result}"})
                     
-                    # CRITICAL: Sync current progress back to the main session
-                    session["history"] = list(temp_history)
+                    # CRITICAL: Sync current progress back to the active backend work history.
+                    self._sync_backend_work_history(session, temp_history, in_polling_mode=in_polling_mode)
 
                     # 每 5 轮提醒后脑汇报进展（仅非轮询模式）
                     if current_turn > 1 and current_turn % 5 == 0 and not context.get("_in_polling_loop", False):
@@ -1135,7 +1228,7 @@ class BackBrainMixin:
                             status.log_tool(tool_name, tool_args)
                             tool_result = await self.tool_manager.execute(tool_name, tool_args)
                             temp_history.append({"role": "user", "content": f"【Tool Output for {tool_name}】\n{tool_result[:4000]}"})
-                            session["history"] = list(temp_history)
+                            self._sync_backend_work_history(session, temp_history, in_polling_mode=in_polling_mode)
                         else:
                             final_response_buffer = turn_text
                             break
@@ -1614,19 +1707,35 @@ class BackBrainMixin:
                         )
                     )
 
-            # Update session history
-            session["history"] = [
+            backend_work_history = list(temp_history)
+            if in_polling_mode and full_user_prompt and full_user_prompt not in [
+                str(h.get("content", "")) for h in backend_work_history
+            ]:
+                backend_work_history.insert(
+                    min(polling_history_insert_at, len(backend_work_history)),
+                    {"role": "user", "content": full_user_prompt},
+                )
+            if final_response_buffer and not any(
+                final_response_buffer in str(h.get("content", "")) for h in backend_work_history
+            ):
+                backend_work_history.append({"role": "assistant", "content": final_response_buffer})
+
+            compact_history = [
                 h for h in temp_history
                 if h.get("role") in ("user", "assistant", "system")
                 and not str(h.get("content", "")).startswith("【Tool Output for ")
             ]
             if final_response_buffer:
-                if not any(final_response_buffer in str(h.get('content', '')) for h in session["history"]):
-                    session["history"].append({"role": "assistant", "content": final_response_buffer})
+                if not any(final_response_buffer in str(h.get('content', '')) for h in compact_history):
+                    compact_history.append({"role": "assistant", "content": final_response_buffer})
 
-            if len(session["history"]) > 20:
-                session["history"] = session["history"][-20:]
-            logger.debug(f"[{chat_id}] History updated. New length: {len(session['history'])}")
+            if in_polling_mode:
+                # 轮询期间不抛弃后脑工作上下文，保留工具输出和中间推理接力；
+                # 等前脑确认结束后由 polling loop 统一清理。
+                self._sync_backend_work_history(session, backend_work_history, in_polling_mode=True)
+            else:
+                session["history"] = self._trim_history(compact_history, max_items=20)
+            logger.debug(f"[{chat_id}] History updated. New length: {len(session.get('history', []))}")
 
         except asyncio.CancelledError:
             status.finish()

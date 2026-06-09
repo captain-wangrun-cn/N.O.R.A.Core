@@ -9,6 +9,12 @@
 {# edit_file 连续循环 #}
 {% block edit_file_loop %}【系统提示】你已经连续多次对同一个文件使用 edit_file。这是低效的做法。请停止 edit_file，改用 read_file 读取完整内容后，用 write_file 一次性写入所有修改。如果不需要继续修改，请直接给用户回复结果。{% endblock %}
 
+{# 工具循环软提示：只提醒，不禁止本轮工具调用 #}
+{% block tool_loop_soft_hint %}【系统提示】你已经连续 {{ count }} 次调用同一个工具目标：{{ loop_key }}。这只是提醒，不是禁止。请先确认重复调用是否真的能带来新信息；如果有明确理由，可以继续执行本次工具调用。若已经拿到足够信息，请整理已有结果继续。{% endblock %}
+
+{# edit_file 软提示：第 3 次只提醒，第 5 次才强制改策略 #}
+{% block edit_file_overuse_hint %}【系统提示】你已经对同一文件 {{ file_path }} 使用 edit_file {{ count }} 次。这只是提醒，不会阻止本次修改。请确认是否还适合继续小步编辑；如果改动已经变复杂，优先先读全文件再考虑一次性写入。{% endblock %}
+
 {# execute_skill 重复失败 #}
 {% block execute_skill_loop %}【系统提示】你已经多次调用同一个 skill 但均未成功。请停止重复调用，现在请你自己检查 skill 的代码实现，分析失败原因，尝试修复 bug 或给出诊断建议。可以结合工具输出、报错信息和 skill 代码内容进行自查。最后用简短自然语言总结你的分析和建议，不要复述原始输出。{% endblock %}
 

@@ -18,6 +18,22 @@ class PollingMixin:
 
     MAX_POLLING_ROUNDS = 5  # 最大轮询轮数，防止无限循环
 
+    @staticmethod
+    def _compact_polling_handoff(text: str, limit: int = 6000) -> str:
+        text = str(text or "").strip()
+        if len(text) <= limit:
+            return text
+        return text[:limit] + "\n...（轮询接力上下文已截断）"
+
+    def _clear_polling_backend_context(self, chat_id: str) -> None:
+        session = self.sessions.get(chat_id)
+        if isinstance(session, dict):
+            clear_fn = getattr(self, "_clear_polling_backend_history", None)
+            if callable(clear_fn):
+                clear_fn(session)
+            else:
+                session.pop("_polling_backend_history", None)
+
     async def _run_polling_loop(self, context: Dict[str, Any]):
         """
         前后脑轮询主循环。
@@ -46,6 +62,7 @@ class PollingMixin:
         # 标记轮询模式，让 _generate_response 的 finally 不自动处理队列
         context = context.copy()
         context["_in_polling_loop"] = True
+        polling_finished = False
         
         try:
             for polling_round in range(1, self.MAX_POLLING_ROUNDS + 1):
@@ -80,7 +97,7 @@ class PollingMixin:
                 
                 # 获取后脑的最终回复（从 session history 中取最后一条 assistant 消息）
                 session = self.sessions.get(chat_id, {})
-                session_history = session.get("history", [])
+                session_history = session.get("_polling_backend_history") or session.get("history", [])
                 backend_result = ""
                 for h in reversed(session_history):
                     if h.get("role") == "assistant":
@@ -172,10 +189,11 @@ class PollingMixin:
                         place_scope_id=place_scope_id,
                     )
                     # 同步到 session history
-                    session_history = session.setdefault("history", [])
-                    session_history.append({"role": "assistant", "content": review_reply})
-                    if len(session_history) > 20:
-                        session["history"] = session_history[-20:]
+                    if not action == "continue":
+                        session_history = session.setdefault("history", [])
+                        session_history.append({"role": "assistant", "content": review_reply})
+                        if len(session_history) > 20:
+                            session["history"] = session_history[-20:]
                 
                 logger.info(f"[{chat_id}] 轮询第 {polling_round} 轮审查结果: action={action}")
                 await self._send_debug(chat_id, f"🔍 审查结果: action={action}")
@@ -183,9 +201,22 @@ class PollingMixin:
                 if review_result.get("force_semi_online"):
                     logger.info(f"[{chat_id}] 轮询审查触发 [SEMI_ONLINE]，立即进入半在线状态。")
                     self._transition_to_semi_online(chat_id)
+                    polling_finished = True
                     break
                 
                 if action == "continue":
+                    if polling_round >= self.MAX_POLLING_ROUNDS:
+                        logger.warning(
+                            f"[{chat_id}] 轮询第 {polling_round} 轮仍请求继续，"
+                            f"已达到最大轮数 {self.MAX_POLLING_ROUNDS}，停止继续下发。"
+                        )
+                        await self._send_debug(
+                            chat_id,
+                            f"⚠️ 轮询第 {polling_round} 轮仍请求继续，但已达到最大轮数 {self.MAX_POLLING_ROUNDS}"
+                        )
+                        polling_finished = True
+                        break
+
                     # 需要后脑继续 — 构建新 context
                     new_instruction = review_reply if review_reply else "请继续处理。"
                     if task_instruction:
@@ -197,6 +228,7 @@ class PollingMixin:
                     context["_front_brain_handled"] = True
                     context["_front_brain_reply"] = review_reply if should_reply else ""
                     context["task_instruction"] = task_instruction
+                    context["_polling_previous_backend_result"] = self._compact_polling_handoff(backend_result)
                     context["use_image_model"] = review_result.get("use_image_model", context.get("use_image_model", False))
                     if need_follow:
                         context["_followup_initial_delay"] = self.FOLLOWUP_NEED_FOLLOW_DELAY
@@ -208,6 +240,7 @@ class PollingMixin:
                 else:
                     # action == "done" or "chat" → 结束轮询
                     logger.info(f"[{chat_id}] 轮询结束: action={action}")
+                    polling_finished = True
                     if need_follow:
                         # 用 NEED_FOLLOW 覆盖后续跟进的首次间隔
                         self._start_followup_timer(chat_id, initial_delay=self.FOLLOWUP_NEED_FOLLOW_DELAY)
@@ -217,6 +250,7 @@ class PollingMixin:
                 # for-else: 达到最大轮数
                 logger.warning(f"[{chat_id}] 轮询达到最大轮数 {self.MAX_POLLING_ROUNDS}，强制结束")
                 await self._send_debug(chat_id, f"⚠️ 轮询达到最大轮数 {self.MAX_POLLING_ROUNDS}")
+                polling_finished = True
         
         except asyncio.CancelledError:
             logger.info(f"[{chat_id}] 轮询循环被取消")
@@ -226,6 +260,8 @@ class PollingMixin:
             logger.error(f"[{chat_id}] 轮询循环异常: {e}", exc_info=True)
         
         finally:
+            if polling_finished:
+                self._clear_polling_backend_context(chat_id)
             if not self._was_interrupted(chat_id):
                 await self._process_pending_messages(chat_id)
 
