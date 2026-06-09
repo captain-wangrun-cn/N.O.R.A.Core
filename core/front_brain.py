@@ -24,6 +24,7 @@ from brain.prompts import (
 from skills.loader import SkillLoader
 from core.message_handler import group_message_content
 from core.routing import parse_front_brain_response, parse_front_brain_review
+from core.scene_context import build_current_scene_block, should_redact_cross_place_details
 import config
 
 logger = logging.getLogger(__name__)
@@ -113,25 +114,57 @@ class FrontBrainMixin:
 
         lines: List[str] = ["【后脑运行时状态（仅供你判断是否需要再次触发后脑）】"]
 
+        redact_busy = bool(busy_runtime and should_redact_cross_place_details(identity, busy_runtime))
         if busy:
-            lines.append(f"- 后脑正在执行: {getattr(status, 'original_query', '')[:120]}")
-            if busy_runtime and busy_runtime != chat_id:
+            if redact_busy:
+                lines.append("- 后脑正在另一个窗口执行任务。")
                 lines.append(f"  来源地点: {busy_runtime}")
-            instr = (getattr(status, "task_instruction", "") or "").strip()
-            if instr:
-                lines.append(f"  任务指示: {instr[:240]}")
-            phase = getattr(status, "phase", "") or ""
-            if phase:
-                lines.append(f"  当前阶段: {phase}")
+                lines.append("  隐私边界: 不要向当前窗口透露那边的任务内容、文件、结果或进度细节。")
+            else:
+                lines.append(f"- 后脑正在执行: {getattr(status, 'original_query', '')[:120]}")
+                if busy_runtime and busy_runtime != chat_id:
+                    lines.append(f"  来源地点: {busy_runtime}")
+                instr = (getattr(status, "task_instruction", "") or "").strip()
+                if instr:
+                    lines.append(f"  任务指示: {instr[:240]}")
+                phase = getattr(status, "phase", "") or ""
+                if phase:
+                    lines.append(f"  当前阶段: {phase}")
 
         if queue_size > 0 and queue is not None:
             lines.append(f"- 已排队任务数: {queue_size}")
+            visible_items = []
+            redacted_queue_count = 0
             try:
-                summary = queue.get_queue_summary()
+                for item in getattr(queue, "_items", []) or []:
+                    item_context = item.get("context") or {}
+                    item_identity = self._identity(item_context)
+                    if should_redact_cross_place_details(identity, item_identity.runtime_key):
+                        redacted_queue_count += 1
+                    else:
+                        visible_items.append(item)
             except Exception:
-                summary = ""
-            if summary:
-                lines.append(summary)
+                visible_items = []
+                redacted_queue_count = queue_size if redact_busy else 0
+
+            if visible_items:
+                lines.append(f"📬 当前窗口可见的排队任务 ({len(visible_items)} 个):")
+                for i, item in enumerate(visible_items, 1):
+                    item_context = item.get("context") or {}
+                    text_preview = str(item.get("text") or item_context.get("text") or "")[:60]
+                    instr = str(item_context.get("task_instruction", "")).strip()
+                    lines.append(f"  {i}. \"{text_preview}\"")
+                    if instr:
+                        lines.append(f"     指示: {instr[:120]}")
+            elif not redacted_queue_count:
+                try:
+                    summary = queue.get_queue_summary()
+                except Exception:
+                    summary = ""
+                if summary:
+                    lines.append(summary)
+            if redacted_queue_count:
+                lines.append(f"  另有 {redacted_queue_count} 个其它窗口的排队任务，内容已隐藏。")
 
         lines.append(
             "判断要点："
@@ -235,6 +268,7 @@ class FrontBrainMixin:
             group_online_count=context.get("group_online_count"),
             group_online_count_status=str(context.get("group_online_count_status") or ""),
         )
+        scene_context_block = build_current_scene_block(identity, context)
 
         # 可选注入块默认空串：下面这些块都是按条件/try 注入，
         # 若条件不满足或注入失败必须有兜底空值，否则渲染模板时会 UnboundLocalError。
@@ -349,6 +383,8 @@ class FrontBrainMixin:
         )
         if yesterday_memory_block:
             system_prompt = system_prompt + "\n\n---\n" + yesterday_memory_block
+        if scene_context_block:
+            system_prompt = system_prompt + "\n\n---\n" + scene_context_block
 
         # 后脑忙碌或队列非空时，把"正在处理什么 + 已排队什么"作为运行时上下文块注入前脑系统提示，
         # 让前脑天然知道"刚才下达过哪些任务、现在还在做"，从而避免对用户的简单承接（嗯/好的/收到）
@@ -676,6 +712,7 @@ class FrontBrainMixin:
             group_online_count=context.get("group_online_count"),
             group_online_count_status=str(context.get("group_online_count_status") or ""),
         )
+        scene_context_block = build_current_scene_block(identity, context)
         schedule_block = ""
         custom_block = ""
         tool_intro_block = ""
@@ -728,6 +765,8 @@ class FrontBrainMixin:
             custom_block=custom_block,
             tool_intro_block=tool_intro_block,
         )
+        if scene_context_block:
+            system_prompt = system_prompt + "\n\n---\n" + scene_context_block
         
         user_prompt = render_template(
             'front_brain_review.jinja',

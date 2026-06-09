@@ -17,6 +17,7 @@ from brain.prompts import (
     should_inject_custom,
     load_identity_context,
 )
+from core.scene_context import build_current_scene_block, should_redact_cross_place_details
 from core.worker_status import WorkerStatus
 
 logger = logging.getLogger(__name__)
@@ -49,15 +50,53 @@ class InterruptHandlerMixin:
                 "reply": "...",                          # 给用户的回复文案
             }
         """
-        progress = (
-            status.get_summary()
-            if status
-            else "后脑当前没有正在执行的任务，但共享后脑队列里已有等待处理的任务。"
+        identity = None
+        try:
+            identity = self._identity_for_runtime_key(chat_id)
+        except Exception:
+            identity = None
+
+        redact_progress = bool(
+            identity
+            and backend_runtime
+            and should_redact_cross_place_details(identity, backend_runtime)
         )
+        if redact_progress:
+            progress = (
+                f"后脑正在另一个窗口执行任务（来源地点: {backend_runtime}）。"
+                "当前窗口只能知道其它窗口忙碌，不能看到那边的任务内容、文件、结果或进度细节。"
+            )
+        else:
+            progress = (
+                status.get_summary()
+                if status
+                else "后脑当前没有正在执行的任务，但共享后脑队列里已有等待处理的任务。"
+            )
         
         # 获取当前队列摘要，让 AI 看到已排队的任务
         queue = self._get_scope_queue_for_runtime(chat_id)
         queue_summary = queue.get_queue_summary() if queue else ""
+        if identity and queue:
+            try:
+                redacted = 0
+                visible_lines = []
+                for item in getattr(queue, "_items", []) or []:
+                    item_context = item.get("context") or {}
+                    item_identity = self._identity(item_context)
+                    if should_redact_cross_place_details(identity, item_identity.runtime_key):
+                        redacted += 1
+                        continue
+                    text_preview = str(item.get("text") or item_context.get("text") or "")[:60]
+                    instr = str(item_context.get("task_instruction") or "").strip()
+                    visible_lines.append(f"- {text_preview}")
+                    if instr:
+                        visible_lines.append(f"  指示: {instr[:120]}")
+                if redacted:
+                    queue_summary = "\n".join(visible_lines)
+                    hidden = f"另有 {redacted} 个其它窗口的排队任务，内容已隐藏。"
+                    queue_summary = f"{queue_summary}\n{hidden}".strip()
+            except Exception:
+                pass
         
         soul = get_soul_prompt()
         prompt = render_template('interrupt_detect.jinja', 'user',
@@ -67,7 +106,7 @@ class InterruptHandlerMixin:
         # 带入最近对话历史，让 smart_llm 理解上下文（而不是只看当前这一句）
         recent_history = []
         try:
-            identity = self._identity_for_runtime_key(chat_id)
+            identity = identity or self._identity_for_runtime_key(chat_id)
             db_context = self.message_history.get_context_messages(
                 identity.platform, identity.storage_id,
                 memory_scope_id=identity.memory_scope_id, current_place_scope_id=identity.place_scope_id,
@@ -89,9 +128,16 @@ class InterruptHandlerMixin:
             for attempt in range(3):
                 response = ""
                 system_prompt = render_template('interrupt_detect.jinja', 'system', soul=soul)
-                identity_context = load_identity_context(include_schedule=False)
+                identity_context = load_identity_context(
+                    include_schedule=False,
+                    actor_display_name=identity.actor_display_name if identity else "",
+                    is_owner=identity.is_owner if identity else True,
+                    chat_type=identity.chat_type if identity else "private",
+                )
                 if identity_context:
                     system_prompt = identity_context + "\n\n" + system_prompt
+                if identity:
+                    system_prompt = system_prompt + "\n\n---\n" + build_current_scene_block(identity)
                 if should_inject_custom("smart"):
                     custom_prompt = load_custom_prompt()
                     if custom_prompt:

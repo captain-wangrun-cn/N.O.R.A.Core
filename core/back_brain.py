@@ -23,6 +23,7 @@ from brain.prompts import (
 )
 from brain.multimodal import extract_image_payloads, extract_video_payloads
 from core.message_handler import group_message_content
+from core.scene_context import build_current_scene_block
 from core.worker_status import WorkerStatus
 import config
 
@@ -494,6 +495,7 @@ class BackBrainMixin:
 
             # --- 2. 构建 Prompt (Context Reconstruction) ---
             instructions = []
+            instructions.append(build_current_scene_block(identity, context))
 
             # 前脑下发的任务指示（用户不可见），提供给后脑执行
             task_instruction = context.get("task_instruction", "")

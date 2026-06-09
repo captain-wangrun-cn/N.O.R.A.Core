@@ -15,6 +15,7 @@ from brain.multimodal import extract_image_payloads, extract_video_payloads
 from brain.prompts import render_template, get_soul_prompt, load_identity_context
 from core.routing import has_image_input, sanitize_user_visible_text
 from core.conversation_identity import conversation_target_dict
+from core.scene_context import build_current_scene_block, should_redact_cross_place_details
 from core.default_chat_id_store import save_default_chat_target
 from core.delivery_target_store import update_last_active_target
 from core.scheduler import (
@@ -664,6 +665,35 @@ class MessageHandlerMixin:
                 # 让 fast_llm 能基于"现在已经在做什么"判断是否实质重复，而不是凭空决定。
                 current_original_query = status.original_query if status else ""
                 current_task_instruction = status.task_instruction if status else ""
+                if busy_runtime and should_redact_cross_place_details(identity, busy_runtime):
+                    progress_summary = (
+                        f"后脑正在另一个窗口执行任务（来源地点: {busy_runtime}）。"
+                        "当前窗口不能看到那边的任务内容、文件、结果或进度细节。"
+                    )
+                    current_original_query = ""
+                    current_task_instruction = ""
+                if queue:
+                    try:
+                        hidden_count = 0
+                        visible_lines = []
+                        for item in getattr(queue, "_items", []) or []:
+                            item_context = item.get("context") or {}
+                            item_identity = self._identity(item_context)
+                            if should_redact_cross_place_details(identity, item_identity.runtime_key):
+                                hidden_count += 1
+                                continue
+                            text_preview = str(item.get("text") or item_context.get("text") or "")[:60]
+                            instr = str(item_context.get("task_instruction") or "").strip()
+                            visible_lines.append(f"- {text_preview}")
+                            if instr:
+                                visible_lines.append(f"  指示: {instr[:120]}")
+                        if hidden_count:
+                            queue_summary = "\n".join(visible_lines)
+                            queue_summary = (
+                                f"{queue_summary}\n另有 {hidden_count} 个其它窗口的排队任务，内容已隐藏。"
+                            ).strip()
+                    except Exception:
+                        queue_summary = "存在其它窗口的排队任务，内容已隐藏。"
                 should_enqueue = await self._auto_confirm_backend_enqueue(
                     chat_id=chat_id,
                     pending_request_text=text,
@@ -745,7 +775,20 @@ class MessageHandlerMixin:
     ) -> bool:
         """前脑内部二次确认：判断本轮是否应自动加入后脑队列（不向用户发确认）。"""
         soul = get_soul_prompt()
-        identity_context = load_identity_context(include_schedule=False)
+        identity = None
+        try:
+            identity = self._identity_for_runtime_key(chat_id)
+        except Exception:
+            identity = None
+        if identity:
+            identity_context = load_identity_context(
+                include_schedule=False,
+                actor_display_name=identity.actor_display_name,
+                is_owner=identity.is_owner,
+                chat_type=identity.chat_type,
+            )
+        else:
+            identity_context = load_identity_context(include_schedule=False)
 
         system_prompt = render_template(
             "queue_confirmation.jinja",
@@ -753,6 +796,8 @@ class MessageHandlerMixin:
             soul=soul,
             identity_context=identity_context,
         )
+        if identity:
+            system_prompt = system_prompt + "\n\n---\n" + build_current_scene_block(identity)
         user_prompt = render_template(
             "queue_confirmation.jinja",
             "auto_decide_user",

@@ -153,9 +153,17 @@ class BackendTaskQueue:
 
     async def enqueue(self, context: Dict[str, Any]):
         """入队一个后脑任务。"""
+        # 兼容历史调用：部分调用方传入 {"context": real_context, "text": ...}，
+        # 这里规范化为内部队列 item，避免出队时把包装对象当平台 context。
+        if isinstance(context, dict) and isinstance(context.get("context"), dict):
+            real_context = dict(context.get("context") or {})
+            text = str(context.get("text") or real_context.get("text") or "")
+        else:
+            real_context = dict(context or {})
+            text = str(real_context.get("text") or "")
         item = {
-            "context": context,
-            "text": context.get("text", ""),
+            "context": real_context,
+            "text": text,
             "enqueued_at": time.time(),
         }
         async with self._lock:

@@ -2,8 +2,9 @@ import asyncio
 from types import SimpleNamespace
 
 from brain.prompts import render_template
-from core.conversation_identity import build_identity_from_parts
+from core.conversation_identity import build_identity_from_parts, set_owner_resolver
 from core.front_brain import FrontBrainMixin
+from core.worker_status import BackendTaskQueue, WorkerStatus
 
 
 class _DummyHistory:
@@ -36,13 +37,23 @@ class _FrontBrainProbe(FrontBrainMixin):
 
     def _identity_for_runtime_key(self, runtime_key):
         platform, chat_id = runtime_key.split(":", 1)
-        return build_identity_from_parts(platform=platform, chat_id=chat_id, chat_type="group")
+        chat_type = "private" if chat_id in {"owner", "private-chat"} else "group"
+        return build_identity_from_parts(
+            platform=platform,
+            chat_id=chat_id,
+            user_id=chat_id,
+            chat_type=chat_type,
+            user_name=chat_id,
+        )
 
     def get_busy_backend_runtime(self, memory_scope_id):
+        for key, status in self.worker_status.items():
+            if status.busy:
+                return key
         return ""
 
     def _get_scope_queue_for_runtime(self, chat_id, create=False):
-        return None
+        return self.task_queues.get("shared")
 
     async def _send_debug(self, chat_id, message):
         return None
@@ -124,3 +135,96 @@ def test_front_brain_retries_legacy_backend_signal_without_task_instruction():
     assert result["user_reply"] == "我去看一下。"
     assert len(probe.system_prompts) == 2
     assert "必须同时输出 [TASK_INSTRUCTION]" in probe.system_prompts[1]
+
+
+def test_front_brain_prompt_includes_current_onebot_group_scene():
+    probe = _FrontBrainProbe(["在群里收到啦。"])
+
+    result = asyncio.run(
+        probe._generate_front_chat_response(
+            {
+                "platform": "onebotv11",
+                "chat_id": "10001",
+                "user_id": "20002",
+                "chat_type": "group",
+                "user_name": "群友A",
+                "chat_title": "测试群",
+                "text": "老大，怎么啦？是不是等急啦",
+            }
+        )
+    )
+
+    assert result["user_reply"] == "在群里收到啦。"
+    system_prompt = probe.system_prompts[0]
+    assert "【当前会话场景 (Scene / Reply Target)】" in system_prompt
+    assert "当前窗口: QQ 群聊" in system_prompt
+    assert "回复目标: onebotv11:10001" in system_prompt
+    assert "当前说话人: 群友A" in system_prompt
+    assert "群聊名称: 测试群" in system_prompt
+
+
+def test_backend_status_redacts_other_window_details_in_group():
+    probe = _FrontBrainProbe([])
+    status = WorkerStatus()
+    status.start(
+        "下载私聊里那两个视频",
+        task_instruction="下载私聊用户发来的两个视频，完成后发回私聊。",
+    )
+    probe.worker_status["onebotv11:20002"] = status
+
+    block = probe._build_backend_status_block("onebotv11:10001")
+
+    assert "另一个窗口执行任务" in block
+    assert "来源地点: onebotv11:20002" in block
+    assert "下载私聊里那两个视频" not in block
+    assert "下载私聊用户发来的两个视频" not in block
+
+
+def test_backend_status_allows_owner_private_cross_window_details():
+    def resolver(platform, user_id, chat_type):
+        return user_id == "owner"
+
+    set_owner_resolver(resolver)
+    try:
+        probe = _FrontBrainProbe([])
+        status = WorkerStatus()
+        status.start(
+            "下载群里那个视频",
+            task_instruction="下载群里用户提到的视频，完成后发回当前私聊。",
+        )
+        probe.worker_status["onebotv11:10001"] = status
+
+        block = probe._build_backend_status_block("onebotv11:owner")
+
+        assert "下载群里那个视频" in block
+        assert "下载群里用户提到的视频" in block
+    finally:
+        set_owner_resolver(None)
+
+
+def test_backend_status_redacts_other_window_queue_items_in_group():
+    probe = _FrontBrainProbe([])
+
+    async def run():
+        queue = BackendTaskQueue()
+        await queue.enqueue(
+            {
+                "context": {
+                    "platform": "onebotv11",
+                    "chat_id": "20002",
+                    "user_id": "20002",
+                    "chat_type": "private",
+                    "text": "下载私聊视频",
+                    "task_instruction": "下载私聊里的两个视频。",
+                },
+                "text": "下载私聊视频",
+            }
+        )
+        probe.task_queues["shared"] = queue
+
+    asyncio.run(run())
+    block = probe._build_backend_status_block("onebotv11:10001")
+
+    assert "另有 1 个其它窗口的排队任务，内容已隐藏。" in block
+    assert "下载私聊视频" not in block
+    assert "下载私聊里的两个视频" not in block

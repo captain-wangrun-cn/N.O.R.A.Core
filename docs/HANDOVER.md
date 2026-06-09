@@ -5,6 +5,20 @@
 
 ## 近期关键改动（截至 2026-06-09）
 
+### 🧭 OB11 私聊/群聊并发场景隔离 — 2026-06-09
+
+- 修复 QQ/OneBot v11 私聊与群聊同时和 Nora 对话时，前脑/后脑容易把“另一个窗口”的任务进度当成当前群聊/私聊话题的问题：
+  - 新增 `core/scene_context.py`，为模型注入内部“当前会话场景 / 回复目标”块，明确当前平台、当前窗口（QQ 私聊/QQ群聊）、回复目标 runtime、当前说话人与群聊边界。
+  - 前脑、后脑、前脑审查、忙碌中断判断、后脑入队二次判断都接入该场景块；这是内部 prompt，不会在用户可见消息前强制加 `[私聊]` / `[群聊]` 前缀。
+  - 当前窗口是群聊或访客时，跨窗口后脑状态与队列只暴露“另一个窗口有任务在跑/排队”，隐藏私聊任务原文、任务指示、文件和进度细节，避免群聊看到私聊下载任务。
+- 修复 `BackendTaskQueue.enqueue()` 对历史包装格式 `{"context": real_context, "text": ...}` 的二次包装问题：
+  - 入队时统一规范化为内部 item，出队时拿到的 `item["context"]` 始终是真实平台 context，降低队列任务回到错误窗口的风险。
+
+**验证**：
+- `.venv\Scripts\python.exe -m pytest tests\test_front_brain_prompt.py tests\test_conversation_identity_and_aggregator.py tests\test_routing.py tests\test_scope_runtime_coordination.py -q` → 46 passed。
+- `.venv\Scripts\python.exe -m pytest tests\test_message_handler_ack.py tests\test_onebotv11_adapter.py tests\test_message_handler_stop_storage.py tests\test_polling_loop.py -q` → 28 passed。
+- `.venv\Scripts\python.exe -m py_compile core\scene_context.py core\front_brain.py core\back_brain.py core\interrupt_handler.py core\message_handler.py core\worker_status.py tests\test_front_brain_prompt.py` 通过。
+
 ### 🧭 接手核查：媒体发送者、people、OB11 表情、跨端 followup、安全审查 — 2026-06-09
 
 - 媒体入库现状：
