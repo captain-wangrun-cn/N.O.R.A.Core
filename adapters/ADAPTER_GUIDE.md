@@ -30,7 +30,7 @@
 - `on_startup()` / `on_ready()` / `on_shutdown()`
 - `before_message(context)` / `after_message(context, result)`
 
-`send_message()` 必须返回平台消息 ID 列表，即使实际只发送了一条消息。
+`send_message()` 必须返回平台消息 ID 列表，即使实际只发送了一条消息。除 `text` 外，还必须接受并安全忽略未知 `**kwargs`；见下文“出站发送参数契约”。
 
 ### Adapter Tools
 
@@ -64,6 +64,8 @@ adapters/<platform>/
 
 ## 4. Context 契约
 
+### 入站消息字段
+
 传给 controller 的 context 至少包含：
 
 - `platform`: str
@@ -75,12 +77,33 @@ adapters/<platform>/
 
 建议包含：
 
-- `platform_message_id`: str，用于 reply、undo、媒体回查。
-- `platform_message_ids`: list[str]，聚合多条平台消息时使用。
-- `contributors`: list[dict]，群聊聚合多说话人时使用。
-- `reply_to_user_id` / `reply_to_user_name` / `reply_to_message_id`: reply 场景的被回复目标，便于平台工具定位操作对象。
+- `platform_message_id`: str。当前这条平台入站消息自己的稳定 ID；必须尽量保留，用于 reply 目标锁定、undo、媒体回查、去重。
+- `platform_message_ids`: list[str]。当前输入由多条平台消息合并而来时使用，例如 Telegram media group、OB11 reply 媒体 + 当前消息；顺序应尽量与平台消息/媒体顺序一致。
+- `reply_target_message_id`: str。可选；如果 adapter 已经明确知道 Nora 本轮回复应该引用哪条消息，可直接给出。通常不必手动填，core/aggregator 会默认用当前 `platform_message_id`。
+- `reply_to_message_id`: str。用户当前消息是在回复/引用另一条平台消息时，被回复消息的 ID。注意它不是 Nora 应该回复的当前消息 ID；Nora 回用户时通常应引用 `reply_target_message_id` 或当前 `platform_message_id`。
+- `reply_to_user_id` / `reply_to_user_name`: reply 场景中被回复消息的发送者，用于平台工具定位操作对象，例如“禁言我回复的这个人”。
+- `contributors`: list[dict]。聚合器生成或 adapter 预聚合时使用，元素至少包含 `user_id`，建议包含 `user_name`。群聊不同用户不应被 adapter 主动合并进同一 context，除非平台事件本身就是不可拆的多人内容。
+- `chat_title` / `group_title` / `group_display_name`: 群聊名称。
+- `group_member_count` / `group_member_count_status`: 群成员总数及状态；未知时不要臆测，写 `None` 和状态字符串。
+- `group_online_count` / `group_online_count_status`: 群在线人数及状态；平台不支持时写 `None` 和如 `unavailable:<platform>`。
 
 不要让 adapter 自行决定人格、记忆作用域或主人/访客关系；这些由 `core/conversation_identity.py` 统一处理。
+
+### 出站发送参数契约
+
+所有 adapter 的 `send_message(chat_id, text, **kwargs)` 都应支持以下通用参数：
+
+- `parse_media: bool = True`：是否解析 NORA 通用媒体标记，如 `[image: path]` / `[file: path]`。`False` 时按纯文本发送。
+- `chat_type: str = ""`：调用方知道目标是 `private` / `group` 时可传入；adapter 可用它选择平台发送 API。不能识别时应回退到自身缓存或平台默认行为。
+- `reply_to_message_id: str = ""`：Nora 本条出站消息应该回复/引用的平台消息 ID。支持 reply 的平台必须优先使用该显式值，不要再回退到“最近一条入站消息”；不支持 reply 的平台应安全忽略。
+
+实现要求：
+
+- 出站 reply 必须由代码层处理，不能要求 LLM 自己生成 `[reply:message_id]` 或平台 CQ/Markdown 代码。
+- 如果平台 reply ID 类型有限制（例如 Telegram 必须是数字 message_id），adapter 应验证并安全忽略非法值，不能让整条消息发送失败。
+- 如果一条 NORA 回复被拆成多条平台消息，默认每个分段都可以引用同一个 `reply_to_message_id`；平台限制不允许时至少第一段应引用。
+- 如果发送文本 + 媒体多条消息，adapter 应尽量让文本或第一条可见消息引用 `reply_to_message_id`。平台允许时，媒体消息也可附带同一 reply 参数。
+- `send_message()` 返回的仍是实际发出的平台消息 ID 列表，顺序与发送顺序一致。
 
 ## 5. Metadata 清单
 
@@ -164,7 +187,15 @@ class XxxAdapter(BaseAdapter):
         await self.dispatch_message(event)
 
     async def send_message(self, chat_id: str, text: str, **kwargs) -> list[str]:
-        message_id = await real_platform_send(chat_id, text)
+        parse_media = bool(kwargs.pop("parse_media", True))
+        reply_to_message_id = str(kwargs.pop("reply_to_message_id", "") or "").strip()
+        # 未支持的 kwargs 必须安全忽略，保证 core 可向所有 adapter 传同一套参数。
+        message_id = await real_platform_send(
+            chat_id,
+            text,
+            parse_media=parse_media,
+            reply_to_message_id=reply_to_message_id or None,
+        )
         return [str(message_id)]
 
     async def start_typing(self, chat_id: str):

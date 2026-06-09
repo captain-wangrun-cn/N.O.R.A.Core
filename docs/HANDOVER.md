@@ -5,6 +5,20 @@
 
 ## 近期关键改动（截至 2026-06-09）
 
+### 🧷 OB11 群聊多人并发 reply 目标锁定 — 2026-06-09
+
+- 修复同一个 QQ 群里多位群友同时 @ Nora 时，Nora 回复文本属于 A、但 QQ 引用/回复段漂到 B 消息的问题：
+  - `MessageAggregator` 在群聊中按 `platform:chat_id:user_id` 建缓冲，同一群不同用户不再合并成一个上下文；同一用户连续多句仍会合并。
+  - 聚合上下文新增 `reply_target_message_id`，优先锁定本轮输入自己的 `platform_message_id`，避免后续 `existing.update(context)` 或媒体 ID 合并覆盖回复目标。
+  - `core.message_handler.reply_target_message_id()` 统一从 context 取显式 reply 目标，前脑回复、忙碌中断回复、入队确认、后脑回复、轮询审查回复都会把 `reply_to_message_id` 传给 adapter。
+  - `OneBotSenderMixin.send_message(..., reply_to_message_id=...)` 会自动在 OB11 数组消息前加 `reply` 段；裸 `[reply]` 也优先使用调用方传入的显式 id，不再默认取“群最近一条 incoming message”。
+  - 用户可见文本不需要 Nora/LLM 自己写 `[reply:message_id]`；代码层自动携带，降低模型猜错/漏写风险。
+
+**验证**：
+- `PYTHONPATH=.venv\Lib\site-packages` + 临时 `HOME/USERPROFILE=.pytest_home` 后，使用 bundled Python 跑：
+  - `pytest tests\test_front_brain_prompt.py tests\test_conversation_identity_and_aggregator.py tests\test_routing.py tests\test_scope_runtime_coordination.py tests\test_message_handler_ack.py tests\test_onebotv11_adapter.py tests\test_message_handler_stop_storage.py tests\test_polling_loop.py -q` → 78 passed。
+  - `py_compile adapters\aggregator.py adapters\onebotv11\sender.py core\message_handler.py core\back_brain.py core\polling.py core\interrupt_handler.py tests\test_conversation_identity_and_aggregator.py tests\test_onebotv11_adapter.py tests\test_polling_loop.py` 通过。
+
 ### 🧭 OB11 私聊/群聊并发场景隔离 — 2026-06-09
 
 - 修复 QQ/OneBot v11 私聊与群聊同时和 Nora 对话时，前脑/后脑容易把“另一个窗口”的任务进度当成当前群聊/私聊话题的问题：

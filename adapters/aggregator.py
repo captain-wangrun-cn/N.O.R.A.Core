@@ -17,6 +17,11 @@ class MessageAggregator:
 
     def _key_for(self, chat_id: str, context: Dict[str, Any]) -> str:
         platform = str(context.get("platform") or "telegram")
+        chat_type = str(context.get("chat_type") or "private").lower()
+        if chat_type == "group":
+            user_id = str(context.get("user_id") or "").strip()
+            if user_id:
+                return f"{platform}:{chat_id}:{user_id}"
         return f"{platform}:{chat_id}"
 
     def _format_parts(self, parts: list[Dict[str, Any]], context: Dict[str, Any]) -> str:
@@ -49,6 +54,15 @@ class MessageAggregator:
             ids.append(str(single_id))
         return list(dict.fromkeys(mid for mid in ids if mid))
 
+    def _reply_target_message_id(self, context: Dict[str, Any]) -> str:
+        explicit = str(context.get("reply_target_message_id") or "").strip()
+        if explicit:
+            return explicit
+        current = str(context.get("platform_message_id") or "").strip()
+        if current:
+            return current
+        return str(context.get("reply_to_message_id") or "").strip()
+
     async def add_message(self, chat_id: str, text: str, context: Dict[str, Any]):
         """添加一条新消息到缓冲区。"""
         key = self._key_for(str(chat_id), context)
@@ -71,6 +85,7 @@ class MessageAggregator:
             "user_name": context.get("user_name"),
             "platform_message_id": platform_msg_id,
             "platform_message_ids": self._context_platform_message_ids(context),
+            "reply_target_message_id": self._reply_target_message_id(context),
         })
         self._buffers[key] = self._format_parts(parts, context)
         
@@ -96,6 +111,9 @@ class MessageAggregator:
                 platform_ids.append(str(part_ids))
         if platform_ids:
             self._contexts[key]["platform_message_ids"] = list(dict.fromkeys(platform_ids))
+        reply_target = str(parts[0].get("reply_target_message_id") or "").strip()
+        if reply_target:
+            self._contexts[key]["reply_target_message_id"] = reply_target
         for field in (
             "chat_title",
             "chat_username",

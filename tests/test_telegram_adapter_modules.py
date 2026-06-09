@@ -117,6 +117,69 @@ class _IncomingOnlyTelegram(TelegramAdapter):
         self.application = SimpleNamespace(bot=FakeBot())
 
 
+class _SendingOnlyTelegram(TelegramAdapter):
+    def __init__(self):
+        self.workspace_root = "D:/repo"
+        self.downloads_dir = "D:/repo/downloads"
+        self.calls = []
+
+        class FakeBot:
+            def __init__(self, outer):
+                self.outer = outer
+
+            async def send_message(self, **kwargs):
+                self.outer.calls.append(("send_message", kwargs))
+                return SimpleNamespace(message_id=901)
+
+        self.application = SimpleNamespace(bot=FakeBot(self))
+
+    async def _send_with_retry(self, send_coro_factory, retries=2, base_delay=1.0):
+        return await send_coro_factory()
+
+
+def test_telegram_sender_uses_explicit_reply_to_message_id():
+    adapter = _SendingOnlyTelegram()
+
+    ids = asyncio.run(
+        adapter.send_message(
+            "123",
+            "hello",
+            parse_media=False,
+            reply_to_message_id="456",
+        )
+    )
+
+    assert ids == ["901"]
+    assert adapter.calls == [
+        (
+            "send_message",
+            {
+                "chat_id": "123",
+                "text": "hello",
+                "parse_mode": "HTML",
+                "reply_to_message_id": 456,
+                "allow_sending_without_reply": True,
+            },
+        )
+    ]
+
+
+def test_telegram_sender_ignores_non_numeric_reply_to_message_id():
+    adapter = _SendingOnlyTelegram()
+
+    asyncio.run(
+        adapter.send_message(
+            "123",
+            "hello",
+            parse_media=False,
+            reply_to_message_id="cb-456",
+        )
+    )
+
+    assert "reply_to_message_id" not in adapter.calls[0][1]
+    assert "allow_sending_without_reply" not in adapter.calls[0][1]
+
+
 def test_context_from_update_includes_sender_identity_and_platform_message_id():
     update = _fake_update()
 

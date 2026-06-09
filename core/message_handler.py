@@ -45,6 +45,17 @@ def _context_platform_message_ids(context: Dict[str, Any]) -> List[str]:
     return list(dict.fromkeys(mid for mid in ids if mid))
 
 
+def reply_target_message_id(context: Dict[str, Any]) -> str:
+    """Return the incoming platform message id that assistant replies should quote."""
+    explicit = str(context.get("reply_target_message_id") or "").strip()
+    if explicit:
+        return explicit
+    current = str(context.get("platform_message_id") or "").strip()
+    if current:
+        return current
+    return str(context.get("reply_to_message_id") or "").strip()
+
+
 def _attach_platform_ids_to_media(items: List[Dict[str, Any]], platform_msg_ids: List[str]) -> List[Dict[str, Any]]:
     """Attach per-media platform message ids by adapter order when available."""
     if not items or not platform_msg_ids:
@@ -60,7 +71,12 @@ def group_message_content(context: Dict[str, Any], user_name: str, text: str, ch
     if str(chat_type or "private").lower() == "private":
         return text
     contributors = context.get("contributors") or []
-    if len(contributors) > 1:
+    contributor_ids = {
+        str(item.get("user_id") or "").strip()
+        for item in contributors
+        if isinstance(item, dict) and str(item.get("user_id") or "").strip()
+    }
+    if len(contributor_ids) > 1:
         return text
     return f"{user_name}: {text}"
 
@@ -137,6 +153,7 @@ class MessageHandlerMixin:
 
         # 将清洗后的文本和多模态内容回填到 context
         platform_msg_ids = _context_platform_message_ids(context)
+        reply_to_message_id = reply_target_message_id(context)
         _attach_platform_ids_to_media(multimodal_images, platform_msg_ids)
         _attach_platform_ids_to_media(multimodal_videos, platform_msg_ids)
         context["text"] = text
@@ -421,7 +438,11 @@ class MessageHandlerMixin:
             if action in {"stop", "change"}:
                 session_history.append({"role": "user", "content": message_content})
                 if reply:
-                    msg_ids = await self._send_platform_message(chat_id, reply)
+                    msg_ids = await self._send_platform_message(
+                        chat_id,
+                        reply,
+                        reply_to_message_id=reply_to_message_id,
+                    )
                     md = {"source": "interrupt"}
                     if msg_ids:
                         md["platform_message_ids"] = [str(mid) for mid in msg_ids]
@@ -436,13 +457,24 @@ class MessageHandlerMixin:
                         place_scope_id=place_scope_id,
                     )
                     session_history.append({"role": "assistant", "content": reply})
-                await self._interrupt_backend(chat_id, reason=action, user_text=text, skip_reply=True, target_runtime_key=backend_runtime)
+                await self._interrupt_backend(
+                    chat_id,
+                    reason=action,
+                    user_text=text,
+                    skip_reply=True,
+                    target_runtime_key=backend_runtime,
+                    source_context=context,
+                )
                 return
             elif action == "list_queue":
                 session_history.append({"role": "user", "content": message_content})
                 if reply:
                     reply = self._append_busy_queue_summary(chat_id, reply)
-                    msg_ids = await self._send_platform_message(chat_id, reply)
+                    msg_ids = await self._send_platform_message(
+                        chat_id,
+                        reply,
+                        reply_to_message_id=reply_to_message_id,
+                    )
                     md = {"source": "queue_status"}
                     if msg_ids:
                         md["platform_message_ids"] = [str(mid) for mid in msg_ids]
@@ -469,7 +501,11 @@ class MessageHandlerMixin:
                     else:
                         logger.warning(f"[{chat_id}] 取消排队任务 #{param} 失败（序号无效或队列已空）")
                 if reply:
-                    msg_ids = await self._send_platform_message(chat_id, reply)
+                    msg_ids = await self._send_platform_message(
+                        chat_id,
+                        reply,
+                        reply_to_message_id=reply_to_message_id,
+                    )
                     md = {"source": "queue_cancel"}
                     if msg_ids:
                         md["platform_message_ids"] = [str(mid) for mid in msg_ids]
@@ -492,7 +528,11 @@ class MessageHandlerMixin:
                     await queue.clear()
                     logger.info(f"[{chat_id}] 已清空所有排队任务")
                 if reply:
-                    msg_ids = await self._send_platform_message(chat_id, reply)
+                    msg_ids = await self._send_platform_message(
+                        chat_id,
+                        reply,
+                        reply_to_message_id=reply_to_message_id,
+                    )
                     md = {"source": "queue_clear"}
                     if msg_ids:
                         md["platform_message_ids"] = [str(mid) for mid in msg_ids]
@@ -591,7 +631,11 @@ class MessageHandlerMixin:
 
         if send_front_reply:
             # 使用 [SPLIT] 分段发送
-            sent_message_ids = await self._send_split_message(chat_id, user_reply)
+            sent_message_ids = await self._send_split_message(
+                chat_id,
+                user_reply,
+                reply_to_message_id=reply_to_message_id,
+            )
 
             # 保存前脑回复到数据库，记录来源与平台 message_id
             metadata: Dict[str, Any] = {"source": "front"}
@@ -878,7 +922,12 @@ class MessageHandlerMixin:
         session_history.append({"role": "user", "content": user_message_content})
 
         if front_reply:
-            front_sent_ids = await self._send_split_message(chat_id, front_reply)
+            reply_to_message_id = reply_target_message_id(backend_context)
+            front_sent_ids = await self._send_split_message(
+                chat_id,
+                front_reply,
+                reply_to_message_id=reply_to_message_id,
+            )
             front_metadata = {"source": "front", "stage": "busy_chat"}
             if front_sent_ids:
                 front_metadata["platform_message_ids"] = front_sent_ids
@@ -895,7 +944,12 @@ class MessageHandlerMixin:
             session_history.append({"role": "assistant", "content": front_reply})
 
         if confirm_reply:
-            sent_ids = await self._send_split_message(chat_id, confirm_reply)
+            reply_to_message_id = reply_target_message_id(backend_context)
+            sent_ids = await self._send_split_message(
+                chat_id,
+                confirm_reply,
+                reply_to_message_id=reply_to_message_id,
+            )
             metadata = {"source": "front", "stage": "queue_confirm"}
             if sent_ids:
                 metadata["platform_message_ids"] = sent_ids
@@ -1010,7 +1064,11 @@ class MessageHandlerMixin:
             logger.info(f"[{chat_id}] 待确认入队：用户回复不明确，继续等待确认")
 
         if reply:
-            sent_ids = await self._send_split_message(chat_id, reply)
+            sent_ids = await self._send_split_message(
+                chat_id,
+                reply,
+                reply_to_message_id=reply_target_message_id(context),
+            )
             metadata = {"source": "front", "stage": "queue_confirm"}
             if sent_ids:
                 metadata["platform_message_ids"] = sent_ids
@@ -1143,7 +1201,13 @@ class MessageHandlerMixin:
 
         return decision, reply
 
-    async def _send_split_message(self, chat_id: str, text: str) -> list[str]:
+    async def _send_split_message(
+        self,
+        chat_id: str,
+        text: str,
+        *,
+        reply_to_message_id: str = "",
+    ) -> list[str]:
         """按 [SPLIT] 或 [SPLIT:delay] 规则发送消息，返回平台消息 ID 列表。"""
         sent_message_ids: list[str] = []
         text = sanitize_user_visible_text(text)
@@ -1155,7 +1219,11 @@ class MessageHandlerMixin:
         for i in range(0, len(parts), 2):
             part = parts[i].strip()
             if part:
-                msg_ids = await self._send_platform_message(chat_id, part)
+                msg_ids = await self._send_platform_message(
+                    chat_id,
+                    part,
+                    reply_to_message_id=reply_to_message_id,
+                )
                 if msg_ids:
                     sent_message_ids.extend(str(mid) for mid in msg_ids)
 

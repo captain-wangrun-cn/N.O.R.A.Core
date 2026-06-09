@@ -74,8 +74,8 @@ class _PollingProbe(BackBrainMixin, PollingMixin):
             "should_reply": False,
         }
 
-    async def _send_split_message(self, chat_id, text):
-        self.sent.append((chat_id, text))
+    async def _send_split_message(self, chat_id, text, **kwargs):
+        self.sent.append((chat_id, text, kwargs))
         return ["msg-1"]
 
     def _get_scope_queue_for_runtime(self, chat_id):

@@ -10,6 +10,8 @@ import logging
 import time
 from typing import Dict, Any
 
+from core.message_handler import reply_target_message_id
+
 logger = logging.getLogger(__name__)
 
 
@@ -175,7 +177,11 @@ class PollingMixin:
                 
                 # 发送前脑审查回复给用户（如果有实质内容）
                 if review_reply and should_reply:
-                    sent_ids = await self._send_split_message(chat_id, review_reply)
+                    sent_ids = await self._send_split_message(
+                        chat_id,
+                        review_reply,
+                        reply_to_message_id=reply_target_message_id(context),
+                    )
                     
                     # 保存到数据库
                     self.message_history.add_message(

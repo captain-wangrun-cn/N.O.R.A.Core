@@ -114,10 +114,13 @@ class OneBotSenderMixin:
         contexts = getattr(self, "_last_incoming_contexts", {}) or {}
         return dict(contexts.get(str(chat_id)) or {})
 
-    def _resolve_reply_id(self, raw_value: str, chat_id: str) -> str:
+    def _resolve_reply_id(self, raw_value: str, chat_id: str, reply_to_message_id: str = "") -> str:
         value = str(raw_value or "").strip()
         if value:
             return value
+        explicit = str(reply_to_message_id or "").strip()
+        if explicit:
+            return explicit
         recent = self._last_incoming_context(chat_id)
         return str(recent.get("platform_message_id") or recent.get("reply_to_message_id") or "").strip()
 
@@ -130,10 +133,16 @@ class OneBotSenderMixin:
             return str(recent.get("reply_to_user_id") or "").strip()
         return value.lstrip("@").strip()
 
-    def _control_segment(self, tag_type: str, raw_value: str, chat_id: str) -> dict[str, Any] | None:
+    def _control_segment(
+        self,
+        tag_type: str,
+        raw_value: str,
+        chat_id: str,
+        reply_to_message_id: str = "",
+    ) -> dict[str, Any] | None:
         kind = tag_type.lower()
         if kind == "reply":
-            reply_id = self._resolve_reply_id(raw_value, chat_id)
+            reply_id = self._resolve_reply_id(raw_value, chat_id, reply_to_message_id=reply_to_message_id)
             if reply_id:
                 return {"type": "reply", "data": {"id": reply_id}}
             return None
@@ -150,12 +159,24 @@ class OneBotSenderMixin:
             return None
         return {"type": "face", "data": {"id": value}}
 
-    def _text_to_onebot_segments(self, text: str, *, parse_media: bool = True, chat_id: str = "") -> list[dict[str, Any]]:
+    def _text_to_onebot_segments(
+        self,
+        text: str,
+        *,
+        parse_media: bool = True,
+        chat_id: str = "",
+        reply_to_message_id: str = "",
+    ) -> list[dict[str, Any]]:
         if not parse_media:
-            return [{"type": "text", "data": {"text": str(text or "")}}]
+            segments = [{"type": "text", "data": {"text": str(text or "")}}]
+            reply_id = str(reply_to_message_id or "").strip()
+            if reply_id:
+                return [{"type": "reply", "data": {"id": reply_id}}] + segments
+            return segments
 
         segments: list[dict[str, Any]] = []
         cursor = 0
+        has_reply_segment = False
         missing: list[str] = []
         marker_pattern = re.compile(
             rf"{_MEDIA_TAG_PATTERN.pattern}|{_CONTROL_TAG_PATTERN.pattern}|{_FACE_TAG_PATTERN.pattern}",
@@ -169,9 +190,16 @@ class OneBotSenderMixin:
             tag_type = str(match.group(1) or match.group(3) or match.group(5) or "")
             tag_value = str(match.group(2) or match.group(4) or match.group(6) or "")
             if tag_type.lower() in {"reply", "at"}:
-                segment = self._control_segment(tag_type, tag_value, chat_id)
+                segment = self._control_segment(
+                    tag_type,
+                    tag_value,
+                    chat_id,
+                    reply_to_message_id=reply_to_message_id,
+                )
                 if segment:
                     segments.append(segment)
+                    if str(segment.get("type") or "") == "reply":
+                        has_reply_segment = True
             elif tag_type.lower() in {"face", "emoji"}:
                 segment = self._face_segment(tag_value)
                 if segment:
@@ -196,7 +224,12 @@ class OneBotSenderMixin:
                     },
                 }
             )
-        return segments or [{"type": "text", "data": {"text": text or "(empty message)"}}]
+        if not segments:
+            segments = [{"type": "text", "data": {"text": text or "(empty message)"}}]
+        reply_id = str(reply_to_message_id or "").strip()
+        if reply_id and not has_reply_segment:
+            segments.insert(0, {"type": "reply", "data": {"id": reply_id}})
+        return segments
 
     def _chat_target_params(self, chat_id: str, chat_type: str = "") -> dict[str, Any]:
         chat_id = str(chat_id or "").strip()
@@ -211,10 +244,16 @@ class OneBotSenderMixin:
         text: str,
         *,
         parse_media: bool,
+        reply_to_message_id: str = "",
     ) -> list[str]:
         all_message_ids: list[str] = []
         target_chat_id = str(target.get("group_id") or target.get("user_id") or "")
-        segments = self._text_to_onebot_segments(text, parse_media=parse_media, chat_id=target_chat_id)
+        segments = self._text_to_onebot_segments(
+            text,
+            parse_media=parse_media,
+            chat_id=target_chat_id,
+            reply_to_message_id=reply_to_message_id,
+        )
         chunks: list[list[dict[str, Any]]] = []
         current: list[dict[str, Any]] = []
         current_text_len = 0
@@ -263,6 +302,7 @@ class OneBotSenderMixin:
     async def send_message(self, chat_id: str, text: str, **kwargs) -> list[str]:
         parse_media = bool(kwargs.pop("parse_media", True))
         chat_type = str(kwargs.pop("chat_type", "") or "")
+        reply_to_message_id = str(kwargs.pop("reply_to_message_id", "") or "").strip()
         target = self._chat_target_params(chat_id, chat_type=chat_type)
         raw_text = str(text or "")
 
@@ -272,7 +312,12 @@ class OneBotSenderMixin:
             for i in range(0, len(parts), 2):
                 part = parts[i].strip()
                 if part:
-                    msg_ids = await self._send_onebot_message_once(target, part, parse_media=parse_media)
+                    msg_ids = await self._send_onebot_message_once(
+                        target,
+                        part,
+                        parse_media=parse_media,
+                        reply_to_message_id=reply_to_message_id,
+                    )
                     all_message_ids.extend(msg_ids)
 
                 if i + 1 < len(parts) and parts[i + 1] is not None:
@@ -284,7 +329,12 @@ class OneBotSenderMixin:
                         pass
             return all_message_ids
 
-        return await self._send_onebot_message_once(target, raw_text, parse_media=parse_media)
+        return await self._send_onebot_message_once(
+            target,
+            raw_text,
+            parse_media=parse_media,
+            reply_to_message_id=reply_to_message_id,
+        )
 
     async def start_typing(self, chat_id: str):
         _ = chat_id

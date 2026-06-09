@@ -22,7 +22,7 @@ from brain.prompts import (
     get_lazy_lexicon_user_prompt_block,
 )
 from brain.multimodal import extract_image_payloads, extract_video_payloads
-from core.message_handler import group_message_content
+from core.message_handler import group_message_content, reply_target_message_id
 from core.scene_context import build_current_scene_block
 from core.worker_status import WorkerStatus
 import config
@@ -360,6 +360,7 @@ class BackBrainMixin:
         video_llm_available = getattr(self, "video_llm", None) is not None
         platform_msg_ids = _context_platform_message_ids(context)
         primary_platform_msg_id = platform_msg_ids[0] if platform_msg_ids else None
+        reply_to_message_id = reply_target_message_id(context)
 
         # 记录本次后脑任务的输入快照：被"新图片到达"打断重启时需要把旧图+新图合并
         self.back_brain_input_context[chat_id] = {
@@ -847,7 +848,11 @@ class BackBrainMixin:
                                     ):
                                         # 轮询模式 / no_reply / 图片标签待校验 时均不直接发送，先缓冲
                                         if not in_polling_mode and not no_reply and not defer_user_send_until_image_tags_ready:
-                                            msg_ids = await self._send_platform_message(chat_id, text_to_send)
+                                            msg_ids = await self._send_platform_message(
+                                                chat_id,
+                                                text_to_send,
+                                                reply_to_message_id=reply_to_message_id,
+                                            )
                                             if msg_ids:
                                                 response_platform_ids.extend(str(mid) for mid in msg_ids)
                                         elif defer_user_send_until_image_tags_ready and not in_polling_mode and not no_reply:
@@ -1059,7 +1064,12 @@ class BackBrainMixin:
                         in_polling = context.get("_in_polling_loop", False)
                         if progress_msg and not in_polling and not no_reply:
                             try:
-                                await self._send_platform_message(chat_id, f"⏳ {progress_msg}", parse_media=False)
+                                await self._send_platform_message(
+                                    chat_id,
+                                    f"⏳ {progress_msg}",
+                                    parse_media=False,
+                                    reply_to_message_id=reply_to_message_id,
+                                )
                                 self.message_history.add_message(
                                     platform=platform,
                                     chat_id=storage_id,
@@ -1463,7 +1473,11 @@ class BackBrainMixin:
 
             if image_tags_failed:
                 if not in_polling and not no_reply:
-                    await self._send_platform_message(chat_id, "图片输出异常，已自动重试失败，请稍后重试。")
+                    await self._send_platform_message(
+                        chat_id,
+                        "图片输出异常，已自动重试失败，请稍后重试。",
+                        reply_to_message_id=reply_to_message_id,
+                    )
                 else:
                     logger.info(f"[{chat_id}] [轮询模式] 图片输出异常，已自动重试失败，前脑稍后重试。")
             elif final_response_buffer:
@@ -1478,7 +1492,11 @@ class BackBrainMixin:
                 clean_response = self._strip_timestamp_markers(clean_response)
                 if clean_response:
                     if not in_polling and not no_reply:
-                        sent_ids = await self._send_split_message(chat_id, self._strip_timestamp_markers(clean_response))
+                        sent_ids = await self._send_split_message(
+                            chat_id,
+                            self._strip_timestamp_markers(clean_response),
+                            reply_to_message_id=reply_to_message_id,
+                        )
                         if sent_ids:
                             response_platform_ids.extend(sent_ids)
                     else:
@@ -1509,13 +1527,21 @@ class BackBrainMixin:
                 final_response_buffer = self._strip_timestamp_markers(final_response_buffer)
                 if final_response_buffer:
                     if not in_polling and not no_reply:
-                        sent_ids = await self._send_split_message(chat_id, self._strip_timestamp_markers(final_response_buffer))
+                        sent_ids = await self._send_split_message(
+                            chat_id,
+                            self._strip_timestamp_markers(final_response_buffer),
+                            reply_to_message_id=reply_to_message_id,
+                        )
                         if sent_ids:
                             response_platform_ids.extend(sent_ids)
                 else:
                     final_response_buffer = "任务已完成。"
                     if not in_polling and not no_reply:
-                        sent_ids = await self._send_split_message(chat_id, self._strip_timestamp_markers(final_response_buffer))
+                        sent_ids = await self._send_split_message(
+                            chat_id,
+                            self._strip_timestamp_markers(final_response_buffer),
+                            reply_to_message_id=reply_to_message_id,
+                        )
                         if sent_ids:
                             response_platform_ids.extend(sent_ids)
             elif latest_tool_output:
@@ -1543,13 +1569,21 @@ class BackBrainMixin:
                 final_response_buffer = self._strip_timestamp_markers(final_response_buffer)
                 if final_response_buffer:
                     if not in_polling and not no_reply:
-                        sent_ids = await self._send_split_message(chat_id, self._strip_timestamp_markers(final_response_buffer))
+                        sent_ids = await self._send_split_message(
+                            chat_id,
+                            self._strip_timestamp_markers(final_response_buffer),
+                            reply_to_message_id=reply_to_message_id,
+                        )
                         if sent_ids:
                             response_platform_ids.extend(sent_ids)
                 else:
                     final_response_buffer = "任务已完成。"
                     if not in_polling and not no_reply:
-                        sent_ids = await self._send_split_message(chat_id, self._strip_timestamp_markers(final_response_buffer))
+                        sent_ids = await self._send_split_message(
+                            chat_id,
+                            self._strip_timestamp_markers(final_response_buffer),
+                            reply_to_message_id=reply_to_message_id,
+                        )
                         if sent_ids:
                             response_platform_ids.extend(sent_ids)
             
@@ -1761,7 +1795,11 @@ class BackBrainMixin:
                 except Exception:
                     logger.debug("发送错误详情失败", exc_info=True)
             try:
-                await self._send_platform_message(chat_id, "抱歉，处理您的请求时出现内部错误。")
+                await self._send_platform_message(
+                    chat_id,
+                    "抱歉，处理您的请求时出现内部错误。",
+                    reply_to_message_id=reply_target_message_id(context),
+                )
             except Exception:
                 pass
             

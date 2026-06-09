@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import io
 import logging
 import os
@@ -21,6 +22,20 @@ logger = logging.getLogger(__name__)
 
 
 class TelegramSenderMixin:
+    def _telegram_reply_kwargs(self, reply_to_message_id: str) -> dict[str, object]:
+        value = str(reply_to_message_id or "").strip()
+        if not value:
+            return {}
+        try:
+            message_id = int(value)
+        except (TypeError, ValueError):
+            logger.debug("[telegram] ignoring non-numeric reply_to_message_id=%s", value)
+            return {}
+        return {
+            "reply_to_message_id": message_id,
+            "allow_sending_without_reply": True,
+        }
+
     def _resolve_local_media_path(self, raw_path: str) -> Optional[str]:
         """
         解析富媒体中的本地文件路径。
@@ -164,7 +179,13 @@ class TelegramSenderMixin:
             logger.error(f"压缩图片时出错 {file_path}: {e}")
             return None
 
-    async def _send_photo_smart(self, chat_id: str, file_path: str, caption: str):
+    async def _send_photo_smart(
+        self,
+        chat_id: str,
+        file_path: str,
+        caption: str,
+        reply_kwargs: dict[str, object] | None = None,
+    ):
         """
         智能发送图片：
         1. 小于 10MB → 直接 send_photo
@@ -173,12 +194,13 @@ class TelegramSenderMixin:
         """
         file_size = os.path.getsize(file_path)
         await self.application.bot.send_chat_action(chat_id=chat_id, action=ChatAction.UPLOAD_PHOTO)
+        reply_kwargs = reply_kwargs or {}
 
         # Case 1: 小图直接发
         if file_size <= TG_PHOTO_MAX_SIZE:
             with open(file_path, 'rb') as f:
                 return await self.application.bot.send_photo(
-                    chat_id=chat_id, photo=f, caption=caption
+                    chat_id=chat_id, photo=f, caption=caption, **reply_kwargs
                 )
 
         # Case 2: 大图尝试压缩
@@ -187,7 +209,7 @@ class TelegramSenderMixin:
         if compressed:
             try:
                 return await self.application.bot.send_photo(
-                    chat_id=chat_id, photo=compressed, caption=f"{caption} (已压缩)"
+                    chat_id=chat_id, photo=compressed, caption=f"{caption} (已压缩)", **reply_kwargs
                 )
             except Exception as e:
                 logger.warning(f"[{chat_id}] 压缩后发送图片仍失败: {e}")
@@ -198,7 +220,7 @@ class TelegramSenderMixin:
             await self.application.bot.send_chat_action(chat_id=chat_id, action=ChatAction.UPLOAD_DOCUMENT)
             with open(file_path, 'rb') as f:
                 return await self.application.bot.send_document(
-                    chat_id=chat_id, document=f, caption=f"{caption} (原图)"
+                    chat_id=chat_id, document=f, caption=f"{caption} (原图)", **reply_kwargs
                 )
         else:
             # 超过 50MB 文档限制，发压缩版文档
@@ -208,7 +230,8 @@ class TelegramSenderMixin:
                 return await self.application.bot.send_document(
                     chat_id=chat_id, document=compressed,
                     filename=os.path.splitext(caption)[0] + '_compressed.jpg',
-                    caption=f"{caption} (压缩后文档)"
+                    caption=f"{caption} (压缩后文档)",
+                    **reply_kwargs,
                 )
             raise Exception(f"文件过大 ({file_size/1024/1024:.1f}MB) 且无法压缩")
 
@@ -290,6 +313,8 @@ class TelegramSenderMixin:
           - 文档/代码: pdf, py, js, json, zip, 等等
         """
         parse_media = bool(kwargs.pop("parse_media", True))
+        reply_to_message_id = str(kwargs.pop("reply_to_message_id", "") or "").strip()
+        reply_kwargs = self._telegram_reply_kwargs(reply_to_message_id)
 
         # 1. 提取所有文件路径（可通过 parse_media=False 禁用）
         file_entries = []  # [(path, media_type, is_url)]
@@ -348,7 +373,8 @@ class TelegramSenderMixin:
                         lambda: self.application.bot.send_message(
                             chat_id=chat_id,
                             text=chunk_html,
-                            parse_mode="HTML"
+                            parse_mode="HTML",
+                            **reply_kwargs,
                         )
                     )
                 except Exception as html_err:
@@ -361,7 +387,8 @@ class TelegramSenderMixin:
                         message = await self._send_with_retry(
                             lambda: self.application.bot.send_message(
                                 chat_id=chat_id,
-                                text=part
+                                text=part,
+                                **reply_kwargs,
                             )
                         )
                 all_message_ids.append(str(message.message_id))
@@ -374,51 +401,51 @@ class TelegramSenderMixin:
                     # URL 直接通过 Telegram 发送，不走本地文件读取
                     if media_type == 'photo':
                         await self.application.bot.send_chat_action(chat_id=chat_id, action=ChatAction.UPLOAD_PHOTO)
-                        message = await self._send_with_retry(lambda: self.application.bot.send_photo(chat_id=chat_id, photo=file_path, caption=caption))
+                        message = await self._send_with_retry(lambda: self.application.bot.send_photo(chat_id=chat_id, photo=file_path, caption=caption, **reply_kwargs))
                     elif media_type == 'gif':
                         await self.application.bot.send_chat_action(chat_id=chat_id, action=ChatAction.UPLOAD_PHOTO)
-                        message = await self._send_with_retry(lambda: self.application.bot.send_animation(chat_id=chat_id, animation=file_path, caption=caption))
+                        message = await self._send_with_retry(lambda: self.application.bot.send_animation(chat_id=chat_id, animation=file_path, caption=caption, **reply_kwargs))
                     elif media_type == 'video':
                         await self.application.bot.send_chat_action(chat_id=chat_id, action=ChatAction.UPLOAD_VIDEO)
-                        message = await self._send_with_retry(lambda: self.application.bot.send_video(chat_id=chat_id, video=file_path, caption=caption))
+                        message = await self._send_with_retry(lambda: self.application.bot.send_video(chat_id=chat_id, video=file_path, caption=caption, **reply_kwargs))
                     elif media_type in ('audio', 'voice'):
                         await self.application.bot.send_chat_action(chat_id=chat_id, action=ChatAction.UPLOAD_VOICE)
-                        message = await self._send_with_retry(lambda: self.application.bot.send_audio(chat_id=chat_id, audio=file_path, caption=caption))
+                        message = await self._send_with_retry(lambda: self.application.bot.send_audio(chat_id=chat_id, audio=file_path, caption=caption, **reply_kwargs))
                     else:
                         await self.application.bot.send_chat_action(chat_id=chat_id, action=ChatAction.UPLOAD_DOCUMENT)
-                        message = await self._send_with_retry(lambda: self.application.bot.send_document(chat_id=chat_id, document=file_path, caption=caption))
+                        message = await self._send_with_retry(lambda: self.application.bot.send_document(chat_id=chat_id, document=file_path, caption=caption, **reply_kwargs))
                 else:
                     if media_type == 'photo':
-                        message = await self._send_photo_smart(chat_id, file_path, caption)
+                        message = await self._send_photo_smart(chat_id, file_path, caption, reply_kwargs=reply_kwargs)
                     elif media_type == 'gif':
                         await self.application.bot.send_chat_action(chat_id=chat_id, action=ChatAction.UPLOAD_PHOTO)
                         with open(file_path, 'rb') as f:
                             message = await self._send_with_retry(lambda: self.application.bot.send_animation(
-                                chat_id=chat_id, animation=f, caption=caption
+                                chat_id=chat_id, animation=f, caption=caption, **reply_kwargs
                             ))
                     elif media_type == 'video':
                         await self.application.bot.send_chat_action(chat_id=chat_id, action=ChatAction.UPLOAD_VIDEO)
                         with open(file_path, 'rb') as f:
                             message = await self._send_with_retry(lambda: self.application.bot.send_video(
-                                chat_id=chat_id, video=f, caption=caption
+                                chat_id=chat_id, video=f, caption=caption, **reply_kwargs
                             ))
                     elif media_type == 'audio':
                         await self.application.bot.send_chat_action(chat_id=chat_id, action=ChatAction.UPLOAD_VOICE)
                         with open(file_path, 'rb') as f:
                             message = await self._send_with_retry(lambda: self.application.bot.send_audio(
-                                chat_id=chat_id, audio=f, caption=caption
+                                chat_id=chat_id, audio=f, caption=caption, **reply_kwargs
                             ))
                     elif media_type == 'voice':
                         await self.application.bot.send_chat_action(chat_id=chat_id, action=ChatAction.UPLOAD_VOICE)
                         with open(file_path, 'rb') as f:
                             message = await self._send_with_retry(lambda: self.application.bot.send_voice(
-                                chat_id=chat_id, voice=f, caption=caption
+                                chat_id=chat_id, voice=f, caption=caption, **reply_kwargs
                             ))
                     else:  # document (including code files)
                         await self.application.bot.send_chat_action(chat_id=chat_id, action=ChatAction.UPLOAD_DOCUMENT)
                         with open(file_path, 'rb') as f:
                             message = await self._send_with_retry(lambda: self.application.bot.send_document(
-                                chat_id=chat_id, document=f, caption=caption
+                                chat_id=chat_id, document=f, caption=caption, **reply_kwargs
                             ))
                 all_message_ids.append(str(message.message_id))
                 logger.info(f"[{chat_id}] 已发送{media_type}: {file_path}")
@@ -429,7 +456,8 @@ class TelegramSenderMixin:
                         chat_id=chat_id,
                         text=("⚠️ 无法发送文件: {file_path}\n类型: {media_type}\n错误: {err}\n"
                              "已达到重试上限，建议检查网络或稍后再试。"
-                        ).format(file_path=file_path, media_type=media_type, err=e)
+                        ).format(file_path=file_path, media_type=media_type, err=e),
+                        **reply_kwargs,
                     )
                 )
                 all_message_ids.append(str(message.message_id))
@@ -438,7 +466,8 @@ class TelegramSenderMixin:
         if not all_message_ids:
             message = await self.application.bot.send_message(
                 chat_id=chat_id,
-                text=text or "(empty message)"
+                text=text or "(empty message)",
+                **reply_kwargs,
             )
             all_message_ids.append(str(message.message_id))
 

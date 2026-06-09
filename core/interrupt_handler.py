@@ -246,6 +246,7 @@ class InterruptHandlerMixin:
         user_text: str,
         skip_reply: bool = False,
         target_runtime_key: str = "",
+        source_context: Optional[Dict[str, Any]] = None,
     ):
         """
         前端打断后端：取消当前任务，清理状态，根据 reason 决定下一步。
@@ -295,14 +296,15 @@ class InterruptHandlerMixin:
             # 调用方已发送回复，直接执行后续操作
             if reason == "change":
                 # 启动新任务处理 user_text
-                context = {
+                context = dict(source_context or {})
+                context.update({
                     "platform": platform,
                     "chat_id": identity.platform_chat_id,
                     "user_id": identity.actor_user_id,
                     "text": user_text,
                     "chat_type": identity.chat_type,
                     "user_name": identity.actor_display_name,
-                }
+                })
                 task = asyncio.create_task(self._run_polling_loop(context))
                 self.generation_tasks[chat_id] = task
         else:
@@ -324,13 +326,14 @@ class InterruptHandlerMixin:
                     memory_scope_id=memory_scope_id, place_scope_id=place_scope_id,
                 )
                 # 启动新任务
-                context = {
+                context = dict(source_context or {})
+                context.update({
                     "platform": platform,
                     "chat_id": identity.platform_chat_id,
                     "user_id": identity.actor_user_id,
                     "text": user_text,
                     "chat_type": identity.chat_type,
                     "user_name": identity.actor_display_name,
-                }
+                })
                 task = asyncio.create_task(self._run_polling_loop(context))
                 self.generation_tasks[chat_id] = task

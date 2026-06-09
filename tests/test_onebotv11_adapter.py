@@ -196,6 +196,60 @@ def test_onebot_sender_parses_reply_and_at_segments():
     ]
 
 
+def test_onebot_sender_prepends_explicit_reply_to_message_id():
+    adapter = SenderOnlyOneBot()
+
+    ids = asyncio.run(
+        adapter.send_message(
+            "10001",
+            "收到啦",
+            parse_media=False,
+            reply_to_message_id="666",
+        )
+    )
+
+    assert ids == ["42"]
+    assert adapter.calls == [
+        (
+            "send_msg",
+            {
+                "message_type": "group",
+                "group_id": 10001,
+                "message": [
+                    {"type": "reply", "data": {"id": "666"}},
+                    {"type": "text", "data": {"text": "收到啦"}},
+                ],
+            },
+        )
+    ]
+
+
+def test_onebot_sender_bare_reply_prefers_explicit_reply_to_message_id():
+    adapter = SenderOnlyOneBot()
+
+    asyncio.run(
+        adapter.send_message(
+            "10001",
+            "[reply] 收到啦",
+            reply_to_message_id="666",
+        )
+    )
+
+    assert adapter.calls == [
+        (
+            "send_msg",
+            {
+                "message_type": "group",
+                "group_id": 10001,
+                "message": [
+                    {"type": "reply", "data": {"id": "666"}},
+                    {"type": "text", "data": {"text": " 收到啦"}},
+                ],
+            },
+        )
+    ]
+
+
 def test_onebot_sender_parses_explicit_reply_and_reply_at_target():
     adapter = SenderOnlyOneBot()
 
