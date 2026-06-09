@@ -345,9 +345,7 @@ class SchedulerMixin:
         """
         try:
             identity = self._identity_for_runtime_key(chat_id)
-            msgs = self.message_history.get_current_segment_messages(
-                identity.platform, identity.storage_id, memory_scope_id=identity.memory_scope_id
-            ) or []
+            msgs = self._current_place_segment_messages(identity) or []
         except Exception as e:
             logger.debug(f"[{chat_id}] 读取当前段消息失败，无法做告别短路: {e}")
             return False
@@ -377,6 +375,23 @@ class SchedulerMixin:
             return True
 
         return False
+
+    def _current_place_segment_messages(self, identity) -> List[Dict[str, Any]]:
+        """Return current open-segment messages from the same runtime/place only.
+
+        普通后脑上下文可以跨平台共享，但 followup/wrapup 会主动发消息，
+        必须只依据当前地点的最后对话，避免把 A 平台的内容追问到 B 平台。
+        """
+        msgs = self.message_history.get_current_segment_messages(
+            identity.platform,
+            identity.storage_id,
+            memory_scope_id=identity.memory_scope_id,
+        ) or []
+        current_place = identity.place_scope_id or f"{identity.platform}:{identity.platform_chat_id}"
+        return [
+            m for m in msgs
+            if str(m.get("place_scope_id") or f"{m.get('platform') or ''}:{m.get('chat_id') or ''}") == current_place
+        ]
 
     async def _followup_loop(self, chat_id: str):
         """
@@ -551,9 +566,7 @@ class SchedulerMixin:
 
         identity = self._identity_for_runtime_key(chat_id)
         storage_id = identity.storage_id
-        current_segment_msgs = self.message_history.get_current_segment_messages(
-            identity.platform, storage_id, memory_scope_id=identity.memory_scope_id
-        )
+        current_segment_msgs = self._current_place_segment_messages(identity)
         recent_msgs = current_segment_msgs[-10:] if current_segment_msgs else []
         recent_conversation = "\n".join(
             f"{'用户' if m['role'] == 'user' else 'AI'}: {m['content']}"
@@ -626,9 +639,7 @@ class SchedulerMixin:
 
         identity = self._identity_for_runtime_key(chat_id)
         storage_id = identity.storage_id
-        current_segment_msgs = self.message_history.get_current_segment_messages(
-            identity.platform, storage_id, memory_scope_id=identity.memory_scope_id
-        )
+        current_segment_msgs = self._current_place_segment_messages(identity)
         recent_msgs = current_segment_msgs[-10:] if current_segment_msgs else []
         recent_conversation = "\n".join(
             f"{'用户' if m['role'] == 'user' else 'AI'}: {m['content']}"
@@ -699,9 +710,7 @@ class SchedulerMixin:
 
         identity = self._identity_for_runtime_key(chat_id)
         storage_id = identity.storage_id
-        current_segment_msgs = self.message_history.get_current_segment_messages(
-            identity.platform, storage_id, memory_scope_id=identity.memory_scope_id
-        )
+        current_segment_msgs = self._current_place_segment_messages(identity)
         recent_msgs = current_segment_msgs[-10:] if current_segment_msgs else []
         recent_conversation = "\n".join(
             f"{'用户' if m['role'] == 'user' else 'AI'}: {m['content']}"

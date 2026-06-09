@@ -136,8 +136,19 @@ class ToolManager:
                 "store_progress_note", "get_progress_note", "list_alarms",
                 "read_secret_vault",
             ]))
+            has_security_alias = bool((cfg.get("llm", {}) or {}).get("models", {}).get("security"))
             if self._security_enabled:
-                logger.info(f"Security model enabled. Whitelist: {self._security_whitelist}")
+                alias_state = "configured" if has_security_alias else "not configured; falling back to fast"
+                logger.info(
+                    "Security review enabled (%s). Whitelist: %s",
+                    alias_state,
+                    sorted(self._security_whitelist),
+                )
+            elif has_security_alias:
+                logger.info(
+                    "Security model alias is configured, but security.enabled=false; "
+                    "tool review is disabled."
+                )
         except Exception as e:
             logger.debug(f"Security config init skipped: {e}")
             self._security_enabled = False

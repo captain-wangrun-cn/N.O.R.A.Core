@@ -217,6 +217,28 @@ def test_onebot_sender_parses_explicit_reply_and_reply_at_target():
     ]
 
 
+def test_onebot_sender_parses_face_and_emoji_segments():
+    adapter = SenderOnlyOneBot()
+
+    ids = asyncio.run(adapter.send_message("10001", "收到[face:14][emoji:66]"))
+
+    assert ids == ["42"]
+    assert adapter.calls == [
+        (
+            "send_msg",
+            {
+                "message_type": "group",
+                "group_id": 10001,
+                "message": [
+                    {"type": "text", "data": {"text": "收到"}},
+                    {"type": "face", "data": {"id": "14"}},
+                    {"type": "face", "data": {"id": "66"}},
+                ],
+            },
+        )
+    ]
+
+
 class ContextInjectionProbe(BackBrainMixin):
     def __init__(self):
         async def onebot_tool(user_id: str, group_id: str = "", chat_id: str = ""):

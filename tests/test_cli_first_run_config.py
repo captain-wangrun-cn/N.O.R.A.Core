@@ -33,6 +33,40 @@ def test_step_models_does_not_load_config_file_during_first_run(monkeypatch, tmp
     assert not (tmp_path / "config.yml").exists()
 
 
+def test_step_models_enables_security_when_security_model_configured(monkeypatch, tmp_path):
+    monkeypatch.chdir(tmp_path)
+
+    state = {
+        "provider": "gemini",
+        "providers": {
+            "gemini": {
+                "type": "gemini",
+                "api_key": "dummy-key",
+            }
+        },
+        "cost_tracking": {"custom_prices": {}},
+        "security": {"enabled": False},
+        "model_providers": {},
+        "models": {},
+    }
+
+    monkeypatch.setattr(cli.StepModels, "_select_provider_for_role", lambda self, role, entries: "gemini")
+    monkeypatch.setattr(cli.StepModels, "_fetch_models_for_provider", lambda self, name, cfg: ["picked-model"])
+    monkeypatch.setattr(cli.StepModels, "select_model", lambda self, models, role, provider: f"{role}-model")
+    monkeypatch.setattr(cli.StepModels, "_prompt_price", lambda self, model_name: None)
+
+    confirmations = iter([False, True])
+    monkeypatch.setattr(cli.questionary, "confirm", lambda *args, **kwargs: _Confirm(next(confirmations)))
+
+    step = cli.StepModels(state)
+
+    assert step.run() is True
+    assert state["security"]["enabled"] is True
+    assert state["models"]["security"] == "security-model"
+    assert state["model_providers"]["security"] == "gemini"
+    assert not (tmp_path / "config.yml").exists()
+
+
 def test_model_price_info_does_not_load_config_file_during_first_run(monkeypatch, tmp_path):
     monkeypatch.chdir(tmp_path)
 

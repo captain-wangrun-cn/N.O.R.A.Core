@@ -15,10 +15,14 @@ from core.worker_status import BackendTaskQueue, WorkerStatus
 class _DummyHistory:
     def __init__(self):
         self.closed = []
+        self.current_messages = []
 
     def close_session(self, **kwargs):
         self.closed.append(kwargs)
         return len(self.closed)
+
+    def get_current_segment_messages(self, *args, **kwargs):
+        return list(self.current_messages)
 
 
 class _ScopeController(SchedulerMixin):
@@ -49,12 +53,12 @@ class _ScopeController(SchedulerMixin):
         self._followup_suspended_until_idle = {}
         self.message_history = _DummyHistory()
 
-    def add_identity(self, platform, chat_id, user_id):
+    def add_identity(self, platform, chat_id, user_id, chat_type="private"):
         identity = build_identity_from_parts(
             platform=platform,
             chat_id=chat_id,
             user_id=user_id,
-            chat_type="private",
+            chat_type=chat_type,
         )
         self.conversation_identities[identity.runtime_key] = identity
         return identity
@@ -118,3 +122,61 @@ def test_active_runtime_includes_scope_queue():
     active = controller.get_active_runtime_keys(web.memory_scope_id)
     assert tg.runtime_key in active
     assert web.runtime_key in active
+
+
+def test_followup_context_is_limited_to_current_place():
+    controller = _ScopeController()
+    tg = controller.add_identity("telegram", "tg-chat", "owner")
+    ob = controller.add_identity("onebotv11", "qq-chat", "owner")
+    controller.message_history.current_messages = [
+        {
+            "role": "user",
+            "content": "Telegram 这里刚聊到一半",
+            "platform": "telegram",
+            "chat_id": tg.storage_id,
+            "place_scope_id": tg.place_scope_id,
+        },
+        {
+            "role": "user",
+            "content": "QQ 这里是另一个活跃话题",
+            "platform": "onebotv11",
+            "chat_id": ob.storage_id,
+            "place_scope_id": ob.place_scope_id,
+        },
+    ]
+
+    tg_msgs = controller._current_place_segment_messages(tg)
+    ob_msgs = controller._current_place_segment_messages(ob)
+
+    assert [m["content"] for m in tg_msgs] == ["Telegram 这里刚聊到一半"]
+    assert [m["content"] for m in ob_msgs] == ["QQ 这里是另一个活跃话题"]
+
+
+def test_followup_context_is_limited_between_onebot_groups():
+    controller = _ScopeController()
+    group_a = controller.add_identity("onebotv11", "10001", "owner", chat_type="group")
+    group_b = controller.add_identity("onebotv11", "10002", "owner", chat_type="group")
+    assert group_a.memory_scope_id == group_b.memory_scope_id
+    assert group_a.place_scope_id == "onebotv11:10001"
+    assert group_b.place_scope_id == "onebotv11:10002"
+
+    controller.message_history.current_messages = [
+        {
+            "role": "user",
+            "content": "群10001正在聊作业",
+            "platform": "onebotv11",
+            "chat_id": group_a.storage_id,
+        },
+        {
+            "role": "user",
+            "content": "群10002正在聊游戏",
+            "platform": "onebotv11",
+            "chat_id": group_b.storage_id,
+        },
+    ]
+
+    group_a_msgs = controller._current_place_segment_messages(group_a)
+    group_b_msgs = controller._current_place_segment_messages(group_b)
+
+    assert [m["content"] for m in group_a_msgs] == ["群10001正在聊作业"]
+    assert [m["content"] for m in group_b_msgs] == ["群10002正在聊游戏"]

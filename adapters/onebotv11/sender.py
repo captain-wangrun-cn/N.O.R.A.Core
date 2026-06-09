@@ -20,6 +20,10 @@ _CONTROL_TAG_PATTERN = re.compile(
     r"\[(reply|at)(?::\s*([^\]]+))?\]",
     re.IGNORECASE,
 )
+_FACE_TAG_PATTERN = re.compile(
+    r"\[(face|emoji)(?::\s*([0-9]+))\]",
+    re.IGNORECASE,
+)
 _SPLIT_MARKER_PATTERN = re.compile(r"\[SPLIT(?::([0-9.]+))?\]", re.IGNORECASE)
 
 
@@ -140,6 +144,12 @@ class OneBotSenderMixin:
             return None
         return None
 
+    def _face_segment(self, raw_value: str) -> dict[str, Any] | None:
+        value = str(raw_value or "").strip()
+        if not value.isdigit():
+            return None
+        return {"type": "face", "data": {"id": value}}
+
     def _text_to_onebot_segments(self, text: str, *, parse_media: bool = True, chat_id: str = "") -> list[dict[str, Any]]:
         if not parse_media:
             return [{"type": "text", "data": {"text": str(text or "")}}]
@@ -148,7 +158,7 @@ class OneBotSenderMixin:
         cursor = 0
         missing: list[str] = []
         marker_pattern = re.compile(
-            rf"{_MEDIA_TAG_PATTERN.pattern}|{_CONTROL_TAG_PATTERN.pattern}",
+            rf"{_MEDIA_TAG_PATTERN.pattern}|{_CONTROL_TAG_PATTERN.pattern}|{_FACE_TAG_PATTERN.pattern}",
             re.IGNORECASE,
         )
         for match in marker_pattern.finditer(text or ""):
@@ -156,10 +166,14 @@ class OneBotSenderMixin:
                 before = text[cursor:match.start()]
                 if before:
                     segments.append({"type": "text", "data": {"text": before}})
-            tag_type = str(match.group(1) or match.group(3) or "")
-            tag_value = str(match.group(2) or match.group(4) or "")
+            tag_type = str(match.group(1) or match.group(3) or match.group(5) or "")
+            tag_value = str(match.group(2) or match.group(4) or match.group(6) or "")
             if tag_type.lower() in {"reply", "at"}:
                 segment = self._control_segment(tag_type, tag_value, chat_id)
+                if segment:
+                    segments.append(segment)
+            elif tag_type.lower() in {"face", "emoji"}:
+                segment = self._face_segment(tag_value)
                 if segment:
                     segments.append(segment)
             else:
@@ -215,7 +229,7 @@ class OneBotSenderMixin:
                         current_text_len = 0
                     current.append({"type": "text", "data": {"text": part}})
                     current_text_len += len(part)
-            elif segment_type in {"reply", "at"}:
+            elif segment_type in {"reply", "at", "face"}:
                 current.append(segment)
             else:
                 control_prefix = [seg for seg in current if str(seg.get("type") or "") in {"reply", "at"}]

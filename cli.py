@@ -1018,6 +1018,7 @@ class StepModels(ConfigStep):
         provider_model_cache: Dict[str, List[str]] = {}
         models = self.state.get('models', {})
         model_providers = self.state.setdefault('model_providers', {})
+        security_cfg = dict(self.state.get('security', {}) or {})
 
         for role_key in ['smart', 'fast', 'coder', 'image', 'video', 'security', 'summary']:
             # video 模型为可选配置
@@ -1036,15 +1037,19 @@ class StepModels(ConfigStep):
             # security 模型为可选配置
             if role_key == 'security':
                 configure_security = questionary.confirm(
-                    "是否配置安全审查模型？（可选，开启后工具调用前经过模型审查）",
-                    default=bool(models.get('security'))
+                    "是否启用安全审查并配置审查模型？（开启后非白名单工具调用前经过模型审查）",
+                    default=bool(security_cfg.get('enabled', False) or models.get('security'))
                 ).ask()
                 if configure_security is None:
                     return False
                 if not configure_security:
                     models.pop('security', None)
                     model_providers.pop('security', None)
+                    security_cfg["enabled"] = False
+                    self.state['security'] = security_cfg
                     continue
+                security_cfg["enabled"] = True
+                self.state['security'] = security_cfg
 
             provider_name = self._select_provider_for_role(role_key, provider_entries)
             if provider_name is None:
@@ -1251,7 +1256,8 @@ def run_wizard():
                 'llm': llm_cfg,
                 'memory': cfg.get("memory", {}),
                 'tavily': cfg.get("tavily", {}),
-                'cost_tracking': cfg.get("cost_tracking", {'enabled': True})
+                'cost_tracking': cfg.get("cost_tracking", {'enabled': True}),
+                'security': cfg.get("security", {}) or {},
             }
 
     questionary.print(
@@ -1288,7 +1294,8 @@ def run_wizard():
             'models': state.get('models', {})
         },
         'memory': state.get('memory', {}),
-        'cost_tracking': state.get('cost_tracking', {'enabled': True})
+        'cost_tracking': state.get('cost_tracking', {'enabled': True}),
+        'security': state.get('security', {}) or {},
     }
     if isinstance(state.get('llm'), dict):
         llm_state = state.get('llm') or {}

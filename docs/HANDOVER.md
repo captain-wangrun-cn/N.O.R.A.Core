@@ -5,6 +5,31 @@
 
 ## 近期关键改动（截至 2026-06-09）
 
+### 🧭 接手核查：媒体发送者、people、OB11 表情、跨端 followup、安全审查 — 2026-06-09
+
+- 媒体入库现状：
+  - `memory/image_store.py` 的图片/视频占位与标签补写会保存 `user_id`、`platform`、`chat_id`、`storage_id`、`platform_message_id`、`memory_scope_id`、`place_scope_id`、`owner_id`、`relationship_id`、`actor_display_name`。
+  - 也就是说“哪个平台、哪个平台 chat、哪个发送者 id、发送者显示名/昵称”已经入库；暂无单独字段存群名片/QQ 昵称的原始拆分，当前统一进 `actor_display_name`。
+- people 目录现状：
+  - `brain/prompts.py` 定义并确保 `workspace/data/memory/people/` 存在，主系统提示允许 Nora 给非主人/访客建人物笔记。
+  - 当前不会自动全量注入 people 文件；只注入 `SOUL.md` / `USER.md` / `data/memory/MEMORY.md` / 可选 `SCHEDULE.md`。这避免把所有访客笔记塞进上下文。
+- OneBot v11 / QQ 表情：
+  - `adapters/onebotv11/sender.py` 支持 `[face:ID]` 与 `[emoji:ID]`，转成 OneBot `{"type":"face","data":{"id":"ID"}}` 消息段。
+  - `adapters/onebotv11/PROMPT.md` 已告知模型：表情 ID 必须来自已知表情表或用户明确给出的 ID，不能凭空编。
+- 跨平台 followup 漂移修复：
+  - 普通上下文仍按 `memory_scope_id` 跨平台共享。
+  - 但 followup / wrapup 会主动发消息，`core/scheduler_mixin.py` 现在只取当前 `place_scope_id` 的当前段消息做检测与生成，避免把 A 平台内容追问到 B 平台。
+- security 配置修复：
+  - 之前只配置 `llm.models.security` 不等于启用审查，`security.enabled` 为 false 时不会生效。
+  - `cli.py` 的模型配置步骤现在会同步写 `security.enabled`；`brain/tools.py` 启动日志会明确提示 security alias 已配置但审查未启用，或启用后是否 fallback 到 fast。
+
+**验证**：
+- `.venv\Scripts\python.exe -m pytest tests\test_onebotv11_adapter.py tests\test_scope_runtime_coordination.py tests\test_cli_first_run_config.py tests\test_tool_security_config.py -q --basetemp .pytest-tmp` → 33 passed。
+- `.venv\Scripts\python.exe -m py_compile adapters\onebotv11\sender.py core\scheduler_mixin.py brain\tools.py cli.py tests\test_onebotv11_adapter.py tests\test_scope_runtime_coordination.py tests\test_cli_first_run_config.py tests\test_tool_security_config.py` 通过。
+- 额外跑 `tests\test_message_history.py tests\test_image_memory.py tests\test_image_store_platform_message_lookup.py tests\test_delivery_target.py` 时 71 passed / 1 failed；失败为当前机器 C 盘 `Free=0` 导致 `OSError: [Errno 28] No space left on device`，非断言失败。
+
+---
+
 ### ⚡ OneBot v11 WebSocket 入站延迟优化 — 2026-06-09
 
 - 修复 OneBot v11 正向/反向 WebSocket 入站消息偶发延迟数秒到十几秒的问题：
