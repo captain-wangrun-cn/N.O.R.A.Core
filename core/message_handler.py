@@ -1,4 +1,4 @@
-'''
+﻿'''
 author:        captain-wangrun-cn <wangrun114514@foxmail.com>
 date:          2026-03-12 13:28:21
 Copyright © WR（captain-wangrun-cn） All rights reserved
@@ -14,7 +14,7 @@ from typing import Dict, Any, List, Optional
 from brain.multimodal import extract_image_payloads, extract_video_payloads
 from brain.prompts import render_template, get_soul_prompt, load_identity_context
 from core.routing import has_image_input, sanitize_user_visible_text
-from core.conversation_identity import conversation_target_dict
+from core.conversation_identity import conversation_target_dict, normalize_chat_type
 from core.scene_context import build_current_scene_block, should_redact_cross_place_details
 from core.default_chat_id_store import save_default_chat_target
 from core.delivery_target_store import update_last_active_target
@@ -47,6 +47,9 @@ def _context_platform_message_ids(context: Dict[str, Any]) -> List[str]:
 
 def reply_target_message_id(context: Dict[str, Any]) -> str:
     """Return the incoming platform message id that assistant replies should quote."""
+    # 私聊场景不需要回复引用，避免消息错乱
+    if normalize_chat_type(context.get("chat_type")) == "private":
+        return ""
     explicit = str(context.get("reply_target_message_id") or "").strip()
     if explicit:
         return explicit

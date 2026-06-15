@@ -108,3 +108,38 @@ def test_delete_last_assistant_message_supports_nth(tmp_path):
     latest = history.delete_last_assistant_message("telegram", "chat-1")
     assert latest is not None
     assert latest["message_id"] != deleted["message_id"]
+
+
+# ---- reply_target_message_id 私聊不回复引用测试 ----
+
+
+def test_reply_target_message_id_returns_empty_for_private_chat():
+    """私聊场景下 reply_target_message_id 应返回空字符串，避免消息错乱。"""
+    from core.message_handler import reply_target_message_id
+
+    context = {
+        "chat_type": "private",
+        "platform_message_id": "123",
+        "reply_target_message_id": "456",
+    }
+    assert reply_target_message_id(context) == ""
+
+
+def test_reply_target_message_id_returns_id_for_group_chat():
+    """群聊场景下 reply_target_message_id 应正常返回消息 ID。"""
+    from core.message_handler import reply_target_message_id
+
+    context = {
+        "chat_type": "group",
+        "platform_message_id": "789",
+        "reply_target_message_id": "101",
+    }
+    assert reply_target_message_id(context) == "101"
+
+
+def test_reply_target_message_id_defaults_to_private_when_missing():
+    """chat_type 缺失时默认视为私聊，不应返回 ID。"""
+    from core.message_handler import reply_target_message_id
+
+    context = {"platform_message_id": "222"}
+    assert reply_target_message_id(context) == ""
