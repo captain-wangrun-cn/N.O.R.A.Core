@@ -1715,6 +1715,7 @@ class BackBrainMixin:
                                 image_id=vid_id,
                                 tags=tags,
                                 ocr_text="",
+                                description="",
                                 user_id=user_id,
                                 chat_id=platform_chat_id,
                                 file_path=vid["path"],
