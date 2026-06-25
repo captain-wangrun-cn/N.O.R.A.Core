@@ -701,6 +701,177 @@ class MessageHistory:
             return "memory_scope_id = ?", (memory_scope_id,)
         return "platform = ? AND chat_id = ?", (platform, chat_id)
 
+    @staticmethod
+    def _platform_message_ids_from_metadata(metadata: Dict[str, Any]) -> List[str]:
+        """从消息 metadata 中规范化平台消息 ID 列表。"""
+        platform_ids = metadata.get("platform_message_ids") or metadata.get("platform_message_id") or []
+        if isinstance(platform_ids, str):
+            platform_ids = [platform_ids]
+        return [str(pid) for pid in platform_ids if pid is not None]
+
+    @staticmethod
+    def _parse_message_metadata(msg: Dict[str, Any]) -> Dict[str, Any]:
+        """解析 messages.metadata，失败时返回空 dict。"""
+        md_raw = msg.get("metadata")
+        try:
+            return json.loads(md_raw) if md_raw else {}
+        except Exception:
+            return {}
+
+    def _format_raw_context_message(
+        self,
+        msg: Dict[str, Any],
+        *,
+        scoped: bool = False,
+        current_place: str = "",
+    ) -> Dict[str, Any]:
+        """把 messages 表原始行转换为模型上下文消息结构。"""
+        md = self._parse_message_metadata(msg)
+        content = msg.get("content", "")
+        if scoped:
+            content = self._apply_source_label(msg, current_place, content)
+
+        return {
+            "role": msg["role"],
+            "content": content,
+            "timestamp": msg["timestamp"],
+            "message_id": msg["id"],
+            "metadata": md,
+            "platform_message_ids": self._platform_message_ids_from_metadata(md),
+            "place_scope_id": msg.get("place_scope_id"),
+            "actor_display_name": msg.get("actor_display_name"),
+            "source_platform": msg.get("platform"),
+        }
+
+    def get_compressed_context_messages(
+        self,
+        platform: str,
+        chat_id: str,
+        include_summaries: bool = True,
+        memory_scope_id: Optional[str] = None,
+        current_place_scope_id: Optional[str] = None,
+    ) -> List[Dict]:
+        """获取压缩/历史上下文，不包含当前活跃段原文窗口。"""
+        scope_where, scope_params = self._scope_filter(platform, chat_id, memory_scope_id)
+        scoped = bool(memory_scope_id)
+        current_place = current_place_scope_id or f"{platform}:{chat_id}"
+
+        conn = sqlite3.connect(str(self.db_path))
+        conn.row_factory = sqlite3.Row
+        cursor = conn.cursor()
+
+        messages: List[Dict] = []
+
+        cursor.execute(f"""
+            SELECT * FROM messages
+            WHERE {scope_where} AND is_pinned = 1
+            ORDER BY timestamp ASC
+        """, scope_params)
+        for row in cursor.fetchall():
+            msg = dict(row)
+            content = msg["content"]
+            if scoped:
+                content = self._apply_source_label(msg, current_place, content)
+            messages.append({
+                "role": msg["role"],
+                "content": f"[📌 重要] {content}",
+                "timestamp": msg["timestamp"],
+            })
+
+        if include_summaries:
+            cursor.execute(f"""
+                SELECT summary_text, message_count FROM summaries
+                WHERE {scope_where} AND level = 3
+                ORDER BY timestamp DESC
+                LIMIT 1
+            """, scope_params)
+            archive_summary = cursor.fetchone()
+            if archive_summary:
+                messages.append({
+                    "role": "system",
+                    "content": f"[📚 早期对话总结，共{archive_summary['message_count']}条] {archive_summary['summary_text']}",
+                    "timestamp": 0,
+                })
+
+        active_segment_exists = bool(self.get_current_segment_messages(platform, chat_id, memory_scope_id=memory_scope_id))
+        if include_summaries and self.context_compressor:
+            compressed_segments = self.context_compressor.get_context_messages(
+                platform, chat_id, memory_scope_id=memory_scope_id
+            )
+            if active_segment_exists:
+                # ContextCompressor 会把当前活跃段作为最新 slot；这里的“压缩上下文”
+                # 只代表历史部分，当前活跃段由 get_current_segment_context_messages 原文提供。
+                compressed_segments = [
+                    seg for seg in compressed_segments
+                    if not (
+                        int(seg.get("segment_slot") or 0) == 1
+                        and seg.get("segment_type") in {"raw_recent_segment", "compressed_recent_segment"}
+                    )
+                ]
+            if compressed_segments:
+                messages.extend(compressed_segments)
+                logger.debug(f"[{platform}/{chat_id}] 使用历史上下文压缩库: {len(compressed_segments)} 段")
+
+        if include_summaries:
+            cursor.execute(f"""
+                SELECT summary_text, level, message_count, timestamp FROM summaries
+                WHERE {scope_where} AND level < 3
+                ORDER BY timestamp ASC
+            """, scope_params)
+            for row in cursor.fetchall():
+                messages.append({
+                    "role": "system",
+                    "content": f"[💬 对话摘要，共{row['message_count']}条] {row['summary_text']}",
+                    "timestamp": row["timestamp"],
+                })
+
+        conn.close()
+        messages.sort(key=lambda x: x.get("timestamp", 0))
+        scope_tag = memory_scope_id if scoped else f"{platform}/{chat_id}"
+        logger.info(f"[{scope_tag}] 获取压缩上下文: {len(messages)} 条消息")
+        return messages
+
+    def get_current_segment_context_messages(
+        self,
+        platform: str,
+        chat_id: str,
+        memory_scope_id: Optional[str] = None,
+        current_place_scope_id: Optional[str] = None,
+    ) -> List[Dict]:
+        """获取当前活跃消息段（session_id IS NULL）的未压缩上下文消息。"""
+        scoped = bool(memory_scope_id)
+        current_place = current_place_scope_id or f"{platform}:{chat_id}"
+        rows = self.get_current_segment_messages(platform, chat_id, memory_scope_id=memory_scope_id)
+        messages = [
+            self._format_raw_context_message(dict(row), scoped=scoped, current_place=current_place)
+            for row in rows
+        ]
+        scope_tag = memory_scope_id if scoped else f"{platform}/{chat_id}"
+        logger.info(f"[{scope_tag}] 获取当前活跃段上下文: {len(messages)} 条消息")
+        return messages
+
+    def get_forebrain_context_messages(
+        self,
+        platform: str,
+        chat_id: str,
+        memory_scope_id: Optional[str] = None,
+        current_place_scope_id: Optional[str] = None,
+    ) -> List[Dict]:
+        """前脑完整上下文：历史压缩上下文 + 当前活跃段未压缩原文。"""
+        compressed = self.get_compressed_context_messages(
+            platform,
+            chat_id,
+            memory_scope_id=memory_scope_id,
+            current_place_scope_id=current_place_scope_id,
+        )
+        active = self.get_current_segment_context_messages(
+            platform,
+            chat_id,
+            memory_scope_id=memory_scope_id,
+            current_place_scope_id=current_place_scope_id,
+        )
+        return compressed + active
+
     def get_context_messages(
         self,
         platform: str,
@@ -836,16 +1007,7 @@ class MessageHistory:
                 })
             
             prev_session_id = current_session_id
-            md_raw = msg.get("metadata")
-            try:
-                md = json.loads(md_raw) if md_raw else {}
-            except Exception:
-                md = {}
-
-            platform_ids = md.get("platform_message_ids") or md.get("platform_message_id") or []
-            if isinstance(platform_ids, str):
-                platform_ids = [platform_ids]
-            platform_ids = [str(pid) for pid in platform_ids if pid is not None]
+            md = self._parse_message_metadata(msg)
 
             content = msg["content"]
             if scoped:
@@ -857,7 +1019,7 @@ class MessageHistory:
                 "timestamp": msg["timestamp"],
                 "message_id": msg["id"],
                 "metadata": md,
-                "platform_message_ids": platform_ids,
+                "platform_message_ids": self._platform_message_ids_from_metadata(md),
                 "place_scope_id": msg.get("place_scope_id"),
                 "actor_display_name": msg.get("actor_display_name"),
                 "source_platform": msg.get("platform"),

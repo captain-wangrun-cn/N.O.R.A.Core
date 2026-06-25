@@ -686,8 +686,8 @@ class BackBrainMixin:
             last_turn_model_alias = base_model_alias
             last_turn_llm = active_llm
             
-            # 临时历史，从数据库加载持久化上下文
-            db_context = self.message_history.get_context_messages(
+            # 临时历史：后脑/image/video 只加载当前活跃消息段的未压缩上下文
+            db_context = self.message_history.get_current_segment_context_messages(
                 platform, storage_id, memory_scope_id=memory_scope_id, current_place_scope_id=place_scope_id
             )
 

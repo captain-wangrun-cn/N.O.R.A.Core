@@ -8,14 +8,21 @@ from core.worker_status import BackendTaskQueue, WorkerStatus
 
 
 class _DummyHistory:
+    def __init__(self, messages=None):
+        self.messages = list(messages or [])
+
     def get_context_messages(self, *args, **kwargs):
-        return []
+        return list(self.messages)
+
+    def get_forebrain_context_messages(self, *args, **kwargs):
+        return list(self.messages)
 
 
 class _FrontBrainProbe(FrontBrainMixin):
     def __init__(self, responses):
         self.responses = list(responses)
         self.system_prompts = []
+        self.histories = []
         self.llm = object()
         self.front_brain_partial = {}
         self.cost_tracking_enabled = False
@@ -63,6 +70,7 @@ class _FrontBrainProbe(FrontBrainMixin):
 
     def _chat_stream_wrapper(self, model_client, chat_id, **kwargs):
         self.system_prompts.append(kwargs.get("system_prompt", ""))
+        self.histories.append(list(kwargs.get("history") or []))
         response = self.responses.pop(0)
 
         async def _gen():
@@ -161,6 +169,61 @@ def test_front_brain_prompt_includes_current_onebot_group_scene():
     assert "回复目标: onebotv11:10001" in system_prompt
     assert "当前说话人: 群友A" in system_prompt
     assert "群聊名称: 测试群" in system_prompt
+
+
+def test_front_brain_history_preserves_system_context_and_not_last20_truncated():
+    probe = _FrontBrainProbe(["收到啦。"])
+    probe.message_history = _DummyHistory(
+        [{"role": "system", "content": "[压缩段] 历史摘要", "timestamp": 0}]
+        + [
+            {"role": "user" if i % 2 == 0 else "assistant", "content": f"历史消息{i}", "timestamp": i + 1}
+            for i in range(25)
+        ]
+    )
+
+    result = asyncio.run(
+        probe._generate_front_chat_response(
+            {
+                "platform": "onebotv11",
+                "chat_id": "10001",
+                "user_id": "20002",
+                "chat_type": "group",
+                "user_name": "User",
+                "text": "新的问题",
+            }
+        )
+    )
+
+    assert result["user_reply"] == "收到啦。"
+    history = probe.histories[0]
+    assert history[0] == {"role": "system", "content": "[压缩段] 历史摘要"}
+    assert any(item["content"] == "历史消息0" for item in history)
+    assert len(history) == 26
+
+
+def test_front_brain_history_removes_current_user_duplicate():
+    probe = _FrontBrainProbe(["收到啦。"])
+    probe.message_history = _DummyHistory(
+        [
+            {"role": "system", "content": "[压缩段] 历史摘要", "timestamp": 0},
+            {"role": "user", "content": "User: 新的问题", "timestamp": 1},
+        ]
+    )
+
+    asyncio.run(
+        probe._generate_front_chat_response(
+            {
+                "platform": "onebotv11",
+                "chat_id": "10001",
+                "user_id": "20002",
+                "chat_type": "group",
+                "user_name": "User",
+                "text": "新的问题",
+            }
+        )
+    )
+
+    assert probe.histories[0] == [{"role": "system", "content": "[压缩段] 历史摘要"}]
 
 
 def test_backend_status_redacts_other_window_details_in_group():

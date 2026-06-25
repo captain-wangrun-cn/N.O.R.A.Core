@@ -247,6 +247,127 @@ def test_source_label_only_for_foreign_place(tmp_path):
     assert "[来自" not in by_place["web:sess_b"]
 
 
+def test_current_segment_context_messages_are_active_only_and_labeled(tmp_path):
+    """当前段上下文只包含 session_id IS NULL 的未压缩消息，并保留跨地点来源标签。"""
+    history = _make_history(tmp_path)
+    history.add_message(
+        platform="telegram", chat_id="user_a", role="user", content="旧段消息",
+        memory_scope_id=SCOPE, place_scope_id="telegram:user_a", actor_display_name="张三",
+    )
+    session_id = history.close_session(
+        platform="telegram", chat_id="user_a", trigger_type="user", memory_scope_id=SCOPE,
+    )
+    assert session_id is not None
+
+    history.add_message(
+        platform="telegram", chat_id="user_a", role="user", content="远端当前段",
+        memory_scope_id=SCOPE, place_scope_id="telegram:user_a", actor_display_name="张三",
+    )
+    history.add_message(
+        platform="web", chat_id="sess_b", role="assistant", content="本地当前段",
+        memory_scope_id=SCOPE, place_scope_id="web:sess_b", actor_display_name="主人",
+    )
+
+    msgs = history.get_current_segment_context_messages(
+        "web", "sess_b", memory_scope_id=SCOPE, current_place_scope_id="web:sess_b",
+    )
+
+    contents = [m["content"] for m in msgs]
+    assert len(msgs) == 2
+    assert not any("旧段消息" in c for c in contents)
+    assert "[来自 telegram:user_a / 张三]" in contents[0]
+    assert "远端当前段" in contents[0]
+    assert "[来自" not in contents[1]
+    assert "本地当前段" in contents[1]
+
+
+def test_compressed_context_excludes_active_segment_raw_window(tmp_path):
+    """压缩上下文 helper 不应夹带当前活跃段原文或活跃段 slot 快照。"""
+    history = _make_history(tmp_path)
+    history.add_message(
+        platform="web", chat_id="sess_b", role="user", content="当前活跃原文",
+        memory_scope_id=SCOPE, place_scope_id="web:sess_b",
+    )
+
+    conn = sqlite3.connect(str(history.db_path))
+    cur = conn.cursor()
+    cur.execute(
+        """
+        INSERT INTO summaries (platform, chat_id, level, start_message_id, end_message_id,
+                               summary_text, message_count, timestamp, memory_scope_id, place_scope_id)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        ("web", "sess_b", 1, 1, 1, "历史摘要", 1, 10.0, SCOPE, "web:sess_b"),
+    )
+    conn.commit()
+    conn.close()
+
+    conn = sqlite3.connect(str(history.context_compressor.db_path))
+    cur = conn.cursor()
+    cur.execute("DELETE FROM context_segments WHERE platform = ? AND chat_id = ?", ("__scope__", SCOPE))
+    cur.execute(
+        """
+        INSERT INTO context_segments
+            (platform, chat_id, slot, segment_type, role, content, message_ids,
+             source_timestamp, updated_at, memory_scope_id)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        ("__scope__", SCOPE, 1, "raw_recent_segment", "system", "当前活跃段快照", "[]", 20.0, 20.0, SCOPE),
+    )
+    cur.execute(
+        """
+        INSERT INTO context_segments
+            (platform, chat_id, slot, segment_type, role, content, message_ids,
+             source_timestamp, updated_at, memory_scope_id)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        ("__scope__", SCOPE, 2, "compressed_single_segment", "system", "历史压缩段", "[]", 5.0, 20.0, SCOPE),
+    )
+    conn.commit()
+    conn.close()
+
+    compressed = history.get_compressed_context_messages(
+        "web", "sess_b", memory_scope_id=SCOPE, current_place_scope_id="web:sess_b",
+    )
+    contents = "\n".join(m["content"] for m in compressed)
+
+    assert "历史摘要" in contents
+    assert "历史压缩段" in contents
+    assert "当前活跃原文" not in contents
+    assert "当前活跃段快照" not in contents
+
+
+def test_forebrain_context_is_compressed_plus_current_segment(tmp_path):
+    """前脑上下文应由历史压缩部分和当前活跃段原文拼接而成。"""
+    history = _make_history(tmp_path)
+    history.add_message(
+        platform="web", chat_id="sess_b", role="user", content="当前段消息",
+        memory_scope_id=SCOPE, place_scope_id="web:sess_b",
+    )
+
+    conn = sqlite3.connect(str(history.db_path))
+    cur = conn.cursor()
+    cur.execute(
+        """
+        INSERT INTO summaries (platform, chat_id, level, start_message_id, end_message_id,
+                               summary_text, message_count, timestamp, memory_scope_id, place_scope_id)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        ("web", "sess_b", 1, 1, 1, "前脑可见历史摘要", 1, 10.0, SCOPE, "web:sess_b"),
+    )
+    conn.commit()
+    conn.close()
+
+    msgs = history.get_forebrain_context_messages(
+        "web", "sess_b", memory_scope_id=SCOPE, current_place_scope_id="web:sess_b",
+    )
+    contents = [m["content"] for m in msgs]
+
+    assert any("前脑可见历史摘要" in c for c in contents)
+    assert any("当前段消息" in c for c in contents)
+    assert contents[-1].endswith("当前段消息")
+
+
 def test_legacy_db_migration_backfills_scope(tmp_path):
     """旧库（无作用域列）启动迁移后，旧行应归入默认共享作用域、place 由 platform/chat_id 生成。"""
     db_path = tmp_path / "legacy.db"

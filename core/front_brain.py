@@ -440,13 +440,10 @@ class FrontBrainMixin:
                 logger.warning(f"[{chat_id}] 前脑 RAG 检索失败，已降级继续。", exc_info=True)
 
         # --- 加载对话历史 ---
-        db_context = self.message_history.get_context_messages(
+        db_context = self.message_history.get_forebrain_context_messages(
             platform, storage_id, memory_scope_id=memory_scope_id, current_place_scope_id=place_scope_id
         )
-        # 常规前脑仅保留最近 20 条；trigger/proactive 场景使用完整上下文
-        if (not proactive_mode) and len(db_context) > 20:
-            db_context = db_context[-20:]
-        
+
         # 去掉最后一条 user 消息（避免和 user_prompt 重复）
         message_content = group_message_content(context, user_name, text, chat_type)
         if db_context:
@@ -461,7 +458,7 @@ class FrontBrainMixin:
                 "content": self._strip_timestamp_markers(str(msg["content"]))
             }
             for msg in db_context
-            if msg["role"] in ("user", "assistant")
+            if msg["role"] in ("system", "user", "assistant")
         ]
 
         # 上下文增强：把前脑历史回复中携带的 routing 元信息（task_instruction / needs_backend）
@@ -775,8 +772,8 @@ class FrontBrainMixin:
             new_user_messages=new_user_messages,
         )
 
-        # 仅取当前对话段的上下文；过长时再截断
-        db_context = self.message_history.get_context_messages(
+        # 前脑审查使用完整上下文：历史压缩上下文 + 当前活跃段原文
+        db_context = self.message_history.get_forebrain_context_messages(
             platform, storage_id, memory_scope_id=memory_scope_id, current_place_scope_id=place_scope_id
         )
         current_session_msgs = [
@@ -785,7 +782,7 @@ class FrontBrainMixin:
                 "content": self._strip_timestamp_markers(str(msg["content"]))
             }
             for msg in db_context
-            if msg.get("role") in ("user", "assistant")
+            if msg.get("role") in ("system", "user", "assistant")
         ]
         # 同步注入历史路由备注，避免审查阶段误判任务是否已下达
         current_session_msgs = self._inject_routing_notes(current_session_msgs, db_context)
@@ -802,10 +799,6 @@ class FrontBrainMixin:
             msg = str(msg).strip()
             if msg:
                 current_session_msgs.append({"role": "user", "content": msg})
-
-        # 若当前消息段过长（>40），仅保留最近 40 条
-        if len(current_session_msgs) > 40:
-            current_session_msgs = current_session_msgs[-40:]
 
         history = current_session_msgs
 
