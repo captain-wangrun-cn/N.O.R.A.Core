@@ -1121,8 +1121,13 @@ class BackBrainMixin:
                                     tv["from_tool"] = True
                                     if tool_name == "view_media" and str(tool_args.get("question", "")).strip():
                                         tv["question"] = str(tool_args.get("question", "")).strip()
-                                pending_tool_multimodal_videos = tool_videos
-                                logger.info(f"[{chat_id}] {tool_name} 返回 {len(tool_videos)} 个视频，下一轮切换 video 模型进行分析。")
+                                if video_llm_available:
+                                    pending_tool_multimodal_videos = tool_videos
+                                    logger.info(f"[{chat_id}] {tool_name} 返回 {len(tool_videos)} 个视频，下一轮切换 video 模型进行分析。")
+                                else:
+                                    # 无视频模型时，不注入视频 payload（coder 模型无法处理），改为文本提示
+                                    logger.warning(f"[{chat_id}] {tool_name} 返回 {len(tool_videos)} 个视频，但未配置视频模型，跳过多模态注入。")
+                                    tool_result += "\n\n（注意：该媒体为视频文件，但当前未配置视频分析模型（models.video），无法查看视频内容。请根据已有信息回复用户。）"
                         except Exception:
                             logger.warning(f"[{chat_id}] 解析 {tool_name} 返回媒体失败，已跳过多模态注入。", exc_info=True)
                     status.update("处理结果", f"{tool_name} 执行完毕，正在分析结果...")
