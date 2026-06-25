@@ -1103,7 +1103,7 @@ class BackBrainMixin:
                     if (
                         tool_name in {"view_media", "crop_image_for_llm"}
                         and isinstance(tool_args, dict)
-                        and bool(tool_args.get("return_image", False))
+                        and bool(tool_args.get("return_image", True))
                     ):
                         try:
                             _clean, tool_images = extract_image_payloads(tool_result)
