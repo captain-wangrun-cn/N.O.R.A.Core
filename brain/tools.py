@@ -1165,6 +1165,10 @@ class ToolManager:
             resolved_local = self._resolve_workspace_path(local_path)
             if not os.path.isfile(resolved_local):
                 return f"Error: local file not found: {local_path}"
+            # 根据文件扩展名判断媒体类型
+            _ext = os.path.splitext(resolved_local)[1].lower()
+            from brain.multimodal import _VIDEO_EXTENSIONS
+            _local_media_type = "video" if _ext in _VIDEO_EXTENSIONS else "image"
             results = [{
                 "image_id": image_id or os.path.basename(resolved_local),
                 "file_path": resolved_local,
@@ -1172,6 +1176,7 @@ class ToolManager:
                 "ocr_text": text_query or "",
                 "user_id": user_id or "",
                 "timestamp": time.time(),
+                "media_type": _local_media_type,
             }]
         else:
             if not self.image_store:
