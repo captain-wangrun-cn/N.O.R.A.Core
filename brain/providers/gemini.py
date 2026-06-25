@@ -14,6 +14,7 @@ import random
 import base64
 import urllib.parse
 
+import asyncio
 import aiohttp
 
 from brain.interface import BaseLLM
@@ -357,82 +358,92 @@ class GeminiProvider(BaseLLM):
         if generation_config:
             body["generationConfig"] = generation_config
 
-        timeout = aiohttp.ClientTimeout(total=120)
+        timeout = aiohttp.ClientTimeout(total=300)
         in_think_block = False
         input_tokens = 0
         output_tokens = 0
+        max_retries = 3
 
-        try:
-            async with aiohttp.ClientSession(timeout=timeout) as session:
-                async with session.post(url, headers=headers, json=body) as resp:
-                    if resp.status != 200:
-                        error_text = await resp.text()
-                        logger.error(f"Gemini REST API error {resp.status}: {error_text[:200]}")
-                        yield {"type": "text", "content": f"抱歉，处理请求时遇到问题：HTTP {resp.status}"}
-                        return
+        for _attempt in range(max_retries):
+            try:
+                async with aiohttp.ClientSession(timeout=timeout) as session:
+                    async with session.post(url, headers=headers, json=body) as resp:
+                        if resp.status != 200:
+                            error_text = await resp.text()
+                            logger.error(f"Gemini REST API error {resp.status}: {error_text[:200]}")
+                            yield {"type": "text", "content": f"抱歉，处理请求时遇到问题：HTTP {resp.status}"}
+                            return
 
-                    # 解析 SSE 流
-                    buffer = ""
-                    async for line in resp.content:
-                        decoded = line.decode("utf-8", errors="replace")
-                        buffer += decoded
+                        # 解析 SSE 流
+                        buffer = ""
+                        async for line in resp.content:
+                            decoded = line.decode("utf-8", errors="replace")
+                            buffer += decoded
 
-                        while "\n" in buffer:
-                            raw_line, buffer = buffer.split("\n", 1)
-                            raw_line = raw_line.strip()
+                            while "\n" in buffer:
+                                raw_line, buffer = buffer.split("\n", 1)
+                                raw_line = raw_line.strip()
 
-                            if not raw_line.startswith("data: "):
-                                continue
-                            json_str = raw_line[6:]
-                            if not json_str:
-                                continue
+                                if not raw_line.startswith("data: "):
+                                    continue
+                                json_str = raw_line[6:]
+                                if not json_str:
+                                    continue
 
-                            try:
-                                chunk_data = json.loads(json_str)
-                            except json.JSONDecodeError:
-                                continue
+                                try:
+                                    chunk_data = json.loads(json_str)
+                                except json.JSONDecodeError:
+                                    continue
 
-                            # 提取 usage
-                            usage_meta = chunk_data.get("usageMetadata") or {}
-                            if usage_meta.get("promptTokenCount"):
-                                input_tokens = usage_meta["promptTokenCount"]
-                            if usage_meta.get("candidatesTokenCount"):
-                                output_tokens = usage_meta["candidatesTokenCount"]
+                                # 提取 usage
+                                usage_meta = chunk_data.get("usageMetadata") or {}
+                                if usage_meta.get("promptTokenCount"):
+                                    input_tokens = usage_meta["promptTokenCount"]
+                                if usage_meta.get("candidatesTokenCount"):
+                                    output_tokens = usage_meta["candidatesTokenCount"]
 
-                            candidates = chunk_data.get("candidates") or []
-                            for candidate in candidates:
-                                parts = (candidate.get("content") or {}).get("parts") or []
-                                for part in parts:
-                                    # thinking 内容跳过
-                                    if part.get("thought"):
-                                        continue
-                                    if "functionCall" in part:
-                                        fc = part["functionCall"]
-                                        yield {
-                                            "type": "tool_call",
-                                            "name": fc.get("name", ""),
-                                            "args": fc.get("args", {})
-                                        }
-                                    elif "text" in part:
-                                        text = part["text"]
-                                        visible_text, in_think_block = self.strip_stream_think_segment(text, in_think_block)
-                                        if visible_text:
-                                            yield {"type": "text", "content": visible_text}
+                                candidates = chunk_data.get("candidates") or []
+                                for candidate in candidates:
+                                    parts = (candidate.get("content") or {}).get("parts") or []
+                                    for part in parts:
+                                        # thinking 内容跳过
+                                        if part.get("thought"):
+                                            continue
+                                        if "functionCall" in part:
+                                            fc = part["functionCall"]
+                                            yield {
+                                                "type": "tool_call",
+                                                "name": fc.get("name", ""),
+                                                "args": fc.get("args", {})
+                                            }
+                                        elif "text" in part:
+                                            text = part["text"]
+                                            visible_text, in_think_block = self.strip_stream_think_segment(text, in_think_block)
+                                            if visible_text:
+                                                yield {"type": "text", "content": visible_text}
 
-            if input_tokens or output_tokens:
-                self.last_usage = {"input_tokens": input_tokens, "output_tokens": output_tokens}
-                yield {"type": "usage", "input_tokens": input_tokens, "output_tokens": output_tokens}
+                if input_tokens or output_tokens:
+                    self.last_usage = {"input_tokens": input_tokens, "output_tokens": output_tokens}
+                    yield {"type": "usage", "input_tokens": input_tokens, "output_tokens": output_tokens}
+                return  # 成功，退出重试循环
 
-        except aiohttp.ClientError as e:
-            logger.error(f"Gemini REST video stream network error: {e}", exc_info=True)
-            yield {"type": "text", "content": f"抱歉，视频处理请求失败：{str(e)[:100]}"}
-        except Exception as e:
-            error_msg = str(e)
-            logger.error(f"Gemini REST video stream error: {e}", exc_info=True)
-            if "block_reason" in error_msg or "PROHIBITED_CONTENT" in error_msg or "SAFETY" in error_msg:
-                yield {"type": "text", "content": "抱歉，由于内容安全限制，我无法直接回复该消息。"}
-            else:
-                yield {"type": "text", "content": f"抱歉，处理请求时遇到问题：{error_msg[:100]}"}
+            except (asyncio.TimeoutError, aiohttp.ClientError) as e:
+                is_last = _attempt == max_retries - 1
+                if is_last:
+                    logger.error(f"Gemini REST video stream error (已重试 {max_retries} 次): {e}", exc_info=True)
+                    yield {"type": "text", "content": f"抱歉，视频处理请求超时（已重试 {max_retries} 次）：{str(e)[:100]}"}
+                    return
+                wait = 2 ** _attempt
+                logger.warning(f"Gemini REST video stream 超时/网络错误，{wait}s 后重试 ({_attempt + 1}/{max_retries}): {e}")
+                await asyncio.sleep(wait)
+            except Exception as e:
+                error_msg = str(e)
+                logger.error(f"Gemini REST video stream error: {e}", exc_info=True)
+                if "block_reason" in error_msg or "PROHIBITED_CONTENT" in error_msg or "SAFETY" in error_msg:
+                    yield {"type": "text", "content": "抱歉，由于内容安全限制，我无法直接回复该消息。"}
+                else:
+                    yield {"type": "text", "content": f"抱歉，处理请求时遇到问题：{error_msg[:100]}"}
+                return
 
     async def chat_stream(
         self,
