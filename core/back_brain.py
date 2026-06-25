@@ -929,6 +929,38 @@ class BackBrainMixin:
                         context="chat"
                     )
                 
+                # 工具回查媒体后的 image/video 轮只负责真实观察；观察结果回灌给正常模型继续推理，不能直接作为最终回复
+                tool_media_analysis_turn = (
+                    current_turn > 1
+                    and not tool_call
+                    and (
+                        (turn_multimodal_images and any(ti.get("from_tool") for ti in turn_multimodal_images))
+                        or (turn_multimodal_videos and any(tv.get("from_tool") for tv in turn_multimodal_videos))
+                    )
+                )
+                if tool_media_analysis_turn:
+                    media_raw = "".join(media_turn_raw_parts) if media_turn_raw_parts else response_text_buffer
+                    media_observation = self._strip_thinking_content(media_raw.strip()) if media_raw else ""
+                    if media_observation:
+                        media_kind = "video" if turn_multimodal_videos else "image"
+                        temp_history.append({
+                            "role": "user",
+                            "content": (
+                                f"【Multimodal Observation from view_media ({media_kind})】\n"
+                                f"{media_observation}\n\n"
+                                "请基于以上真实媒体观察结果，回到正常推理模型继续完成用户原始请求，给出最终回复。"
+                            )
+                        })
+                        self._sync_backend_work_history(session, temp_history, in_polling_mode=in_polling_mode)
+                        await self._send_debug(chat_id, f"👁️ view_media {media_kind} 观察完成，回到正常模型继续推理。")
+                    else:
+                        temp_history.append({
+                            "role": "user",
+                            "content": "【Multimodal Observation from view_media】\n媒体模型没有返回可用观察结果，请如实告知用户无法可靠解析该媒体。"
+                        })
+                        self._sync_backend_work_history(session, temp_history, in_polling_mode=in_polling_mode)
+                    continue
+
                 # Append text to final buffer (visible to user)
                 if response_text_buffer:
                     if (
