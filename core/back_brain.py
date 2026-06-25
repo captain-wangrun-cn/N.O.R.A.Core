@@ -766,6 +766,13 @@ class BackBrainMixin:
                 media_turn_raw_parts: List[str] = [] if turn_model_alias in ("image", "video") else None
                 # 视频模型轮次不传工具，专注生成标签
                 video_turn_no_tools = (turn_model_alias == "video")
+                _media_info = ""
+                if turn_multimodal_images:
+                    _media_info += f", images={len(turn_multimodal_images)}"
+                if turn_multimodal_videos:
+                    _media_info += f", videos={len(turn_multimodal_videos)}"
+                logger.info(f"[{chat_id}] Turn {current_turn} 模型: {turn_model_alias}{_media_info}, no_tools={video_turn_no_tools or force_no_tools}")
+                await self._send_debug(chat_id, f"🎯 Turn {current_turn} 模型: {turn_model_alias}{_media_info}")
                 # 构造本轮 user_prompt：工具返回图片时追加提示（这些是回查的旧图，不要生成 IMAGE_TAGS）
                 turn_user_prompt = full_user_prompt if current_turn == 1 else " (Continue processing tool outputs...)"
                 if current_turn > 1 and turn_multimodal_images and any(ti.get("from_tool") for ti in turn_multimodal_images):
@@ -941,7 +948,8 @@ class BackBrainMixin:
                     if self.tui_callback: self.tui_callback(f"🔧 Executing Tool: {tool_name}")
                     logger.info(f"[{chat_id}] 🧠 AI Request Tool: {tool_name}({tool_args})")
                     # Debug: 工具调用详情
-                    args_preview = str(tool_args)[:300] if tool_args else "(无参数)"
+                    _args_preview_len = 800 if tool_name in {"view_media", "crop_image_for_llm"} else 300
+                    args_preview = str(tool_args)[:_args_preview_len] if tool_args else "(无参数)"
                     await self._send_debug(chat_id, f"🔧 调用工具: {tool_name}\n参数: {args_preview}")
 
                     # --- Loop Detection and Intervention ---
