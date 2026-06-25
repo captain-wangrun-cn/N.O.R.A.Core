@@ -1120,8 +1120,11 @@ class BackBrainMixin:
                     status.update("处理结果", f"{tool_name} 执行完毕，正在分析结果...")
                     # --- 抢占检查点：工具执行后检查取消 ---
                     await asyncio.sleep(0)
-                    logger.info(f"[{chat_id}] 🔧 Tool Result for {tool_name}: {tool_result[:100]}...")
-                    result_preview = tool_result[:500] if len(tool_result) > 500 else tool_result
+                    # view_media 输出包含 MediaTag 等关键信息，需要更完整的日志
+                    _log_preview_len = 2000 if tool_name in {"view_media", "crop_image_for_llm"} else 100
+                    logger.info(f"[{chat_id}] 🔧 Tool Result for {tool_name}: {tool_result[:_log_preview_len]}...")
+                    _debug_preview_len = 1500 if tool_name in {"view_media", "crop_image_for_llm"} else 500
+                    result_preview = tool_result[:_debug_preview_len] if len(tool_result) > _debug_preview_len else tool_result
                     await self._send_debug(chat_id, f"📋 {tool_name} 结果 ({len(tool_result)} 字符):\n{result_preview}")
 
                     # 记录关键结果：保留路径/ID/摘要，供前脑总结
