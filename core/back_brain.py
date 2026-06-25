@@ -92,6 +92,8 @@ class BackBrainMixin:
         cleaned = cls._IMAGE_TAGS_PATTERN.sub("", cleaned)  # type: ignore[attr-defined]
         # 移除 IMAGE_OCR 块（不应展示给用户，仅后台存储用）
         cleaned = cls._IMAGE_OCR_PATTERN.sub("", cleaned)  # type: ignore[attr-defined]
+        # 移除 IMAGE_DESC 块（不应展示给用户，仅后台存储用）
+        cleaned = cls._IMAGE_DESC_PATTERN.sub("", cleaned)  # type: ignore[attr-defined]
         # 移除 VIDEO_TAGS 块（不应展示给用户，仅后台存储用）
         cleaned = cls._VIDEO_TAGS_PATTERN.sub("", cleaned)  # type: ignore[attr-defined]
         cleaned = re.sub(r'\n{3,}', '\n\n', cleaned).strip()
@@ -1276,8 +1278,10 @@ class BackBrainMixin:
             # 先提取图片标签（在任何清理之前），供后续存储
             image_tags_extracted: Dict[str, str] = {}
             image_ocr_extracted: Dict[str, str] = {}
+            image_desc_extracted: Dict[str, str] = {}
             parsed_tag_blocks: List[tuple[str, str]] = []
             parsed_ocr_blocks: List[tuple[str, str]] = []
+            parsed_desc_blocks: List[tuple[str, str]] = []
             
             # 若有新图片才要求tags，由搜索查找到的历史图片不需要生成标签
             expected_ids = [] if historical_reply_image_direct else [img["image_id"] for img in multimodal_images if not img.get("from_tool")]
@@ -1298,6 +1302,12 @@ class BackBrainMixin:
                     if img_id and ocr_text and ocr_text != "（无文字）":
                         image_ocr_extracted[img_id] = ocr_text
                         parsed_ocr_blocks.append((img_id, ocr_text))
+                for m in self._IMAGE_DESC_PATTERN.finditer(source_text_for_tags):
+                    img_id = m.group(1).strip()
+                    desc_text = m.group(2).strip()
+                    if img_id and desc_text and desc_text != "未识别":
+                        image_desc_extracted[img_id] = desc_text
+                        parsed_desc_blocks.append((img_id, desc_text))
 
                 # LLM 可能输出占位符/错误 image_id（如 img_xxxxxxxx）。
                 # 若出现这种情况，按图片顺序重映射到本轮真实 image_id，避免标签丢失回退为文件名。
@@ -1332,7 +1342,21 @@ class BackBrainMixin:
                                 f"[{chat_id}] IMAGE_OCR image_id 不匹配，已按顺序重映射: "
                                 f"{parsed_id} -> {expected_id}"
                             )
-                logger.debug(f"[{chat_id}] 已提取 {len(image_tags_extracted)} 个图片标签块，{len(image_ocr_extracted)} 个 OCR 文字块。")
+
+                if parsed_desc_blocks:
+                    for idx, expected_id in enumerate(expected_ids):
+                        if expected_id in image_desc_extracted:
+                            continue
+                        if idx >= len(parsed_desc_blocks):
+                            break
+                        parsed_id, parsed_desc = parsed_desc_blocks[idx]
+                        if parsed_id not in expected_set and parsed_desc:
+                            image_desc_extracted[expected_id] = parsed_desc
+                            logger.warning(
+                                f"[{chat_id}] IMAGE_DESC image_id 不匹配，已按顺序重映射: "
+                                f"{parsed_id} -> {expected_id}"
+                            )
+                logger.debug(f"[{chat_id}] 已提取 {len(image_tags_extracted)} 个图片标签块，{len(image_ocr_extracted)} 个 OCR 文字块，{len(image_desc_extracted)} 个图片描述块。")
 
                 def _find_tag_issues():
                     missing = [img_id for img_id in expected_ids if not image_tags_extracted.get(img_id)]
@@ -1618,10 +1642,11 @@ class BackBrainMixin:
 
                     tags = image_tags_extracted.get(img_id, "")
                     ocr_text = image_ocr_extracted.get(img_id, "")
+                    description = image_desc_extracted.get(img_id, "")
 
-                    if not tags and not ocr_text:
+                    if not tags and not ocr_text and not description:
                         # 保持 pending 占位，待后续补充
-                        logger.warning(f"[{chat_id}] 图片 {img_id} 未生成标签/OCR，保持占位待补全 (path={img['path']})")
+                        logger.warning(f"[{chat_id}] 图片 {img_id} 未生成标签/OCR/描述，保持占位待补全 (path={img['path']})")
                         continue
 
                     asyncio.create_task(
@@ -1629,6 +1654,7 @@ class BackBrainMixin:
                             image_id=img_id,
                             tags=tags,
                             ocr_text=ocr_text,
+                            description=description,
                             user_id=user_id,
                             chat_id=platform_chat_id,
                             file_path=img["path"],
@@ -1643,7 +1669,8 @@ class BackBrainMixin:
                         )
                     )
                     ocr_info = f", ocr_text='{ocr_text[:40]}...'" if ocr_text else ""
-                    logger.info(f"[{chat_id}] 图片 {img_id} 标签已补充: '{tags[:60]}...'{ocr_info}")
+                    desc_info = f", desc='{description[:40]}...'" if description else ""
+                    logger.info(f"[{chat_id}] 图片 {img_id} 标签已补充: '{tags[:60]}...'{ocr_info}{desc_info}")
 
             # --- 4.7 视频记忆存储 (Video Memory Storage) ---
             if multimodal_videos and video_llm_available and self.image_store.enabled:

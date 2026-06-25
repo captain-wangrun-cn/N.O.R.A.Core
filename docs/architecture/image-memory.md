@@ -8,8 +8,8 @@
 
 1. **为每张图片分配唯一 ID**（格式: `img_<8位hex>`，如 `img_a1b2c3d4`）
 2. **将图片原图发送给 LLM**（多模态输入，二进制 bytes）
-3. **在文本提示中告知 LLM 图片 ID**，要求 LLM 返回关键词标签列表（用于检索）
-4. **解析 LLM 回复中的标签**，与图片 ID、路径、时间等一起存入 MongoDB + Qdrant
+3. **在文本提示中告知 LLM 图片 ID**，要求 LLM 返回关键词标签列表（用于检索）、OCR 文字和内容描述
+4. **解析 LLM 回复中的标签/OCR/描述**，与图片 ID、路径、时间等一起存入 MongoDB + Qdrant
 5. **提供 `view_media` 工具**，支持多种检索方式
 6. 当 `view_media(return_image=true)` 时，工具会返回图片内容标签，下一轮自动切换 `image` 模型进行图像分析
 
@@ -74,6 +74,7 @@ LLM 基于找回图片继续分析并回复
     "file_path": "data/telegram/photo_xxxx.jpg",
     "tags": "猫咪, 橘猫, 沙发, 室内, 可爱, 蜷缩, 温暖, 阳光, 午后",
     "ocr_text": "（图片中提取的文字内容，如有）",
+    "description": "（图片内容的自然语言描述，1-3 句）",
     "user_id": "123456789",
     "chat_id": "123456789",
     "platform": "telegram",
@@ -96,7 +97,7 @@ LLM 基于找回图片继续分析并回复
 - `image_id` (唯一)
 - `user_id`
 - `timestamp`
-- `tags + ocr_text` (复合文本索引, 支持全文搜索，ocr_text 权重更高)
+- `tags + ocr_text + description` (复合文本索引, 支持全文搜索，ocr_text 权重最高)
 
 ### Qdrant (`nora_images`)
 
@@ -135,6 +136,9 @@ LLM 基于找回图片继续分析并回复
 [IMAGE_OCR:img_a1b2c3d4]
 图片中出现的所有可见文字内容，原样输出
 [/IMAGE_OCR]
+[IMAGE_DESC:img_a1b2c3d4]
+用 1-3 句中文自然语言描述这张图片的主要内容
+[/IMAGE_DESC]
 ```
 
 LLM 回复示例：
@@ -149,14 +153,18 @@ LLM 回复示例：
 def hello_world():
     print("Hello, World!")
 [/IMAGE_OCR]
+[IMAGE_DESC:img_a1b2c3d4]
+这是一张 Python IDE 的截图，展示了一个简单的 hello_world 函数定义，使用深色主题。
+[/IMAGE_DESC]
 ```
 
 系统会：
 1. 提取 `[IMAGE_TAGS:xxx]...[/IMAGE_TAGS]` 中的标签文本
 2. 提取 `[IMAGE_OCR:xxx]...[/IMAGE_OCR]` 中的 OCR 文字
-3. 从发送给用户的文本中移除这些标签块和 OCR 块
-4. 将标签文本向量化并存入 Qdrant
-5. 将 OCR 文字存入 MongoDB 的 `ocr_text` 字段
+3. 提取 `[IMAGE_DESC:xxx]...[/IMAGE_DESC]` 中的图片内容描述
+4. 从发送给用户的文本中移除这些标签块、OCR 块和描述块
+5. 将标签文本向量化并存入 Qdrant
+6. 将 OCR 文字和图片描述存入 MongoDB 的 `ocr_text` 和 `description` 字段
 
 ## `view_media` 工具
 

@@ -152,8 +152,8 @@ class ImageStore:
             except Exception:
                 pass  # 旧索引不存在时忽略
             self.mongo_col.create_index(
-                [("tags", pymongo.TEXT), ("ocr_text", pymongo.TEXT)],
-                weights={"tags": 2, "ocr_text": 3},  # OCR 文字权重更高
+                [("tags", pymongo.TEXT), ("ocr_text", pymongo.TEXT), ("description", pymongo.TEXT)],
+                weights={"tags": 2, "ocr_text": 3, "description": 2},
                 name="tags_ocr_text_index",
             )
         except Exception as e:
@@ -364,6 +364,7 @@ class ImageStore:
         image_id: str,
         tags: str,
         ocr_text: str = "",
+        description: str = "",
         user_id: Optional[str] = None,
         chat_id: Optional[str] = None,
         file_path: Optional[str] = None,
@@ -417,6 +418,8 @@ class ImageStore:
         }
         if ocr_text:
             set_doc["ocr_text"] = ocr_text
+        if description:
+            set_doc["description"] = description
         if platform:
             set_doc["platform"] = platform
         if platform_message_id:
@@ -490,6 +493,7 @@ class ImageStore:
         logger.info(
             f"图片标签已更新: {image_id} tags='{tags[:60]}...'"
             + (f", ocr='{ocr_text[:40]}...'" if ocr_text else "")
+            + (f", desc='{description[:40]}...'" if description else "")
         )
         return True
 

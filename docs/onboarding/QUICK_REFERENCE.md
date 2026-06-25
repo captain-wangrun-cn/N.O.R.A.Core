@@ -68,7 +68,7 @@ core/controller.py            NoraController.handle_message()
 - `ToolManager` — 工具注册、schema 生成、执行
   - 内置工具：`create_new_skill`, `execute_skill`, `execute_tool_plan`, `read_file`, `search`, `write_file`, `edit_file`, `list_dir`, `get_available_skills`, `exec_command`, `view_media`, `crop_image_for_llm`, `set_alarm`, `list_alarms`, `cancel_alarm`
   - `view_media`: 默认 `return_image=true`，输出 `[image: abs_path]` 或 `[video: abs_path]` MediaTag，后脑下一轮会读取真实图片/视频并临时使用 image/video 模型；可用 `question` 参数指定对媒体要问的问题，且 `question` 非空时会自动强制 `return_image=true`。可用 `type` 参数筛选（`image`/`video`，不设则全部）。只查元数据/标签/OCR 时可设 `return_image=false`。
-  - IMAGE_TAGS 质量兜底：缺失标签或标签未使用英文逗号分隔时，会触发一次仅请求 `IMAGE_TAGS` 的补齐重试。
+  - IMAGE_TAGS / IMAGE_OCR / IMAGE_DESC 质量兜底：缺失标签或标签未使用英文逗号分隔时，会触发一次仅请求 `IMAGE_TAGS` 的补齐重试。
   - 详细说明：`docs/architecture/tools.md`
 
 ### `core/scheduler.py`

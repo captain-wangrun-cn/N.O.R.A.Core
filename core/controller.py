@@ -93,6 +93,10 @@ class NoraController(
         r'\[IMAGE_OCR:([^\]\s]+)\](.*?)\[/IMAGE_OCR\]',
         re.IGNORECASE | re.DOTALL,
     )
+    _IMAGE_DESC_PATTERN = re.compile(
+        r'\[IMAGE_DESC:([^\]\s]+)\](.*?)\[/IMAGE_DESC\]',
+        re.IGNORECASE | re.DOTALL,
+    )
     _VIDEO_TAGS_PATTERN = re.compile(
         r'\[VIDEO_TAGS:([^\]\s]+)\](.*?)\[/VIDEO_TAGS\]',
         re.IGNORECASE | re.DOTALL,
@@ -721,6 +725,7 @@ class NoraController(
         image_id: str,
         tags: str,
         ocr_text: str,
+        description: str,
         user_id: str,
         chat_id: str,
         file_path: str,
@@ -740,6 +745,7 @@ class NoraController(
                 image_id=image_id,
                 tags=tags,
                 ocr_text=ocr_text,
+                description=description,
                 user_id=user_id,
                 chat_id=chat_id,
                 file_path=file_path,
