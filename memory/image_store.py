@@ -27,8 +27,29 @@ logger = logging.getLogger(__name__)
 # Constants
 # ---------------------------------------------------------------------------
 IMAGE_COLLECTION = "nora_images"          # Qdrant collection 名称
-MONGO_DB_NAME = "nora"                     # MongoDB 数据库名称
+DEFAULT_MONGO_DB_NAME = "nora"             # MongoDB 数据库名称（无显式配置且 URI 未带库名时的兜底）
 MONGO_COLLECTION = "images"                # MongoDB collection 名称
+
+
+def resolve_mongo_db_name(mongo_cfg: Dict[str, Any], client: "pymongo.MongoClient") -> str:
+    """
+    解析 MongoDB 数据库名称，优先级：
+      1. 配置项 memory.mongo.db_name（显式指定）
+      2. URI 路径里携带的默认库名（如 .../nora_qiuxi）
+      3. 兜底常量 DEFAULT_MONGO_DB_NAME
+
+    注意：受限用户通常只对自己的库有权限，硬编码库名会触发 not authorized。
+    """
+    explicit = (mongo_cfg.get("db_name") or "").strip()
+    if explicit:
+        return explicit
+    try:
+        default_db = client.get_default_database()
+        if default_db is not None and default_db.name:
+            return default_db.name
+    except Exception:
+        pass
+    return DEFAULT_MONGO_DB_NAME
 
 
 def _generate_image_id() -> str:
@@ -70,10 +91,11 @@ class ImageStore:
         try:
             mongo_uri = mongo_cfg.get("uri", "mongodb://localhost:27017/")
             self.mongo_client = pymongo.MongoClient(mongo_uri)
-            self.mongo_db = self.mongo_client[MONGO_DB_NAME]
+            db_name = resolve_mongo_db_name(mongo_cfg, self.mongo_client)
+            self.mongo_db = self.mongo_client[db_name]
             self.mongo_col = self.mongo_db[MONGO_COLLECTION]
             self._ensure_mongo_indexes()
-            logger.info("ImageStore: MongoDB 已连接。")
+            logger.info(f"ImageStore: MongoDB 已连接（db={db_name}）。")
         except Exception as e:
             logger.error(f"ImageStore: MongoDB 连接失败: {e}")
             self.mongo_client = None

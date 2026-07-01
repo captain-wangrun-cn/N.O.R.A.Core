@@ -118,7 +118,9 @@ memory:
 
   # Document Database (MongoDB)
   mongo:
-    uri: "mongodb://nora:nora_password@localhost:27017/"
+    uri: "mongodb://nora:nora_password@localhost:27017/nora"
+    # db_name: "nora"  # （可选）显式指定数据库名。留空则取 URI 路径里的库名（如 .../nora_qiuxi），再兜底为 "nora"。
+    #                   受限用户通常只对自己的库有权限，请让此处与 URI 中的库名一致，否则会报 not authorized。
 
   # Embedding Service (Text -> Vector)
   embedding:

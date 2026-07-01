@@ -1552,9 +1552,10 @@ def clean_mongodb():
         mongo_cfg = mem_cfg.get("mongo", {})
         
         mongo_uri = mongo_cfg.get("uri", "mongodb://localhost:27017/")
-        db_name = "nora"
         # 连接 MongoDB
         client = MongoClient(mongo_uri)
+        from memory.image_store import resolve_mongo_db_name
+        db_name = resolve_mongo_db_name(mongo_cfg, client)
         db = client[db_name]
 
         # 获取所有 collection
