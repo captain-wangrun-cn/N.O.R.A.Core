@@ -281,6 +281,32 @@ def test_current_segment_context_messages_are_active_only_and_labeled(tmp_path):
     assert "本地当前段" in contents[1]
 
 
+def test_close_session_refreshes_context_compressor(tmp_path):
+    """关闭段落后应刷新滑动上下文，避免前脑下一轮读到过期 slot。"""
+    history = _make_history(tmp_path)
+    calls = []
+    original_refresh = history._schedule_context_refresh
+
+    def spy_refresh(platform, chat_id, memory_scope_id=None):
+        calls.append((platform, chat_id, memory_scope_id))
+        return original_refresh(platform, chat_id, memory_scope_id)
+
+    history._schedule_context_refresh = spy_refresh
+
+    history.add_message(
+        platform="telegram", chat_id="user_a", role="user", content="上一段消息",
+        memory_scope_id=SCOPE, place_scope_id="telegram:user_a",
+    )
+    calls.clear()
+
+    session_id = history.close_session(
+        platform="telegram", chat_id="user_a", trigger_type="user", memory_scope_id=SCOPE,
+    )
+
+    assert session_id is not None
+    assert calls == [("telegram", "user_a", SCOPE)]
+
+
 def test_compressed_context_excludes_active_segment_raw_window(tmp_path):
     """压缩上下文 helper 不应夹带当前活跃段原文或活跃段 slot 快照。"""
     history = _make_history(tmp_path)

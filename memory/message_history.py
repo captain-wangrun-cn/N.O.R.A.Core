@@ -1389,9 +1389,14 @@ class MessageHistory:
                 f"消息数={message_count}, 时间跨度={ended_at - started_at:.0f}s"
             )
 
+            # 关闭段落后立即刷新滑动上下文：上一段已从 active 变为 closed session，
+            # 若不刷新，前脑下一轮可能读到过期 slot，甚至漏掉刚关闭的上一段。
+            self._schedule_context_refresh(platform, chat_id, memory_scope_id)
+
             # 异步生成段落摘要（不阻塞）
             try:
-                asyncio.create_task(self._generate_session_summary(platform, chat_id, int(session_id)))
+                loop = asyncio.get_running_loop()
+                loop.create_task(self._generate_session_summary(platform, chat_id, int(session_id)))
             except RuntimeError:
                 pass  # 没有事件循环时跳过
 

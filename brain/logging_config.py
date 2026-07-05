@@ -90,14 +90,14 @@ def _cleanup_old_logs(log_dir: str, retention_days: int, prefixes: Optional[list
             continue
 
 
-def setup_logging(console_level=logging.WARNING, file_level=logging.DEBUG):
+def setup_logging(console_level=logging.INFO, file_level=logging.INFO):
     """
     Setup centralized logging with console and file handlers.
     Logs rotate daily and old files are cleaned automatically.
-    
+
     Args:
-        console_level: Minimum level for console output (default: WARNING)
-        file_level: Minimum level for file output (default: DEBUG)
+        console_level: Minimum level for console output (default: INFO)
+        file_level: Minimum level for file output (default: INFO)
     """
     logging_cfg = _get_logging_config()
     retention_days = logging_cfg.get("retention_days", 14)

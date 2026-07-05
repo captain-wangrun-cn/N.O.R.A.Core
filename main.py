@@ -27,7 +27,7 @@ class TuiLogHandler(logging.Handler):
 
 def setup_logging_with_tui(tui_app):
     """Initialize unified logging + TUI handler."""
-    setup_unified_logging(console_level=logging.WARNING, file_level=logging.DEBUG)
+    setup_unified_logging(console_level=logging.INFO, file_level=logging.INFO)
 
     tui_handler = TuiLogHandler(tui_app)
     tui_formatter = logging.Formatter(
@@ -169,7 +169,7 @@ def run_headless(console_level=logging.INFO, adapter_name: str = "auto"):
         sys.exit(1)
 
     # Console logging for headless mode
-    setup_unified_logging(console_level=console_level, file_level=logging.DEBUG)
+    setup_unified_logging(console_level=console_level, file_level=logging.INFO)
     logging.info("启动 N.O.R.A. Core (无 TUI 模式)...")
 
     def headless_status_callback(text: str):
