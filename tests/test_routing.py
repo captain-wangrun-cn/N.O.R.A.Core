@@ -206,6 +206,27 @@ def test_front_brain_response_carries_route():
     assert "[scene:" not in result["user_reply"]
 
 
+def test_front_brain_response_preserves_native_message_controls_for_adapter():
+    result = parse_front_brain_response(
+        "[reply:777][at:6112866979]你单独发一个，其他什么也不要说"
+    )
+
+    assert result["user_reply"] == (
+        "[reply:777][at:6112866979]你单独发一个，其他什么也不要说"
+    )
+
+
+def test_front_brain_review_preserves_native_message_controls_for_adapter():
+    from core.routing import parse_front_brain_review
+
+    result = parse_front_brain_review(
+        "[at:6112866979]处理完成啦 [TASK_DONE]"
+    )
+
+    assert result["action"] == "done"
+    assert result["user_reply"] == "[at:6112866979]处理完成啦"
+
+
 def test_front_brain_response_no_marker_empty_route():
     result = parse_front_brain_response("就在这儿说说话")
     assert result["route"] == {"platform": "", "scene_id": "", "scene_type": ""}

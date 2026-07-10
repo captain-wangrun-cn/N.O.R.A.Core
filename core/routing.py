@@ -236,7 +236,7 @@ def parse_front_brain_response(response_text: str) -> dict:
         need_follow = False
         force_semi_online = False
 
-    # 清理标记，生成用户可见文本
+    # 清理内部标记，同时保留应由目标 Adapter 解释的 reply/@ 控制标记
     user_reply = response_text
     user_reply = user_reply.replace(_BACKEND_SIGNAL, "")
     user_reply = user_reply.replace(_FOLLOW_SIGNAL, "")
@@ -246,7 +246,7 @@ def parse_front_brain_response(response_text: str) -> dict:
     user_reply = _RETRACT_MESSAGE_PATTERN.sub("", user_reply)
     user_reply = _USE_IMAGE_MODEL_PATTERN.sub("", user_reply)
     user_reply = _TASK_INSTRUCTION_PATTERN.sub("", user_reply)
-    user_reply = sanitize_user_visible_text(user_reply)
+    user_reply = sanitize_adapter_output_text(user_reply)
 
     if not should_reply:
         user_reply = ""
@@ -328,7 +328,7 @@ def parse_front_brain_review(response_text: str) -> dict:
         need_follow = False
         force_semi_online = False
 
-    # 清理标记，生成用户可见文本
+    # 清理内部标记，同时保留应由目标 Adapter 解释的 reply/@ 控制标记
     user_reply = response_text
     user_reply = user_reply.replace(_TASK_DONE_SIGNAL, "")
     user_reply = user_reply.replace(_BACKEND_SIGNAL, "")
@@ -341,7 +341,7 @@ def parse_front_brain_review(response_text: str) -> dict:
     # 清理 continue 标记文本，避免泄漏给用户
     user_reply = _CONTINUE_PATTERN.sub("", user_reply)
     user_reply = _TASK_INSTRUCTION_PATTERN.sub("", user_reply)
-    user_reply = sanitize_user_visible_text(user_reply)
+    user_reply = sanitize_adapter_output_text(user_reply)
 
     if not should_reply:
         user_reply = ""
