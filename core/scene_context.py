@@ -78,6 +78,7 @@ def build_current_scene_block(
         or "未知"
     )
     actor_role = "主人" if identity.is_owner else "访客/群友"
+    actor_user_id = _clean(identity.actor_user_id) or _clean(context.get("user_id"))
     reply_target = identity.runtime_key or f"{identity.platform}:{identity.platform_chat_id}"
 
     lines = [
@@ -91,6 +92,8 @@ def build_current_scene_block(
     ]
 
     if chat_type == "group":
+        if actor_user_id:
+            lines.append(f"- 当前说话人平台用户 ID: {actor_user_id}；若明确需要原生 @ 当前说话人，可使用 `[at:{actor_user_id}]`。")
         group_title = _clean(context.get("chat_title") or context.get("group_title") or context.get("group_display_name"))
         if group_title:
             lines.append(f"- 群聊名称: {group_title}")

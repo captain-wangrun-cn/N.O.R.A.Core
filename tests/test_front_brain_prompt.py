@@ -168,6 +168,8 @@ def test_front_brain_prompt_includes_current_onebot_group_scene():
     assert "当前窗口: QQ 群聊" in system_prompt
     assert "回复目标: onebotv11:10001" in system_prompt
     assert "当前说话人: 群友A" in system_prompt
+    assert "当前说话人平台用户 ID: 20002" in system_prompt
+    assert "[at:20002]" in system_prompt
     assert "群聊名称: 测试群" in system_prompt
 
 

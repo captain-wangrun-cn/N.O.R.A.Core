@@ -70,7 +70,7 @@ adapters/<platform>/
 
 - `platform`: str
 - `chat_id`: str
-- `user_id`: str
+- `user_id`: str。当前消息发送者在目标平台中的可靠用户 ID；群聊场景会将其提供给模型，用于明确请求下生成 `[at:USER_ID]`。必须来自平台事件本身，禁止使用显示名、username 或其它场景 ID 猜测/替代。
 - `text`: str
 - `chat_type`: str，如 `private` / `group`
 - `user_name`: str
@@ -225,7 +225,7 @@ Telegram Bot API 不支持枚举完整普通成员名单，因此“成员名单
 - [ ] `run()` 保存了 `message_handler`。
 - [ ] 已在正确时机触发 `startup/on_ready/shutdown`。
 - [ ] `metadata.json` 说明了真实平台、能力、限制和隐私提示。
-- [ ] 平台事件通过 `AdapterEvent` 或等价 dict 输出统一字段。
+- [ ] 平台事件通过 `AdapterEvent` 或等价 dict 输出统一字段；群聊中的 `user_id` 是平台事件提供的可靠发送者 ID，可供模型生成 `[at:USER_ID]`，不得由显示名/username 猜测。
 - [ ] 入站原生 reply/@ 已转换为 canonical 标记，并保留可靠的 reply/mention 元数据。
 - [ ] 支持消息控制时声明 `supports_message_controls=True`；不支持、私聊 mention、非法 ID 和异常降级路径均不会泄漏标记。
 - [ ] `[SPLIT]` 与平台长度切块不会重复应用 reply/@，普通无标记回复不会自动产生原生控制。
