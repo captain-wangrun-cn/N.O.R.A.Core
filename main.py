@@ -156,9 +156,13 @@ async def _run_adapters_async(controller, adapters: list):
 
         adapter.on_ready = _make_hook(_original_on_ready)
 
-    await asyncio.gather(
-        *[adapter.run_async(controller.handle_new_message) for adapter in adapters]
-    )
+    try:
+        await asyncio.gather(
+            *[adapter.run_async(controller.handle_new_message) for adapter in adapters]
+        )
+    except asyncio.CancelledError:
+        # Ctrl+C / 关闭信号会取消主任务，属正常关闭流程，不向上抛栈噪音。
+        logging.info("收到关闭信号，正在停止所有适配器…")
 
 
 def run_bot_logic(tui_app, tui_ready_event, adapter_name: str = "auto"):
@@ -238,6 +242,8 @@ def run_headless(console_level=logging.INFO, adapter_name: str = "auto"):
         controller = NoraController(adapters, tui_callback=headless_status_callback)
 
         asyncio.run(_run_adapters_async(controller, adapters))
+    except KeyboardInterrupt:
+        logging.info("已退出 N.O.R.A. Core。")
     except Exception as exc:
         logging.critical(f"启动失败: {exc}", exc_info=True)
         sys.exit(1)
