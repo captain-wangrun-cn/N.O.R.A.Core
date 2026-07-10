@@ -55,13 +55,7 @@ class MessageAggregator:
         return list(dict.fromkeys(mid for mid in ids if mid))
 
     def _reply_target_message_id(self, context: Dict[str, Any]) -> str:
-        explicit = str(context.get("reply_target_message_id") or "").strip()
-        if explicit:
-            return explicit
-        current = str(context.get("platform_message_id") or "").strip()
-        if current:
-            return current
-        return str(context.get("reply_to_message_id") or "").strip()
+        return str(context.get("reply_target_message_id") or "").strip()
 
     async def add_message(self, chat_id: str, text: str, context: Dict[str, Any]):
         """添加一条新消息到缓冲区。"""

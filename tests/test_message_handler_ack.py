@@ -125,8 +125,8 @@ def test_reply_target_message_id_returns_empty_for_private_chat():
     assert reply_target_message_id(context) == ""
 
 
-def test_reply_target_message_id_returns_id_for_group_chat():
-    """群聊场景下 reply_target_message_id 应正常返回消息 ID。"""
+def test_reply_target_message_id_returns_explicit_id_for_group_chat():
+    """群聊仅在显式指定回复目标时返回消息 ID。"""
     from core.message_handler import reply_target_message_id
 
     context = {
@@ -135,6 +135,18 @@ def test_reply_target_message_id_returns_id_for_group_chat():
         "reply_target_message_id": "101",
     }
     assert reply_target_message_id(context) == "101"
+
+
+def test_reply_target_message_id_does_not_use_incoming_ids_for_group_chat():
+    """普通群聊入站消息 ID 不应被自动转换为回复目标。"""
+    from core.message_handler import reply_target_message_id
+
+    context = {
+        "chat_type": "group",
+        "platform_message_id": "789",
+        "reply_to_message_id": "456",
+    }
+    assert reply_target_message_id(context) == ""
 
 
 def test_reply_target_message_id_defaults_to_private_when_missing():

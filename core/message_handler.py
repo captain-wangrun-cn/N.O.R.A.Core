@@ -46,17 +46,11 @@ def _context_platform_message_ids(context: Dict[str, Any]) -> List[str]:
 
 
 def reply_target_message_id(context: Dict[str, Any]) -> str:
-    """Return the incoming platform message id that assistant replies should quote."""
+    """Return an explicitly selected platform message id to quote."""
     # 私聊场景不需要回复引用，避免消息错乱
     if normalize_chat_type(context.get("chat_type")) == "private":
         return ""
-    explicit = str(context.get("reply_target_message_id") or "").strip()
-    if explicit:
-        return explicit
-    current = str(context.get("platform_message_id") or "").strip()
-    if current:
-        return current
-    return str(context.get("reply_to_message_id") or "").strip()
+    return str(context.get("reply_target_message_id") or "").strip()
 
 
 def _attach_platform_ids_to_media(items: List[Dict[str, Any]], platform_msg_ids: List[str]) -> List[Dict[str, Any]]:

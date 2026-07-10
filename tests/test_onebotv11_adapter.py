@@ -174,7 +174,7 @@ def test_onebot_sender_parses_split_markers_before_sending():
     ]
 
 
-def test_onebot_sender_parses_reply_and_at_segments():
+def test_onebot_sender_bare_reply_does_not_use_recent_message():
     adapter = SenderOnlyOneBot()
 
     ids = asyncio.run(adapter.send_message("10001", "[reply][at:current] 收到啦"))
@@ -187,7 +187,6 @@ def test_onebot_sender_parses_reply_and_at_segments():
                 "message_type": "group",
                 "group_id": 10001,
                 "message": [
-                    {"type": "reply", "data": {"id": "555"}},
                     {"type": "at", "data": {"qq": "20002"}},
                     {"type": "text", "data": {"text": " 收到啦"}},
                 ],

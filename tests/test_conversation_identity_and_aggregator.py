@@ -178,10 +178,10 @@ def test_aggregator_separates_group_contributors_by_user():
         by_user = {ctx["user_id"]: ctx for ctx in completed}
         assert by_user["u1"]["text"] == "第一句"
         assert by_user["u1"]["platform_message_ids"] == ["101"]
-        assert by_user["u1"]["reply_target_message_id"] == "101"
+        assert not by_user["u1"].get("reply_target_message_id")
         assert by_user["u2"]["text"] == "第二句"
         assert by_user["u2"]["platform_message_ids"] == ["102"]
-        assert by_user["u2"]["reply_target_message_id"] == "102"
+        assert not by_user["u2"].get("reply_target_message_id")
         assert by_user["u1"]["contributors"] == [{"user_id": "u1", "user_name": "Alice"}]
         assert by_user["u2"]["contributors"] == [{"user_id": "u2", "user_name": "Bob"}]
 
@@ -227,8 +227,37 @@ def test_aggregator_still_combines_same_group_user_messages():
         context = completed[0]
         assert context["text"] == "第一句\n第二句"
         assert context["platform_message_ids"] == ["101", "102"]
-        assert context["reply_target_message_id"] == "101"
+        assert not context.get("reply_target_message_id")
         assert [c["user_id"] for c in context["contributors"]] == ["u1", "u1"]
+
+    asyncio.run(run())
+
+
+def test_aggregator_preserves_explicit_reply_target():
+    async def run():
+        completed = []
+
+        async def on_complete(context):
+            completed.append(context)
+
+        agg = MessageAggregator(timeout=0.01, on_complete=on_complete)
+        await agg.add_message(
+            "group-1",
+            "显式回复",
+            {
+                "platform": "telegram",
+                "chat_id": "group-1",
+                "user_id": "u1",
+                "chat_type": "group",
+                "platform_message_id": "101",
+                "reply_target_message_id": "999",
+            },
+        )
+
+        await asyncio.sleep(0.03)
+
+        assert len(completed) == 1
+        assert completed[0]["reply_target_message_id"] == "999"
 
     asyncio.run(run())
 

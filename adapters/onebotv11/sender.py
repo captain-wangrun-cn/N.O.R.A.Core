@@ -118,11 +118,7 @@ class OneBotSenderMixin:
         value = str(raw_value or "").strip()
         if value:
             return value
-        explicit = str(reply_to_message_id or "").strip()
-        if explicit:
-            return explicit
-        recent = self._last_incoming_context(chat_id)
-        return str(recent.get("platform_message_id") or recent.get("reply_to_message_id") or "").strip()
+        return str(reply_to_message_id or "").strip()
 
     def _resolve_at_user_id(self, raw_value: str, chat_id: str) -> str:
         value = str(raw_value or "").strip()
