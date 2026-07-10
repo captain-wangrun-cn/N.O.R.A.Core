@@ -291,7 +291,9 @@ class NoraController(
             self.trigger_manager = None
             logger.info("Trigger 系统已禁用")
         
-        self.tool_manager = ToolManager(adapter, image_store=self.image_store, scheduler=self.scheduler)
+        # ToolManager 暂仍按 primary 适配器注册平台工具；不能传入原始 adapter
+        # 参数，因为多适配器模式下它可能是 list/dict。
+        self.tool_manager = ToolManager(self.adapter, image_store=self.image_store, scheduler=self.scheduler)
         self.message_history.start_retry_worker()
         
         logger.info(
