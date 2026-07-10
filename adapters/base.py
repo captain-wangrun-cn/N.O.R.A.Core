@@ -39,6 +39,7 @@ class PlatformFeatures:
     supports_chat_member_lookup: bool = False
     supports_chat_moderation: bool = False
     supports_member_tags: bool = False
+    supports_message_controls: bool = False
     max_message_length: int | None = None
 
 
@@ -140,6 +141,14 @@ class MessageSegment:
     def reply(cls, text: str) -> "MessageSegment":
         return cls("reply", {"text": text})
 
+    @classmethod
+    def reply_reference(cls, message_id: str) -> "MessageSegment":
+        return cls("reply_reference", {"message_id": str(message_id)})
+
+    @classmethod
+    def mention(cls, user_id: str) -> "MessageSegment":
+        return cls("mention", {"user_id": str(user_id)})
+
     def is_text(self) -> bool:
         return self.type == "text"
 
@@ -148,6 +157,10 @@ class MessageSegment:
             return str(self.data.get("text") or "")
         if self.type == "reply":
             return f"[回复: {self.data.get('text') or ''}]"
+        if self.type == "reply_reference":
+            return f"[reply:{self.data.get('message_id') or ''}]"
+        if self.type == "mention":
+            return f"[at:{self.data.get('user_id') or ''}]"
         if self.type == "sticker":
             emoji = str(self.data.get("emoji") or "")
             set_name = str(self.data.get("set_name") or "")
@@ -207,6 +220,10 @@ class AdapterEvent:
     chat_type: str = "private"
     user_name: str = "Unknown"
     platform_message_id: str | None = None
+    reply_to_message_id: str | None = None
+    reply_to_user_id: str | None = None
+    reply_to_user_name: str | None = None
+    mentioned_user_ids: list[str] = field(default_factory=list)
     message: AdapterMessage | None = None
     raw: Any = None
     metadata: dict[str, Any] = field(default_factory=dict)
@@ -229,6 +246,26 @@ class AdapterEvent:
                 if context.get("platform_message_id") is not None
                 else None
             ),
+            reply_to_message_id=(
+                str(context.get("reply_to_message_id"))
+                if context.get("reply_to_message_id") is not None
+                else None
+            ),
+            reply_to_user_id=(
+                str(context.get("reply_to_user_id"))
+                if context.get("reply_to_user_id") is not None
+                else None
+            ),
+            reply_to_user_name=(
+                str(context.get("reply_to_user_name"))
+                if context.get("reply_to_user_name") is not None
+                else None
+            ),
+            mentioned_user_ids=[
+                str(user_id)
+                for user_id in (context.get("mentioned_user_ids") or [])
+                if user_id is not None and str(user_id).strip()
+            ],
             message=adapter_message,
             raw=context.get("raw"),
             metadata=dict(context.get("metadata") or {}),
@@ -248,6 +285,14 @@ class AdapterEvent:
         }
         if self.platform_message_id is not None:
             context["platform_message_id"] = self.platform_message_id
+        if self.reply_to_message_id is not None:
+            context["reply_to_message_id"] = self.reply_to_message_id
+        if self.reply_to_user_id is not None:
+            context["reply_to_user_id"] = self.reply_to_user_id
+        if self.reply_to_user_name is not None:
+            context["reply_to_user_name"] = self.reply_to_user_name
+        if self.mentioned_user_ids:
+            context["mentioned_user_ids"] = list(self.mentioned_user_ids)
         if self.message is not None:
             context["message"] = self.message
         if self.raw is not None:

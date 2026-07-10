@@ -38,7 +38,11 @@ class TelegramCommandsMixin:
         return text
 
     async def _command_context(self, update: Update, text: str) -> Dict[str, Any]:
-        context = context_from_update(update, text)
+        context = context_from_update(
+            update,
+            text,
+            bot_user_id=str(getattr(self, "bot_user_id", "") or ""),
+        )
         return await self._enrich_group_context(context, update.effective_chat, update=update)
 
     async def _start_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):

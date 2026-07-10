@@ -6,7 +6,7 @@ from typing import List
 from .constants import TG_MSG_MAX_LENGTH
 
 
-def _markdown_to_html(text: str) -> str:
+def _markdown_to_html(text: str, *, preserve_safe_html: bool = False) -> str:
     """
     将 Markdown 格式转为 Telegram 兼容的 HTML。
     
@@ -15,6 +15,19 @@ def _markdown_to_html(text: str) -> str:
     # === Phase 0: 提取并保护代码块和行内代码（避免内部内容被错误转换） ===
     code_blocks = []
     inline_codes = []
+    safe_html_parts = []
+
+    if preserve_safe_html:
+        def _save_safe_html(m):
+            idx = len(safe_html_parts)
+            safe_html_parts.append(m.group(0))
+            return f'\x00SAFEHTML{idx}\x00'
+
+        text = re.sub(
+            r'<a href="tg://user\?id=\d+">[^<>]*</a>',
+            _save_safe_html,
+            text,
+        )
     
     def _save_code_block(m):
         idx = len(code_blocks)
@@ -73,7 +86,9 @@ def _markdown_to_html(text: str) -> str:
         text = text.replace(f'\x00CODEBLOCK{idx}\x00', block)
     for idx, code in enumerate(inline_codes):
         text = text.replace(f'\x00INLINECODE{idx}\x00', code)
-    
+    for idx, safe_html in enumerate(safe_html_parts):
+        text = text.replace(f'\x00SAFEHTML{idx}\x00', safe_html)
+
     return text
 
 

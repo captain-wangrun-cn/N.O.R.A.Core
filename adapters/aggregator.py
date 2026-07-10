@@ -79,6 +79,14 @@ class MessageAggregator:
             "user_name": context.get("user_name"),
             "platform_message_id": platform_msg_id,
             "platform_message_ids": self._context_platform_message_ids(context),
+            "reply_to_message_id": str(context.get("reply_to_message_id") or "").strip(),
+            "reply_to_user_id": str(context.get("reply_to_user_id") or "").strip(),
+            "reply_to_user_name": str(context.get("reply_to_user_name") or "").strip(),
+            "mentioned_user_ids": [
+                str(user_id)
+                for user_id in (context.get("mentioned_user_ids") or [])
+                if user_id is not None and str(user_id).strip()
+            ],
             "reply_target_message_id": self._reply_target_message_id(context),
         })
         self._buffers[key] = self._format_parts(parts, context)
@@ -96,6 +104,42 @@ class MessageAggregator:
             {"user_id": part.get("user_id"), "user_name": part.get("user_name")}
             for part in parts
         ]
+        self._contexts[key]["native_reference_parts"] = [
+            {
+                "platform_message_id": part.get("platform_message_id"),
+                "platform_message_ids": list(part.get("platform_message_ids") or []),
+                "reply_to_message_id": part.get("reply_to_message_id") or "",
+                "reply_to_user_id": part.get("reply_to_user_id") or "",
+                "reply_to_user_name": part.get("reply_to_user_name") or "",
+                "mentioned_user_ids": list(part.get("mentioned_user_ids") or []),
+            }
+            for part in parts
+        ]
+        latest_reply = next(
+            (
+                part
+                for part in reversed(parts)
+                if str(part.get("reply_to_message_id") or "").strip()
+            ),
+            None,
+        )
+        if latest_reply:
+            for field in ("reply_to_message_id", "reply_to_user_id", "reply_to_user_name"):
+                value = str(latest_reply.get(field) or "").strip()
+                if value:
+                    self._contexts[key][field] = value
+                else:
+                    self._contexts[key].pop(field, None)
+        mentioned_user_ids = [
+            str(user_id)
+            for part in parts
+            for user_id in (part.get("mentioned_user_ids") or [])
+            if user_id is not None and str(user_id).strip()
+        ]
+        if mentioned_user_ids:
+            self._contexts[key]["mentioned_user_ids"] = list(dict.fromkeys(mentioned_user_ids))
+        else:
+            self._contexts[key].pop("mentioned_user_ids", None)
         platform_ids = []
         for part in parts:
             part_ids = part.get("platform_message_ids") or []

@@ -185,7 +185,21 @@ python tui.py
 
 ---
 
-## 6.1 标记速查（NEED_FOLLOW / NO_REPLY / SPLIT 延时）
+## 6.1 标记速查（消息控制 / NEED_FOLLOW / NO_REPLY / SPLIT 延时）
+
+- `[reply:MESSAGE_ID]`
+  - 含义：让当前语义分段原生回复目标平台消息。
+  - 约束：ID 只能来自当前目标平台/场景的可靠上下文；不写标记就不自动引用。
+  - 区分：入站 `reply_to_message_id` 只描述用户回复了哪条历史消息；应用选择的 `reply_target_message_id` 才是代码层出站目标，两者不得自动互相推导。
+
+- `[at:USER_ID]`
+  - 含义：在明确群聊场景原生 @ 已知用户。
+  - 约束：私聊、未知场景、无效 ID 或不支持的平台只移除标记；禁止猜测、跨平台复用 ID，禁止手写 CQ 码或 Telegram `tg://user` HTML。
+
+- 消息控制作用域
+  - 每个 `[SPLIT]` 分段独立解释 `[reply:...]` / `[at:...]`。
+  - 平台长度切块时，reply 只附着该分段首个实际发送项，mention 不复制到后续 chunk。
+  - OneBot 的 `[reply]`、`[at:current]`、`[at:reply]` 仅为兼容旧格式；新输出优先显式 ID。
 
 - `[NO_REPLY]`
   - 含义：静默执行，本轮不向用户发送可见消息。

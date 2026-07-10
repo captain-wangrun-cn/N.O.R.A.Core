@@ -5,7 +5,14 @@ from adapters.base import MessageSegment
 from adapters.telegram.constants import FILE_PATTERN, TG_MSG_MAX_LENGTH
 from adapters.telegram.formatting import _markdown_to_html, _split_long_text
 from adapters.telegram.incoming import MENTION_ONLY_TEXT
-from adapters.telegram.message import context_from_update, has_bot_mention, media_message, strip_bot_mention
+from adapters.telegram.message import (
+    context_from_update,
+    decorate_native_references,
+    has_bot_mention,
+    media_message,
+    strip_bot_mention,
+    telegram_text_mention_markers,
+)
 from adapters.telegram.main import TelegramAdapter
 from brain.prompts import load_identity_context
 from core.back_brain import _image_ids_by_platform_message_id
@@ -83,6 +90,8 @@ def _fake_update(
     message_id=456,
     reply_to_message=None,
     chat_title="测试群",
+    entities=None,
+    caption_entities=None,
 ):
     chat = SimpleNamespace(id=-100 if chat_type != "private" else user_id, type=chat_type)
     if chat_type != "private":
@@ -98,6 +107,8 @@ def _fake_update(
         text=text,
         caption=caption,
         reply_to_message=reply_to_message,
+        entities=list(entities or []),
+        caption_entities=list(caption_entities or []),
         photo=None,
         document=None,
         sticker=None,
@@ -108,6 +119,7 @@ def _fake_update(
 class _IncomingOnlyTelegram(TelegramAdapter):
     def __init__(self):
         self.bot_username = "NoraBot"
+        self.bot_user_id = "999"
         class FakeBot:
             id = 999
 
@@ -130,6 +142,13 @@ class _SendingOnlyTelegram(TelegramAdapter):
             async def send_message(self, **kwargs):
                 self.outer.calls.append(("send_message", kwargs))
                 return SimpleNamespace(message_id=901)
+
+            async def send_chat_action(self, **kwargs):
+                self.outer.calls.append(("send_chat_action", kwargs))
+
+            async def send_photo(self, **kwargs):
+                self.outer.calls.append(("send_photo", kwargs))
+                return SimpleNamespace(message_id=902)
 
         self.application = SimpleNamespace(bot=FakeBot(self))
 
@@ -178,6 +197,173 @@ def test_telegram_sender_ignores_non_numeric_reply_to_message_id():
 
     assert "reply_to_message_id" not in adapter.calls[0][1]
     assert "allow_sending_without_reply" not in adapter.calls[0][1]
+
+
+def test_telegram_sender_canonical_reply_overrides_fallback_and_mentions_group_user():
+    adapter = _SendingOnlyTelegram()
+
+    asyncio.run(
+        adapter.send_message(
+            "-100",
+            "[reply:777]hello [at:321]world",
+            parse_media=False,
+            chat_type="group",
+            reply_to_message_id="456",
+        )
+    )
+
+    call = adapter.calls[0][1]
+    assert call["reply_to_message_id"] == 777
+    assert call["allow_sending_without_reply"] is True
+    assert '<a href="tg://user?id=321">@321</a>' in call["text"]
+    assert "[reply:" not in call["text"]
+    assert "[at:" not in call["text"]
+
+
+def test_telegram_sender_removes_mentions_outside_group_and_ignores_invalid_ids():
+    adapter = _SendingOnlyTelegram()
+
+    asyncio.run(
+        adapter.send_message(
+            "123",
+            "before[reply:not-a-number][at:abc]after",
+            parse_media=False,
+            chat_type="private",
+        )
+    )
+
+    call = adapter.calls[0][1]
+    assert call["text"] == "beforeafter"
+    assert "reply_to_message_id" not in call
+
+
+def test_telegram_sender_reply_applies_only_to_first_platform_chunk():
+    adapter = _SendingOnlyTelegram()
+
+    asyncio.run(
+        adapter.send_message(
+            "123",
+            "[reply:777]" + ("a" * (TG_MSG_MAX_LENGTH + 10)),
+            parse_media=False,
+        )
+    )
+
+    assert len(adapter.calls) == 2
+    assert adapter.calls[0][1]["reply_to_message_id"] == 777
+    assert "reply_to_message_id" not in adapter.calls[1][1]
+
+
+def test_telegram_sender_reply_applies_to_first_media_when_no_text():
+    adapter = _SendingOnlyTelegram()
+
+    asyncio.run(
+        adapter.send_message(
+            "-100",
+            "[reply:777][image: https://example.com/photo.jpg]",
+            chat_type="group",
+        )
+    )
+
+    media_calls = [call for name, call in adapter.calls if name == "send_photo"]
+    assert len(media_calls) == 1
+    assert media_calls[0]["reply_to_message_id"] == 777
+    assert media_calls[0]["allow_sending_without_reply"] is True
+
+
+def test_telegram_html_fallback_does_not_leak_message_controls():
+    class _FallbackTelegram(_SendingOnlyTelegram):
+        def __init__(self):
+            super().__init__()
+            original_send = self.application.bot.send_message
+            state = {"failed": False}
+
+            async def send_message(**kwargs):
+                if kwargs.get("parse_mode") == "HTML" and not state["failed"]:
+                    state["failed"] = True
+                    self.calls.append(("send_message", kwargs))
+                    raise ValueError("bad html")
+                return await original_send(**kwargs)
+
+            self.application.bot.send_message = send_message
+
+    adapter = _FallbackTelegram()
+    ids = asyncio.run(
+        adapter.send_message(
+            "-100",
+            "[reply:777][at:321]hello",
+            parse_media=False,
+            chat_type="group",
+        )
+    )
+
+    assert ids == ["901"]
+    fallback = adapter.calls[-1][1]
+    assert fallback["reply_to_message_id"] == 777
+    assert "[reply:" not in fallback["text"]
+    assert "[at:" not in fallback["text"]
+
+
+def test_telegram_native_reference_helpers_use_reliable_ids_only():
+    reply = SimpleNamespace(message_id=777)
+    text_mention = SimpleNamespace(
+        type="text_mention",
+        offset=0,
+        length=5,
+        user=SimpleNamespace(id=321),
+    )
+    bot_mention = SimpleNamespace(
+        type="text_mention",
+        offset=6,
+        length=4,
+        user=SimpleNamespace(id=999),
+    )
+    username_mention = SimpleNamespace(
+        type="mention",
+        offset=11,
+        length=6,
+        user=None,
+    )
+    message = SimpleNamespace(
+        text="Alice Nora @carol",
+        caption=None,
+        entities=[text_mention, bot_mention, username_mention],
+        caption_entities=[],
+        reply_to_message=reply,
+    )
+
+    user_ids, markers = telegram_text_mention_markers(message, bot_user_id="999")
+    decorated, decorated_ids = decorate_native_references(
+        message,
+        "hello",
+        bot_user_id="999",
+    )
+
+    assert user_ids == ["321"]
+    assert markers == "[at:321]"
+    assert decorated == "[reply:777][at:321]hello"
+    assert decorated_ids == ["321"]
+
+
+def test_context_from_update_filters_bot_text_mention_metadata():
+    entities = [
+        SimpleNamespace(
+            type="text_mention",
+            offset=0,
+            length=5,
+            user=SimpleNamespace(id=321),
+        ),
+        SimpleNamespace(
+            type="text_mention",
+            offset=6,
+            length=4,
+            user=SimpleNamespace(id=999),
+        ),
+    ]
+    update = _fake_update(text="Alice Nora", entities=entities)
+
+    context = context_from_update(update, "hello", bot_user_id="999")
+
+    assert context["mentioned_user_ids"] == ["321"]
 
 
 def test_context_from_update_includes_sender_identity_and_platform_message_id():
@@ -339,6 +525,64 @@ def test_media_group_flush_preserves_all_platform_message_ids():
         assert captured[0]["platform_message_ids"] == ["101", "102"]
         assert captured[0]["chat_title"] == "测试群"
         assert captured[0]["group_member_count"] == 42
+
+    asyncio.run(run())
+
+
+def test_media_group_flush_preserves_native_reply_and_caption_mentions_once():
+    async def run():
+        adapter = _IncomingOnlyTelegram()
+        captured = []
+
+        class FakeAggregator:
+            async def add_message(self, chat_id, text, context):
+                captured.append((text, context))
+
+        adapter._aggregator = FakeAggregator()
+        reply = SimpleNamespace(message_id=777)
+        caption_entities = [
+            SimpleNamespace(
+                type="text_mention",
+                offset=0,
+                length=5,
+                user=SimpleNamespace(id=321),
+            )
+        ]
+        update = _fake_update(
+            chat_type="group",
+            caption="Alice album",
+            reply_to_message=reply,
+            caption_entities=caption_entities,
+        )
+        decorated_caption, user_ids = adapter._decorate_native_references(
+            update,
+            "Alice album",
+        )
+        adapter._media_group_buffers = {
+            "g1": {
+                "photos": ["[image: data/telegram/a.jpg]", "[image: data/telegram/b.jpg]"],
+                "caption": decorated_caption,
+                "chat_id": "-100",
+                "update": update,
+                "context": context_from_update(update, "", bot_user_id="999"),
+                "chat_type": "group",
+                "reply_info": "quoted text",
+                "mentioned_user_ids": user_ids,
+                "native_references_decorated": True,
+                "platform": "telegram",
+                "message_ids": ["101", "102"],
+            }
+        }
+        adapter._media_group_timers = {"g1": object()}
+
+        await adapter._flush_media_group("g1")
+
+        text, context = captured[0]
+        assert text.count("[reply:777]") == 1
+        assert text.count("[at:321]") == 1
+        assert "[回复: quoted text]" in text
+        assert context["mentioned_user_ids"] == ["321"]
+        assert context["platform_message_ids"] == ["101", "102"]
 
     asyncio.run(run())
 

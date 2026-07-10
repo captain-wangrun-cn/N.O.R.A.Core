@@ -5,6 +5,7 @@ import re
 from typing import Any, Iterable
 
 from adapters.base import AdapterEvent, AdapterMessage, MessageSegment
+from adapters.message_controls import format_mention_marker, format_reply_marker
 
 
 _CQ_PATTERN = re.compile(r"\[CQ:(?P<type>[a-zA-Z0-9_.-]+)(?P<params>(?:,[^\]]*)?)\]")
@@ -113,6 +114,35 @@ def reply_id_from_event(event: dict[str, Any], segments: Iterable[dict[str, Any]
     if raw_message:
         return reply_id_from_segments(parse_cq_message(raw_message))
     return ""
+
+
+def native_reference_markers(
+    segments: Iterable[dict[str, Any]],
+    *,
+    self_id: str = "",
+    include_mentions: bool = True,
+) -> tuple[str, list[str]]:
+    """Serialize native reply/@ segments to canonical model-visible markers."""
+    parts: list[str] = []
+    mentioned_user_ids: list[str] = []
+    reply_added = False
+    for segment in segments:
+        segment_type = str(segment.get("type") or "")
+        data = segment.get("data") or {}
+        if segment_type == "reply" and not reply_added:
+            marker = format_reply_marker(str(data.get("id") or data.get("message_id") or ""))
+            if marker:
+                parts.append(marker)
+                reply_added = True
+        elif segment_type == "at" and include_mentions:
+            user_id = str(data.get("qq") or "").strip()
+            if not user_id or user_id == str(self_id or ""):
+                continue
+            marker = format_mention_marker(user_id)
+            if marker:
+                parts.append(marker)
+                mentioned_user_ids.append(user_id)
+    return "".join(parts), list(dict.fromkeys(mentioned_user_ids))
 
 
 def plain_text_from_segments(segments: Iterable[dict[str, Any]]) -> str:

@@ -6,6 +6,7 @@ from typing import Any
 from telegram import Message as TelegramMessage, Update
 
 from adapters.base import AdapterEvent, AdapterMessage, MessageSegment
+from adapters.message_controls import format_mention_marker, format_reply_marker
 
 
 def build_telegram_event(
@@ -108,12 +109,64 @@ def has_bot_mention(text: str, bot_username: str | None) -> bool:
     return re.search(pattern, text) is not None
 
 
+def _entity_text(message: Any, entity: Any) -> str:
+    parse_entity = getattr(message, "parse_entity", None)
+    if callable(parse_entity):
+        try:
+            return str(parse_entity(entity) or "")
+        except Exception:
+            pass
+    source = str(getattr(message, "text", None) or getattr(message, "caption", None) or "")
+    offset = int(getattr(entity, "offset", 0) or 0)
+    length = int(getattr(entity, "length", 0) or 0)
+    encoded = source.encode("utf-16-le")
+    return encoded[offset * 2:(offset + length) * 2].decode("utf-16-le", errors="ignore")
+
+
+def telegram_text_mention_markers(message: Any, *, bot_user_id: str = "") -> tuple[list[str], str]:
+    """Return reliable text_mention user ids and canonical marker prefix."""
+    if not message:
+        return [], ""
+    entities = list(getattr(message, "entities", None) or getattr(message, "caption_entities", None) or [])
+    user_ids: list[str] = []
+    for entity in entities:
+        entity_type = str(getattr(entity, "type", "") or "").lower()
+        user = getattr(entity, "user", None)
+        user_id = str(getattr(user, "id", "") or "").strip()
+        if entity_type != "text_mention" or not user_id or user_id == str(bot_user_id or ""):
+            continue
+        if not _entity_text(message, entity):
+            continue
+        user_ids.append(user_id)
+    user_ids = list(dict.fromkeys(user_ids))
+    return user_ids, "".join(format_mention_marker(user_id) for user_id in user_ids)
+
+
+def decorate_native_references(
+    message: Any,
+    text: str,
+    *,
+    bot_user_id: str = "",
+) -> tuple[str, list[str]]:
+    """Prefix Telegram reply/text_mention semantics using canonical markers."""
+    parts: list[str] = []
+    reply_message = getattr(message, "reply_to_message", None) if message else None
+    reply_marker = format_reply_marker(str(getattr(reply_message, "message_id", "") or ""))
+    if reply_marker:
+        parts.append(reply_marker)
+    user_ids, mention_markers = telegram_text_mention_markers(message, bot_user_id=bot_user_id)
+    if mention_markers:
+        parts.append(mention_markers)
+    return "".join(parts) + str(text or ""), user_ids
+
+
 def context_from_update(
     update: Update,
     text: str,
     message: AdapterMessage | None = None,
     *,
     platform_message_ids: list[str] | None = None,
+    bot_user_id: str = "",
 ) -> dict[str, Any]:
     """Best-effort Telegram Update -> controller context helper."""
     chat = update.effective_chat
@@ -141,6 +194,12 @@ def context_from_update(
             reply_user_name = telegram_display_name(reply_user)
             if reply_user_name:
                 context["reply_to_user_name"] = reply_user_name
+    mentioned_user_ids, _ = telegram_text_mention_markers(
+        telegram_message,
+        bot_user_id=bot_user_id,
+    )
+    if mentioned_user_ids:
+        context["mentioned_user_ids"] = mentioned_user_ids
     return context
 
 

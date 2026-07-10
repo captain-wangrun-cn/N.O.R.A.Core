@@ -270,6 +270,47 @@ def test_onebot_sender_parses_explicit_reply_and_reply_at_target():
     ]
 
 
+def test_onebot_sender_strips_at_control_in_private_chat():
+    adapter = SenderOnlyOneBot()
+
+    asyncio.run(adapter.send_message("10001", "[at:20002] 私聊正文", chat_type="private"))
+
+    assert adapter.calls[0][1]["message"] == [
+        {"type": "text", "data": {"text": " 私聊正文"}},
+    ]
+
+
+def test_onebot_sender_split_fallback_reply_only_applies_to_first_part():
+    adapter = SenderOnlyOneBot()
+
+    asyncio.run(
+        adapter.send_message(
+            "10001",
+            "第一段[SPLIT:0]第二段",
+            reply_to_message_id="666",
+        )
+    )
+
+    assert adapter.calls[0][1]["message"][0] == {"type": "reply", "data": {"id": "666"}}
+    assert all(
+        segment.get("type") != "reply"
+        for segment in adapter.calls[1][1]["message"]
+    )
+
+
+def test_onebot_sender_split_explicit_reply_is_local_to_its_part():
+    adapter = SenderOnlyOneBot()
+
+    asyncio.run(adapter.send_message("10001", "[reply:666]第一段[SPLIT:0][at:20002]第二段"))
+
+    assert adapter.calls[0][1]["message"][0] == {"type": "reply", "data": {"id": "666"}}
+    assert adapter.calls[1][1]["message"][0] == {"type": "at", "data": {"qq": "20002"}}
+    assert all(
+        segment.get("type") != "reply"
+        for segment in adapter.calls[1][1]["message"]
+    )
+
+
 def test_onebot_sender_parses_face_and_emoji_segments():
     adapter = SenderOnlyOneBot()
 
@@ -498,6 +539,7 @@ def test_onebot_group_reply_image_with_mention_includes_replied_media():
         assert len(captured) == 1
         chat_id, text, context = captured[0]
         assert chat_id == "10001"
+        assert "[reply:777]" in text
         assert "[回复内容]" in text
         assert "[image: http://example.test/old.jpg]" in text
         assert "旧图说明" in text
@@ -507,6 +549,42 @@ def test_onebot_group_reply_image_with_mention_includes_replied_media():
         assert context["reply_to_user_id"] == "30003"
         assert context["reply_to_user_name"] == "Bob"
         assert context["platform_message_ids"] == ["777", "889"]
+
+    asyncio.run(run())
+
+
+def test_onebot_group_reply_and_other_mention_use_canonical_markers():
+    async def run():
+        adapter = IncomingOnlyOneBot()
+        captured = []
+
+        class FakeAggregator:
+            async def add_message(self, chat_id, text, context):
+                captured.append((chat_id, text, context))
+
+        adapter._aggregator = FakeAggregator()
+        event = {
+            "post_type": "message",
+            "message_type": "group",
+            "group_id": 10001,
+            "user_id": 20002,
+            "message_id": 892,
+            "sender": {"card": "Alice"},
+            "message": [
+                {"type": "reply", "data": {"id": "777"}},
+                {"type": "at", "data": {"qq": "999"}},
+                {"type": "at", "data": {"qq": "30003"}},
+                {"type": "text", "data": {"text": " 看这里"}},
+            ],
+        }
+
+        await adapter.handle_onebot_event(event)
+
+        text = captured[0][1]
+        context = captured[0][2]
+        assert text.startswith("[reply:777][at:30003]")
+        assert "[at:999]" not in text
+        assert context["mentioned_user_ids"] == ["30003"]
 
     asyncio.run(run())
 

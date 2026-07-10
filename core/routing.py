@@ -1,5 +1,7 @@
 import re
 
+from adapters.message_controls import strip_message_control_markers
+
 
 def parse_route_decision_response(response_text: str) -> str:
     """
@@ -148,8 +150,8 @@ def _strip_timestamp_markers(text: str) -> str:
     return _TIMESTAMP_PATTERN.sub("", text).strip()
 
 
-def sanitize_user_visible_text(text: str) -> str:
-    """清理不应暴露给用户的内部备注/控制标记。"""
+def sanitize_adapter_output_text(text: str) -> str:
+    """清理内部信息，同时保留应由目标 Adapter 解释的消息控制标记。"""
     if not text:
         return ""
 
@@ -157,11 +159,15 @@ def sanitize_user_visible_text(text: str) -> str:
     cleaned = _SYSTEM_NOTE_BLOCK_PATTERN.sub("", cleaned)
     cleaned = _strip_timestamp_markers(cleaned)
     cleaned = _SOURCE_LABEL_PATTERN.sub("", cleaned)
-    # 路由标记兜底：即使解析路径漏掉，也不让 [platform:X]/[scene:...] 泄漏给用户。
     cleaned = _ROUTE_PLATFORM_PATTERN.sub("", cleaned)
     cleaned = _ROUTE_SCENE_PATTERN.sub("", cleaned)
     cleaned = re.sub(r"\n{3,}", "\n\n", cleaned)
     return cleaned.strip()
+
+
+def sanitize_user_visible_text(text: str) -> str:
+    """清理不应暴露给用户的内部备注及回复/@控制标记。"""
+    return strip_message_control_markers(sanitize_adapter_output_text(text)).strip()
 
 
 def parse_front_brain_response(response_text: str) -> dict:

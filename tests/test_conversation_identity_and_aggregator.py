@@ -262,6 +262,76 @@ def test_aggregator_preserves_explicit_reply_target():
     asyncio.run(run())
 
 
+def test_aggregator_preserves_native_reference_metadata_per_part():
+    async def run():
+        completed = []
+
+        async def on_complete(context):
+            completed.append(context)
+
+        agg = MessageAggregator(timeout=0.01, on_complete=on_complete)
+        await agg.add_message(
+            "group-1",
+            "[reply:201]第一句[at:301]",
+            {
+                "platform": "telegram",
+                "chat_id": "group-1",
+                "user_id": "u1",
+                "chat_type": "group",
+                "platform_message_id": "101",
+                "reply_to_message_id": "201",
+                "reply_to_user_id": "u2",
+                "reply_to_user_name": "Bob",
+                "mentioned_user_ids": ["301"],
+            },
+        )
+        await agg.add_message(
+            "group-1",
+            "[reply:202]第二句[at:302]",
+            {
+                "platform": "telegram",
+                "chat_id": "group-1",
+                "user_id": "u1",
+                "chat_type": "group",
+                "platform_message_id": "102",
+                "reply_to_message_id": "202",
+                "reply_to_user_id": "u3",
+                "reply_to_user_name": "Carol",
+                "mentioned_user_ids": ["302", "301"],
+            },
+        )
+
+        await asyncio.sleep(0.03)
+
+        context = completed[0]
+        assert context["text"] == "[reply:201]第一句[at:301]\n[reply:202]第二句[at:302]"
+        assert context["reply_to_message_id"] == "202"
+        assert context["reply_to_user_id"] == "u3"
+        assert context["reply_to_user_name"] == "Carol"
+        assert context["mentioned_user_ids"] == ["301", "302"]
+        assert context["native_reference_parts"] == [
+            {
+                "platform_message_id": "101",
+                "platform_message_ids": ["101"],
+                "reply_to_message_id": "201",
+                "reply_to_user_id": "u2",
+                "reply_to_user_name": "Bob",
+                "mentioned_user_ids": ["301"],
+            },
+            {
+                "platform_message_id": "102",
+                "platform_message_ids": ["102"],
+                "reply_to_message_id": "202",
+                "reply_to_user_id": "u3",
+                "reply_to_user_name": "Carol",
+                "mentioned_user_ids": ["302", "301"],
+            },
+        ]
+        assert not context.get("reply_target_message_id")
+
+    asyncio.run(run())
+
+
 def test_group_message_content_prefixes_single_contributor_aggregate():
     context = {
         "contributors": [

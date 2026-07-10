@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import html
 import io
 import logging
 import os
@@ -9,6 +10,8 @@ from typing import List, Optional
 
 from telegram.constants import ChatAction
 from telegram.error import RetryAfter, TimedOut
+
+from adapters.message_controls import parse_message_controls, strip_message_control_markers
 
 from .constants import (
     COMPRESS_TARGET_SIZE,
@@ -22,6 +25,20 @@ logger = logging.getLogger(__name__)
 
 
 class TelegramSenderMixin:
+    def _render_message_controls(self, text: str, *, allow_mentions: bool) -> tuple[str, str]:
+        parsed = parse_message_controls(text)
+        rendered: list[str] = []
+        for token in parsed.tokens:
+            if token.type == "text":
+                rendered.append(token.value)
+            elif token.type == "mention" and allow_mentions:
+                if token.value.isdigit():
+                    label = html.escape(f"@{token.value}")
+                    rendered.append(f'<a href="tg://user?id={token.value}">{label}</a>')
+                else:
+                    logger.debug("[telegram] ignoring non-numeric mention user id=%s", token.value)
+        return "".join(rendered), parsed.reply_message_id
+
     def _telegram_reply_kwargs(self, reply_to_message_id: str) -> dict[str, object]:
         value = str(reply_to_message_id or "").strip()
         if not value:
@@ -313,8 +330,15 @@ class TelegramSenderMixin:
           - 文档/代码: pdf, py, js, json, zip, 等等
         """
         parse_media = bool(kwargs.pop("parse_media", True))
+        chat_type = str(kwargs.pop("chat_type", "") or "").strip().lower()
+        allow_mentions = chat_type in {"group", "supergroup"}
         reply_to_message_id = str(kwargs.pop("reply_to_message_id", "") or "").strip()
-        reply_kwargs = self._telegram_reply_kwargs(reply_to_message_id)
+        rendered_text, explicit_reply_id = self._render_message_controls(
+            str(text or ""),
+            allow_mentions=allow_mentions,
+        )
+        text = rendered_text
+        reply_kwargs = self._telegram_reply_kwargs(explicit_reply_id or reply_to_message_id)
 
         # 1. 提取所有文件路径（可通过 parse_media=False 禁用）
         file_entries = []  # [(path, media_type, is_url)]
@@ -360,14 +384,16 @@ class TelegramSenderMixin:
 
         # 3. 发送文本部分
         all_message_ids: list[str] = []
+        pending_reply_kwargs = dict(reply_kwargs)
         if clean_text:
             # Markdown → HTML 转换（LLM 有时会输出 Markdown 格式）
-            html_text = _markdown_to_html(clean_text)
+            html_text = _markdown_to_html(clean_text, preserve_safe_html=True)
             
             # 分割超长消息（Telegram 限制 4096 字符）
             html_chunks = _split_long_text(html_text, TG_MSG_MAX_LENGTH)
             
             for chunk_html in html_chunks:
+                reply_kwargs = pending_reply_kwargs
                 try:
                     message = await self._send_with_retry(
                         lambda: self.application.bot.send_message(
@@ -379,9 +405,7 @@ class TelegramSenderMixin:
                     )
                 except Exception as html_err:
                     logger.warning(f"[{chat_id}] HTML 发送失败 ({html_err})，降级为纯文本。")
-                    # HTML 解析失败，降级发送纯文本（去除所有标签）
                     plain_chunk = re.sub(r'<[^>]+>', '', chunk_html)
-                    # 纯文本也可能过长（标签去掉后不一定短多少），再次分割
                     plain_parts = _split_long_text(plain_chunk or chunk_html, TG_MSG_MAX_LENGTH)
                     for part in plain_parts:
                         message = await self._send_with_retry(
@@ -391,10 +415,16 @@ class TelegramSenderMixin:
                                 **reply_kwargs,
                             )
                         )
+                        reply_kwargs = {}
+                        pending_reply_kwargs = {}
+                        all_message_ids.append(str(message.message_id))
+                    continue
+                pending_reply_kwargs = {}
                 all_message_ids.append(str(message.message_id))
 
         # 4. 逐个发送媒体文件
         for file_path, media_type, is_url in file_entries:
+            reply_kwargs = pending_reply_kwargs
             caption = os.path.basename(file_path)
             try:
                 if is_url:
@@ -448,6 +478,7 @@ class TelegramSenderMixin:
                                 chat_id=chat_id, document=f, caption=caption, **reply_kwargs
                             ))
                 all_message_ids.append(str(message.message_id))
+                pending_reply_kwargs = {}
                 logger.info(f"[{chat_id}] 已发送{media_type}: {file_path}")
             except Exception as e:
                 logger.error(f"[{chat_id}] 发送{media_type}失败 {file_path}: {e}")
@@ -461,13 +492,15 @@ class TelegramSenderMixin:
                     )
                 )
                 all_message_ids.append(str(message.message_id))
+                pending_reply_kwargs = {}
 
-        # 5. 兜底：如果什么都没发出去，发原始文本
+        # 5. 兜底：如果什么都没发出去，发已清理的正文
         if not all_message_ids:
+            fallback_text = strip_message_control_markers(text).strip() or "(empty message)"
             message = await self.application.bot.send_message(
                 chat_id=chat_id,
-                text=text or "(empty message)",
-                **reply_kwargs,
+                text=fallback_text,
+                **pending_reply_kwargs,
             )
             all_message_ids.append(str(message.message_id))
 
@@ -487,7 +520,7 @@ class TelegramSenderMixin:
     async def edit_message(self, chat_id: str, message_id: str, new_text: str, **kwargs) -> bool:
         """编辑一条已发送的 Telegram 消息。"""
         try:
-            html_text = _markdown_to_html(new_text)
+            html_text = _markdown_to_html(strip_message_control_markers(new_text))
             await self._send_with_retry(
                 lambda: self.application.bot.edit_message_text(
                     chat_id=chat_id,

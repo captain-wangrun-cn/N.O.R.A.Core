@@ -130,5 +130,10 @@ class TelegramGroupContextMixin:
         *,
         platform_message_ids: list[str] | None = None,
     ) -> Dict[str, Any]:
-        context = context_from_update(update, text, platform_message_ids=platform_message_ids)
+        context = context_from_update(
+            update,
+            text,
+            platform_message_ids=platform_message_ids,
+            bot_user_id=str(getattr(self, "bot_user_id", "") or ""),
+        )
         return await self._enrich_group_context(context, update.effective_chat, update=update)

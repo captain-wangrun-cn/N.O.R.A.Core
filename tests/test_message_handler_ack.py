@@ -1,4 +1,5 @@
 import asyncio
+import re
 import pytest
 
 try:
@@ -108,6 +109,49 @@ def test_delete_last_assistant_message_supports_nth(tmp_path):
     latest = history.delete_last_assistant_message("telegram", "chat-1")
     assert latest is not None
     assert latest["message_id"] != deleted["message_id"]
+
+
+class _SplitSendingHandler(mh.MessageHandlerMixin):
+    _SPLIT_MARKER_PATTERN = re.compile(r"\[SPLIT(?::([0-9.]+))?\]", re.IGNORECASE)
+
+    def __init__(self):
+        self.sent = []
+
+    async def _send_platform_message(self, chat_id: str, text: str, **kwargs):
+        self.sent.append((chat_id, text, kwargs))
+        return [str(len(self.sent))]
+
+
+def test_split_message_consumes_fallback_reply_on_first_sent_part_only():
+    handler = _SplitSendingHandler()
+
+    ids = asyncio.run(
+        handler._send_split_message(
+            "onebotv11:group:100",
+            "first[SPLIT]second",
+            reply_to_message_id="777",
+            chat_type="group",
+        )
+    )
+
+    assert ids == ["1", "2"]
+    assert handler.sent[0][2]["reply_to_message_id"] == "777"
+    assert handler.sent[1][2]["reply_to_message_id"] == ""
+
+
+def test_split_message_keeps_explicit_controls_local_to_each_part():
+    handler = _SplitSendingHandler()
+
+    asyncio.run(
+        handler._send_split_message(
+            "onebotv11:group:100",
+            "[reply:111]first[SPLIT][at:222]second",
+            chat_type="group",
+        )
+    )
+
+    assert handler.sent[0][1] == "[reply:111]first"
+    assert handler.sent[1][1] == "[at:222]second"
 
 
 # ---- reply_target_message_id 私聊不回复引用测试 ----

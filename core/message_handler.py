@@ -13,7 +13,7 @@ from typing import Dict, Any, List, Optional
 
 from brain.multimodal import extract_image_payloads, extract_video_payloads
 from brain.prompts import render_template, get_soul_prompt, load_identity_context
-from core.routing import has_image_input, sanitize_user_visible_text
+from core.routing import has_image_input, sanitize_adapter_output_text, sanitize_user_visible_text
 from core.conversation_identity import conversation_target_dict, normalize_chat_type
 from core.scene_context import build_current_scene_block, should_redact_cross_place_details
 from core.default_chat_id_store import save_default_chat_target
@@ -1225,18 +1225,21 @@ class MessageHandlerMixin:
         chat_type 非空时透传给适配器（OneBot 用它区分群/私聊，消除歧义）。
         """
         sent_message_ids: list[str] = []
-        text = sanitize_user_visible_text(text)
+        text = sanitize_adapter_output_text(text)
         if not text:
             return sent_message_ids
         send_kwargs: Dict[str, Any] = {"reply_to_message_id": reply_to_message_id}
         if chat_type:
             send_kwargs["chat_type"] = chat_type
+        # fallback reply 只属于首个实际发出的语义分段；显式 [reply:ID] 仍由各分段自行解释。
+        pending_reply_to_message_id = reply_to_message_id
         # _SPLIT_MARKER_PATTERN 现在返回 [text_part, delay_str, text_part, ...]
         parts = self._SPLIT_MARKER_PATTERN.split(text)
 
         for i in range(0, len(parts), 2):
             part = parts[i].strip()
             if part:
+                send_kwargs["reply_to_message_id"] = pending_reply_to_message_id
                 msg_ids = await self._send_platform_message(
                     chat_id,
                     part,
@@ -1244,6 +1247,7 @@ class MessageHandlerMixin:
                 )
                 if msg_ids:
                     sent_message_ids.extend(str(mid) for mid in msg_ids)
+                    pending_reply_to_message_id = ""
 
             # 如果后面还有 delay，则执行停顿（最后一个 part 后面没有 delay 所以用 i+1 检查）
             if i + 1 < len(parts) and parts[i+1] is not None:

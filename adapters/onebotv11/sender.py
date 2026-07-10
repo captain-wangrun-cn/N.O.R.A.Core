@@ -7,6 +7,8 @@ import asyncio
 from pathlib import Path
 from typing import Any
 
+from adapters.message_controls import parse_message_controls, strip_message_control_markers
+
 from .constants import MEDIA_TYPES, ONEBOT_MSG_MAX_LENGTH
 
 logger = logging.getLogger(__name__)
@@ -155,6 +157,39 @@ class OneBotSenderMixin:
             return None
         return {"type": "face", "data": {"id": value}}
 
+    def _normalize_message_controls(
+        self,
+        text: str,
+        *,
+        chat_id: str,
+        reply_to_message_id: str = "",
+        allow_mentions: bool,
+    ) -> str:
+        def replace_legacy(match: re.Match) -> str:
+            kind = str(match.group(1) or "").lower()
+            raw_value = str(match.group(2) or "")
+            if kind == "reply":
+                reply_id = self._resolve_reply_id(
+                    raw_value,
+                    chat_id,
+                    reply_to_message_id=reply_to_message_id,
+                )
+                return f"[reply:{reply_id}]" if reply_id else ""
+            user_id = self._resolve_at_user_id(raw_value, chat_id)
+            return f"[at:{user_id}]" if allow_mentions and user_id else ""
+
+        normalized = _CONTROL_TAG_PATTERN.sub(replace_legacy, str(text or ""))
+        parsed = parse_message_controls(normalized)
+        parts: list[str] = []
+        for token in parsed.tokens:
+            if token.type == "text":
+                parts.append(token.value)
+            elif token.type == "reply":
+                parts.append(f"[reply:{token.value}]")
+            elif token.type == "mention" and allow_mentions:
+                parts.append(f"[at:{token.value}]")
+        return "".join(parts)
+
     def _text_to_onebot_segments(
         self,
         text: str,
@@ -162,13 +197,28 @@ class OneBotSenderMixin:
         parse_media: bool = True,
         chat_id: str = "",
         reply_to_message_id: str = "",
+        allow_mentions: bool = False,
     ) -> list[dict[str, Any]]:
+        text = self._normalize_message_controls(
+            text,
+            chat_id=chat_id,
+            reply_to_message_id=reply_to_message_id,
+            allow_mentions=allow_mentions,
+        )
         if not parse_media:
-            segments = [{"type": "text", "data": {"text": str(text or "")}}]
-            reply_id = str(reply_to_message_id or "").strip()
-            if reply_id:
-                return [{"type": "reply", "data": {"id": reply_id}}] + segments
-            return segments
+            parsed = parse_message_controls(text)
+            segments: list[dict[str, Any]] = []
+            for token in parsed.tokens:
+                if token.type == "text" and token.value:
+                    segments.append({"type": "text", "data": {"text": token.value}})
+                elif token.type == "reply":
+                    segments.append({"type": "reply", "data": {"id": token.value}})
+                elif token.type == "mention" and allow_mentions:
+                    segments.append({"type": "at", "data": {"qq": token.value}})
+            reply_id = parsed.reply_message_id or str(reply_to_message_id or "").strip()
+            if reply_id and not any(segment.get("type") == "reply" for segment in segments):
+                segments.insert(0, {"type": "reply", "data": {"id": reply_id}})
+            return segments or [{"type": "text", "data": {"text": "(empty message)"}}]
 
         segments: list[dict[str, Any]] = []
         cursor = 0
@@ -249,6 +299,7 @@ class OneBotSenderMixin:
             parse_media=parse_media,
             chat_id=target_chat_id,
             reply_to_message_id=reply_to_message_id,
+            allow_mentions=str(target.get("message_type") or "") == "group",
         )
         chunks: list[list[dict[str, Any]]] = []
         current: list[dict[str, Any]] = []
@@ -305,6 +356,7 @@ class OneBotSenderMixin:
         if _SPLIT_MARKER_PATTERN.search(raw_text):
             all_message_ids: list[str] = []
             parts = _SPLIT_MARKER_PATTERN.split(raw_text)
+            fallback_reply_id = reply_to_message_id
             for i in range(0, len(parts), 2):
                 part = parts[i].strip()
                 if part:
@@ -312,9 +364,10 @@ class OneBotSenderMixin:
                         target,
                         part,
                         parse_media=parse_media,
-                        reply_to_message_id=reply_to_message_id,
+                        reply_to_message_id=fallback_reply_id,
                     )
                     all_message_ids.extend(msg_ids)
+                    fallback_reply_id = ""
 
                 if i + 1 < len(parts) and parts[i + 1] is not None:
                     try:

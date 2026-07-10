@@ -74,6 +74,7 @@ class TelegramAdapter(
             supports_chat_member_lookup=True,
             supports_chat_moderation=True,
             supports_member_tags=True,
+            supports_message_controls=True,
             max_message_length=TG_MSG_MAX_LENGTH,
         )
 
@@ -101,6 +102,7 @@ class TelegramAdapter(
         self.message_history = MessageHistory()
         self._reply_contexts: Dict[str, Dict] = {}
         self.bot_username: Optional[str] = None
+        self.bot_user_id: str = ""
         self._media_group_buffers: Dict[str, Dict[str, Any]] = {}
         self._media_group_timers: Dict[str, asyncio.Task] = {}
         self._model_option_tokens: Dict[str, Dict[str, Any]] = {}
@@ -172,10 +174,12 @@ class TelegramAdapter(
         try:
             bot_info = await application.bot.get_me()
             self.bot_username = bot_info.username
+            self.bot_user_id = str(bot_info.id)
             logger.info(f"成功获取机器人用户名: @{self.bot_username}")
         except Exception as e:
             logger.error(f"无法获取机器人用户名: {e}")
             self.bot_username = None
+            self.bot_user_id = ""
         await self.on_ready()
 
     async def _notify_debug_exception(self, chat_id: Optional[str], error: Exception):

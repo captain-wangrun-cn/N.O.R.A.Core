@@ -20,6 +20,7 @@ from .constants import ONEBOT_MSG_MAX_LENGTH
 from .media import OneBotMediaMixin
 from .message import (
     is_at_self,
+    native_reference_markers,
     onebot_event_to_adapter_event,
     onebot_message_segments,
     remove_empty_text_edges,
@@ -81,7 +82,8 @@ class OneBotV11Adapter(
             supports_buttons=False,
             supports_chat_member_lookup=True,
             supports_chat_moderation=True,
-            supports_member_tags=False,
+            supports_member_tags=True,
+            supports_message_controls=True,
             max_message_length=ONEBOT_MSG_MAX_LENGTH,
         )
 
@@ -343,14 +345,25 @@ class OneBotV11Adapter(
         if not self._message_triggers_bot(event, segments):
             return
         await self._enrich_reply_text(event)
+        reference_markers, mentioned_user_ids = native_reference_markers(
+            segments,
+            self_id=self.self_id,
+            include_mentions=message_type == "group",
+        )
         if message_type == "group":
             segments = remove_empty_text_edges(strip_at_self(segments, self.self_id))
-            segments = [seg for seg in segments if str(seg.get("type") or "") != "reply"]
+            segments = [
+                seg
+                for seg in segments
+                if str(seg.get("type") or "") not in {"reply", "at"}
+            ]
 
         text = await self.segments_to_nora_text(segments)
         reply_text = str(event.get("reply_to_text") or "").strip()
         if reply_text:
             text = f"[回复内容]\n{reply_text}\n[/回复内容]\n{text}".strip()
+        if reference_markers:
+            text = f"{reference_markers}{text}"
         if not text and mention_only_trigger:
             text = MENTION_ONLY_TEXT
         if not text:
@@ -369,6 +382,8 @@ class OneBotV11Adapter(
         if event.get("reply_to_user_id") is not None:
             context["reply_to_user_id"] = str(event.get("reply_to_user_id"))
             context["reply_to_user_name"] = str(event.get("reply_to_user_name") or "")
+        if mentioned_user_ids:
+            context["mentioned_user_ids"] = mentioned_user_ids
         context = await self._enrich_group_context(context)
 
         chat_id = context["chat_id"]

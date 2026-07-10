@@ -53,7 +53,8 @@ from core.conversation_identity import (
     resolve_platform,
     runtime_key_for,
 )
-from core.routing import sanitize_user_visible_text, parse_route_markers
+from core.routing import sanitize_adapter_output_text, sanitize_user_visible_text, parse_route_markers
+from adapters.message_controls import strip_message_control_markers
 from triggers import TriggerManager
 from triggers.factory import build_triggers
 import config
@@ -541,10 +542,13 @@ class NoraController(
             logger.debug("同步全局后脑状态失败", exc_info=True)
 
     async def _send_platform_message(self, chat_or_runtime_key: str, text: str, **kwargs):
-        text = sanitize_user_visible_text(text)
+        adapter = self._adapter_for_key(chat_or_runtime_key)
+        text = sanitize_adapter_output_text(text)
+        if not adapter.platform_features.supports_message_controls:
+            text = strip_message_control_markers(text)
         if not text:
             return []
-        return await self._adapter_for_key(chat_or_runtime_key).send_message(
+        return await adapter.send_message(
             self._platform_chat_id(chat_or_runtime_key),
             text,
             **kwargs,

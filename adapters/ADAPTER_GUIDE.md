@@ -79,9 +79,11 @@ adapters/<platform>/
 
 - `platform_message_id`: str。当前这条平台入站消息自己的稳定 ID；必须尽量保留，用于 reply 目标锁定、undo、媒体回查、去重。
 - `platform_message_ids`: list[str]。当前输入由多条平台消息合并而来时使用，例如 Telegram media group、OB11 reply 媒体 + 当前消息；顺序应尽量与平台消息/媒体顺序一致。
-- `reply_target_message_id`: str。可选；如果 adapter 已经明确知道 Nora 本轮回复应该引用哪条消息，可直接给出。通常不必手动填，core/aggregator 会默认用当前 `platform_message_id`。
-- `reply_to_message_id`: str。用户当前消息是在回复/引用另一条平台消息时，被回复消息的 ID。注意它不是 Nora 应该回复的当前消息 ID；Nora 回用户时通常应引用 `reply_target_message_id` 或当前 `platform_message_id`。
+- `reply_target_message_id`: str。可选；仅当应用逻辑已经明确选择 Nora 本轮应该引用哪条消息时填写。不得从当前 `platform_message_id` 或入站 `reply_to_message_id` 自动推导。
+- `reply_to_message_id`: str。用户当前消息是在回复/引用另一条平台消息时，被回复消息的 ID。它只描述入站关系，不表示 Nora 出站时应自动引用该消息。
 - `reply_to_user_id` / `reply_to_user_name`: reply 场景中被回复消息的发送者，用于平台工具定位操作对象，例如“禁言我回复的这个人”。
+- `mentioned_user_ids`: list[str]。当前入站消息中平台能够可靠解析出的用户 ID；不要从普通显示名或 `@username` 猜测。
+- `native_reference_parts`: list[dict]。聚合器生成的有序原生引用元数据，每个 part 保留自身平台消息 ID、reply 和 mention 关系。
 - `contributors`: list[dict]。聚合器生成或 adapter 预聚合时使用，元素至少包含 `user_id`，建议包含 `user_name`。群聊不同用户不应被 adapter 主动合并进同一 context，除非平台事件本身就是不可拆的多人内容。
 - `chat_title` / `group_title` / `group_display_name`: 群聊名称。
 - `group_member_count` / `group_member_count_status`: 群成员总数及状态；未知时不要臆测，写 `None` 和状态字符串。
@@ -99,10 +101,13 @@ adapters/<platform>/
 
 实现要求：
 
-- 出站 reply 必须由代码层处理，不能要求 LLM 自己生成 `[reply:message_id]` 或平台 CQ/Markdown 代码。
+- canonical 消息控制协议为 `[reply:MESSAGE_ID]` 与 `[at:USER_ID]`。支持的平台应声明 `PlatformFeatures.supports_message_controls=True`，在 adapter 内将其转换为原生能力；不支持的平台必须移除标记，不能原样泄漏。
+- 普通模型回复不自动产生原生 reply/@。显式 `[reply:ID]` 的优先级高于调用方 `reply_to_message_id`；两者都没有时不引用。
+- `[at:ID]` 只在明确群聊场景生成原生 mention；私聊或未知场景应移除。ID 必须按目标平台规则验证，禁止猜测或跨平台转换。
+- 控制标记按每个语义 `[SPLIT]` part 局部生效。平台长度切块时，reply 只附着该 part 首个实际发送项，mention 保持其逻辑文本位置，不复制到后续 chunk。
+- 入站 `reply_to_message_id`、当前 `platform_message_id` 和应用选择的 `reply_target_message_id` 含义不同，任何一层都不得自动互相推导。
 - 如果平台 reply ID 类型有限制（例如 Telegram 必须是数字 message_id），adapter 应验证并安全忽略非法值，不能让整条消息发送失败。
-- 如果一条 NORA 回复被拆成多条平台消息，默认每个分段都可以引用同一个 `reply_to_message_id`；平台限制不允许时至少第一段应引用。
-- 如果发送文本 + 媒体多条消息，adapter 应尽量让文本或第一条可见消息引用 `reply_to_message_id`。平台允许时，媒体消息也可附带同一 reply 参数。
+- HTML/纯文本降级、媒体失败提示、编辑消息等非标准路径也必须移除控制标记。
 - `send_message()` 返回的仍是实际发出的平台消息 ID 列表，顺序与发送顺序一致。
 
 ## 5. Metadata 清单
@@ -221,6 +226,9 @@ Telegram Bot API 不支持枚举完整普通成员名单，因此“成员名单
 - [ ] 已在正确时机触发 `startup/on_ready/shutdown`。
 - [ ] `metadata.json` 说明了真实平台、能力、限制和隐私提示。
 - [ ] 平台事件通过 `AdapterEvent` 或等价 dict 输出统一字段。
+- [ ] 入站原生 reply/@ 已转换为 canonical 标记，并保留可靠的 reply/mention 元数据。
+- [ ] 支持消息控制时声明 `supports_message_controls=True`；不支持、私聊 mention、非法 ID 和异常降级路径均不会泄漏标记。
+- [ ] `[SPLIT]` 与平台长度切块不会重复应用 reply/@，普通无标记回复不会自动产生原生控制。
 - [ ] `send_message()` 返回稳定的消息 ID 列表。
 - [ ] `get_adapter_tools()` 暴露的工具命名、docstring、风险等级和返回格式清晰。
 - [ ] 群聊响应条件、平台 message_id、媒体路径和撤回能力有测试或手动验证。

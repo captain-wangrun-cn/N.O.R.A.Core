@@ -3,6 +3,22 @@
 - 目标：多平台智能体内核，包含 LLM 适配、工具/技能体系、成本追踪、记忆/RAG。
 - 当前状态：可运行，自测通过；已完成图片记忆链路（入库/检索/回查再分析）、`view_media` 工具增强、CLI 高危清理保护、**跨平台接力 + 主人/访客分离（五层身份模型，全 5 Phase 完成）**。
 
+## 近期关键改动（截至 2026-07-10）
+
+### 💬 跨平台双向精确 reply / 群聊 @ 控制标记 — 2026-07-10
+
+- 新增平台无关 canonical 协议：`[reply:MESSAGE_ID]` 与 `[at:USER_ID]`。入站原生 reply/@ 会转换为模型可见标记，出站标记由 OneBot v11 / Telegram adapter 还原为平台原生能力。
+- 行为改为保守显式控制：普通模型回复不自动引用、不自动 @；`platform_message_id`、入站 `reply_to_message_id` 与应用选择的 `reply_target_message_id` 含义严格分离，聚合器不再自动推导出站 reply 目标。
+- `adapters/message_controls.py` 统一有序解析、ID 校验和清理：每个语义 `[SPLIT]` part 只接受首个有效 reply，可保留多个有序 mention；无效、不支持或场景不符的标记必须移除，不能泄漏给用户。
+- OneBot v11：入站 reply 与群聊中非 Nora 自身的 at segment 转 canonical 标记，并保留 `[回复内容]...[/回复内容]`；出站转换为 OneBot `reply` / `at` 数组段，兼容 `[reply]`、`[at:current]`、`[at:reply]` 等旧别名，但新 prompt 只推荐显式 ID。
+- Telegram：入站 reply 与带可靠 `User.id` 的 `text_mention` 转 canonical 标记；普通 `@username` 不猜数字 ID，bot 自身 mention 不注入。出站群聊 mention 使用 sender 生成的安全 `tg://user?id=...` 链接，reply 使用 Bot API `reply_to_message_id`；私聊 mention 和非法数字 ID 安全忽略。
+- 控制标记按 `[SPLIT]` part 局部生效；平台超长切块或文本+媒体发送时，fallback reply 只用于首个实际发送项。adapter 前清洗保留控制标记，最终用户可见/不支持 adapter/异常降级路径统一剥离。
+- `AdapterEvent` 与聚合器新增 reply/mention 元数据及有序 `native_reference_parts`，保留每个聚合 part 的原生引用语义。
+
+> 更正 2026-06-09 的旧记录：当时描述的“聚合器默认从当前 `platform_message_id` 锁定 `reply_target_message_id`、代码层自动给普通回复附加引用”已不再成立。当前实现只有显式应用目标或 canonical `[reply:ID]` 才会产生原生引用。
+
+---
+
 ## 近期关键改动（截至 2026-06-09）
 
 ### 🧷 OB11 群聊多人并发 reply 目标锁定 — 2026-06-09

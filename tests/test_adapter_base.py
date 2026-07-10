@@ -33,6 +33,8 @@ def test_message_segments_serialize_to_existing_markers():
             MessageSegment.text("看这个"),
             MessageSegment.image("data/telegram/a.jpg"),
             MessageSegment.video("data/telegram/b.mp4"),
+            MessageSegment.reply_reference("message-1"),
+            MessageSegment.mention("user-1"),
         ]
     )
 
@@ -41,6 +43,8 @@ def test_message_segments_serialize_to_existing_markers():
     assert "看这个" in text
     assert "[image: data/telegram/a.jpg]" in text
     assert "[video: data/telegram/b.mp4]" in text
+    assert "[reply:message-1]" in text
+    assert "[at:user-1]" in text
 
 
 def test_adapter_event_from_context_defaults_and_roundtrip():
@@ -49,6 +53,10 @@ def test_adapter_event_from_context_defaults_and_roundtrip():
             "platform": "telegram",
             "chat_id": "chat-1",
             "text": "hello",
+            "reply_to_message_id": 101,
+            "reply_to_user_id": 202,
+            "reply_to_user_name": "Alice",
+            "mentioned_user_ids": [303, "404", ""],
         }
     )
 
@@ -56,8 +64,15 @@ def test_adapter_event_from_context_defaults_and_roundtrip():
 
     assert event.user_id == "chat-1"
     assert event.chat_type == "private"
+    assert event.reply_to_message_id == "101"
+    assert event.reply_to_user_id == "202"
+    assert event.mentioned_user_ids == ["303", "404"]
     assert context["platform"] == "telegram"
     assert context["text"] == "hello"
+    assert context["reply_to_message_id"] == "101"
+    assert context["reply_to_user_id"] == "202"
+    assert context["reply_to_user_name"] == "Alice"
+    assert context["mentioned_user_ids"] == ["303", "404"]
 
 
 def test_base_adapter_loads_metadata():

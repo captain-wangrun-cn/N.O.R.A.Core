@@ -9,6 +9,7 @@ from core.routing import (
     parse_route_decision_response,
     has_image_input,
     parse_front_brain_response,
+    sanitize_adapter_output_text,
     sanitize_user_visible_text,
 )
 
@@ -215,3 +216,17 @@ def test_sanitize_user_visible_text_strips_route_markers_as_safety_net():
     assert "[platform:" not in cleaned
     assert "[scene:" not in cleaned
     assert cleaned == "漏网的标记也要抹掉"
+
+
+def test_adapter_output_sanitizer_preserves_native_message_controls():
+    cleaned = sanitize_adapter_output_text(
+        "[platform:telegram][scene:group:1][reply:22][at:33]正文"
+    )
+
+    assert cleaned == "[reply:22][at:33]正文"
+
+
+def test_user_visible_sanitizer_strips_native_message_controls():
+    cleaned = sanitize_user_visible_text("[reply:22][at:33]正文[reply:bad id][at]")
+
+    assert cleaned == "正文"
