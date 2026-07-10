@@ -3,7 +3,7 @@
 不构造完整 NoraController（依赖 LLM/DB/RAG），用 __new__ 绕过 __init__，
 只装配 _adapter_for_key 所需的最小状态。
 """
-
+import asyncio
 from types import SimpleNamespace
 
 from core.controller import NoraController
@@ -46,3 +46,43 @@ def test_adapter_for_key_single_adapter_registry():
     assert ctrl._adapter_for_key("telegram:1") is tg
     # 单适配器时任何平台都回退到它
     assert ctrl._adapter_for_key("onebotv11:2") is tg
+
+
+def test_send_platform_message_logs_recognized_controls(caplog):
+    sent = []
+
+    class _Adapter:
+        platform_name = "telegram"
+        platform_features = SimpleNamespace(supports_message_controls=True)
+
+        async def send_message(self, chat_id, text, **kwargs):
+            sent.append((chat_id, text, kwargs))
+            return ["1"]
+
+    ctrl = _controller_with_adapters([_Adapter()])
+    with caplog.at_level("INFO", logger="core.controller"):
+        asyncio.run(
+            ctrl._send_platform_message(
+                "telegram:group:100",
+                "[reply:777][at:321]你好",
+                chat_type="group",
+            )
+        )
+
+    assert "消息控制标记: reply=777, at=['321']" in caplog.text
+    assert sent[0][1] == "[reply:777][at:321]你好"
+
+
+def test_send_platform_message_logs_missing_controls(caplog):
+    class _Adapter:
+        platform_name = "telegram"
+        platform_features = SimpleNamespace(supports_message_controls=True)
+
+        async def send_message(self, chat_id, text, **kwargs):
+            return ["1"]
+
+    ctrl = _controller_with_adapters([_Adapter()])
+    with caplog.at_level("INFO", logger="core.controller"):
+        asyncio.run(ctrl._send_platform_message("telegram:100", "普通消息"))
+
+    assert "消息控制标记: reply=未识别, at=未识别" in caplog.text

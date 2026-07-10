@@ -54,7 +54,7 @@ from core.conversation_identity import (
     runtime_key_for,
 )
 from core.routing import sanitize_adapter_output_text, sanitize_user_visible_text, parse_route_markers
-from adapters.message_controls import strip_message_control_markers
+from adapters.message_controls import parse_message_controls, strip_message_control_markers
 from triggers import TriggerManager
 from triggers.factory import build_triggers
 import config
@@ -544,6 +544,13 @@ class NoraController(
     async def _send_platform_message(self, chat_or_runtime_key: str, text: str, **kwargs):
         adapter = self._adapter_for_key(chat_or_runtime_key)
         text = sanitize_adapter_output_text(text)
+        controls = parse_message_controls(text)
+        logger.info(
+            "[%s] 消息控制标记: reply=%s, at=%s",
+            chat_or_runtime_key,
+            controls.reply_message_id or "未识别",
+            controls.mention_user_ids or "未识别",
+        )
         if not adapter.platform_features.supports_message_controls:
             text = strip_message_control_markers(text)
         if not text:
