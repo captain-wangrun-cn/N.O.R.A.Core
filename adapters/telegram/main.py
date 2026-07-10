@@ -28,6 +28,7 @@ from .commands import TelegramCommandsMixin
 from .constants import FILE_PATTERN, MEDIA_TYPES, TG_MSG_MAX_LENGTH
 from .group_context import TelegramGroupContextMixin
 from .incoming import TelegramIncomingMixin
+from .message import TelegramUserLabelCache
 from .reply import TelegramReplyMixin
 from .sender import TelegramSenderMixin
 from .tools import TelegramToolsMixin
@@ -103,6 +104,7 @@ class TelegramAdapter(
         self._reply_contexts: Dict[str, Dict] = {}
         self.bot_username: Optional[str] = None
         self.bot_user_id: str = ""
+        self._user_label_cache = TelegramUserLabelCache()
         self._media_group_buffers: Dict[str, Dict[str, Any]] = {}
         self._media_group_timers: Dict[str, asyncio.Task] = {}
         self._model_option_tokens: Dict[str, Dict[str, Any]] = {}

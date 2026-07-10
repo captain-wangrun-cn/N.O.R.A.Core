@@ -270,6 +270,20 @@ def test_onebot_sender_parses_explicit_reply_and_reply_at_target():
     ]
 
 
+def test_onebot_sender_canonical_at_uses_native_segment_without_numeric_text():
+    adapter = SenderOnlyOneBot()
+
+    asyncio.run(adapter.send_message("10001", "[at:20002] 看这里", chat_type="group"))
+
+    segments = adapter.calls[0][1]["message"]
+    assert [segment for segment in segments if segment.get("type") == "at"] == [
+        {"type": "at", "data": {"qq": "20002"}},
+    ]
+    assert all(
+        "@20002" not in str(segment.get("data", {}).get("text", ""))
+        for segment in segments
+        if segment.get("type") == "text"
+    )
 def test_onebot_sender_strips_at_control_in_private_chat():
     adapter = SenderOnlyOneBot()
 

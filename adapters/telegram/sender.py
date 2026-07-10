@@ -20,20 +20,63 @@ from .constants import (
     TG_PHOTO_MAX_SIZE,
 )
 from .formatting import _markdown_to_html, _split_long_text
+from .message import telegram_display_name
 
 logger = logging.getLogger(__name__)
 
 
 class TelegramSenderMixin:
-    def _render_message_controls(self, text: str, *, allow_mentions: bool) -> tuple[str, str]:
+    async def _resolve_mention_label(self, chat_id: str, user_id: str) -> str:
+        cache = getattr(self, "_user_label_cache", None)
+        if cache is not None:
+            found, cached_label = cache.get(user_id)
+            if found:
+                return cached_label or f"@{user_id}"
+
+        try:
+            member = await self.application.bot.get_chat_member(
+                chat_id=chat_id,
+                user_id=int(user_id),
+            )
+            user = getattr(member, "user", None)
+            label = telegram_display_name(user)
+            if label and label != user_id:
+                if cache is not None:
+                    cache.put(user_id, label)
+                return label
+        except Exception as exc:
+            logger.debug(
+                "[telegram] resolving mention label failed chat_id=%s user_id=%s: %s",
+                chat_id,
+                user_id,
+                exc,
+            )
+
+        if cache is not None:
+            cache.put_missing(user_id)
+        return f"@{user_id}"
+
+    async def _render_message_controls(
+        self,
+        text: str,
+        *,
+        chat_id: str,
+        allow_mentions: bool,
+    ) -> tuple[str, str]:
         parsed = parse_message_controls(text)
+        labels: dict[str, str] = {}
+        if allow_mentions:
+            for user_id in parsed.mention_user_ids:
+                if user_id.isdigit() and user_id not in labels:
+                    labels[user_id] = await self._resolve_mention_label(chat_id, user_id)
+
         rendered: list[str] = []
         for token in parsed.tokens:
             if token.type == "text":
                 rendered.append(token.value)
             elif token.type == "mention" and allow_mentions:
                 if token.value.isdigit():
-                    label = html.escape(f"@{token.value}")
+                    label = html.escape(labels[token.value])
                     rendered.append(f'<a href="tg://user?id={token.value}">{label}</a>')
                 else:
                     logger.debug("[telegram] ignoring non-numeric mention user id=%s", token.value)
@@ -333,8 +376,9 @@ class TelegramSenderMixin:
         chat_type = str(kwargs.pop("chat_type", "") or "").strip().lower()
         allow_mentions = chat_type in {"group", "supergroup"}
         reply_to_message_id = str(kwargs.pop("reply_to_message_id", "") or "").strip()
-        rendered_text, explicit_reply_id = self._render_message_controls(
+        rendered_text, explicit_reply_id = await self._render_message_controls(
             str(text or ""),
+            chat_id=str(chat_id),
             allow_mentions=allow_mentions,
         )
         text = rendered_text

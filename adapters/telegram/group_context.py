@@ -130,6 +130,9 @@ class TelegramGroupContextMixin:
         *,
         platform_message_ids: list[str] | None = None,
     ) -> Dict[str, Any]:
+        remember_users = getattr(self, "_remember_update_users", None)
+        if callable(remember_users):
+            remember_users(update)
         context = context_from_update(
             update,
             text,

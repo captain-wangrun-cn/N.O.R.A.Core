@@ -6,11 +6,13 @@ from adapters.telegram.constants import FILE_PATTERN, TG_MSG_MAX_LENGTH
 from adapters.telegram.formatting import _markdown_to_html, _split_long_text
 from adapters.telegram.incoming import MENTION_ONLY_TEXT
 from adapters.telegram.message import (
+    TelegramUserLabelCache,
     context_from_update,
     decorate_native_references,
     has_bot_mention,
     media_message,
     strip_bot_mention,
+    telegram_reliable_users,
     telegram_text_mention_markers,
 )
 from adapters.telegram.main import TelegramAdapter
@@ -120,6 +122,7 @@ class _IncomingOnlyTelegram(TelegramAdapter):
     def __init__(self):
         self.bot_username = "NoraBot"
         self.bot_user_id = "999"
+        self._user_label_cache = TelegramUserLabelCache()
         class FakeBot:
             id = 999
 
@@ -134,6 +137,9 @@ class _SendingOnlyTelegram(TelegramAdapter):
         self.workspace_root = "D:/repo"
         self.downloads_dir = "D:/repo/downloads"
         self.calls = []
+        self.member_calls = []
+        self.members = {}
+        self._user_label_cache = TelegramUserLabelCache()
 
         class FakeBot:
             def __init__(self, outer):
@@ -142,6 +148,15 @@ class _SendingOnlyTelegram(TelegramAdapter):
             async def send_message(self, **kwargs):
                 self.outer.calls.append(("send_message", kwargs))
                 return SimpleNamespace(message_id=901)
+
+            async def get_chat_member(self, chat_id, user_id):
+                self.outer.member_calls.append((str(chat_id), str(user_id)))
+                member = self.outer.members.get(str(user_id))
+                if isinstance(member, Exception):
+                    raise member
+                if member is None:
+                    raise LookupError(user_id)
+                return SimpleNamespace(user=member)
 
             async def send_chat_action(self, **kwargs):
                 self.outer.calls.append(("send_chat_action", kwargs))
@@ -201,6 +216,12 @@ def test_telegram_sender_ignores_non_numeric_reply_to_message_id():
 
 def test_telegram_sender_canonical_reply_overrides_fallback_and_mentions_group_user():
     adapter = _SendingOnlyTelegram()
+    adapter.members["321"] = SimpleNamespace(
+        id=321,
+        first_name="Alice",
+        last_name="Smith",
+        username="alice",
+    )
 
     asyncio.run(
         adapter.send_message(
@@ -215,11 +236,101 @@ def test_telegram_sender_canonical_reply_overrides_fallback_and_mentions_group_u
     call = adapter.calls[0][1]
     assert call["reply_to_message_id"] == 777
     assert call["allow_sending_without_reply"] is True
-    assert '<a href="tg://user?id=321">@321</a>' in call["text"]
+    assert '<a href="tg://user?id=321">Alice Smith</a>' in call["text"]
+    assert adapter.member_calls == [("-100", "321")]
     assert "[reply:" not in call["text"]
     assert "[at:" not in call["text"]
 
 
+def test_telegram_sender_reuses_cached_mention_label_and_escapes_html():
+    adapter = _SendingOnlyTelegram()
+    adapter._user_label_cache.put("321", "Alice & <Admin>")
+
+    asyncio.run(
+        adapter.send_message(
+            "-100",
+            "[at:321]hello [at:321]again",
+            parse_media=False,
+            chat_type="supergroup",
+        )
+    )
+
+    text = adapter.calls[0][1]["text"]
+    assert text.count('<a href="tg://user?id=321">Alice &amp; &lt;Admin&gt;</a>') == 2
+    assert adapter.member_calls == []
+
+
+def test_telegram_sender_uses_username_and_caches_chat_member_lookup():
+    adapter = _SendingOnlyTelegram()
+    adapter.members["321"] = SimpleNamespace(
+        id=321,
+        first_name="",
+        last_name="",
+        username="alice",
+    )
+
+    asyncio.run(
+        adapter.send_message(
+            "-100",
+            "[at:321]first [at:321]second",
+            parse_media=False,
+            chat_type="group",
+        )
+    )
+    asyncio.run(
+        adapter.send_message(
+            "-100",
+            "[at:321]third",
+            parse_media=False,
+            chat_type="group",
+        )
+    )
+
+    assert adapter.member_calls == [("-100", "321")]
+    assert '<a href="tg://user?id=321">@alice</a>' in adapter.calls[0][1]["text"]
+    assert '<a href="tg://user?id=321">@alice</a>' in adapter.calls[1][1]["text"]
+
+
+def test_telegram_sender_failed_lookup_falls_back_and_negative_caches():
+    adapter = _SendingOnlyTelegram()
+    adapter.members["321"] = LookupError("not found")
+
+    asyncio.run(
+        adapter.send_message(
+            "-100",
+            "[at:321]first",
+            parse_media=False,
+            chat_type="group",
+        )
+    )
+    asyncio.run(
+        adapter.send_message(
+            "-100",
+            "[at:321]second",
+            parse_media=False,
+            chat_type="group",
+        )
+    )
+
+    assert adapter.member_calls == [("-100", "321")]
+    assert '<a href="tg://user?id=321">@321</a>' in adapter.calls[0][1]["text"]
+    assert '<a href="tg://user?id=321">@321</a>' in adapter.calls[1][1]["text"]
+
+
+def test_telegram_sender_private_and_invalid_mentions_do_not_query_members():
+    adapter = _SendingOnlyTelegram()
+
+    asyncio.run(
+        adapter.send_message(
+            "123",
+            "[at:321]private [at:abc]invalid",
+            parse_media=False,
+            chat_type="private",
+        )
+    )
+
+    assert adapter.member_calls == []
+    assert "[at:" not in adapter.calls[0][1]["text"]
 def test_telegram_sender_removes_mentions_outside_group_and_ignores_invalid_ids():
     adapter = _SendingOnlyTelegram()
 
@@ -344,7 +455,56 @@ def test_telegram_native_reference_helpers_use_reliable_ids_only():
     assert decorated_ids == ["321"]
 
 
-def test_context_from_update_filters_bot_text_mention_metadata():
+def test_telegram_reliable_users_collects_sender_reply_and_text_mentions():
+    reply_user = SimpleNamespace(id=222, first_name="Reply", last_name="User", username="reply")
+    text_user = SimpleNamespace(id=333, first_name="Text", last_name="Mention", username="text")
+    caption_user = SimpleNamespace(id=444, first_name="Caption", last_name="Mention", username="caption")
+    update = _fake_update(
+        reply_to_message=SimpleNamespace(from_user=reply_user),
+        entities=[SimpleNamespace(type="text_mention", user=text_user)],
+        caption_entities=[SimpleNamespace(type="text_mention", user=caption_user)],
+    )
+
+    users = telegram_reliable_users(update)
+
+    assert [str(user.id) for user in users] == ["123", "222", "333", "444"]
+
+
+def test_group_filter_populates_user_label_cache_before_rejecting_message():
+    adapter = _IncomingOnlyTelegram()
+    update = _fake_update(chat_type="group", text="not addressed to bot")
+
+    should_process = asyncio.run(adapter._should_process_message(update))
+
+    assert should_process is False
+    assert adapter._user_label_cache.get("123") == (True, "Alice Smith")
+
+
+def test_telegram_user_label_cache_bounds_expires_and_allows_positive_override():
+    now = [100.0]
+    cache = TelegramUserLabelCache(
+        max_size=2,
+        ttl=10.0,
+        negative_ttl=2.0,
+        clock=lambda: now[0],
+    )
+    cache.put("1", "One")
+    cache.put("2", "Two")
+    cache.put("3", "Three")
+
+    assert cache.get("1") == (False, None)
+    assert cache.get("2") == (True, "Two")
+    cache.put_missing("4")
+    assert cache.get("4") == (True, None)
+    now[0] += 3.0
+    assert cache.get("4") == (False, None)
+    cache.put_missing("4")
+    cache.put("4", "Four")
+    assert cache.get("4") == (True, "Four")
+    now[0] += 11.0
+    assert cache.get("4") == (False, None)
+
+
     entities = [
         SimpleNamespace(
             type="text_mention",

@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import re
-from typing import Any
+import time
+from collections import OrderedDict
+from typing import Any, Callable
 
 from telegram import Message as TelegramMessage, Update
 
@@ -82,6 +84,89 @@ def telegram_display_name(user: Any) -> str:
         return f"@{username}"
     user_id = getattr(user, "id", None)
     return str(user_id) if user_id is not None else ""
+
+
+class TelegramUserLabelCache:
+    """Bounded in-memory cache for Telegram mention display labels."""
+
+    def __init__(
+        self,
+        *,
+        max_size: int = 512,
+        ttl: float = 3600.0,
+        negative_ttl: float = 60.0,
+        clock: Callable[[], float] = time.monotonic,
+    ):
+        self.max_size = max(1, int(max_size))
+        self.ttl = max(0.0, float(ttl))
+        self.negative_ttl = max(0.0, float(negative_ttl))
+        self._clock = clock
+        self._entries: OrderedDict[str, tuple[str | None, float]] = OrderedDict()
+
+    def get(self, user_id: str) -> tuple[bool, str | None]:
+        key = str(user_id or "").strip()
+        entry = self._entries.get(key)
+        if entry is None:
+            return False, None
+        label, expires_at = entry
+        if expires_at <= self._clock():
+            self._entries.pop(key, None)
+            return False, None
+        self._entries.move_to_end(key)
+        return True, label
+
+    def put(self, user_id: str, label: str) -> None:
+        key = str(user_id or "").strip()
+        value = str(label or "").strip()
+        if not key.isdigit() or not value or value == key:
+            return
+        self._store(key, value, self.ttl)
+
+    def put_missing(self, user_id: str) -> None:
+        key = str(user_id or "").strip()
+        if key.isdigit():
+            self._store(key, None, self.negative_ttl)
+
+    def remember_user(self, user: Any) -> None:
+        user_id = str(getattr(user, "id", "") or "").strip()
+        if not user_id.isdigit():
+            return
+        label = telegram_display_name(user)
+        if label and label != user_id:
+            self.put(user_id, label)
+
+    def _store(self, user_id: str, label: str | None, ttl: float) -> None:
+        self._entries[user_id] = (label, self._clock() + ttl)
+        self._entries.move_to_end(user_id)
+        while len(self._entries) > self.max_size:
+            self._entries.popitem(last=False)
+
+
+def telegram_reliable_users(update: Any) -> list[Any]:
+    """Return reliable Telegram users found in an Update, deduplicated by id."""
+    users: list[Any] = []
+    seen: set[str] = set()
+
+    def add(user: Any) -> None:
+        user_id = str(getattr(user, "id", "") or "").strip()
+        if not user_id.isdigit() or user_id in seen:
+            return
+        seen.add(user_id)
+        users.append(user)
+
+    add(getattr(update, "effective_user", None))
+    message = getattr(update, "message", None)
+    if not message:
+        return users
+
+    reply_message = getattr(message, "reply_to_message", None)
+    add(getattr(reply_message, "from_user", None))
+    entities = list(getattr(message, "entities", None) or [])
+    entities.extend(list(getattr(message, "caption_entities", None) or []))
+    for entity in entities:
+        if str(getattr(entity, "type", "") or "").lower() == "text_mention":
+            add(getattr(entity, "user", None))
+    return users
 
 
 def strip_bot_mention(text: str, bot_username: str | None) -> str:

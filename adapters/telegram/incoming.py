@@ -7,7 +7,12 @@ import os
 from telegram import Update
 from telegram.ext import ContextTypes
 
-from .message import decorate_native_references, has_bot_mention, strip_bot_mention
+from .message import (
+    decorate_native_references,
+    has_bot_mention,
+    strip_bot_mention,
+    telegram_reliable_users,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -43,8 +48,19 @@ class TelegramIncomingMixin:
         bot_user_id = str(getattr(self, "bot_user_id", "") or "")
         return decorate_native_references(message, text, bot_user_id=bot_user_id)
 
+    def _remember_update_users(self, update: Update) -> None:
+        cache = getattr(self, "_user_label_cache", None)
+        if cache is None:
+            return
+        try:
+            for user in telegram_reliable_users(update):
+                cache.remember_user(user)
+        except Exception as exc:
+            logger.debug("[telegram] 记录用户显示名失败: %s", exc)
+
     async def _should_process_message(self, update: Update) -> bool:
         """判断是否应该处理收到的消息。"""
+        self._remember_update_users(update)
         if not update.effective_chat:
             return False
         
