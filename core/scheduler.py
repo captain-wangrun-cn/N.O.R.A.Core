@@ -582,7 +582,12 @@ class ProactiveScheduler:
             try:
                 target_chat = self._resolve_delivery_target(event)
                 if target_chat:
-                    await self._send_proactive_callback(target_chat, event.reason, event.event_type)
+                    await self._send_proactive_callback(
+                        target_chat,
+                        event.reason,
+                        event.event_type,
+                        event.message_kind,
+                    )
                 else:
                     logger.warning(f"无法触发事件 {event_id}：缺少 chat_id 且 default_chat_id 未设置。"
                                    "请先向机器人发送一条消息以初始化 default_chat_id。")

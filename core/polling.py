@@ -177,8 +177,13 @@ class PollingMixin:
                 
                 # 发送前脑审查回复给用户（如果有实质内容）
                 if review_reply and should_reply:
-                    send_target = self.resolve_send_target(review_result.get("route"), identity)
-                    send_key = send_target.get("runtime_key") or chat_id
+                    send_target = self.resolve_send_target(
+                        review_result.get("route"), identity, route_source="front_brain_review"
+                    )
+                    send_key = send_target.get("runtime_key")
+                    if not send_key:
+                        logger.warning(f"[{chat_id}] 前脑审查请求的投递目标被拒绝，跳过用户可见回复。")
+                        continue
                     send_chat_type = send_target.get("chat_type") or context.get("chat_type", "")
                     redirected = bool(send_target.get("redirected"))
                     dest_identity = send_target.get("identity") or identity

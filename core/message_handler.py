@@ -626,10 +626,19 @@ class MessageHandlerMixin:
         if retract_target:
             await self._handle_retract_signal(chat_id, chat_type, user_id, retract_target)
 
+        send_target = None
+        if send_front_reply:
+            send_target = self.resolve_send_target(
+                front_result.get("route"), identity, route_source="front_brain"
+            )
+            if not send_target.get("runtime_key"):
+                logger.warning(f"[{chat_id}] 前脑请求的投递目标被拒绝，跳过用户可见回复。")
+                send_front_reply = False
+
         if send_front_reply:
             # 解析 Nora 输出里的 [platform:X][scene:Y] 重定向标记；缺项取活跃值。
-            send_target = self.resolve_send_target(front_result.get("route"), identity)
-            send_key = send_target.get("runtime_key") or chat_id
+            send_target = send_target or {}
+            send_key = send_target.get("runtime_key")
             send_chat_type = send_target.get("chat_type") or chat_type
             redirected = bool(send_target.get("redirected"))
             dest_identity = send_target.get("identity") or identity

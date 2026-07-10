@@ -27,6 +27,8 @@ from core.scheduler import (
     get_ai_state_summary,
     get_user_idle_seconds,
 )
+from core.routing import parse_route_markers, sanitize_adapter_output_text
+from core.delivery_target_store import load_known_scenes
 from workspace_config import get_workspace_manager
 from memory.message_history import MessageHistory
 from datetime import datetime, date, timedelta
@@ -670,6 +672,19 @@ class SchedulerMixin:
 
             response = self._strip_thinking_content(response.strip())
             if response:
+                route, response = parse_route_markers(response)
+                response = sanitize_adapter_output_text(response)
+                self._log_route_resolution(
+                    "followup",
+                    route,
+                    identity.runtime_key,
+                    {
+                        "runtime_key": identity.runtime_key,
+                        "redirected": False,
+                        "policy": "origin_locked" if route.get("platform") or route.get("scene_id") else "default_current",
+                    },
+                )
+            if response:
                 await self._send_split_response(chat_id, response)
                 self.message_history.add_message(
                     platform=identity.platform,
@@ -741,6 +756,19 @@ class SchedulerMixin:
                     response += chunk
 
             response = self._strip_thinking_content(response.strip())
+            if response:
+                route, response = parse_route_markers(response)
+                response = sanitize_adapter_output_text(response)
+                self._log_route_resolution(
+                    "wrapup",
+                    route,
+                    identity.runtime_key,
+                    {
+                        "runtime_key": identity.runtime_key,
+                        "redirected": False,
+                        "policy": "origin_locked" if route.get("platform") or route.get("scene_id") else "default_current",
+                    },
+                )
             if response:
                 await self._send_split_response(chat_id, response)
                 self.message_history.add_message(
@@ -923,13 +951,66 @@ class SchedulerMixin:
         if isinstance(user_reply, str):
             user_reply = user_reply.strip()
 
-        # 发送前脑回复
-        if user_reply:
-            send_target = self.resolve_send_target(front_result.get("route"), identity)
-            send_key = send_target.get("runtime_key") or chat_id
+        # 发送前脑回复。闹钟与显式提醒锁定创建时目标；自主消息可选择已知目标，
+        # 但进入群聊必须显式使用 typed [scene:group:ID]。
+        send_key = chat_id
+        send_chat_type = identity.chat_type
+        dest_identity = identity
+        redirected = False
+        route = front_result.get("route") or {}
+        route_has_marker = bool(route.get("platform") or route.get("scene_id"))
+        route_source = "alarm" if event_type == "alarm" else "proactive"
+        origin_locked = event_type == "alarm" or message_kind == "explicit"
+        if origin_locked:
+            self._log_route_resolution(
+                route_source,
+                route,
+                identity.runtime_key,
+                {
+                    "runtime_key": identity.runtime_key,
+                    "redirected": False,
+                    "policy": "origin_locked" if route_has_marker else "default_current",
+                },
+            )
+        else:
+            send_target = self.resolve_send_target(route, identity, route_source=route_source)
+            send_key = str(send_target.get("runtime_key") or "").strip()
             send_chat_type = send_target.get("chat_type") or identity.chat_type
             redirected = bool(send_target.get("redirected"))
             dest_identity = send_target.get("identity") or identity
+            if send_key and redirected:
+                known_target = any(
+                    str(scene.get("runtime_key") or "") == send_key
+                    and str(scene.get("chat_type") or "") == send_chat_type
+                    for scene in load_known_scenes()
+                )
+                if not known_target:
+                    self._log_route_resolution(
+                        route_source,
+                        route,
+                        identity.runtime_key,
+                        {
+                            "runtime_key": "",
+                            "redirected": False,
+                            "policy": "rejected_unknown_scene",
+                        },
+                    )
+                    send_key = ""
+                elif send_chat_type == "group" and route.get("scene_type") != "group":
+                    self._log_route_resolution(
+                        route_source,
+                        route,
+                        identity.runtime_key,
+                        {
+                            "runtime_key": "",
+                            "redirected": False,
+                            "policy": "rejected_group_not_explicit",
+                        },
+                    )
+                    send_key = ""
+
+        sent_reply = bool(user_reply and send_key)
+        if sent_reply:
             await self._send_split_message(send_key, user_reply, chat_type=send_chat_type)
 
             log_platform = dest_identity.platform if redirected else platform
@@ -946,20 +1027,24 @@ class SchedulerMixin:
                 place_scope_id=log_place_scope_id,
             )
         else:
-            logger.info(f"[{chat_id}] 主动消息生成为空，跳过发送")
+            if user_reply and not send_key:
+                logger.info(f"[{chat_id}] 主动消息投递目标被拒绝，跳过发送")
+            else:
+                logger.info(f"[{chat_id}] 主动消息生成为空，跳过发送")
 
-        # 记录到 session 历史（含触发标记）
-        session = self.sessions.setdefault(chat_id, {"history": [], "interrupted_thought": "", "pending_text": ""})
+        # 记录到实际目标的 session 历史（含触发标记）。若投递被拒绝，不记录伪发送。
+        session_key = send_key if sent_reply else chat_id
+        session = self.sessions.setdefault(session_key, {"history": [], "interrupted_thought": "", "pending_text": ""})
         session_history = session.setdefault("history", [])
         trigger_note = f"[proactive:{event_type}:{message_kind}] {reason}" if reason else f"[proactive:{event_type}:{message_kind}]"
         session_history.append({"role": "system", "content": trigger_note})
-        if user_reply:
+        if sent_reply:
             session_history.append({"role": "assistant", "content": user_reply})
         if len(session_history) > 20:
             session["history"] = session_history[-20:]
 
         # 如需后脑则启动轮询，否则标记空闲
-        if front_result.get("needs_backend"):
+        if front_result.get("needs_backend") and send_key:
             backend_instruction = (
                 f"主动消息触发（类型: {event_type}, 分类: {message_kind}, 时间: {current_time}, 缘由: {reason_display}）。"
                 "请完成前脑提到的需要后台处理的任务，生成最终要发送给用户的结果。"
@@ -974,10 +1059,10 @@ class SchedulerMixin:
                 backend_instruction += f"\n\n【任务指示】\n{task_instruction}"
 
             backend_context = {
-                "platform": platform,
-                "chat_id": platform_chat_id,
-                "chat_type": identity.chat_type,
-                "user_id": identity.actor_user_id,
+                "platform": dest_identity.platform,
+                "chat_id": dest_identity.platform_chat_id,
+                "chat_type": dest_identity.chat_type,
+                "user_id": dest_identity.actor_user_id,
                 "user_name": "User",
                 "text": backend_instruction,
                 "_front_brain_handled": True,
@@ -986,19 +1071,19 @@ class SchedulerMixin:
                 "use_image_model": front_result.get("use_image_model", False),
             }
 
-            busy_runtime = self.get_busy_backend_runtime(identity.memory_scope_id)
-            queue = self._get_scope_queue_for_runtime(chat_id)
+            busy_runtime = self.get_busy_backend_runtime(dest_identity.memory_scope_id)
+            queue = self._get_scope_queue_for_runtime(send_key)
             if busy_runtime or (queue and queue.size() > 0):
-                queue = self._get_scope_queue_for_runtime(chat_id, create=True)
+                queue = self._get_scope_queue_for_runtime(send_key, create=True)
                 await queue.enqueue({
                     "context": backend_context,
                     "text": backend_context.get("text", ""),
                 })
-                logger.info(f"[{chat_id}] 主动消息后脑任务已加入共享队列 (队列长度 {queue.size()})")
+                logger.info(f"[{send_key}] 主动消息后脑任务已加入共享队列 (队列长度 {queue.size()})")
             else:
-                logger.info(f"[{chat_id}] 前脑标记需要后脑，启动轮询处理主动消息")
+                logger.info(f"[{send_key}] 前脑标记需要后脑，启动轮询处理主动消息")
                 task = asyncio.create_task(self._run_polling_loop(backend_context))
-                self.generation_tasks[chat_id] = task
+                self.generation_tasks[send_key] = task
         else:
             logger.info(f"[{chat_id}] 主动消息前脑已完成，无需后脑")
             self._mark_scheduler_idle(chat_id)

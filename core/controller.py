@@ -375,9 +375,12 @@ class NoraController(
         return self._identity_for_runtime_key(str(chat_or_runtime_key)).platform
 
     def _adapter_for_key(self, chat_or_runtime_key: str) -> BaseAdapter:
-        """按 runtime_key 的平台前缀选适配器；未知平台回退 primary。"""
+        """按 runtime_key 的平台前缀选适配器；未知平台拒绝投递。"""
         platform = self._platform_for_key(chat_or_runtime_key)
-        return self.adapters.get(platform) or self.adapter
+        adapter = self.adapters.get(platform)
+        if adapter is None:
+            raise ValueError(f"未注册目标平台适配器: {platform or 'unknown'}")
+        return adapter
 
     def _chat_type_lookup(self, platform: str, platform_chat_id: str) -> str:
         """给 resolve_route_target 用：从身份缓存查某会话的 chat_type。"""
@@ -391,6 +394,8 @@ class NoraController(
         self,
         route: Optional[Dict[str, Any]],
         source_identity: Optional[ConversationIdentity] = None,
+        *,
+        route_source: str = "ai_output",
     ) -> Dict[str, Any]:
         """把 Nora 输出的路由标记解析为投递目标，并登记目标身份。
 
@@ -399,6 +404,25 @@ class NoraController(
         无标记/解析失败时 runtime_key 为源会话，redirected=False。
         """
         current_target = conversation_target_dict(source_identity) if source_identity else None
+        route = route or {}
+        requested_platform = str(route.get("platform") or "").strip()
+        requested_scene_id = str(route.get("scene_id") or "").strip()
+        requested_scene_type = str(route.get("scene_type") or "").strip()
+        source_key = str((current_target or {}).get("runtime_key") or "").strip()
+
+        if requested_platform and requested_platform not in self.adapters:
+            resolved = {
+                "runtime_key": "",
+                "platform": requested_platform,
+                "platform_chat_id": requested_scene_id,
+                "chat_type": requested_scene_type,
+                "redirected": False,
+                "policy": "rejected_unknown_platform",
+                "identity": None,
+            }
+            self._log_route_resolution(route_source, route, source_key, resolved)
+            return resolved
+
         resolved = resolve_route_target(
             route=route,
             current_target=current_target,
@@ -406,10 +430,20 @@ class NoraController(
         )
         runtime_key = str(resolved.get("runtime_key") or "").strip()
         if not runtime_key:
-            # 兜底：回到源会话。
-            resolved["identity"] = source_identity
+            resolved["identity"] = None
+            self._log_route_resolution(route_source, route, source_key, resolved)
             return resolved
-        # 已知会话直接复用；未知会话（如 Nora 首次点名某群）按 target 建身份并登记。
+        platform = str(resolved.get("platform") or "").strip()
+        if platform not in self.adapters:
+            resolved.update({
+                "runtime_key": "",
+                "redirected": False,
+                "policy": "rejected_unknown_platform",
+                "identity": None,
+            })
+            self._log_route_resolution(route_source, route, source_key, resolved)
+            return resolved
+        # 已知会话直接复用；显式 typed 场景可按目标建立身份。
         identity = self.conversation_identities.get(runtime_key)
         if not identity:
             identity = build_identity_from_target({
@@ -421,7 +455,37 @@ class NoraController(
             })
             self._remember_identity(identity)
         resolved["identity"] = identity
+        self._log_route_resolution(route_source, route, source_key, resolved)
         return resolved
+
+    def _log_route_resolution(
+        self,
+        route_source: str,
+        route: Dict[str, Any],
+        source_key: str,
+        resolved: Dict[str, Any],
+    ) -> None:
+        """记录 AI 平台/场景标记及最终投递决策，不打印完整模型文本。"""
+        platform = str(route.get("platform") or "").strip()
+        scene_id = str(route.get("scene_id") or "").strip()
+        scene_type = str(route.get("scene_type") or "").strip()
+        final_key = str(resolved.get("runtime_key") or "").strip()
+        logger.info(
+            "[%s] 投递路由标记: source=%s, platform=%s, scene=%s, requested_platform=%s, "
+            "requested_scene_type=%s, requested_scene_id=%s, source_target=%s, final_target=%s, "
+            "redirected=%s, policy=%s",
+            source_key or "unknown",
+            route_source,
+            platform or "未识别",
+            (f"{scene_type + ':' if scene_type else ''}{scene_id}" if scene_id else "未识别"),
+            platform or "未指定",
+            scene_type or "未指定",
+            scene_id or "未指定",
+            source_key or "未指定",
+            final_key or "拒绝投递",
+            bool(resolved.get("redirected")),
+            resolved.get("policy") or "default_current",
+        )
 
     def resolve_route_state(
         self,
@@ -429,25 +493,83 @@ class NoraController(
         route_state: Dict[str, Any],
         source_identity: Optional[ConversationIdentity] = None,
     ) -> Dict[str, Any]:
-        """流式发送用：首个含路由标记的文本解析一次，之后复用同一目标。
+        """流式发送前缓冲路由前缀，首次实际正文发送后锁定目标。
 
-        约定标记是整条消息的前缀，故首个待发文本即可判定。首个文本无标记
-        即视为无重定向、就地回复（resolved=True 锁定）。route_state 会被就地
-        更新，含 key/chat_type/redirected/identity/resolved。
+        ``route_state["send_text"]`` 是本次可实际发送的文本；空串表示路由前缀
+        尚不完整，应继续等待后续 chunk。正文开始后再出现的路由标记只会清理，
+        不再改变已锁定目标。
         """
+        incoming = str(text or "")
+        route_state["send_text"] = incoming
         if route_state.get("resolved"):
+            late_route, cleaned = parse_route_markers(incoming)
+            if late_route.get("platform") or late_route.get("scene_id"):
+                self._log_route_resolution(
+                    "back_brain_stream",
+                    late_route,
+                    str((source_identity or route_state.get("identity")).runtime_key if (source_identity or route_state.get("identity")) else ""),
+                    {
+                        "runtime_key": route_state.get("key") or "",
+                        "redirected": bool(route_state.get("redirected")),
+                        "policy": "rejected_late_route",
+                    },
+                )
+                route_state["send_text"] = cleaned
             return route_state
+
+        buffered = str(route_state.get("prefix_buffer") or "") + incoming
+        route_state["prefix_buffer"] = buffered
+        stripped = buffered.lstrip()
+        lower = stripped.lower()
+        partial_prefixes = ("[platform", "[scene")
+        looks_like_partial_route = any(
+            token.startswith(lower) for token in partial_prefixes
+        ) or any(lower.startswith(token) and "]" not in lower for token in partial_prefixes)
+        route, cleaned = parse_route_markers(buffered)
+        has_route = bool(route.get("platform") or route.get("scene_id"))
+        route_starts_output = lower.startswith(partial_prefixes)
+        residual = cleaned.lstrip().lower()
+        residual_partial_route = any(
+            residual.startswith(token) and "]" not in residual
+            for token in partial_prefixes
+        )
+
+        # 仅收到完整/不完整路由标记而尚无正文时继续等待，以便两个标记跨 chunk。
+        if looks_like_partial_route or residual_partial_route or (has_route and not cleaned.strip()):
+            route_state["send_text"] = ""
+            return route_state
+
         route_state["resolved"] = True
-        route, _ = parse_route_markers(text or "")
-        if not (route.get("platform") or route.get("scene_id")):
-            return route_state  # 无标记 → 保持默认（当前会话）
-        target = self.resolve_send_target(route, source_identity)
+        route_state["prefix_buffer"] = ""
+        if has_route and not route_starts_output:
+            self._log_route_resolution(
+                "back_brain_stream",
+                route,
+                str((source_identity or route_state.get("identity")).runtime_key if (source_identity or route_state.get("identity")) else ""),
+                {
+                    "runtime_key": route_state.get("key") or "",
+                    "redirected": bool(route_state.get("redirected")),
+                    "policy": "rejected_late_route",
+                },
+            )
+            route_state["send_text"] = cleaned
+            return route_state
+
+        route_state["send_text"] = cleaned if has_route else buffered
+        target = self.resolve_send_target(
+            route,
+            source_identity,
+            route_source="back_brain_stream",
+        )
         key = str(target.get("runtime_key") or "").strip()
-        if key:
-            route_state["key"] = key
-            route_state["chat_type"] = target.get("chat_type") or route_state.get("chat_type", "")
-            route_state["redirected"] = bool(target.get("redirected"))
-            route_state["identity"] = target.get("identity")
+        if not key:
+            route_state["send_text"] = ""
+            route_state["rejected"] = True
+            return route_state
+        route_state["key"] = key
+        route_state["chat_type"] = target.get("chat_type") or route_state.get("chat_type", "")
+        route_state["redirected"] = bool(target.get("redirected"))
+        route_state["identity"] = target.get("identity")
         return route_state
 
     def _scope_key_for_identity(self, identity: ConversationIdentity) -> str:

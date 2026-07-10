@@ -131,6 +131,31 @@ def test_load_known_scenes_lists_per_platform(tmp_path, monkeypatch):
     assert "onebotv11:-100" in keys
 
 
+def test_load_known_scenes_keeps_multiple_scenes_per_platform(tmp_path, monkeypatch):
+    _patch_workspace(monkeypatch, tmp_path)
+    delivery_target_store.record_active_scene(_private_target(chat_id="111"))
+    delivery_target_store.record_active_scene(_group_target(chat_id="-100"))
+
+    scenes = delivery_target_store.load_known_scenes()
+    keys = {s["runtime_key"] for s in scenes}
+    assert keys == {"telegram:111", "telegram:-100"}
+    assert delivery_target_store.load_platform_scene("telegram")["runtime_key"] == "telegram:-100"
+    assert delivery_target_store.load_last_active_runtime_key() == "telegram:111"
+
+
+def test_load_known_scenes_reads_legacy_platform_scenes(tmp_path, monkeypatch):
+    _patch_workspace(monkeypatch, tmp_path)
+    state_path = tmp_path / "delivery_target_state.json"
+    state_path.write_text(
+        '{"platform_scenes":{"telegram":{"runtime_key":"telegram:old","platform":"telegram",'
+        '"platform_chat_id":"old","chat_type":"private","at":1}}}',
+        encoding="utf-8",
+    )
+
+    scenes = delivery_target_store.load_known_scenes()
+    assert [scene["runtime_key"] for scene in scenes] == ["telegram:old"]
+
+
 def test_resolve_route_target_defaults_to_current_when_no_markers(tmp_path, monkeypatch):
     _patch_workspace(monkeypatch, tmp_path)
     current = _private_target(chat_id="123")
@@ -160,6 +185,47 @@ def test_resolve_route_target_platform_only_uses_that_platform_active_scene(tmp_
     resolved = delivery_target_store.resolve_route_target(route=route, current_target=current)
     assert resolved["runtime_key"] == "onebotv11:-55"
     assert resolved["redirected"] is True
+
+
+def test_resolve_route_target_bare_known_scene_uses_recorded_type(tmp_path, monkeypatch):
+    _patch_workspace(monkeypatch, tmp_path)
+    delivery_target_store.record_active_scene(_group_target(chat_id="700", platform="onebotv11"))
+    current = _private_target(chat_id="123")
+
+    resolved = delivery_target_store.resolve_route_target(
+        route={"platform": "onebotv11", "scene_id": "700", "scene_type": ""},
+        current_target=current,
+    )
+
+    assert resolved["runtime_key"] == "onebotv11:700"
+    assert resolved["chat_type"] == "group"
+    assert resolved["policy"] == "applied"
+
+
+def test_resolve_route_target_bare_unknown_scene_is_rejected(tmp_path, monkeypatch):
+    _patch_workspace(monkeypatch, tmp_path)
+    current = _private_target(chat_id="123")
+
+    resolved = delivery_target_store.resolve_route_target(
+        route={"platform": "telegram", "scene_id": "unknown", "scene_type": ""},
+        current_target=current,
+    )
+
+    assert resolved["runtime_key"] == ""
+    assert resolved["policy"] == "rejected_unknown_scene"
+
+
+def test_resolve_route_target_platform_only_without_scene_is_rejected(tmp_path, monkeypatch):
+    _patch_workspace(monkeypatch, tmp_path)
+    current = _private_target(chat_id="123")
+
+    resolved = delivery_target_store.resolve_route_target(
+        route={"platform": "onebotv11", "scene_id": "", "scene_type": ""},
+        current_target=current,
+    )
+
+    assert resolved["runtime_key"] == ""
+    assert resolved["policy"] == "rejected_unknown_scene"
 
 
 # ----------------------------------------------------------------------
@@ -201,6 +267,42 @@ def test_scheduler_no_resolver_uses_default(tmp_path):
     sched.default_chat_id = "telegram:default"
     ev = ScheduledEvent(trigger_time=None, event_type="proactive", chat_id="", event_id="ev1")
     assert sched._resolve_delivery_target(ev) == "telegram:default"
+
+
+def test_scheduler_trigger_passes_message_kind(tmp_path):
+    captured = {}
+
+    async def send(chat_id, reason, event_type, message_kind):
+        captured.update({
+            "chat_id": chat_id,
+            "reason": reason,
+            "event_type": event_type,
+            "message_kind": message_kind,
+        })
+
+    sched = ProactiveScheduler(
+        cache_dir=str(tmp_path / "cache"),
+        timezone_str="Asia/Shanghai",
+        send_proactive_callback=send,
+    )
+    event = ScheduledEvent(
+        trigger_time=None,
+        event_type="proactive",
+        chat_id="telegram:target",
+        event_id="kind-event",
+        reason="固定提醒",
+        message_kind="explicit",
+    )
+    sched._daily_events = [event]
+
+    asyncio.run(sched._on_event_trigger("kind-event"))
+
+    assert captured == {
+        "chat_id": "telegram:target",
+        "reason": "固定提醒",
+        "event_type": "proactive",
+        "message_kind": "explicit",
+    }
 
 
 # ----------------------------------------------------------------------

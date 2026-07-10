@@ -77,8 +77,8 @@ adapters/<platform>/
 
 建议包含：
 
-- `platform_message_id`: str。当前这条平台入站消息自己的稳定 ID；必须尽量保留，用于 reply 目标锁定、undo、媒体回查、去重。
-- `platform_message_ids`: list[str]。当前输入由多条平台消息合并而来时使用，例如 Telegram media group、OB11 reply 媒体 + 当前消息；顺序应尽量与平台消息/媒体顺序一致。
+- `platform_message_id`: str。当前这条平台入站消息自己的稳定 ID；必须尽量保留并字符串化，用于模型显式生成 `[reply:MESSAGE_ID]`、reply 目标锁定、undo、媒体回查和去重。
+- `platform_message_ids`: list[str]。当前输入由多条平台消息合并而来时使用，例如 Telegram media group、OB11 reply 媒体 + 当前消息；元素必须字符串化，顺序应与平台消息/媒体输入顺序一致。共享场景提示会按顺序去重后将这些 ID 提供给前脑和后脑。
 - `reply_target_message_id`: str。可选；仅当应用逻辑已经明确选择 Nora 本轮应该引用哪条消息时填写。不得从当前 `platform_message_id` 或入站 `reply_to_message_id` 自动推导。
 - `reply_to_message_id`: str。用户当前消息是在回复/引用另一条平台消息时，被回复消息的 ID。它只描述入站关系，不表示 Nora 出站时应自动引用该消息。
 - `reply_to_user_id` / `reply_to_user_name`: reply 场景中被回复消息的发送者，用于平台工具定位操作对象，例如“禁言我回复的这个人”。
@@ -105,7 +105,8 @@ adapters/<platform>/
 - 普通模型回复不自动产生原生 reply/@。显式 `[reply:ID]` 的优先级高于调用方 `reply_to_message_id`；两者都没有时不引用。
 - `[at:ID]` 只在明确群聊场景生成原生 mention；私聊或未知场景应移除。ID 必须按目标平台规则验证，禁止猜测或跨平台转换。
 - 控制标记按每个语义 `[SPLIT]` part 局部生效。平台长度切块时，reply 只附着该 part 首个实际发送项，mention 保持其逻辑文本位置，不复制到后续 chunk。
-- 入站 `reply_to_message_id`、当前 `platform_message_id` 和应用选择的 `reply_target_message_id` 含义不同，任何一层都不得自动互相推导。
+- 入站 `reply_to_message_id`、当前 `platform_message_id` / `platform_message_ids` 和应用选择的 `reply_target_message_id` 含义不同，任何一层都不得自动互相推导。当前/聚合消息 ID 会进入共享场景提示供模型选择，但看到 ID 不表示必须原生回复。
+- 消息 ID 仅在其所属目标平台和场景内有效；跨平台或跨场景投递时不得复用来源消息 ID。
 - 如果平台 reply ID 类型有限制（例如 Telegram 必须是数字 message_id），adapter 应验证并安全忽略非法值，不能让整条消息发送失败。
 - HTML/纯文本降级、媒体失败提示、编辑消息等非标准路径也必须移除控制标记。
 - `send_message()` 返回的仍是实际发出的平台消息 ID 列表，顺序与发送顺序一致。
@@ -226,6 +227,7 @@ Telegram Bot API 不支持枚举完整普通成员名单，因此“成员名单
 - [ ] 已在正确时机触发 `startup/on_ready/shutdown`。
 - [ ] `metadata.json` 说明了真实平台、能力、限制和隐私提示。
 - [ ] 平台事件通过 `AdapterEvent` 或等价 dict 输出统一字段；群聊中的 `user_id` 是平台事件提供的可靠发送者 ID，可供模型生成 `[at:USER_ID]`，不得由显示名/username 猜测。
+- [ ] 单条 `platform_message_id` 与聚合 `platform_message_ids` 均已字符串化并保持输入顺序；已验证它们能通过标准 context 进入前脑/后脑共享场景提示。
 - [ ] 入站原生 reply/@ 已转换为 canonical 标记，并保留可靠的 reply/mention 元数据。
 - [ ] 支持消息控制时声明 `supports_message_controls=True`；不支持、私聊 mention、非法 ID 和异常降级路径均不会泄漏标记。
 - [ ] `[SPLIT]` 与平台长度切块不会重复应用 reply/@，普通无标记回复不会自动产生原生控制。

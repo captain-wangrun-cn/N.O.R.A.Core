@@ -52,6 +52,7 @@ from workspace_config import get_workspace_manager
 logger = logging.getLogger(__name__)
 
 _DELIVERY_TARGET_STATE_FILE = "delivery_target_state.json"
+_MAX_KNOWN_SCENES = 100
 
 
 def _get_state_file_path() -> str:
@@ -158,9 +159,19 @@ def record_active_scene(target: Dict[str, Any]) -> bool:
     state = _read_state()
     platform_scenes = dict(state.get("platform_scenes") or {})
     platform_scenes[identity.platform] = scene
+    known_scenes = dict(state.get("known_scenes") or {})
+    known_scenes[runtime_key] = scene
+    if len(known_scenes) > _MAX_KNOWN_SCENES:
+        ordered = sorted(
+            known_scenes.items(),
+            key=lambda item: float(item[1].get("at", 0.0)) if isinstance(item[1], dict) else 0.0,
+            reverse=True,
+        )
+        known_scenes = dict(ordered[:_MAX_KNOWN_SCENES])
     updates: Dict[str, Any] = {
         "active": scene,
         "platform_scenes": platform_scenes,
+        "known_scenes": known_scenes,
     }
     # 私聊：顺带刷新主动投递端。
     if identity.chat_type == PRIVATE_CHAT_TYPE:
@@ -198,32 +209,32 @@ def load_platform_scene(platform: str) -> Dict[str, Any]:
 
 
 def load_known_scenes() -> list[Dict[str, Any]]:
-    """列出各平台最近活跃场景（供 prompt 展示合法可投递目标）。
-
-    返回每项含 platform / platform_chat_id / chat_type / runtime_key。
-    仅包含实际见过的场景，避免模型编造 scene id。
-    """
+    """列出实际见过的场景；兼容旧版仅有 platform_scenes 的状态文件。"""
     state = _read_state()
-    scenes = state.get("platform_scenes") or {}
+    scenes = state.get("known_scenes")
+    if not isinstance(scenes, dict) or not scenes:
+        scenes = state.get("platform_scenes") or {}
     if not isinstance(scenes, dict):
         return []
-    out: list[Dict[str, Any]] = []
-    for scene in scenes.values():
-        if isinstance(scene, dict) and str(scene.get("platform_chat_id") or "").strip():
-            out.append(dict(scene))
-    return out
+    out = [
+        dict(scene)
+        for scene in scenes.values()
+        if isinstance(scene, dict) and str(scene.get("platform_chat_id") or "").strip()
+    ]
+    return sorted(out, key=lambda scene: float(scene.get("at", 0.0)), reverse=True)
 
 
-def _guess_chat_type(platform: str, platform_chat_id: str) -> str:
-    """裸 scene_id 无 chat_type 时的启发式兜底。
-
-    OneBot 群号在本项目里以负号或数字区分不可靠，这里只对明显负号判群，
-    其余默认私聊（保守，宁可判私聊也不自动进群）。
-    """
-    cid = str(platform_chat_id or "")
-    if cid.startswith("-"):
-        return "group"
-    return PRIVATE_CHAT_TYPE
+def _known_scene(platform: str, platform_chat_id: str) -> Dict[str, Any]:
+    """查找已实际记录的平台场景。"""
+    platform = str(platform or "").strip()
+    platform_chat_id = str(platform_chat_id or "").strip()
+    for scene in load_known_scenes():
+        if (
+            str(scene.get("platform") or "").strip() == platform
+            and str(scene.get("platform_chat_id") or "").strip() == platform_chat_id
+        ):
+            return scene
+    return {}
 
 
 def resolve_route_target(
@@ -259,31 +270,47 @@ def resolve_route_target(
     platform = route_platform or cur_platform or load_active_platform()
 
     # —— 场景 ——
+    policy = "default_current"
     if route_scene_id:
         platform_chat_id = route_scene_id
+        known_scene = _known_scene(platform, platform_chat_id)
         if route_scene_type:
             chat_type = normalize_chat_type(route_scene_type)
+            policy = "applied"
+        elif known_scene:
+            chat_type = normalize_chat_type(known_scene.get("chat_type"))
+            policy = "applied"
         else:
-            looked = ""
-            if chat_type_lookup:
-                try:
-                    looked = str(chat_type_lookup(platform, platform_chat_id) or "").strip()
-                except Exception:
-                    looked = ""
-            chat_type = normalize_chat_type(looked) if looked else _guess_chat_type(platform, platform_chat_id)
+            return {
+                "runtime_key": "",
+                "platform": platform,
+                "platform_chat_id": platform_chat_id,
+                "chat_type": "",
+                "redirected": False,
+                "policy": "rejected_unknown_scene",
+            }
     else:
-        # 场景缺失 → 该平台的活跃场景。
-        if platform == cur_platform and cur_chat_id:
+        # 无任何标记始终就地回复；仅显式换平台时才使用该平台活跃场景。
+        if not route_platform and cur_chat_id:
+            platform, platform_chat_id, chat_type = cur_platform, cur_chat_id, cur_chat_type
+        elif platform == cur_platform and cur_chat_id:
             platform_chat_id, chat_type = cur_chat_id, cur_chat_type
+            policy = "applied"
         else:
             scene = load_platform_scene(platform)
             if scene.get("platform_chat_id"):
                 platform_chat_id = str(scene["platform_chat_id"])
                 chat_type = normalize_chat_type(scene.get("chat_type"))
+                policy = "applied"
             else:
-                # 兜底：就地回复当前场景。
-                platform = cur_platform or platform
-                platform_chat_id, chat_type = cur_chat_id, cur_chat_type
+                return {
+                    "runtime_key": "",
+                    "platform": platform,
+                    "platform_chat_id": "",
+                    "chat_type": "",
+                    "redirected": False,
+                    "policy": "rejected_unknown_scene",
+                }
 
     runtime_key = f"{platform}:{platform_chat_id}" if platform_chat_id else ""
     redirected = bool(runtime_key) and runtime_key != str(current.get("runtime_key") or "").strip()
@@ -293,4 +320,5 @@ def resolve_route_target(
         "platform_chat_id": platform_chat_id,
         "chat_type": chat_type,
         "redirected": redirected,
+        "policy": policy,
     }

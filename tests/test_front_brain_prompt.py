@@ -157,6 +157,7 @@ def test_front_brain_prompt_includes_current_onebot_group_scene():
                 "chat_type": "group",
                 "user_name": "群友A",
                 "chat_title": "测试群",
+                "platform_message_id": 345,
                 "text": "老大，怎么啦？是不是等急啦",
             }
         )
@@ -171,6 +172,59 @@ def test_front_brain_prompt_includes_current_onebot_group_scene():
     assert "当前说话人平台用户 ID: 20002" in system_prompt
     assert "[at:20002]" in system_prompt
     assert "群聊名称: 测试群" in system_prompt
+    assert "当前入站消息 ID: 345" in system_prompt
+    assert "[reply:MESSAGE_ID]" in system_prompt
+    assert "看到当前消息 ID 不代表必须回复或自动引用" in system_prompt
+
+
+def test_front_brain_prompt_includes_ordered_aggregate_and_distinct_reply_ids():
+    probe = _FrontBrainProbe(["收到。"])
+
+    asyncio.run(
+        probe._generate_front_chat_response(
+            {
+                "platform": "telegram",
+                "chat_id": "private-chat",
+                "user_id": "owner",
+                "chat_type": "private",
+                "user_name": "Owner",
+                "platform_message_id": "103",
+                "platform_message_ids": ["101", 102, "101"],
+                "reply_to_message_id": 88,
+                "reply_target_message_id": "99",
+                "text": "看看这些",
+            }
+        )
+    )
+
+    system_prompt = probe.system_prompts[0]
+    assert "当前聚合入站消息 IDs（按输入顺序）: 101, 102, 103" in system_prompt
+    assert "用户当前消息引用的历史消息 ID: 88" in system_prompt
+    assert "应用已选择的出站引用目标 ID: 99" in system_prompt
+    assert "禁止猜测、转换或跨平台/跨场景复用" in system_prompt
+
+
+def test_front_brain_prompt_without_inbound_ids_does_not_invent_message_id():
+    probe = _FrontBrainProbe(["主动问候。"])
+
+    asyncio.run(
+        probe._generate_front_chat_response(
+            {
+                "platform": "telegram",
+                "chat_id": "private-chat",
+                "user_id": "owner",
+                "chat_type": "private",
+                "user_name": "Owner",
+                "text": "主动消息上下文",
+            }
+        )
+    )
+
+    system_prompt = probe.system_prompts[0]
+    assert "- 当前入站消息 ID:" not in system_prompt
+    assert "- 当前聚合入站消息 IDs（按输入顺序）:" not in system_prompt
+    assert "- 用户当前消息引用的历史消息 ID:" not in system_prompt
+    assert "- 应用已选择的出站引用目标 ID:" not in system_prompt
 
 
 def test_front_brain_history_preserves_system_context_and_not_last20_truncated():

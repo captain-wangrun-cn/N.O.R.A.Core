@@ -189,8 +189,9 @@ python tui.py
 
 - `[reply:MESSAGE_ID]`
   - 含义：让当前语义分段原生回复目标平台消息。
-  - 约束：ID 只能来自当前目标平台/场景的可靠上下文；不写标记就不自动引用。
-  - 区分：入站 `reply_to_message_id` 只描述用户回复了哪条历史消息；应用选择的 `reply_target_message_id` 才是代码层出站目标，两者不得自动互相推导。
+  - 模型可见性：标准场景提示会注入单条 `platform_message_id`，或按输入顺序去重后的聚合 `platform_message_ids`；主动消息等没有真实入站 ID 时不会虚构。
+  - 约束：ID 只能来自当前目标平台/场景的可靠上下文；不写标记就不自动引用，看到 ID 也不表示必须引用；跨平台/跨场景后不得复用来源 ID。
+  - 区分：`platform_message_id(s)` 是当前输入自身；入站 `reply_to_message_id` 只描述用户回复了哪条历史消息；应用选择的 `reply_target_message_id` 才是代码层出站目标，三者不得自动互相推导。
 
 - `[at:USER_ID]`
   - 含义：在明确群聊场景原生 @ 已知用户。

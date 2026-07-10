@@ -377,12 +377,15 @@ class BackBrainMixin:
         async def _send_reply(text_to_send: str) -> list[str]:
             """按路由标记把后脑回复发到目标场景（缺省=当前会话）。"""
             self.resolve_route_state(text_to_send, _route_state, identity)
+            send_text = str(_route_state.get("send_text") or "")
+            if not send_text:
+                return []
             send_key = _route_state.get("key") or chat_id
             send_ct = _route_state.get("chat_type") or chat_type
             reply_id = "" if _route_state.get("redirected") else reply_to_message_id
             return await self._send_split_message(
                 send_key,
-                text_to_send,
+                send_text,
                 reply_to_message_id=reply_id,
                 chat_type=send_ct,
             )

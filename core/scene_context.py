@@ -60,6 +60,26 @@ def _format_optional_count(value: Any, status: str = "") -> str:
     return str(value)
 
 
+def _platform_message_ids(context: Mapping[str, Any]) -> list[str]:
+    """按入站顺序整理当前模型轮次对应的平台消息 ID。"""
+    values = context.get("platform_message_ids")
+    if isinstance(values, (list, tuple)):
+        raw_ids = list(values)
+    else:
+        raw_ids = []
+    raw_ids.append(context.get("platform_message_id"))
+
+    seen: set[str] = set()
+    message_ids: list[str] = []
+    for value in raw_ids:
+        message_id = _clean(value)
+        if not message_id or message_id in seen:
+            continue
+        seen.add(message_id)
+        message_ids.append(message_id)
+    return message_ids
+
+
 def build_current_scene_block(
     identity: ConversationIdentity,
     context: Optional[Mapping[str, Any]] = None,
@@ -104,6 +124,25 @@ def build_current_scene_block(
         lines.append("- 群聊边界: 群里可能有其他人在场；不要泄露私聊内容、主人隐私或其它窗口的后台任务细节。")
     else:
         lines.append("- 私聊边界: 这是当前私聊窗口；文件、结果和进度默认发回这里，除非用户明确要求转发到群聊或其它窗口。")
+
+    message_ids = _platform_message_ids(context)
+    if len(message_ids) == 1:
+        lines.append(f"- 当前入站消息 ID: {message_ids[0]}")
+    elif message_ids:
+        lines.append(f"- 当前聚合入站消息 IDs（按输入顺序）: {', '.join(message_ids)}")
+
+    reply_to_message_id = _clean(context.get("reply_to_message_id"))
+    if reply_to_message_id:
+        lines.append(f"- 用户当前消息引用的历史消息 ID: {reply_to_message_id}")
+    reply_target_message_id = _clean(context.get("reply_target_message_id"))
+    if reply_target_message_id:
+        lines.append(f"- 应用已选择的出站引用目标 ID: {reply_target_message_id}")
+
+    if message_ids or reply_to_message_id or reply_target_message_id:
+        lines.append(
+            "- 消息 ID 规则: 只有明确需要平台产生原生引用回复时才使用 `[reply:MESSAGE_ID]`；"
+            "看到当前消息 ID 不代表必须回复或自动引用。ID 是当前目标平台与场景内的不透明值，禁止猜测、转换或跨平台/跨场景复用。"
+        )
 
     # 跨场景投递提示：默认无需标记；仅当要发去别处时用规范标记。
     self_marker = _canonical_scene_marker(identity.platform, chat_type, identity.platform_chat_id)
