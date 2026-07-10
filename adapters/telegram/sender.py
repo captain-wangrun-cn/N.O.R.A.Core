@@ -76,7 +76,10 @@ class TelegramSenderMixin:
                 rendered.append(token.value)
             elif token.type == "mention" and allow_mentions:
                 if token.value.isdigit():
-                    label = html.escape(labels[token.value])
+                    display_label = labels[token.value]
+                    if not display_label.startswith("@"):
+                        display_label = f"@{display_label}"
+                    label = html.escape(display_label)
                     rendered.append(f'<a href="tg://user?id={token.value}">{label}</a>')
                 else:
                     logger.debug("[telegram] ignoring non-numeric mention user id=%s", token.value)

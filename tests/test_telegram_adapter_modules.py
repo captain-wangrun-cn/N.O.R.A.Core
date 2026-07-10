@@ -236,7 +236,7 @@ def test_telegram_sender_canonical_reply_overrides_fallback_and_mentions_group_u
     call = adapter.calls[0][1]
     assert call["reply_to_message_id"] == 777
     assert call["allow_sending_without_reply"] is True
-    assert '<a href="tg://user?id=321">Alice Smith</a>' in call["text"]
+    assert '<a href="tg://user?id=321">@Alice Smith</a>' in call["text"]
     assert adapter.member_calls == [("-100", "321")]
     assert "[reply:" not in call["text"]
     assert "[at:" not in call["text"]
@@ -256,7 +256,7 @@ def test_telegram_sender_reuses_cached_mention_label_and_escapes_html():
     )
 
     text = adapter.calls[0][1]["text"]
-    assert text.count('<a href="tg://user?id=321">Alice &amp; &lt;Admin&gt;</a>') == 2
+    assert text.count('<a href="tg://user?id=321">@Alice &amp; &lt;Admin&gt;</a>') == 2
     assert adapter.member_calls == []
 
 
