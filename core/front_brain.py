@@ -662,6 +662,7 @@ class FrontBrainMixin:
             "need_follow": parsed.get("need_follow", False),
             "keep_segment_open": parsed.get("keep_segment_open", False),
             "retract_message_target": parsed.get("retract_message_target", ""),
+            "route": parsed.get("route"),
             "raw_response": response_text,
         }
 
@@ -850,7 +851,7 @@ class FrontBrainMixin:
 
         parsed, response_text = await _run_review_once(system_prompt)
         if not parsed:
-            return {"action": "done", "user_reply": ""}
+            return {"action": "done", "user_reply": "", "route": {"platform": "", "scene_id": "", "scene_type": ""}}
 
         if parsed.get("task_instruction") and parsed.get("action") != "continue":
             logger.warning(f"[{chat_id}] 审查输出含任务指示但未标记继续，提醒模型确认。")
@@ -879,6 +880,7 @@ class FrontBrainMixin:
                     "task_instruction": parsed.get("task_instruction", ""),
                     "should_reply": parsed.get("should_reply", True),
                     "use_image_model": parsed.get("use_image_model", False),
+                    "route": parsed.get("route"),
                 }
 
         logger.info(

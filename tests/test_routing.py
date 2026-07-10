@@ -164,3 +164,54 @@ def test_sanitize_user_visible_text_removes_source_labels():
 def test_sanitize_user_visible_text_removes_source_labels_with_actor():
     cleaned = sanitize_user_visible_text("[来自 telegram:user_a / 张三] 远端消息")
     assert cleaned == "远端消息"
+
+
+# --- 跨场景投递标记 [platform:X][scene:type:id] 测试 ---
+
+def test_parse_route_markers_extracts_platform_and_typed_scene():
+    from core.routing import parse_route_markers
+
+    route, cleaned = parse_route_markers("[platform:telegram][scene:group:123456]去群里说：晚安")
+    assert route["platform"] == "telegram"
+    assert route["scene_id"] == "123456"
+    assert route["scene_type"] == "group"
+    assert "[platform:" not in cleaned
+    assert "[scene:" not in cleaned
+    assert cleaned.strip() == "去群里说：晚安"
+
+
+def test_parse_route_markers_platform_alias_normalized():
+    from core.routing import parse_route_markers
+
+    route, _ = parse_route_markers("[platform:qq][scene:private:88888]hi")
+    assert route["platform"] == "onebotv11"
+    assert route["scene_type"] == "private"
+
+
+def test_parse_route_markers_bare_scene_leaves_type_empty():
+    from core.routing import parse_route_markers
+
+    route, _ = parse_route_markers("[scene:99999]hi")
+    assert route["scene_id"] == "99999"
+    assert route["scene_type"] == ""
+
+
+def test_front_brain_response_carries_route():
+    result = parse_front_brain_response("[platform:onebotv11][scene:group:700]收到，我去群里说 [NEED_BACKEND]")
+    assert result["route"]["platform"] == "onebotv11"
+    assert result["route"]["scene_id"] == "700"
+    assert result["route"]["scene_type"] == "group"
+    assert "[platform:" not in result["user_reply"]
+    assert "[scene:" not in result["user_reply"]
+
+
+def test_front_brain_response_no_marker_empty_route():
+    result = parse_front_brain_response("就在这儿说说话")
+    assert result["route"] == {"platform": "", "scene_id": "", "scene_type": ""}
+
+
+def test_sanitize_user_visible_text_strips_route_markers_as_safety_net():
+    cleaned = sanitize_user_visible_text("[platform:telegram][scene:group:1]漏网的标记也要抹掉")
+    assert "[platform:" not in cleaned
+    assert "[scene:" not in cleaned
+    assert cleaned == "漏网的标记也要抹掉"

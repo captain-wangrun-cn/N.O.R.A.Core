@@ -925,16 +925,25 @@ class SchedulerMixin:
 
         # 发送前脑回复
         if user_reply:
-            await self._send_split_message(chat_id, user_reply)
+            send_target = self.resolve_send_target(front_result.get("route"), identity)
+            send_key = send_target.get("runtime_key") or chat_id
+            send_chat_type = send_target.get("chat_type") or identity.chat_type
+            redirected = bool(send_target.get("redirected"))
+            dest_identity = send_target.get("identity") or identity
+            await self._send_split_message(send_key, user_reply, chat_type=send_chat_type)
 
+            log_platform = dest_identity.platform if redirected else platform
+            log_storage_id = dest_identity.storage_id if redirected else storage_id
+            log_memory_scope_id = dest_identity.memory_scope_id if redirected else identity.memory_scope_id
+            log_place_scope_id = dest_identity.place_scope_id if redirected else identity.place_scope_id
             self.message_history.add_message(
-                platform=platform,
-                chat_id=storage_id,
+                platform=log_platform,
+                chat_id=log_storage_id,
                 role="assistant",
                 content=user_reply,
                 user_id="assistant",
-                memory_scope_id=identity.memory_scope_id,
-                place_scope_id=identity.place_scope_id,
+                memory_scope_id=log_memory_scope_id,
+                place_scope_id=log_place_scope_id,
             )
         else:
             logger.info(f"[{chat_id}] 主动消息生成为空，跳过发送")

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import inspect
 import json
 from abc import ABC, abstractmethod
@@ -328,7 +329,17 @@ class BaseAdapter(ABC):
 
     @abstractmethod
     def run(self, message_handler: MessageHandler):
-        """启动适配器并开始监听消息。"""
+        """启动适配器并开始监听消息（阻塞式，单适配器兼容入口）。"""
+
+    async def run_async(self, message_handler: MessageHandler) -> None:
+        """非阻塞并发入口：在调用方已有的事件循环内启动并常驻。
+
+        多适配器同时在线时，主程序用单个事件循环 gather 各适配器的
+        ``run_async()``。子类应覆盖此方法，用平台原生 async API 启动监听且
+        不自行 ``asyncio.run(...)``。默认实现把同步 ``run()`` 丢进线程池兜底，
+        以兼容尚未适配的子类。"""
+        loop = asyncio.get_running_loop()
+        await loop.run_in_executor(None, self.run, message_handler)
 
     async def startup(self) -> None:
         """生命周期：适配器启动时触发。"""

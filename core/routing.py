@@ -67,6 +67,56 @@ _USE_IMAGE_MODEL_PATTERN = re.compile(r"\[USE_IMAGE_MODEL\]|use_image_model\s*[:
 # 可选：任务指示块
 _TASK_INSTRUCTION_PATTERN = re.compile(r"\[TASK_INSTRUCTION\](.*?)\[/TASK_INSTRUCTION\]", re.IGNORECASE | re.DOTALL)
 
+# ── 路由重定向标记（多平台/多场景）──
+# [platform:X]  指定目标平台（telegram / onebotv11 / qq...）
+# [scene:id]           指定目标场景，类型由身份缓存/启发式推断
+# [scene:group:id]     显式群聊场景
+# [scene:private:id]   显式私聊场景
+# 缺一个则取「活跃的」那个（活跃平台 / 活跃场景）。
+_ROUTE_PLATFORM_PATTERN = re.compile(r"\[platform\s*:\s*([A-Za-z0-9_.\-]+)\s*\]", re.IGNORECASE)
+_ROUTE_SCENE_PATTERN = re.compile(
+    r"\[scene\s*:\s*(?:(private|group)\s*:\s*)?([^\]\s]+)\s*\]",
+    re.IGNORECASE,
+)
+
+# 平台别名归一（与 main.resolve_adapter_names 保持一致，避免相互导入）。
+_PLATFORM_ALIASES = {"onebot": "onebotv11", "onebot-11": "onebotv11", "qq": "onebotv11"}
+
+
+def _canonical_platform(name: str) -> str:
+    n = str(name or "").strip().lower()
+    return _PLATFORM_ALIASES.get(n, n)
+
+
+def parse_route_markers(text: str) -> tuple[dict, str]:
+    """从文本中提取 [platform:X] / [scene:...] 路由标记并抹除。
+
+    返回 (route, cleaned_text)：
+      route = {"platform": str, "scene_id": str, "scene_type": str}
+              未出现的字段为空串。
+      cleaned_text = 移除路由标记后的文本（其余清理由调用方/sanitize 负责）。
+    """
+    route = {"platform": "", "scene_id": "", "scene_type": ""}
+    if not text:
+        return route, text or ""
+
+    m = _ROUTE_PLATFORM_PATTERN.search(text)
+    if m:
+        route["platform"] = _canonical_platform(m.group(1))
+
+    m = _ROUTE_SCENE_PATTERN.search(text)
+    if m:
+        route["scene_type"] = (m.group(1) or "").strip().lower()
+        route["scene_id"] = (m.group(2) or "").strip()
+
+    cleaned = _ROUTE_PLATFORM_PATTERN.sub("", text)
+    cleaned = _ROUTE_SCENE_PATTERN.sub("", cleaned)
+    return route, cleaned
+
+
+def _empty_route() -> dict:
+    return {"platform": "", "scene_id": "", "scene_type": ""}
+
 # 前脑审查中任务完成的标记
 _TASK_DONE_SIGNAL = "[TASK_DONE]"
 
@@ -107,6 +157,9 @@ def sanitize_user_visible_text(text: str) -> str:
     cleaned = _SYSTEM_NOTE_BLOCK_PATTERN.sub("", cleaned)
     cleaned = _strip_timestamp_markers(cleaned)
     cleaned = _SOURCE_LABEL_PATTERN.sub("", cleaned)
+    # 路由标记兜底：即使解析路径漏掉，也不让 [platform:X]/[scene:...] 泄漏给用户。
+    cleaned = _ROUTE_PLATFORM_PATTERN.sub("", cleaned)
+    cleaned = _ROUTE_SCENE_PATTERN.sub("", cleaned)
     cleaned = re.sub(r"\n{3,}", "\n\n", cleaned)
     return cleaned.strip()
 
@@ -135,7 +188,11 @@ def parse_front_brain_response(response_text: str) -> dict:
             "force_semi_online": False,
             "keep_segment_open": False,
             "retract_message_target": "",
+            "route": _empty_route(),
         }
+
+    # 提取路由标记（[platform:X] / [scene:...]）并抹除
+    route, response_text = parse_route_markers(response_text)
 
     needs_backend = _BACKEND_SIGNAL in response_text
     need_follow = _FOLLOW_SIGNAL in response_text
@@ -198,6 +255,7 @@ def parse_front_brain_response(response_text: str) -> dict:
         "force_semi_online": force_semi_online,
         "keep_segment_open": keep_segment_open,
         "retract_message_target": retract_target,
+        "route": route,
     }
 
 
@@ -227,7 +285,11 @@ def parse_front_brain_review(response_text: str) -> dict:
             "force_semi_online": False,
             "keep_segment_open": False,
             "retract_message_target": "",
+            "route": _empty_route(),
         }
+
+    # 提取路由标记（[platform:X] / [scene:...]）并抹除
+    route, response_text = parse_route_markers(response_text)
 
     has_done = _TASK_DONE_SIGNAL in response_text
     has_backend = _BACKEND_SIGNAL in response_text
@@ -289,6 +351,7 @@ def parse_front_brain_review(response_text: str) -> dict:
             "force_semi_online": force_semi_online,
             "keep_segment_open": keep_segment_open,
             "retract_message_target": retract_target,
+            "route": route,
         }
     elif has_done:
         return {
@@ -301,6 +364,7 @@ def parse_front_brain_review(response_text: str) -> dict:
             "force_semi_online": force_semi_online,
             "keep_segment_open": keep_segment_open,
             "retract_message_target": retract_target,
+            "route": route,
         }
     else:
         # 无标记 = 纯聊天，也结束轮询
@@ -314,4 +378,5 @@ def parse_front_brain_review(response_text: str) -> dict:
             "force_semi_online": force_semi_online,
             "keep_segment_open": keep_segment_open,
             "retract_message_target": retract_target,
+            "route": route,
         }

@@ -66,24 +66,51 @@ def _onebotv11_configured() -> bool:
     return not is_placeholder_value(cfg.get("websocket_url"))
 
 
-def resolve_adapter_name(adapter_name: str = "auto") -> str:
+def resolve_adapter_names(adapter_name: str = "auto") -> list[str]:
+    """解析 --adapter 参数为一个或多个适配器名。
+
+    支持：``auto``（所有已配置平台）、``all``、逗号分隔多值、单个名。
+    """
     normalized = (adapter_name or "auto").strip().lower()
-    if normalized in {"", "auto"}:
-        if _onebotv11_configured():
+
+    def _canonical(name: str) -> str:
+        n = name.strip().lower()
+        if n in {"onebot", "onebot-11", "qq"}:
             return "onebotv11"
+        return n
+
+    if normalized in {"", "auto", "all"}:
+        configured: list[str] = []
+        if _onebotv11_configured():
+            configured.append("onebotv11")
         if _telegram_configured():
-            return "telegram"
+            configured.append("telegram")
+        if configured:
+            return configured
         raise ValueError(
             "No configured adapter found. Please edit one adapter config.json, "
             "or start with --adapter telegram / --adapter onebotv11 to configure explicitly."
         )
-    if normalized in {"onebot", "onebot-11", "qq"}:
-        return "onebotv11"
-    return normalized
+
+    names = [_canonical(part) for part in normalized.split(",") if part.strip()]
+    # 去重且保序
+    seen: set[str] = set()
+    result: list[str] = []
+    for n in names:
+        if n and n not in seen:
+            seen.add(n)
+            result.append(n)
+    if not result:
+        raise ValueError(f"Unsupported adapter: {adapter_name}")
+    return result
 
 
-def create_adapter(adapter_name: str = "auto"):
-    normalized = resolve_adapter_name(adapter_name)
+def resolve_adapter_name(adapter_name: str = "auto") -> str:
+    """单适配器兼容入口：返回解析后的第一个适配器名。"""
+    return resolve_adapter_names(adapter_name)[0]
+
+
+def _instantiate_adapter(normalized: str):
     if normalized == "telegram":
         from adapters.telegram import TelegramAdapter
 
@@ -92,33 +119,62 @@ def create_adapter(adapter_name: str = "auto"):
         from adapters.onebotv11 import OneBotV11Adapter
 
         return OneBotV11Adapter()
-    raise ValueError(f"Unsupported adapter: {adapter_name}")
+    raise ValueError(f"Unsupported adapter: {normalized}")
+
+
+def create_adapter(adapter_name: str = "auto"):
+    return _instantiate_adapter(resolve_adapter_name(adapter_name))
+
+
+def create_adapters(adapter_name: str = "auto") -> list:
+    """创建一个或多个适配器实例（多平台同时在线）。"""
+    return [_instantiate_adapter(n) for n in resolve_adapter_names(adapter_name)]
+
+
+async def _run_adapters_async(controller, adapters: list):
+    """在单个事件循环中并发运行所有适配器，on_ready 服务只启动一次。"""
+    services_started = {"done": False}
+    services_lock = asyncio.Lock()
+
+    async def _maybe_start_services():
+        async with services_lock:
+            if services_started["done"]:
+                return
+            services_started["done"] = True
+            controller.start_scheduler()
+            await controller.start_triggers()
+
+    # 每个 adapter 就绪后尝试启动一次公共服务（scheduler/triggers）。
+    for adapter in adapters:
+        _original_on_ready = adapter.on_ready
+
+        def _make_hook(orig):
+            async def _on_ready_with_services():
+                await orig()
+                await _maybe_start_services()
+            return _on_ready_with_services
+
+        adapter.on_ready = _make_hook(_original_on_ready)
+
+    await asyncio.gather(
+        *[adapter.run_async(controller.handle_new_message) for adapter in adapters]
+    )
 
 
 def run_bot_logic(tui_app, tui_ready_event, adapter_name: str = "auto"):
     """Contains the core bot logic, runs in a separate thread."""
     tui_ready_event.wait() # Wait for the TUI to be ready
-    
+
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
-    
+
     logging.info("TUI is ready. Initializing N.O.R.A. Core in background thread...")
     try:
-        adapter = create_adapter(adapter_name)
-        logging.info("使用平台适配器: %s", adapter.platform_name)
-        controller = NoraController(adapter, tui_callback=lambda text: tui_app.call_from_thread(tui_app.update_status, text))
-        
-        # 注册 on_ready 钩子：适配器就绪后启动 scheduler + triggers
-        _original_on_ready = adapter.on_ready
-        async def _on_ready_with_services():
-            await _original_on_ready()
-            controller.start_scheduler()
-            await controller.start_triggers()
-        adapter.on_ready = _on_ready_with_services
-        
-        # Start the bot logic within the existing event loop if necessary, 
-        # but run_polling is blocking, so we run it directly here.
-        adapter.run(message_handler=controller.handle_new_message)
+        adapters = create_adapters(adapter_name)
+        logging.info("使用平台适配器: %s", ", ".join(a.platform_name for a in adapters))
+        controller = NoraController(adapters, tui_callback=lambda text: tui_app.call_from_thread(tui_app.update_status, text))
+
+        loop.run_until_complete(_run_adapters_async(controller, adapters))
     except Exception as e:
         logging.critical(f"FATAL ERROR in bot thread: {e}", exc_info=True)
         tui_app.call_from_thread(tui_app.update_status, f"FATAL ERROR. Check nora_core.log.")
@@ -177,19 +233,11 @@ def run_headless(console_level=logging.INFO, adapter_name: str = "auto"):
         logging.info(f"[STATUS] {text}")
 
     try:
-        adapter = create_adapter(adapter_name)
-        logging.info("使用平台适配器: %s", adapter.platform_name)
-        controller = NoraController(adapter, tui_callback=headless_status_callback)
-        
-        # 注册 on_ready 钩子：适配器就绪后启动 scheduler + triggers
-        _original_on_ready = adapter.on_ready
-        async def _on_ready_with_services():
-            await _original_on_ready()
-            controller.start_scheduler()
-            await controller.start_triggers()
-        adapter.on_ready = _on_ready_with_services
-        
-        adapter.run(message_handler=controller.handle_new_message)
+        adapters = create_adapters(adapter_name)
+        logging.info("使用平台适配器: %s", ", ".join(a.platform_name for a in adapters))
+        controller = NoraController(adapters, tui_callback=headless_status_callback)
+
+        asyncio.run(_run_adapters_async(controller, adapters))
     except Exception as exc:
         logging.critical(f"启动失败: {exc}", exc_info=True)
         sys.exit(1)
@@ -206,9 +254,11 @@ def main():
     )
     parser.add_argument(
         "--adapter",
-        choices=["auto", "telegram", "onebotv11"],
         default="auto",
-        help="选择平台适配器；auto 会使用第一个看起来已配置的平台",
+        help=(
+            "选择平台适配器；auto 会使用所有已配置平台，"
+            "可逗号分隔多选（如 'telegram,onebotv11'），或 'all'"
+        ),
     )
 
     args = parser.parse_args()

@@ -177,22 +177,33 @@ class PollingMixin:
                 
                 # 发送前脑审查回复给用户（如果有实质内容）
                 if review_reply and should_reply:
+                    send_target = self.resolve_send_target(review_result.get("route"), identity)
+                    send_key = send_target.get("runtime_key") or chat_id
+                    send_chat_type = send_target.get("chat_type") or context.get("chat_type", "")
+                    redirected = bool(send_target.get("redirected"))
+                    dest_identity = send_target.get("identity") or identity
+                    reply_id = "" if redirected else reply_target_message_id(context)
                     sent_ids = await self._send_split_message(
-                        chat_id,
+                        send_key,
                         review_reply,
-                        reply_to_message_id=reply_target_message_id(context),
+                        reply_to_message_id=reply_id,
+                        chat_type=send_chat_type,
                     )
-                    
-                    # 保存到数据库
+
+                    # 保存到数据库（重定向后按目标场景身份归属）
+                    log_platform = dest_identity.platform if redirected else platform
+                    log_storage_id = dest_identity.storage_id if redirected else storage_id
+                    log_memory_scope_id = dest_identity.memory_scope_id if redirected else memory_scope_id
+                    log_place_scope_id = dest_identity.place_scope_id if redirected else place_scope_id
                     self.message_history.add_message(
-                        platform=platform,
-                        chat_id=storage_id,
+                        platform=log_platform,
+                        chat_id=log_storage_id,
                         role="assistant",
                         content=review_reply,
                         user_id="assistant",
                         metadata={"source": "polling_review", "platform_message_ids": sent_ids},
-                        memory_scope_id=memory_scope_id,
-                        place_scope_id=place_scope_id,
+                        memory_scope_id=log_memory_scope_id,
+                        place_scope_id=log_place_scope_id,
                     )
                     # 同步到 session history
                     if not action == "continue":

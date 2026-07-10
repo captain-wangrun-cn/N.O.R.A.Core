@@ -43,7 +43,7 @@ from core.cost_tracker import get_cost_tracker
 from core.worker_status import WorkerStatus, BackendTaskQueue
 from core.scheduler import ProactiveScheduler
 from core.default_chat_id_store import load_default_chat_id, load_default_chat_target
-from core.delivery_target_store import resolve_delivery_runtime_key
+from core.delivery_target_store import resolve_delivery_runtime_key, resolve_route_target
 from core.conversation_identity import (
     ConversationIdentity,
     build_conversation_identity,
@@ -53,7 +53,7 @@ from core.conversation_identity import (
     resolve_platform,
     runtime_key_for,
 )
-from core.routing import sanitize_user_visible_text
+from core.routing import sanitize_user_visible_text, parse_route_markers
 from triggers import TriggerManager
 from triggers.factory import build_triggers
 import config
@@ -108,8 +108,22 @@ class NoraController(
     # 初始化
     # ------------------------------------------------------------------
 
-    def __init__(self, adapter: BaseAdapter, tui_callback: Optional[Callable[[str], None]] = None):
-        self.adapter = adapter
+    def __init__(self, adapter, tui_callback: Optional[Callable[[str], None]] = None):
+        # adapter 可为单个 BaseAdapter，或 list/tuple/dict（多适配器并发在线）。
+        if isinstance(adapter, dict):
+            adapter_list = [a for a in adapter.values() if a is not None]
+        elif isinstance(adapter, (list, tuple)):
+            adapter_list = [a for a in adapter if a is not None]
+        else:
+            adapter_list = [adapter]
+        if not adapter_list:
+            raise ValueError("NoraController 需要至少一个适配器")
+        # 平台注册表：platform_name -> adapter。同名后者覆盖前者。
+        self.adapters: Dict[str, BaseAdapter] = {}
+        for a in adapter_list:
+            self.adapters[getattr(a, "platform_name", "unknown")] = a
+        # primary（首个）保留兼容旧的 self.adapter 单适配器引用。
+        self.adapter = adapter_list[0]
         self.tui_callback = tui_callback
         # 注入主人识别回调，让 conversation_identity 能判断 is_owner（自动绑定+config 预声明）。
         try:
@@ -357,6 +371,82 @@ class NoraController(
     def _platform_for_key(self, chat_or_runtime_key: str) -> str:
         return self._identity_for_runtime_key(str(chat_or_runtime_key)).platform
 
+    def _adapter_for_key(self, chat_or_runtime_key: str) -> BaseAdapter:
+        """按 runtime_key 的平台前缀选适配器；未知平台回退 primary。"""
+        platform = self._platform_for_key(chat_or_runtime_key)
+        return self.adapters.get(platform) or self.adapter
+
+    def _chat_type_lookup(self, platform: str, platform_chat_id: str) -> str:
+        """给 resolve_route_target 用：从身份缓存查某会话的 chat_type。"""
+        runtime_key = f"{platform}:{platform_chat_id}"
+        identity = self.conversation_identities.get(runtime_key)
+        if identity:
+            return identity.chat_type
+        return ""
+
+    def resolve_send_target(
+        self,
+        route: Optional[Dict[str, Any]],
+        source_identity: Optional[ConversationIdentity] = None,
+    ) -> Dict[str, Any]:
+        """把 Nora 输出的路由标记解析为投递目标，并登记目标身份。
+
+        返回：{"runtime_key", "platform", "platform_chat_id", "chat_type",
+               "redirected", "identity"}。
+        无标记/解析失败时 runtime_key 为源会话，redirected=False。
+        """
+        current_target = conversation_target_dict(source_identity) if source_identity else None
+        resolved = resolve_route_target(
+            route=route,
+            current_target=current_target,
+            chat_type_lookup=self._chat_type_lookup,
+        )
+        runtime_key = str(resolved.get("runtime_key") or "").strip()
+        if not runtime_key:
+            # 兜底：回到源会话。
+            resolved["identity"] = source_identity
+            return resolved
+        # 已知会话直接复用；未知会话（如 Nora 首次点名某群）按 target 建身份并登记。
+        identity = self.conversation_identities.get(runtime_key)
+        if not identity:
+            identity = build_identity_from_target({
+                "platform": resolved.get("platform"),
+                "platform_chat_id": resolved.get("platform_chat_id"),
+                "chat_id": resolved.get("platform_chat_id"),
+                "chat_type": resolved.get("chat_type"),
+                "runtime_key": runtime_key,
+            })
+            self._remember_identity(identity)
+        resolved["identity"] = identity
+        return resolved
+
+    def resolve_route_state(
+        self,
+        text: str,
+        route_state: Dict[str, Any],
+        source_identity: Optional[ConversationIdentity] = None,
+    ) -> Dict[str, Any]:
+        """流式发送用：首个含路由标记的文本解析一次，之后复用同一目标。
+
+        约定标记是整条消息的前缀，故首个待发文本即可判定。首个文本无标记
+        即视为无重定向、就地回复（resolved=True 锁定）。route_state 会被就地
+        更新，含 key/chat_type/redirected/identity/resolved。
+        """
+        if route_state.get("resolved"):
+            return route_state
+        route_state["resolved"] = True
+        route, _ = parse_route_markers(text or "")
+        if not (route.get("platform") or route.get("scene_id")):
+            return route_state  # 无标记 → 保持默认（当前会话）
+        target = self.resolve_send_target(route, source_identity)
+        key = str(target.get("runtime_key") or "").strip()
+        if key:
+            route_state["key"] = key
+            route_state["chat_type"] = target.get("chat_type") or route_state.get("chat_type", "")
+            route_state["redirected"] = bool(target.get("redirected"))
+            route_state["identity"] = target.get("identity")
+        return route_state
+
     def _scope_key_for_identity(self, identity: ConversationIdentity) -> str:
         """Runtime queue key for one shared memory scope."""
         return identity.memory_scope_id or identity.runtime_key
@@ -452,20 +542,24 @@ class NoraController(
         text = sanitize_user_visible_text(text)
         if not text:
             return []
-        return await self.adapter.send_message(
+        return await self._adapter_for_key(chat_or_runtime_key).send_message(
             self._platform_chat_id(chat_or_runtime_key),
             text,
             **kwargs,
         )
 
     async def _start_platform_typing(self, chat_or_runtime_key: str):
-        return await self.adapter.start_typing(self._platform_chat_id(chat_or_runtime_key))
+        return await self._adapter_for_key(chat_or_runtime_key).start_typing(
+            self._platform_chat_id(chat_or_runtime_key)
+        )
 
     async def _stop_platform_typing(self, chat_or_runtime_key: str):
-        return await self.adapter.stop_typing(self._platform_chat_id(chat_or_runtime_key))
+        return await self._adapter_for_key(chat_or_runtime_key).stop_typing(
+            self._platform_chat_id(chat_or_runtime_key)
+        )
 
     async def _delete_platform_message(self, chat_or_runtime_key: str, message_id: str, **kwargs) -> bool:
-        return await self.adapter.delete_message(
+        return await self._adapter_for_key(chat_or_runtime_key).delete_message(
             self._platform_chat_id(chat_or_runtime_key),
             message_id,
             **kwargs,

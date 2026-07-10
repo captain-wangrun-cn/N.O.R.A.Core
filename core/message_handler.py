@@ -17,7 +17,7 @@ from core.routing import has_image_input, sanitize_user_visible_text
 from core.conversation_identity import conversation_target_dict, normalize_chat_type
 from core.scene_context import build_current_scene_block, should_redact_cross_place_details
 from core.default_chat_id_store import save_default_chat_target
-from core.delivery_target_store import update_last_active_target
+from core.delivery_target_store import record_active_scene
 from core.scheduler import (
     AIPresence,
     set_ai_presence,
@@ -249,14 +249,14 @@ class MessageHandlerMixin:
                     trig.default_chat_target = dict(self.trigger_manager.default_chat_target)
             logger.info(f"Trigger default_chat_id 已设置: {chat_id}")
 
-        # ── 更新最近活跃投递端（跨平台接力 Phase 4）──
-        # 主动消息默认投递到用户最后活跃的私聊端；群聊活跃不改变投递目标
-        # （update_last_active_target 内部已对群聊做拦截，落实「仅私聊投递」）。
-        if chat_type == "private":
-            try:
-                update_last_active_target(conversation_target_dict(identity))
-            except Exception as e:
-                logger.debug(f"[{chat_id}] 更新最近活跃投递端失败: {e}")
+        # ── 记录活跃平台 + 活跃场景（含群聊）──
+        # 最新收到消息的平台/场景成为活跃平台/活跃场景，用于 Nora 输出标记
+        # [platform][scene] 缺省时的兜底。私聊会顺带刷新主动投递端；
+        # 群聊只记活跃场景、不改动私聊投递键（绝不自动发进群）。
+        try:
+            record_active_scene(conversation_target_dict(identity))
+        except Exception as e:
+            logger.debug(f"[{chat_id}] 记录活跃平台/场景失败: {e}")
 
         # ── 命令分发 ──
         stripped = text.strip()
@@ -633,14 +633,28 @@ class MessageHandlerMixin:
             await self._handle_retract_signal(chat_id, chat_type, user_id, retract_target)
 
         if send_front_reply:
+            # 解析 Nora 输出里的 [platform:X][scene:Y] 重定向标记；缺项取活跃值。
+            send_target = self.resolve_send_target(front_result.get("route"), identity)
+            send_key = send_target.get("runtime_key") or chat_id
+            send_chat_type = send_target.get("chat_type") or chat_type
+            redirected = bool(send_target.get("redirected"))
+            dest_identity = send_target.get("identity") or identity
+            # 重定向到别的场景时，被引用的消息 id 在目标场景不存在，不能带引用。
+            reply_id = "" if redirected else reply_to_message_id
             # 使用 [SPLIT] 分段发送
             sent_message_ids = await self._send_split_message(
-                chat_id,
+                send_key,
                 user_reply,
-                reply_to_message_id=reply_to_message_id,
+                reply_to_message_id=reply_id,
+                chat_type=send_chat_type,
             )
 
-            # 保存前脑回复到数据库，记录来源与平台 message_id
+            # 保存前脑回复到数据库，记录来源与平台 message_id。
+            # 若发生重定向，落库到目标场景的作用域，避免历史记到错误会话。
+            log_platform = dest_identity.platform if redirected else platform
+            log_storage_id = dest_identity.storage_id if redirected else storage_id
+            log_memory_scope_id = dest_identity.memory_scope_id if redirected else memory_scope_id
+            log_place_scope_id = dest_identity.place_scope_id if redirected else place_scope_id
             metadata: Dict[str, Any] = {"source": "front"}
             if sent_message_ids:
                 metadata["platform_message_ids"] = sent_message_ids
@@ -654,14 +668,14 @@ class MessageHandlerMixin:
                     "task_instruction": front_task_instruction,
                 }
             self.message_history.add_message(
-                platform=platform,
-                chat_id=storage_id,
+                platform=log_platform,
+                chat_id=log_storage_id,
                 role="assistant",
                 content=user_reply,
                 user_id="assistant",
                 metadata=metadata,
-                memory_scope_id=memory_scope_id,
-                place_scope_id=place_scope_id,
+                memory_scope_id=log_memory_scope_id,
+                place_scope_id=log_place_scope_id,
             )
 
             # 同步到 session history
@@ -1210,12 +1224,19 @@ class MessageHandlerMixin:
         text: str,
         *,
         reply_to_message_id: str = "",
+        chat_type: str = "",
     ) -> list[str]:
-        """按 [SPLIT] 或 [SPLIT:delay] 规则发送消息，返回平台消息 ID 列表。"""
+        """按 [SPLIT] 或 [SPLIT:delay] 规则发送消息，返回平台消息 ID 列表。
+
+        chat_type 非空时透传给适配器（OneBot 用它区分群/私聊，消除歧义）。
+        """
         sent_message_ids: list[str] = []
         text = sanitize_user_visible_text(text)
         if not text:
             return sent_message_ids
+        send_kwargs: Dict[str, Any] = {"reply_to_message_id": reply_to_message_id}
+        if chat_type:
+            send_kwargs["chat_type"] = chat_type
         # _SPLIT_MARKER_PATTERN 现在返回 [text_part, delay_str, text_part, ...]
         parts = self._SPLIT_MARKER_PATTERN.split(text)
 
@@ -1225,7 +1246,7 @@ class MessageHandlerMixin:
                 msg_ids = await self._send_platform_message(
                     chat_id,
                     part,
-                    reply_to_message_id=reply_to_message_id,
+                    **send_kwargs,
                 )
                 if msg_ids:
                     sent_message_ids.extend(str(mid) for mid in msg_ids)

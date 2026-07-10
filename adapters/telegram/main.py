@@ -106,6 +106,33 @@ class TelegramAdapter(
         self._model_option_tokens: Dict[str, Dict[str, Any]] = {}
 
     def run(self, message_handler: Callable[[Dict[str, Any]], Any]):
+        self._configure_application(message_handler)
+        self.application.post_init = self._post_init_setup
+        logger.info("Telegram Adapter is running...")
+        self.application.run_polling(stop_signals=None)
+
+    async def run_async(self, message_handler: Callable[[Dict[str, Any]], Any]) -> None:
+        """并发入口：在调用方事件循环内启动 polling，不自建循环。"""
+        self._configure_application(message_handler)
+        logger.info("Telegram Adapter is running (async)...")
+        await self.application.initialize()
+        # run_polling 会自动触发 post_init；手动生命周期下需自行调用。
+        await self._post_init_setup(self.application)
+        await self.application.updater.start_polling()
+        await self.application.start()
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            pass
+        finally:
+            if self.application.updater.running:
+                await self.application.updater.stop()
+            if self.application.running:
+                await self.application.stop()
+            await self.application.shutdown()
+
+    def _configure_application(self, message_handler: Callable[[Dict[str, Any]], Any]) -> None:
+        """注册所有处理器与聚合器（run 与 run_async 共用）。"""
         self._message_handler = message_handler
         import config
 
@@ -138,11 +165,6 @@ class TelegramAdapter(
         self.application.add_handler(MessageHandler(filters.Document.ALL, self._handle_document))
         self.application.add_handler(MessageHandler(filters.Sticker.ALL, self._handle_sticker))
         self.application.add_handler(CallbackQueryHandler(self._handle_callback))
-
-        self.application.post_init = self._post_init_setup
-
-        logger.info("Telegram Adapter is running...")
-        self.application.run_polling(stop_signals=None)
 
     async def _post_init_setup(self, application: Application):
         """完成 Telegram 启动后初始化，并触发生命周期钩子。"""

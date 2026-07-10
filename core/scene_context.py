@@ -11,6 +11,14 @@ from typing import Any, Mapping, Optional
 from core.conversation_identity import ConversationIdentity, PRIVATE_CHAT_TYPE
 
 
+def _canonical_scene_marker(platform: str, chat_type: str, platform_chat_id: str) -> str:
+    """构造某场景的规范投递标记 `[platform:X][scene:type:id]`。"""
+    platform = _clean(platform).lower()
+    chat_type = _clean(chat_type).lower() or PRIVATE_CHAT_TYPE
+    chat_id = _clean(platform_chat_id)
+    return f"[platform:{platform}][scene:{chat_type}:{chat_id}]"
+
+
 def _clean(value: Any) -> str:
     return str(value or "").strip()
 
@@ -94,7 +102,39 @@ def build_current_scene_block(
     else:
         lines.append("- 私聊边界: 这是当前私聊窗口；文件、结果和进度默认发回这里，除非用户明确要求转发到群聊或其它窗口。")
 
+    # 跨场景投递提示：默认无需标记；仅当要发去别处时用规范标记。
+    self_marker = _canonical_scene_marker(identity.platform, chat_type, identity.platform_chat_id)
+    lines.append(
+        f"- 投递默认: 回复默认发回当前场景，无需任何标记。若确需发去别的平台/场景，才在整条消息最前面加 `[platform:X][scene:type:id]`（type 为 group/private）。本场景标记为 {self_marker}。"
+    )
+
+    known = _known_scene_lines(identity)
+    if known:
+        lines.append("- 已知可投递场景（仅这些是确认存在的合法目标，不要编造其它 id）:")
+        lines.extend(f"  · {line}" for line in known)
+
     return "\n".join(lines)
+
+
+def _known_scene_lines(current: ConversationIdentity) -> list[str]:
+    """列出已知活跃场景的规范标记，供模型选择合法投递目标。"""
+    try:
+        from core.delivery_target_store import load_known_scenes
+        scenes = load_known_scenes()
+    except Exception:
+        return []
+    out: list[str] = []
+    cur_key = _clean(current.runtime_key)
+    for scene in scenes:
+        platform = _clean(scene.get("platform"))
+        chat_id = _clean(scene.get("platform_chat_id"))
+        chat_type = _clean(scene.get("chat_type")) or PRIVATE_CHAT_TYPE
+        if not platform or not chat_id:
+            continue
+        marker = _canonical_scene_marker(platform, chat_type, chat_id)
+        tag = "（当前）" if _clean(scene.get("runtime_key")) == cur_key else ""
+        out.append(f"{marker}{tag}")
+    return out
 
 
 def should_redact_cross_place_details(

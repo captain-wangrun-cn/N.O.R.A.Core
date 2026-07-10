@@ -116,6 +116,21 @@ class OneBotV11Adapter(
         self._ready_fired = False
 
     def run(self, message_handler: Callable[[Dict[str, Any]], Any]):
+        self._configure(message_handler)
+        logger.info("[onebotv11] Adapter starting with connection_type=%s", self.connection_type)
+        try:
+            asyncio.run(self._run_forever())
+        except KeyboardInterrupt:
+            logger.info("[onebotv11] Adapter stopped by keyboard interrupt.")
+
+    async def run_async(self, message_handler: Callable[[Dict[str, Any]], Any]) -> None:
+        """并发入口：在调用方事件循环内常驻，不自建循环。"""
+        self._configure(message_handler)
+        logger.info("[onebotv11] Adapter starting (async) with connection_type=%s", self.connection_type)
+        await self._run_forever()
+
+    def _configure(self, message_handler: Callable[[Dict[str, Any]], Any]) -> None:
+        """初始化 handler 与聚合器（run 与 run_async 共用）。"""
         self._message_handler = message_handler
         import config
 
@@ -126,11 +141,6 @@ class OneBotV11Adapter(
             timeout=buffer_timeout,
             on_complete=self.on_aggregator_complete,
         )
-        logger.info("[onebotv11] Adapter starting with connection_type=%s", self.connection_type)
-        try:
-            asyncio.run(self._run_forever())
-        except KeyboardInterrupt:
-            logger.info("[onebotv11] Adapter stopped by keyboard interrupt.")
 
     async def _run_forever(self) -> None:
         await self.startup()

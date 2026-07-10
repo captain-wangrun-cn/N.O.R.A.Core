@@ -104,6 +104,65 @@ def test_load_empty_when_no_file(tmp_path, monkeypatch):
 
 
 # ----------------------------------------------------------------------
+# record_active_scene + resolve_route_target（活跃平台/场景 & 路由标记）
+# ----------------------------------------------------------------------
+
+def test_record_active_scene_records_group_without_touching_delivery(tmp_path, monkeypatch):
+    _patch_workspace(monkeypatch, tmp_path)
+    # 先有一个私聊投递端
+    delivery_target_store.record_active_scene(_private_target(chat_id="111"))
+    # 群聊活跃：记入活跃场景，但不改私聊投递端
+    delivery_target_store.record_active_scene(_group_target(chat_id="-100"))
+    assert delivery_target_store.load_active_platform() == "telegram"
+    assert delivery_target_store.load_active_target()["platform_chat_id"] == "-100"
+    # 私聊投递端不受群聊影响，绝不自动进群
+    assert delivery_target_store.load_last_active_runtime_key() == "telegram:111"
+
+
+def test_load_known_scenes_lists_per_platform(tmp_path, monkeypatch):
+    _patch_workspace(monkeypatch, tmp_path)
+    delivery_target_store.record_active_scene(_private_target(chat_id="111"))
+    delivery_target_store.record_active_scene(
+        _group_target(chat_id="-100", platform="onebotv11", user_id="u-1")
+    )
+    scenes = delivery_target_store.load_known_scenes()
+    keys = {s["runtime_key"] for s in scenes}
+    assert "telegram:111" in keys
+    assert "onebotv11:-100" in keys
+
+
+def test_resolve_route_target_defaults_to_current_when_no_markers(tmp_path, monkeypatch):
+    _patch_workspace(monkeypatch, tmp_path)
+    current = _private_target(chat_id="123")
+    resolved = delivery_target_store.resolve_route_target(route=None, current_target=current)
+    assert resolved["runtime_key"] == "telegram:123"
+    assert resolved["redirected"] is False
+
+
+def test_resolve_route_target_explicit_group_marker_redirects(tmp_path, monkeypatch):
+    _patch_workspace(monkeypatch, tmp_path)
+    current = _private_target(chat_id="123")
+    route = {"platform": "onebotv11", "scene_id": "700", "scene_type": "group"}
+    resolved = delivery_target_store.resolve_route_target(route=route, current_target=current)
+    assert resolved["runtime_key"] == "onebotv11:700"
+    assert resolved["chat_type"] == "group"
+    assert resolved["redirected"] is True
+
+
+def test_resolve_route_target_platform_only_uses_that_platform_active_scene(tmp_path, monkeypatch):
+    _patch_workspace(monkeypatch, tmp_path)
+    # onebotv11 最近活跃在某群
+    delivery_target_store.record_active_scene(
+        _group_target(chat_id="-55", platform="onebotv11", user_id="u-1")
+    )
+    current = _private_target(chat_id="123", platform="telegram")
+    route = {"platform": "onebotv11", "scene_id": "", "scene_type": ""}
+    resolved = delivery_target_store.resolve_route_target(route=route, current_target=current)
+    assert resolved["runtime_key"] == "onebotv11:-55"
+    assert resolved["redirected"] is True
+
+
+# ----------------------------------------------------------------------
 # ProactiveScheduler._resolve_delivery_target
 # ----------------------------------------------------------------------
 

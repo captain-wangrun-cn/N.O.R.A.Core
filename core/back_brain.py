@@ -364,6 +364,29 @@ class BackBrainMixin:
         primary_platform_msg_id = platform_msg_ids[0] if platform_msg_ids else None
         reply_to_message_id = reply_target_message_id(context)
 
+        # 路由重定向状态：后脑流式输出可能带 [platform:X][scene:Y] 前缀，
+        # 首个待发文本解析一次，之后本轮复用同一目标（见 controller.resolve_route_state）。
+        _route_state: Dict[str, Any] = {
+            "key": chat_id,
+            "chat_type": chat_type,
+            "redirected": False,
+            "identity": identity,
+            "resolved": False,
+        }
+
+        async def _send_reply(text_to_send: str) -> list[str]:
+            """按路由标记把后脑回复发到目标场景（缺省=当前会话）。"""
+            self.resolve_route_state(text_to_send, _route_state, identity)
+            send_key = _route_state.get("key") or chat_id
+            send_ct = _route_state.get("chat_type") or chat_type
+            reply_id = "" if _route_state.get("redirected") else reply_to_message_id
+            return await self._send_split_message(
+                send_key,
+                text_to_send,
+                reply_to_message_id=reply_id,
+                chat_type=send_ct,
+            )
+
         # 记录本次后脑任务的输入快照：被"新图片到达"打断重启时需要把旧图+新图合并
         self.back_brain_input_context[chat_id] = {
             "text": text,
@@ -857,11 +880,7 @@ class BackBrainMixin:
                                     ):
                                         # 轮询模式 / no_reply / 图片标签待校验 时均不直接发送，先缓冲
                                         if not in_polling_mode and not no_reply and not defer_user_send_until_image_tags_ready:
-                                            msg_ids = await self._send_platform_message(
-                                                chat_id,
-                                                text_to_send,
-                                                reply_to_message_id=reply_to_message_id,
-                                            )
+                                            msg_ids = await _send_reply(text_to_send)
                                             if msg_ids:
                                                 response_platform_ids.extend(str(mid) for mid in msg_ids)
                                         elif defer_user_send_until_image_tags_ready and not in_polling_mode and not no_reply:
@@ -1564,10 +1583,8 @@ class BackBrainMixin:
                 clean_response = self._strip_timestamp_markers(clean_response)
                 if clean_response:
                     if not in_polling and not no_reply:
-                        sent_ids = await self._send_split_message(
-                            chat_id,
+                        sent_ids = await _send_reply(
                             self._strip_timestamp_markers(clean_response),
-                            reply_to_message_id=reply_to_message_id,
                         )
                         if sent_ids:
                             response_platform_ids.extend(sent_ids)
@@ -1599,20 +1616,16 @@ class BackBrainMixin:
                 final_response_buffer = self._strip_timestamp_markers(final_response_buffer)
                 if final_response_buffer:
                     if not in_polling and not no_reply:
-                        sent_ids = await self._send_split_message(
-                            chat_id,
+                        sent_ids = await _send_reply(
                             self._strip_timestamp_markers(final_response_buffer),
-                            reply_to_message_id=reply_to_message_id,
                         )
                         if sent_ids:
                             response_platform_ids.extend(sent_ids)
                 else:
                     final_response_buffer = "任务已完成。"
                     if not in_polling and not no_reply:
-                        sent_ids = await self._send_split_message(
-                            chat_id,
+                        sent_ids = await _send_reply(
                             self._strip_timestamp_markers(final_response_buffer),
-                            reply_to_message_id=reply_to_message_id,
                         )
                         if sent_ids:
                             response_platform_ids.extend(sent_ids)
@@ -1641,20 +1654,16 @@ class BackBrainMixin:
                 final_response_buffer = self._strip_timestamp_markers(final_response_buffer)
                 if final_response_buffer:
                     if not in_polling and not no_reply:
-                        sent_ids = await self._send_split_message(
-                            chat_id,
+                        sent_ids = await _send_reply(
                             self._strip_timestamp_markers(final_response_buffer),
-                            reply_to_message_id=reply_to_message_id,
                         )
                         if sent_ids:
                             response_platform_ids.extend(sent_ids)
                 else:
                     final_response_buffer = "任务已完成。"
                     if not in_polling and not no_reply:
-                        sent_ids = await self._send_split_message(
-                            chat_id,
+                        sent_ids = await _send_reply(
                             self._strip_timestamp_markers(final_response_buffer),
-                            reply_to_message_id=reply_to_message_id,
                         )
                         if sent_ids:
                             response_platform_ids.extend(sent_ids)
@@ -1668,15 +1677,17 @@ class BackBrainMixin:
                 if response_platform_ids:
                     metadata["platform_message_ids"] = response_platform_ids
 
+                # 若发生重定向，落库到目标场景作用域，避免历史记到错误会话。
+                _dest = _route_state.get("identity") if _route_state.get("redirected") else None
                 self.message_history.add_message(
-                    platform=platform,
-                    chat_id=storage_id,
+                    platform=_dest.platform if _dest else platform,
+                    chat_id=_dest.storage_id if _dest else storage_id,
                     role="assistant",
                     content=final_response_buffer,
                     user_id="assistant",
                     metadata=metadata,
-                    memory_scope_id=memory_scope_id,
-                    place_scope_id=place_scope_id,
+                    memory_scope_id=_dest.memory_scope_id if _dest else memory_scope_id,
+                    place_scope_id=_dest.place_scope_id if _dest else place_scope_id,
                 )
             
             # --- 4.6 图片记忆存储 (Image Memory Storage) ---
