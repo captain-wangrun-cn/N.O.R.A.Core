@@ -102,6 +102,10 @@ class NoraController(
         r'\[VIDEO_TAGS:([^\]\s]+)\](.*?)\[/VIDEO_TAGS\]',
         re.IGNORECASE | re.DOTALL,
     )
+    _VIDEO_DESC_PATTERN = re.compile(
+        r'\[VIDEO_DESC:([^\]\s]+)\](.*?)\[/VIDEO_DESC\]',
+        re.IGNORECASE | re.DOTALL,
+    )
     _SYSTEM_ENV_MARKER = "【系统环境信息 (System Environment)】"
     _LEXICON_GLOBAL_MARKER = "【词库全局说明 (Lexicon Global Prompt)】"
 

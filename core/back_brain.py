@@ -96,6 +96,8 @@ class BackBrainMixin:
         cleaned = cls._IMAGE_DESC_PATTERN.sub("", cleaned)  # type: ignore[attr-defined]
         # 移除 VIDEO_TAGS 块（不应展示给用户，仅后台存储用）
         cleaned = cls._VIDEO_TAGS_PATTERN.sub("", cleaned)  # type: ignore[attr-defined]
+        # 移除 VIDEO_DESC 块（不应展示给用户，仅后台存储用）
+        cleaned = cls._VIDEO_DESC_PATTERN.sub("", cleaned)  # type: ignore[attr-defined]
         cleaned = re.sub(r'\n{3,}', '\n\n', cleaned).strip()
         return cleaned
 
@@ -1737,19 +1739,29 @@ class BackBrainMixin:
             # --- 4.7 视频记忆存储 (Video Memory Storage) ---
             if multimodal_videos and video_llm_available and self.image_store.enabled:
                 video_tags_extracted: Dict[str, str] = {}
-                # 仅对新用户视频（非工具回查）提取标签，和图片逻辑一致
+                video_desc_extracted: Dict[str, str] = {}
+                # 仅对新用户视频（非工具回查）提取标签和描述，和图片逻辑一致
                 expected_video_ids = [vid["video_id"] for vid in multimodal_videos if not vid.get("from_tool")]
                 if expected_video_ids:
                     source_text_for_vtags = final_response_buffer or last_video_raw_output or ""
+                    parsed_vtag_blocks: List[tuple[str, str]] = []
+                    parsed_vdesc_blocks: List[tuple[str, str]] = []
                     for m in self._VIDEO_TAGS_PATTERN.finditer(source_text_for_vtags):
                         vid_id = m.group(1).strip()
                         tags_text = m.group(2).strip()
                         if vid_id and tags_text:
                             video_tags_extracted[vid_id] = tags_text
+                            parsed_vtag_blocks.append((vid_id, tags_text))
+
+                    for m in self._VIDEO_DESC_PATTERN.finditer(source_text_for_vtags):
+                        vid_id = m.group(1).strip()
+                        desc_text = m.group(2).strip()
+                        if vid_id and desc_text and desc_text != "未识别":
+                            video_desc_extracted[vid_id] = desc_text
+                            parsed_vdesc_blocks.append((vid_id, desc_text))
 
                     # ID 重映射（和图片逻辑一致）
                     expected_video_set = set(expected_video_ids)
-                    parsed_vtag_blocks = list(video_tags_extracted.items())
                     if parsed_vtag_blocks:
                         for idx, expected_id in enumerate(expected_video_ids):
                             if expected_id in video_tags_extracted:
@@ -1761,20 +1773,32 @@ class BackBrainMixin:
                                 video_tags_extracted[expected_id] = parsed_tags
                                 logger.warning(f"[{chat_id}] VIDEO_TAGS id 不匹配，重映射: {parsed_id} -> {expected_id}")
 
+                    if parsed_vdesc_blocks:
+                        for idx, expected_id in enumerate(expected_video_ids):
+                            if expected_id in video_desc_extracted:
+                                continue
+                            if idx >= len(parsed_vdesc_blocks):
+                                break
+                            parsed_id, parsed_desc = parsed_vdesc_blocks[idx]
+                            if parsed_id not in expected_video_set and parsed_desc:
+                                video_desc_extracted[expected_id] = parsed_desc
+                                logger.warning(f"[{chat_id}] VIDEO_DESC id 不匹配，重映射: {parsed_id} -> {expected_id}")
+
                     for vid in multimodal_videos:
                         if vid.get("from_tool"):
                             continue
                         vid_id = vid["video_id"]
                         tags = video_tags_extracted.get(vid_id, "")
-                        if not tags:
-                            logger.warning(f"[{chat_id}] 视频 {vid_id} 未生成标签，保持占位 (path={vid['path']})")
+                        description = video_desc_extracted.get(vid_id, "")
+                        if not tags and not description:
+                            logger.warning(f"[{chat_id}] 视频 {vid_id} 未生成标签/描述，保持占位 (path={vid['path']})")
                             continue
                         asyncio.create_task(
                             self._async_update_image_tags(
                                 image_id=vid_id,
                                 tags=tags,
                                 ocr_text="",
-                                description="",
+                                description=description,
                                 user_id=user_id,
                                 chat_id=platform_chat_id,
                                 file_path=vid["path"],
@@ -1788,7 +1812,8 @@ class BackBrainMixin:
                                 actor_display_name=actor_display_name,
                             )
                         )
-                        logger.info(f"[{chat_id}] 视频 {vid_id} 标签已补充: '{tags[:60]}...'")
+                        desc_info = f", desc='{description[:40]}...'" if description else ""
+                        logger.info(f"[{chat_id}] 视频 {vid_id} 标签已补充: '{tags[:60]}...'{desc_info}")
             # --- 5. RAG 记忆存储 (Memory Storage) ---
             if self.rag.enabled:
                 asyncio.create_task(
