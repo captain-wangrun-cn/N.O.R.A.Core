@@ -56,9 +56,14 @@ def test_onebot_standard_tools_are_exposed_without_napcat():
     names = {tool.name for tool in tools}
 
     assert "onebotv11_get_group_member_list" in names
+    assert "onebotv11_send_private_msg" in names
+    assert "onebotv11_send_group_msg" in names
     assert "onebotv11_set_group_ban" in names
     assert "onebotv11_napcat_send_poke" not in names
     assert all(isinstance(tool, AdapterToolSpec) for tool in tools)
+    assert next(tool for tool in tools if tool.name == "onebotv11_send_private_msg").risk == "medium"
+    assert next(tool for tool in tools if tool.name == "onebotv11_send_private_msg").requires_owner_confirmation is True
+    assert next(tool for tool in tools if tool.name == "onebotv11_send_group_msg").requires_owner_confirmation is True
     assert next(tool for tool in tools if tool.name == "onebotv11_set_group_ban").risk == "high"
 
 
@@ -108,6 +113,41 @@ def test_onebot_napcat_send_poke_prefers_current_group():
 
     assert result["ok"] is True
     assert adapter.calls == [("send_poke", {"user_id": 20002, "group_id": 10001})]
+
+
+def test_onebot_send_message_tools_call_standard_actions():
+    adapter = ToolOnlyOneBot()
+
+    private = _loads(asyncio.run(adapter.onebotv11_send_private_msg("20002", "你好", auto_escape=True)))
+    group = _loads(asyncio.run(adapter.onebotv11_send_group_msg("大家好")))
+
+    assert private["ok"] is True
+    assert private["target_user_id"] == "20002"
+    assert group["ok"] is True
+    assert group["group_id"] == "10001"
+    assert adapter.calls == [
+        (
+            "send_private_msg",
+            {"user_id": 20002, "message": "你好", "auto_escape": True},
+        ),
+        (
+            "send_group_msg",
+            {"group_id": 10001, "message": "大家好", "auto_escape": False},
+        ),
+    ]
+
+
+def test_onebot_send_message_tools_reject_empty_content():
+    adapter = ToolOnlyOneBot()
+
+    private = _loads(asyncio.run(adapter.onebotv11_send_private_msg("20002", "  ")))
+    group = _loads(asyncio.run(adapter.onebotv11_send_group_msg("")))
+
+    assert private["ok"] is False
+    assert group["ok"] is False
+    assert "message is required" in private["error"]
+    assert "message is required" in group["error"]
+    assert adapter.calls == []
 
 
 class SenderOnlyOneBot(OneBotSenderMixin):

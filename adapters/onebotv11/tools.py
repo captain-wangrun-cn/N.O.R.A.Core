@@ -120,6 +120,22 @@ class OneBotV11ToolsMixin:
                 platform="onebotv11",
             ),
             AdapterToolSpec(
+                name="onebotv11_send_private_msg",
+                callable=self.onebotv11_send_private_msg,
+                intro="向指定 QQ 用户发送私聊文本消息；这是对外发送操作，执行前必须确认目标和内容。",
+                risk="medium",
+                requires_owner_confirmation=True,
+                platform="onebotv11",
+            ),
+            AdapterToolSpec(
+                name="onebotv11_send_group_msg",
+                callable=self.onebotv11_send_group_msg,
+                intro="向当前或指定 QQ 群发送文本消息；这是对外发送操作，执行前必须确认目标和内容。",
+                risk="medium",
+                requires_owner_confirmation=True,
+                platform="onebotv11",
+            ),
+            AdapterToolSpec(
                 name="onebotv11_send_like",
                 callable=self.onebotv11_send_like,
                 intro="给指定 QQ 好友发送点赞；可能被平台频率限制。",
@@ -451,6 +467,57 @@ class OneBotV11ToolsMixin:
         :param forward_id: Merged forward id from a forward message segment.
         """
         return await self._call_onebot_tool("get_forward_msg", {"id": str(forward_id or "")}, forward_id=str(forward_id or ""))
+
+    async def onebotv11_send_private_msg(self, user_id: str, message: str, auto_escape: bool = False) -> str:
+        """
+        Send a text message to a QQ private chat.
+
+        :param user_id: Target QQ user id.
+        :param message: Text content to send. Do not pass raw OneBot message arrays or guessed CQ codes.
+        :param auto_escape: Whether to treat the string as plain text and escape CQ codes.
+        """
+        action = "send_private_msg"
+        try:
+            uid = self._onebot_user_id(user_id)
+            text = str(message or "")
+            if not text.strip():
+                raise ValueError("message is required.")
+            return await self._call_onebot_tool(
+                action,
+                {"user_id": uid, "message": text, "auto_escape": bool(auto_escape)},
+                target_user_id=str(uid),
+            )
+        except Exception as exc:
+            return _json_error(action, exc, target_user_id=str(user_id or ""))
+
+    async def onebotv11_send_group_msg(
+        self,
+        message: str,
+        group_id: str = "",
+        auto_escape: bool = False,
+        chat_id: str = "",
+    ) -> str:
+        """
+        Send a text message to a QQ group.
+
+        :param message: Text content to send. Do not pass raw OneBot message arrays or guessed CQ codes.
+        :param group_id: QQ group id. Leave empty to use current group chat.
+        :param auto_escape: Whether to treat the string as plain text and escape CQ codes.
+        :param chat_id: Auto-injected current platform chat id; normally leave empty.
+        """
+        action = "send_group_msg"
+        try:
+            gid = self._onebot_group_id(group_id, chat_id)
+            text = str(message or "")
+            if not text.strip():
+                raise ValueError("message is required.")
+            return await self._call_onebot_tool(
+                action,
+                {"group_id": gid, "message": text, "auto_escape": bool(auto_escape)},
+                group_id=str(gid),
+            )
+        except Exception as exc:
+            return _json_error(action, exc, group_id=str(group_id or chat_id or ""))
 
     async def onebotv11_send_like(self, user_id: str, times: int = 1) -> str:
         """

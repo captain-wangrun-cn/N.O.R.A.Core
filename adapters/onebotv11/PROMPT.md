@@ -28,12 +28,21 @@ OneBot adapter 会向后脑暴露平台工具。工具返回 JSON 字符串，�
 
 - `onebotv11_get_login_info()`：获取当前登录号信息。
 - `onebotv11_get_status()` / `onebotv11_get_version_info()`：查询 OneBot 实现状态与版本。
+- `onebotv11_get_friend_list(no_cache=false)`：查询当前登录号好友列表。
 - `onebotv11_get_group_info(group_id="", no_cache=false)`：查询群信息。
 - `onebotv11_get_group_list()`：查询登录号加入的群列表。
 - `onebotv11_get_group_member_info(user_id, group_id="", no_cache=false)`：查询单个群成员资料。
 - `onebotv11_get_group_member_list(group_id="")`：查询群成员列表。
 - `onebotv11_get_group_honor_info(group_id="", honor_type="all")`：查询群荣誉。
 - `onebotv11_get_msg(message_id)`：按 message_id 获取消息。
+- `onebotv11_get_forward_msg(forward_id)`：按合并转发 id 获取消息内容。
+
+消息发送工具：
+
+- `onebotv11_send_private_msg(user_id, message, auto_escape=false)`：向指定 QQ 用户发送私聊文本消息。
+- `onebotv11_send_group_msg(message, group_id="", auto_escape=false)`：向当前或指定 QQ 群发送文本消息。
+- 两个工具都会产生真实的对外消息；调用前必须向主人确认目标和发送内容。`auto_escape=true` 表示把字符串严格视为纯文本，不解析其中的 CQ 码。
+- 普通当前会话回复仍应直接输出文本，不要为了回复当前用户而调用发送工具；发送工具用于向其他已知私聊或群主动发送消息。
 
 群管/副作用工具：
 
