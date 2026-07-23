@@ -97,6 +97,13 @@ class TelegramAdapter(
         self.data_dir = str(workspace_manager.data_dir)
         self.telegram_data_dir = os.path.join(self.data_dir, "telegram")
         os.makedirs(self.telegram_data_dir, exist_ok=True)
+        # 首次启动自动迁移旧扁平媒体到 data/media/<platform>/<scene>/<chat_id>/<type>/ 结构
+        from scripts.media_migration import migrate_media_layout_once
+        migrate_media_layout_once(
+            data_dir=self.data_dir,
+            workspace_root=self.workspace_root,
+            platforms=[("telegram", self.telegram_data_dir)],
+        )
 
         self.application = ApplicationBuilder().token(token).build()
         self._aggregator: MessageAggregator | None = None

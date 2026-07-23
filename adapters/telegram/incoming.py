@@ -13,6 +13,11 @@ from .message import (
     strip_bot_mention,
     telegram_reliable_users,
 )
+from adapters.media_path import (
+    build_media_relpath,
+    build_media_subdir,
+    infer_scene,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -27,6 +32,26 @@ class TelegramIncomingMixin:
         if not update.message:
             return ""
         return update.message.text or update.message.caption or ""
+
+    def _media_target_dir(self, update: Update, media_type: str) -> str:
+        """按 平台/场景/chat_id/媒体类型 计算媒体落点的绝对目录。"""
+        chat = update.effective_chat
+        chat_type = chat.type if chat else ""
+        scene = infer_scene(chat_type=chat_type, chat_id=self.current_chat_id)
+        return build_media_subdir(
+            data_dir=self.data_dir,
+            platform="telegram",
+            scene=scene,
+            chat_id=self.current_chat_id or "",
+            media_type=media_type,
+        )
+
+    async def _download_media(self, update: Update, file_obj, filename: str, media_type: str) -> str:
+        """下载到新结构目录，返回相对 workspace root 的路径（正斜杠）。"""
+        target_dir = self._media_target_dir(update, media_type)
+        abs_file_path = os.path.join(target_dir, filename)
+        await file_obj.download_to_drive(abs_file_path)
+        return os.path.relpath(abs_file_path, self.workspace_root).replace("\\", "/")
 
     def _has_bot_mention(self, update: Update) -> bool:
         text_to_check = self._message_text_for_mention(update)
@@ -151,7 +176,8 @@ class TelegramIncomingMixin:
         
         # 下载图片
         file = await photo.get_file()
-        abs_file_path = os.path.join(self.telegram_data_dir, f"photo_{photo.file_id}.jpg")
+        filename = f"photo_{photo.file_id}.jpg"
+        abs_file_path = os.path.join(self._media_target_dir(update, "image"), filename)
         await file.download_to_drive(abs_file_path)
         rel_file_path = os.path.relpath(abs_file_path, self.workspace_root).replace('\\', '/')
         
@@ -279,7 +305,7 @@ class TelegramIncomingMixin:
                 file_ext = ext
 
         file = await video.get_file()
-        abs_file_path = os.path.join(self.telegram_data_dir, f"video_{file_id}{file_ext}")
+        abs_file_path = os.path.join(self._media_target_dir(update, "video"), f"video_{file_id}{file_ext}")
         await file.download_to_drive(abs_file_path)
         rel_file_path = os.path.relpath(abs_file_path, self.workspace_root).replace('\\', '/')
 
@@ -358,7 +384,7 @@ class TelegramIncomingMixin:
         # 下载文档
         file = await document.get_file()
         file_name = document.file_name or f"document_{document.file_id}"
-        abs_file_path = os.path.join(self.telegram_data_dir, file_name)
+        abs_file_path = os.path.join(self._media_target_dir(update, "document"), file_name)
         await file.download_to_drive(abs_file_path)
         rel_file_path = os.path.relpath(abs_file_path, self.workspace_root).replace('\\', '/')
         
@@ -398,7 +424,7 @@ class TelegramIncomingMixin:
         # 下载贴纸
         file = await sticker.get_file()
         ext = "webm" if sticker.is_video else "webp"
-        abs_file_path = os.path.join(self.telegram_data_dir, f"sticker_{sticker.file_id}.{ext}")
+        abs_file_path = os.path.join(self._media_target_dir(update, "sticker"), f"sticker_{sticker.file_id}.{ext}")
         await file.download_to_drive(abs_file_path)
         rel_file_path = os.path.relpath(abs_file_path, self.workspace_root).replace('\\', '/')
         

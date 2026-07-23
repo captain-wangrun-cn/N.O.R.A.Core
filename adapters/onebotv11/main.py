@@ -96,6 +96,13 @@ class OneBotV11Adapter(
         self.data_dir = str(workspace_manager.data_dir)
         self.onebot_data_dir = os.path.join(self.data_dir, "onebotv11")
         os.makedirs(self.onebot_data_dir, exist_ok=True)
+        # 首次启动自动迁移旧扁平媒体到 data/media/<platform>/<scene>/<chat_id>/<type>/ 结构
+        from scripts.media_migration import migrate_media_layout_once
+        migrate_media_layout_once(
+            data_dir=self.data_dir,
+            workspace_root=self.workspace_root,
+            platforms=[("onebotv11", self.onebot_data_dir)],
+        )
 
         self.connection_type = str(self.config.get("connection_type") or "websocket").strip().lower()
         self.websocket_url = str(self.config.get("websocket_url") or "").strip()
@@ -323,6 +330,11 @@ class OneBotV11Adapter(
             return
         message_type = str(event.get("message_type") or "private")
         raw_message = str(event.get("raw_message") or "")
+        # 媒体落点上下文：当前消息的 message_type 与 chat_id，供媒体下载按 scenario 归档
+        self._current_message_type = message_type
+        self.current_chat_id = str(
+            event.get("group_id") if message_type == "group" else event.get("user_id") or ""
+        )
         segments = onebot_message_segments(event.get("message"), raw_message=raw_message)
         segment_reply_id = reply_id_from_event({}, segments)
         raw_reply_segments = [seg for seg in onebot_message_segments(None, raw_message=raw_message) if str(seg.get("type") or "") == "reply"]

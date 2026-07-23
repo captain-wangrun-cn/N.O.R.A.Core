@@ -10,6 +10,12 @@ from urllib.parse import urlparse
 
 from aiohttp import ClientSession
 
+from adapters.media_path import (
+    SEGMENT_TO_MEDIA_TYPE,
+    build_media_subdir,
+    infer_scene,
+)
+
 logger = logging.getLogger(__name__)
 
 
@@ -32,12 +38,27 @@ class OneBotMediaMixin:
                     response.raise_for_status()
                     content = await response.read()
                     filename = self._media_filename(url, fallback_prefix, response.headers.get("content-type", ""))
-                    path = Path(self.onebot_data_dir) / filename
+                    target_dir = self._compute_media_target_dir(fallback_prefix)
+                    path = Path(target_dir) / filename
                     path.write_bytes(content)
                     return os.path.relpath(path, self.workspace_root).replace("\\", "/")
         except Exception as exc:
             logger.warning("[onebotv11] media download failed url=%s err=%s", url, exc)
             return None
+
+    def _compute_media_target_dir(self, fallback_prefix: str) -> str:
+        """按 平台/场景/chat_id/媒体类型 计算当前消息的媒体落点目录。"""
+        message_type = getattr(self, "_current_message_type", "") or ""
+        chat_id = str(getattr(self, "current_chat_id", "") or "")
+        scene = infer_scene(message_type=message_type, chat_id=chat_id)
+        media_type = SEGMENT_TO_MEDIA_TYPE.get(fallback_prefix, fallback_prefix or "misc")
+        return build_media_subdir(
+            data_dir=self.data_dir,
+            platform="onebotv11",
+            scene=scene,
+            chat_id=chat_id,
+            media_type=media_type,
+        )
 
     async def _resolve_media_reference(
         self,

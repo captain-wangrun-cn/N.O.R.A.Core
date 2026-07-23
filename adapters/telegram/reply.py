@@ -9,6 +9,7 @@ from typing import Any, Dict, Optional
 from telegram import Message
 
 from .constants import COMPRESS_TARGET_SIZE, HISTORICAL_REPLY_IMAGE_DIRECT_MARKER
+from adapters.media_path import build_media_subdir, infer_scene
 
 logger = logging.getLogger(__name__)
 
@@ -288,7 +289,18 @@ class TelegramReplyMixin:
             return None
         try:
             photo = reply_msg.photo[-1]
-            abs_file_path = os.path.join(self.telegram_data_dir, f"photo_{photo.file_id}.jpg")
+            chat = getattr(reply_msg, "chat", None)
+            chat_type = chat.type if chat else ""
+            chat_id = str((chat.id if chat else None) or self.current_chat_id or "")
+            scene = infer_scene(chat_type=chat_type, chat_id=chat_id)
+            target_dir = build_media_subdir(
+                data_dir=self.data_dir,
+                platform="telegram",
+                scene=scene,
+                chat_id=chat_id,
+                media_type="image",
+            )
+            abs_file_path = os.path.join(target_dir, f"photo_{photo.file_id}.jpg")
             # 已存在就直接复用，不重复下载
             if not os.path.isfile(abs_file_path):
                 file = await photo.get_file()
