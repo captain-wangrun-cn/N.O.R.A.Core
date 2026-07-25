@@ -637,10 +637,16 @@ class FrontBrainMixin:
             except Exception:
                 logger.warning(f"[{chat_id}] 前脑 API 异常补救重试失败，保持原流程。", exc_info=True)
         logger.info(
-            f"[{chat_id}] 前脑结果: needs_backend={parsed['needs_backend']}, "
-            f"should_reply={parsed.get('should_reply')}, "
-            f"need_follow={parsed.get('need_follow')}, "
-            f"reply='{parsed['user_reply'][:80]}...'"
+            "[%s] 前脑结果: needs_backend=%s should_reply=%s need_follow=%s "
+            "force_online=%s force_semi_online=%s keep_segment_open=%s reply_length=%d",
+            chat_id,
+            parsed["needs_backend"],
+            parsed.get("should_reply"),
+            parsed.get("need_follow"),
+            parsed.get("force_online", False),
+            parsed.get("force_semi_online", False),
+            parsed.get("keep_segment_open", False),
+            len(str(parsed.get("user_reply", ""))),
         )
         await self._send_debug(
             chat_id,
@@ -886,9 +892,15 @@ class FrontBrainMixin:
                 }
 
         logger.info(
-            f"[{chat_id}] 前脑审查结果: action={parsed['action']}, "
-            f"should_reply={parsed.get('should_reply')}, "
-            f"reply='{parsed['user_reply'][:80]}...'"
+            "[%s] 前脑审查结果: action=%s should_reply=%s need_follow=%s "
+            "force_online=%s force_semi_online=%s reply_length=%d",
+            chat_id,
+            parsed["action"],
+            parsed.get("should_reply"),
+            parsed.get("need_follow"),
+            parsed.get("force_online", False),
+            parsed.get("force_semi_online", False),
+            len(str(parsed.get("user_reply", ""))),
         )
         await self._send_debug(
             chat_id,

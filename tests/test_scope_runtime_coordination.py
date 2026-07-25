@@ -5,6 +5,7 @@ from core.controller import NoraController
 from core.scheduler import (
     AIPresence,
     get_ai_presence,
+    get_ai_state_summary,
     record_user_activity,
     set_ai_presence,
 )
@@ -122,6 +123,25 @@ def test_active_runtime_includes_scope_queue():
     active = controller.get_active_runtime_keys(web.memory_scope_id)
     assert tg.runtime_key in active
     assert web.runtime_key in active
+
+
+def test_backend_start_still_promotes_global_presence():
+    controller = _ScopeController()
+    tg = controller.add_identity("telegram", "tg-chat", "owner")
+    set_ai_presence(AIPresence.SEMI_ONLINE, reason="test_setup")
+
+    controller._update_scheduler_state(tg.runtime_key, busy=True)
+
+    state = get_ai_state_summary()
+    assert state["presence"] == AIPresence.ONLINE.value
+    assert state["is_backend_busy"] is True
+    assert state["is_generating"] is True
+
+    controller._transition_to_semi_online(tg.runtime_key)
+    cleanup_state = get_ai_state_summary()
+    assert cleanup_state["presence"] == AIPresence.SEMI_ONLINE.value
+    assert cleanup_state["is_backend_busy"] is False
+    assert cleanup_state["is_generating"] is False
 
 
 def test_followup_context_is_limited_to_current_place():

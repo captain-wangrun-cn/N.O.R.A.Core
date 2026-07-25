@@ -110,11 +110,23 @@ def get_ai_presence() -> AIPresence:
     return _ai_state.presence
 
 
-def set_ai_presence(presence: AIPresence):
+def set_ai_presence(
+    presence: AIPresence,
+    *,
+    reason: str = "unspecified",
+    runtime_key: str = "",
+):
     old = _ai_state.presence
     _ai_state.presence = presence
     if old != presence:
-        logger.info(f"AI 状态变更: {old.value} -> {presence.value}")
+        runtime_part = f" runtime={runtime_key}" if runtime_key else ""
+        logger.info(
+            "[GLOBAL PRESENCE]%s %s -> %s reason=%s",
+            runtime_part,
+            old.value,
+            presence.value,
+            reason,
+        )
 
 
 def set_ai_generating(is_generating: bool):

@@ -31,6 +31,19 @@ import config
 logger = logging.getLogger(__name__)
 
 
+def _update_message_entry_presence(runtime_key: str, chat_type: str) -> Dict[str, Any]:
+    """Record activity while keeping group presence independent from global presence."""
+    normalized_chat_type = normalize_chat_type(chat_type)
+    if normalized_chat_type != "group":
+        set_ai_presence(
+            AIPresence.ONLINE,
+            reason="private_message_received",
+            runtime_key=runtime_key,
+        )
+    record_user_activity(runtime_key)
+    return get_ai_state_summary()
+
+
 def _context_platform_message_ids(context: Dict[str, Any]) -> List[str]:
     """Return all platform message ids carried by an adapter context."""
     raw_ids = context.get("platform_message_ids")
@@ -358,20 +371,31 @@ class MessageHandlerMixin:
         if has_image_marker and not has_real_image:
             context["image_load_failed"] = True
             logger.warning(
-                f"[{chat_id}] 检测到图片标记但未加载到图片字节，按文本流程继续。"
-                f" 原始文本片段: {text[:120]}"
+                "[%s] 检测到图片标记但未加载到图片字节，按文本流程继续，message_length=%d",
+                chat_id,
+                len(text),
             )
 
-        logger.debug(f"[{chat_id}] 收到新聚合消息: '{text[:50]}...'")
-        
-        # --- 更新 AI 在线状态：收到消息 → AI 进入在线 ---
-        set_ai_presence(AIPresence.ONLINE)
-        # 统一使用 chat_id 进行对话活跃度追踪，避免后续 followup 循环取用不同 key 导致计数/空闲时间错乱
-        record_user_activity(chat_id)
-        ai_state = get_ai_state_summary()
+        logger.debug(
+            "[%s] 收到新聚合消息: chat_type=%s message_length=%d",
+            chat_id,
+            chat_type,
+            len(text),
+        )
+
+        # 私聊输入维持既有全局活跃会话语义；群聊的监听模式由群级 marker/fast 独立决定。
+        # 群内 @ 或回复只负责唤醒本轮处理，不能因此提升全局或当前群的 presence。
+        ai_state = _update_message_entry_presence(chat_id, chat_type)
         logger.info(
-            f"[{chat_id}] 当前在线状态: presence={ai_state['presence']}, "
-            f"generating={ai_state['is_generating']}, backend_busy={ai_state['is_backend_busy']}"
+            "[%s] 消息入口状态: chat_type=%s global_presence=%s "
+            "generating=%s backend_busy=%s explicit_mention=%s reply_to_bot=%s",
+            chat_id,
+            chat_type,
+            ai_state["presence"],
+            ai_state["is_generating"],
+            ai_state["is_backend_busy"],
+            bool(context.get("explicit_bot_mention")),
+            bool(context.get("reply_to_bot")),
         )
         # 取消该 chat 已有的对话延续定时器（用户回来了）
         self._cancel_followup_timer(chat_id)
@@ -805,6 +829,13 @@ class MessageHandlerMixin:
                     continuation_token,
                     listener_token,
                 )
+        logger.info(
+            "[%s] 前脑生成开始: source=%s listener_token=%s batch_size=%d",
+            chat_id,
+            context.get("_group_listener_reason") or "direct",
+            listener_token if listener_token is not None else "none",
+            len(context.get("group_message_batch") or []),
+        )
         front_task = asyncio.create_task(self._generate_front_chat_response(context))
         self.front_brain_tasks[chat_id] = front_task
         if listener_token is not None:
@@ -831,6 +862,16 @@ class MessageHandlerMixin:
                 self.front_brain_tasks.pop(chat_id, None)
 
         # 3) 发送前脑回复给用户（如果有的话）
+        logger.info(
+            "[%s] 前脑生成完成: listener_token=%s needs_backend=%s should_reply=%s "
+            "force_online=%s force_semi_online=%s",
+            chat_id,
+            listener_token if listener_token is not None else "none",
+            bool(front_result.get("needs_backend")),
+            bool(front_result.get("should_reply", True)),
+            bool(front_result.get("force_online")),
+            bool(front_result.get("force_semi_online")),
+        )
         user_reply = front_result.get("user_reply", "")
         should_reply = front_result.get("should_reply", True)
         send_front_reply = bool(user_reply and should_reply)

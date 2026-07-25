@@ -195,8 +195,10 @@ class GroupListenerManager:
         *,
         platform: str = "",
         platform_chat_id: str = "",
+        reason: str = "unspecified",
     ) -> None:
         mode = GroupPresence(mode)
+        old_mode = self.mode_for(runtime_key)
         self.store.set(
             runtime_key,
             mode,
@@ -211,7 +213,21 @@ class GroupListenerManager:
                 state.idle_generation += 1
                 self._cancel_task(state.idle_task)
                 state.idle_task = None
-        logger.info("[%s] 群监听状态切换为 %s", runtime_key, mode.value)
+        if old_mode != mode:
+            logger.info(
+                "[GROUP PRESENCE] runtime=%s %s -> %s reason=%s",
+                runtime_key,
+                old_mode.value,
+                mode.value,
+                reason,
+            )
+        else:
+            logger.debug(
+                "[GROUP PRESENCE] runtime=%s unchanged=%s reason=%s",
+                runtime_key,
+                mode.value,
+                reason,
+            )
 
     async def receive(self, context: Dict[str, Any]) -> bool:
         """Accept an ONLINE group event. Returns False when normal handling should be used."""
@@ -409,6 +425,12 @@ class GroupListenerManager:
         state = self._state(runtime_key)
         if state.passive_task and not state.passive_task.done():
             return
+        logger.info(
+            "[%s] 群监听 fast 判断开始: trigger=%s window=%d",
+            runtime_key,
+            trigger,
+            len(state.pending_window),
+        )
         state.passive_task = asyncio.create_task(self._run_passive_decision(runtime_key, trigger))
 
     async def _run_passive_decision(self, runtime_key: str, trigger: str) -> None:
@@ -455,6 +477,7 @@ class GroupListenerManager:
                     GroupPresence.SEMI_ONLINE,
                     platform=first.platform,
                     platform_chat_id=first.platform_chat_id,
+                    reason="fast_passive_semi_online",
                 )
             elif promote_events:
                 await self.promote(runtime_key, promote_events, "passive_reply")
@@ -498,7 +521,14 @@ class GroupListenerManager:
                 for event in batch:
                     self._append_pending(state, event)
 
-        logger.info("[%s] 群生成追加 fast=%s batch=%d", runtime_key, action.value, len(batch))
+        logger.info(
+            "[%s] 群生成追加 fast=%s batch=%d token=%d interrupt=%s",
+            runtime_key,
+            action.value,
+            len(batch),
+            token,
+            bool(interrupt_events),
+        )
         if interrupt_events:
             await self.interrupt(runtime_key, interrupt_events, "ordinary_append", token)
 

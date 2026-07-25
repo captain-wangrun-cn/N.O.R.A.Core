@@ -243,7 +243,11 @@ class SchedulerMixin:
         """同步 controller 的忙碌状态到全局 AI 状态。"""
         if busy:
             set_ai_backend_busy(True)
-            set_ai_presence(AIPresence.ONLINE)
+            set_ai_presence(
+                AIPresence.ONLINE,
+                reason="backend_started",
+                runtime_key=chat_id,
+            )
             set_ai_generating(True)
         else:
             self._sync_global_backend_flags()
@@ -532,12 +536,18 @@ class SchedulerMixin:
         """Apply model presence markers without conflating group mode and shared presence."""
         if chat_type == "group":
             if force_semi_online:
-                await self.group_listener.set_mode(chat_id, GroupPresence.SEMI_ONLINE)
-                logger.info(f"[{chat_id}] 当前群切换为 SEMI_ONLINE")
+                await self.group_listener.set_mode(
+                    chat_id,
+                    GroupPresence.SEMI_ONLINE,
+                    reason="front_marker_semi_online",
+                )
                 return True
             if force_online:
-                await self.group_listener.set_mode(chat_id, GroupPresence.ONLINE)
-                logger.info(f"[{chat_id}] 当前群切换为 ONLINE")
+                await self.group_listener.set_mode(
+                    chat_id,
+                    GroupPresence.ONLINE,
+                    reason="front_marker_online",
+                )
             return False
 
         if force_semi_online:
@@ -554,14 +564,22 @@ class SchedulerMixin:
 
         active_keys = self.get_active_runtime_keys(identity.memory_scope_id)
         if active_keys:
-            set_ai_presence(AIPresence.ONLINE)
+            set_ai_presence(
+                AIPresence.ONLINE,
+                reason="shared_scope_still_active",
+                runtime_key=chat_id,
+            )
             self._sync_global_backend_flags()
             logger.info(
                 f"[{chat_id}] 当前地点已空闲，但共享作用域仍活跃: {active_keys}，暂不关闭全局消息段"
             )
             return
 
-        set_ai_presence(AIPresence.SEMI_ONLINE)
+        set_ai_presence(
+            AIPresence.SEMI_ONLINE,
+            reason="shared_scope_idle",
+            runtime_key=chat_id,
+        )
         self._sync_global_backend_flags()
         
         try:
