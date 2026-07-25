@@ -29,6 +29,16 @@ logger = logging.getLogger(__name__)
 IMAGE_COLLECTION = "nora_images"          # Qdrant collection 名称
 DEFAULT_MONGO_DB_NAME = "nora"             # MongoDB 数据库名称（无显式配置且 URI 未带库名时的兜底）
 MONGO_COLLECTION = "images"                # MongoDB collection 名称
+IMAGE_TEXT_INDEX_NAME = "tags_ocr_text_index"
+IMAGE_TEXT_INDEX_KEYS = (
+    ("tags", pymongo.TEXT),
+    ("ocr_text", pymongo.TEXT),
+    ("description", pymongo.TEXT),
+)
+IMAGE_TEXT_INDEX_WEIGHTS = {"tags": 2, "ocr_text": 3, "description": 2}
+LEGACY_IMAGE_TEXT_INDEX_WEIGHTS = {"tags": 2, "ocr_text": 3}
+LEGACY_TAGS_TEXT_INDEX_NAME = "tags_text"
+LEGACY_TAGS_TEXT_INDEX_WEIGHTS = {"tags": 1}
 
 
 def resolve_mongo_db_name(mongo_cfg: Dict[str, Any], client: "pymongo.MongoClient") -> str:
@@ -155,6 +165,109 @@ class ImageStore:
         except Exception as e:
             logger.debug(f"ImageStore: Qdrant payload 索引已存在或创建失败: {field_name}, {e}")
 
+    @staticmethod
+    def _normalize_text_index(index: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        """提取文本索引的稳定元数据；MongoDB 会将 text key 返回为内部 _fts 结构。"""
+        key = index.get("key") or {}
+        key_items = tuple(key.items()) if hasattr(key, "items") else tuple(key)
+        is_text = any(str(kind).lower() == "text" for _field, kind in key_items)
+        if not is_text:
+            return None
+        try:
+            weights = {str(field): int(weight) for field, weight in (index.get("weights") or {}).items()}
+        except (AttributeError, TypeError, ValueError):
+            weights = {}
+        return {
+            "name": str(index.get("name") or ""),
+            "weights": weights,
+        }
+
+    def _list_mongo_text_indexes(self) -> List[Dict[str, Any]]:
+        indexes = []
+        for index in self.mongo_col.list_indexes():
+            normalized = self._normalize_text_index(index)
+            if normalized is not None:
+                indexes.append(normalized)
+        return indexes
+
+    @staticmethod
+    def _find_text_index(indexes: List[Dict[str, Any]], name: str) -> Optional[Dict[str, Any]]:
+        return next((index for index in indexes if index["name"] == name), None)
+
+    def _has_current_text_index(self) -> bool:
+        current = self._find_text_index(self._list_mongo_text_indexes(), IMAGE_TEXT_INDEX_NAME)
+        return bool(current and current["weights"] == IMAGE_TEXT_INDEX_WEIGHTS)
+
+    def _create_image_text_index(self) -> None:
+        try:
+            self.mongo_col.create_index(
+                list(IMAGE_TEXT_INDEX_KEYS),
+                weights=IMAGE_TEXT_INDEX_WEIGHTS,
+                name=IMAGE_TEXT_INDEX_NAME,
+            )
+        except Exception as exc:
+            # 多实例可能同时完成升级；以服务端最终状态为准。
+            try:
+                if self._has_current_text_index():
+                    logger.info("MongoDB 图片全文索引已由另一实例完成创建。")
+                    return
+            except Exception:
+                pass
+            logger.error(f"创建 MongoDB 图片全文索引失败: {exc}")
+
+    def _ensure_image_text_index(self) -> None:
+        """安全、幂等地创建或升级图片全文索引。"""
+        try:
+            text_indexes = self._list_mongo_text_indexes()
+        except Exception as exc:
+            logger.error(f"读取 MongoDB 图片全文索引失败: {exc}")
+            return
+
+        current = self._find_text_index(text_indexes, IMAGE_TEXT_INDEX_NAME)
+        if current:
+            if current["weights"] == IMAGE_TEXT_INDEX_WEIGHTS:
+                return
+            if current["weights"] != LEGACY_IMAGE_TEXT_INDEX_WEIGHTS:
+                logger.error(
+                    "MongoDB 图片全文索引规格未知，保留原索引不自动删除: name=%s weights=%s",
+                    current["name"], current["weights"],
+                )
+                return
+            old_name = IMAGE_TEXT_INDEX_NAME
+        else:
+            legacy = self._find_text_index(text_indexes, LEGACY_TAGS_TEXT_INDEX_NAME)
+            if legacy:
+                if legacy["weights"] != LEGACY_TAGS_TEXT_INDEX_WEIGHTS:
+                    logger.error(
+                        "MongoDB 旧图片全文索引规格未知，保留原索引不自动删除: name=%s weights=%s",
+                        legacy["name"], legacy["weights"],
+                    )
+                    return
+                old_name = LEGACY_TAGS_TEXT_INDEX_NAME
+            elif text_indexes:
+                logger.error(
+                    "MongoDB images 集合存在未知全文索引，保留原索引不自动删除: %s",
+                    text_indexes,
+                )
+                return
+            else:
+                self._create_image_text_index()
+                return
+
+        logger.info("升级 MongoDB 图片全文索引: %s -> %s", old_name, IMAGE_TEXT_INDEX_NAME)
+        try:
+            self.mongo_col.drop_index(old_name)
+        except Exception as exc:
+            # 若另一实例已完成升级，无需再次操作。
+            try:
+                if self._has_current_text_index():
+                    return
+            except Exception:
+                pass
+            logger.error(f"删除 MongoDB 旧图片全文索引失败: {old_name}, {exc}")
+            return
+        self._create_image_text_index()
+
     def _ensure_mongo_indexes(self):
         """确保 MongoDB 索引存在。"""
         if self.mongo_col is None:
@@ -167,19 +280,9 @@ class ImageStore:
             self.mongo_col.create_index([("platform", 1), ("storage_id", 1), ("timestamp", -1)])
             self.mongo_col.create_index([("memory_scope_id", 1), ("timestamp", -1)])
             self.mongo_col.create_index("timestamp")
-            # 复合文本索引：同时覆盖 tags 和 ocr_text，支持全文搜索
-            # 注意：MongoDB 每个 collection 只能有一个文本索引，需要先尝试删除旧的
-            try:
-                self.mongo_col.drop_index("tags_text")
-            except Exception:
-                pass  # 旧索引不存在时忽略
-            self.mongo_col.create_index(
-                [("tags", pymongo.TEXT), ("ocr_text", pymongo.TEXT), ("description", pymongo.TEXT)],
-                weights={"tags": 2, "ocr_text": 3, "description": 2},
-                name="tags_ocr_text_index",
-            )
         except Exception as e:
-            logger.error(f"创建 MongoDB 索引失败: {e}")
+            logger.error(f"创建 MongoDB 普通索引失败: {e}")
+        self._ensure_image_text_index()
 
     # ------------------------------------------------------------------
     # 写入
