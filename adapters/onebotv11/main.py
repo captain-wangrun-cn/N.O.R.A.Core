@@ -141,6 +141,9 @@ class OneBotV11Adapter(
     def _configure(self, message_handler: Callable[[Dict[str, Any]], Any]) -> None:
         """初始化 handler 与聚合器（run 与 run_async 共用）。"""
         self._message_handler = message_handler
+        controller = getattr(message_handler, "__self__", None)
+        self._group_message_handler = getattr(controller, "submit_group_message", None)
+        self._group_presence_for = getattr(controller, "group_presence_for", None)
         import config
 
         app_config = config.get_config()
@@ -346,15 +349,24 @@ class OneBotV11Adapter(
                 raw_message,
             )
         await self._enrich_reply_context(event, segments, include_text=False)
+        explicit_bot_mention = message_type == "group" and is_at_self(segments, self.self_id)
+        reply_to_bot = str(event.get("reply_to_user_id") or "") == str(self.self_id)
+        online_group = False
+        if message_type == "group":
+            presence_for = getattr(self, "_group_presence_for", None)
+            if callable(presence_for):
+                runtime_key = f"onebotv11:{event.get('group_id') or ''}"
+                mode = presence_for(runtime_key)
+                online_group = str(getattr(mode, "value", mode)).lower() == "online"
         has_reply = bool(event.get("reply_to_message_id"))
-        mention_only_trigger = message_type == "group" and is_at_self(segments, self.self_id) and not has_reply
+        mention_only_trigger = explicit_bot_mention and not has_reply
         if mention_only_trigger:
             logger.debug(
                 "[onebotv11] mention-only trigger message_id=%s event=%s",
                 event.get("message_id"),
                 json.dumps(event, ensure_ascii=False, default=str)[:2000],
             )
-        if not self._message_triggers_bot(event, segments):
+        if not online_group and not self._message_triggers_bot(event, segments):
             return
         await self._enrich_reply_text(event)
         reference_markers, mentioned_user_ids = native_reference_markers(
@@ -383,6 +395,9 @@ class OneBotV11Adapter(
         adapter_event = onebot_event_to_adapter_event(event, text=text)
         context = adapter_event.to_context()
         context["self_id"] = self.self_id
+        if message_type == "group":
+            context["explicit_bot_mention"] = bool(explicit_bot_mention)
+            context["reply_to_bot"] = bool(reply_to_bot)
         if event.get("reply_to_message_id") is not None:
             context["reply_to_message_id"] = str(event.get("reply_to_message_id"))
             if event.get("reply_to_contains_media"):
@@ -402,6 +417,10 @@ class OneBotV11Adapter(
         self.current_chat_id = chat_id
         self._chat_types[chat_id] = context["chat_type"]
         self._remember_incoming_context(chat_id, context)
+        group_handler = getattr(self, "_group_message_handler", None)
+        if message_type == "group" and callable(group_handler):
+            if await group_handler(context):
+                return
         if self._aggregator:
             await self._aggregator.add_message(chat_id, text, context)
 

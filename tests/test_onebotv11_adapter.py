@@ -543,6 +543,89 @@ def test_onebot_group_mention_only_still_reaches_aggregator():
         assert context["user_id"] == "20002"
         assert context["user_name"] == "Alice"
         assert context["platform_message_id"] == "888"
+        assert context["explicit_bot_mention"] is True
+        assert context["reply_to_bot"] is False
+
+    asyncio.run(run())
+
+
+def test_onebot_online_group_message_bypasses_aggregator():
+    async def run():
+        adapter = IncomingOnlyOneBot()
+        aggregated = []
+        submitted = []
+
+        class FakeAggregator:
+            async def add_message(self, chat_id, text, context):
+                aggregated.append((chat_id, text, context))
+
+        adapter._aggregator = FakeAggregator()
+        adapter._group_presence_for = lambda runtime_key: "online"
+
+        async def submit_group_message(context):
+            submitted.append(context)
+            return True
+
+        adapter._group_message_handler = submit_group_message
+        event = {
+            "post_type": "message",
+            "message_type": "group",
+            "group_id": 10001,
+            "user_id": 20002,
+            "message_id": 890,
+            "sender": {"card": "Alice", "nickname": "Nick"},
+            "message": [{"type": "text", "data": {"text": "ordinary group message"}}],
+        }
+
+        await adapter.handle_onebot_event(event)
+
+        assert aggregated == []
+        assert len(submitted) == 1
+        assert submitted[0]["text"] == "ordinary group message"
+        assert submitted[0]["explicit_bot_mention"] is False
+        assert submitted[0]["reply_to_bot"] is False
+
+    asyncio.run(run())
+
+
+def test_onebot_semi_online_reply_to_bot_uses_aggregator():
+    async def run():
+        adapter = IncomingOnlyOneBot()
+        aggregated = []
+
+        class FakeAggregator:
+            async def add_message(self, chat_id, text, context):
+                aggregated.append((chat_id, text, context))
+
+        adapter._aggregator = FakeAggregator()
+        adapter._group_presence_for = lambda runtime_key: "semi_online"
+        event = {
+            "post_type": "message",
+            "message_type": "group",
+            "group_id": 10001,
+            "user_id": 20002,
+            "message_id": 891,
+            "sender": {"card": "Alice", "nickname": "Nick"},
+            "message": [
+                {"type": "reply", "data": {"id": "777"}},
+                {"type": "text", "data": {"text": "reply to Nora"}},
+            ],
+        }
+
+        async def fake_enrich(event_data, segments, include_text=True):
+            event_data["reply_to_message_id"] = "777"
+            event_data["reply_to_user_id"] = "999"
+            event_data["reply_to_user_name"] = "Nora"
+            if include_text:
+                event_data["reply_to_text"] = "previous Nora message"
+
+        adapter._enrich_reply_context = fake_enrich
+        await adapter.handle_onebot_event(event)
+
+        assert len(aggregated) == 1
+        context = aggregated[0][2]
+        assert context["explicit_bot_mention"] is False
+        assert context["reply_to_bot"] is True
 
     asyncio.run(run())
 

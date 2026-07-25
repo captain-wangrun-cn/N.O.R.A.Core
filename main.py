@@ -163,6 +163,8 @@ async def _run_adapters_async(controller, adapters: list):
     except asyncio.CancelledError:
         # Ctrl+C / 关闭信号会取消主任务，属正常关闭流程，不向上抛栈噪音。
         logging.info("收到关闭信号，正在停止所有适配器…")
+    finally:
+        await controller.shutdown()
 
 
 def run_bot_logic(tui_app, tui_ready_event, adapter_name: str = "auto"):

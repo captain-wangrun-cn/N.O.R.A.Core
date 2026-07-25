@@ -551,14 +551,52 @@ def test_has_bot_mention_uses_explicit_mention_boundaries():
     assert has_bot_mention("foo@NoraBot should not wake", "NoraBot") is False
 
 
-def test_group_processing_requires_bot_mention_even_when_replying_to_bot():
+def test_group_processing_accepts_reply_to_bot_in_semi_online():
     adapter = _IncomingOnlyTelegram()
     replied_bot_message = SimpleNamespace(from_user=SimpleNamespace(id=999))
     update = _fake_update(chat_type="group", text="reply without mention", reply_to_message=replied_bot_message)
 
     should_process = asyncio.run(adapter._should_process_message(update))
 
-    assert should_process is False
+    assert should_process is True
+
+
+def test_online_group_message_bypasses_telegram_aggregator():
+    async def run():
+        adapter = _IncomingOnlyTelegram()
+        aggregated = []
+        submitted = []
+
+        class FakeAggregator:
+            async def add_message(self, chat_id, text, context):
+                aggregated.append((chat_id, text, context))
+
+        adapter._aggregator = FakeAggregator()
+        adapter._group_presence_for = lambda runtime_key: "online"
+
+        async def submit_group_message(context):
+            submitted.append(context)
+            return True
+
+        adapter._group_message_handler = submit_group_message
+        adapter.current_chat_id = None
+
+        async def fake_extract_reply_info(message):
+            return None
+
+        adapter._extract_reply_info = fake_extract_reply_info
+        update = _fake_update(chat_type="supergroup", text="ordinary group message", message_id=778)
+
+        await adapter._handle_incoming_message(update, None)
+
+        assert aggregated == []
+        assert len(submitted) == 1
+        assert submitted[0]["chat_type"] == "group"
+        assert submitted[0]["text"] == "ordinary group message"
+        assert submitted[0]["explicit_bot_mention"] is False
+        assert submitted[0]["reply_to_bot"] is False
+
+    asyncio.run(run())
 
 
 def test_group_processing_accepts_bot_mention_and_strips_before_aggregation():

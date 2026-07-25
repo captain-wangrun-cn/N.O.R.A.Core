@@ -28,6 +28,7 @@ from core.scheduler import (
     get_user_idle_seconds,
 )
 from core.routing import parse_route_markers, sanitize_adapter_output_text
+from core.group_presence_store import GroupPresence
 from core.delivery_target_store import load_known_scenes
 from workspace_config import get_workspace_manager
 from memory.message_history import MessageHistory
@@ -519,6 +520,30 @@ class SchedulerMixin:
         except Exception as e:
             logger.error(f"[{chat_id}] 对话延续循环异常: {e}", exc_info=True)
             self._transition_to_semi_online(chat_id)
+
+    async def _apply_presence_markers(
+        self,
+        chat_id: str,
+        chat_type: str,
+        *,
+        force_online: bool = False,
+        force_semi_online: bool = False,
+    ) -> bool:
+        """Apply model presence markers without conflating group mode and shared presence."""
+        if chat_type == "group":
+            if force_semi_online:
+                await self.group_listener.set_mode(chat_id, GroupPresence.SEMI_ONLINE)
+                logger.info(f"[{chat_id}] 当前群切换为 SEMI_ONLINE")
+                return True
+            if force_online:
+                await self.group_listener.set_mode(chat_id, GroupPresence.ONLINE)
+                logger.info(f"[{chat_id}] 当前群切换为 ONLINE")
+            return False
+
+        if force_semi_online:
+            self._transition_to_semi_online(chat_id)
+            return True
+        return False
 
     def _transition_to_semi_online(self, chat_id: str):
         """安全地从 ONLINE 过渡到 SEMI_ONLINE，同时关闭当前对话段落。"""

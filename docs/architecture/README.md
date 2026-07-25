@@ -203,6 +203,8 @@ flowchart TB
 
 ### 💾 记忆与上下文 (Memory & Context)
 
+- **[群聊独立监听 (Group Chat Listener)](./group-chat-listener.md)**
+  - 每群 ONLINE/SEMI_ONLINE 运行状态、跨说话者窗口、fast 决策与 smart 生成中断；认知历史继续跨场景共享。
 - **[消息历史管理 (Message History)](./message_history.md)**
   - 四层存储策略 (Raw, Compressed, Vector, Archive) + 对话分段 (Conversation Session Segmentation)。
 - **[对话分段系统 (Conversation Segmentation)](./conversation-segmentation.md)**

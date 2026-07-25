@@ -220,9 +220,19 @@ class PollingMixin:
                 logger.info(f"[{chat_id}] 轮询第 {polling_round} 轮审查结果: action={action}")
                 await self._send_debug(chat_id, f"🔍 审查结果: action={action}")
 
-                if review_result.get("force_semi_online"):
-                    logger.info(f"[{chat_id}] 轮询审查触发 [SEMI_ONLINE]，立即进入半在线状态。")
-                    self._transition_to_semi_online(chat_id)
+                apply_presence = getattr(self, "_apply_presence_markers", None)
+                if callable(apply_presence):
+                    presence_ended = await apply_presence(
+                        chat_id,
+                        identity.chat_type,
+                        force_online=bool(review_result.get("force_online")),
+                        force_semi_online=bool(review_result.get("force_semi_online")),
+                    )
+                else:
+                    presence_ended = bool(review_result.get("force_semi_online"))
+                    if presence_ended:
+                        self._transition_to_semi_online(chat_id)
+                if presence_ended:
                     polling_finished = True
                     break
                 

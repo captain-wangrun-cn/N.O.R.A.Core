@@ -97,6 +97,9 @@ def test_front_brain_system_includes_platform_prompt_and_preferences():
     assert "分段聊天倾向：高" in system_prompt
     assert "OneBot v11 / QQ 不解析 Markdown" in system_prompt
     assert "使用 [SPLIT] 分段" in system_prompt
+    assert "当前群" in system_prompt
+    assert "[ONLINE]" in system_prompt
+    assert "多说话者" in system_prompt
 
 
 def test_front_brain_review_system_includes_platform_prompt_and_preferences():
@@ -115,6 +118,30 @@ def test_front_brain_review_system_includes_platform_prompt_and_preferences():
     assert "分段聊天倾向：高" in system_prompt
     assert "OneBot v11 / QQ 不解析 Markdown" in system_prompt
     assert "使用 [SPLIT] 分段" in system_prompt
+    assert "当前群" in system_prompt
+    assert "[ONLINE]" in system_prompt
+    assert "多说话者" in system_prompt
+
+
+def test_group_listener_templates_define_strict_actions_and_batches():
+    passive_system = render_template("group_listener.jinja", "passive_system")
+    passive_user = render_template(
+        "group_listener.jinja",
+        "passive_user",
+        events_text="[1] Alice: first\n[2] Bob: second",
+    )
+    append_system = render_template("group_listener.jinja", "append_system")
+    append_user = render_template(
+        "group_listener.jinja",
+        "append_user",
+        base_events_text="old batch",
+        new_events_text="new batch",
+    )
+
+    assert all(action in passive_system for action in ("KEEP_LISTENING", "REPLY", "SEMI_ONLINE"))
+    assert "Alice: first" in passive_user and "Bob: second" in passive_user
+    assert "APPEND" in append_system and "KEEP_PENDING" in append_system
+    assert "old batch" in append_user and "new batch" in append_user
 
 
 def test_front_brain_retries_legacy_backend_signal_without_task_instruction():

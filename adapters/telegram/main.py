@@ -145,6 +145,9 @@ class TelegramAdapter(
     def _configure_application(self, message_handler: Callable[[Dict[str, Any]], Any]) -> None:
         """注册所有处理器与聚合器（run 与 run_async 共用）。"""
         self._message_handler = message_handler
+        controller = getattr(message_handler, "__self__", None)
+        self._group_message_handler = getattr(controller, "submit_group_message", None)
+        self._group_presence_for = getattr(controller, "group_presence_for", None)
         import config
 
         app_config = config.get_config()

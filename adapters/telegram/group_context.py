@@ -139,4 +139,8 @@ class TelegramGroupContextMixin:
             platform_message_ids=platform_message_ids,
             bot_user_id=str(getattr(self, "bot_user_id", "") or ""),
         )
+        if self._is_group_chat_object(update.effective_chat):
+            context["chat_type"] = "group"
+            context["explicit_bot_mention"] = bool(self._has_bot_mention(update))
+            context["reply_to_bot"] = bool(self._is_reply_to_bot(update))
         return await self._enrich_group_context(context, update.effective_chat, update=update)

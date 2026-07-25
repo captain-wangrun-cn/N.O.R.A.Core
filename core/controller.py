@@ -53,6 +53,8 @@ from core.conversation_identity import (
     resolve_platform,
     runtime_key_for,
 )
+from core.group_listener import GroupListenerManager
+from core.group_presence_store import GroupPresence, GroupPresenceStore
 from core.routing import sanitize_adapter_output_text, sanitize_user_visible_text, parse_route_markers
 from adapters.message_controls import parse_message_controls, strip_message_control_markers
 from triggers import TriggerManager
@@ -222,6 +224,23 @@ class NoraController(
             context_db_path=history_cfg.get("context_db_path"),
             long_message_threshold=history_cfg.get("long_message_threshold", 1200),
         )
+
+        group_listener_cfg = config.get_group_listener_config()
+        default_group_mode = GroupPresence(group_listener_cfg["default_mode"])
+        self.group_presence_store = GroupPresenceStore(default_mode=default_group_mode)
+        self.group_listener = GroupListenerManager(
+            store=self.group_presence_store,
+            persist_message=self._persist_online_group_message,
+            decide_passive=self._decide_group_passive_action,
+            decide_append=self._decide_group_append_action,
+            promote=self._promote_group_message_batch,
+            interrupt=self._interrupt_group_generation,
+            batch_size=group_listener_cfg["evaluation_batch_size"],
+            idle_seconds=group_listener_cfg["idle_seconds"],
+            max_pending=group_listener_cfg["max_pending_messages"],
+            enabled=group_listener_cfg["enabled"],
+        )
+        self.group_listener_decision_timeout = group_listener_cfg["decision_timeout_seconds"]
         
         # 成本跟踪
         cost_cfg = (config.get_config() or {}).get("cost_tracking", {})
@@ -746,6 +765,12 @@ class NoraController(
         """停止 Trigger 系统。"""
         if self.trigger_manager:
             await self.trigger_manager.shutdown()
+
+    async def shutdown(self) -> None:
+        """停止控制器持有的监听、Trigger 与调度服务。"""
+        await self.group_listener.shutdown()
+        await self.stop_triggers()
+        self.stop_scheduler()
 
     # ------------------------------------------------------------------
     # 模型重载

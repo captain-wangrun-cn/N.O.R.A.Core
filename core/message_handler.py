@@ -13,6 +13,8 @@ from typing import Dict, Any, List, Optional
 
 from brain.multimodal import extract_image_payloads, extract_video_payloads
 from brain.prompts import render_template, get_soul_prompt, load_identity_context
+from core.group_listener import AppendAction, GroupMessageEvent, PassiveAction
+from core.group_presence_store import GroupPresence
 from core.routing import has_image_input, sanitize_adapter_output_text, sanitize_user_visible_text
 from core.conversation_identity import conversation_target_dict, normalize_chat_type
 from core.scene_context import build_current_scene_block, should_redact_cross_place_details
@@ -109,6 +111,196 @@ class MessageHandlerMixin:
             return f"{text}\n\n【后脑队列详情】\n{queue_block}"
         return f"【后脑队列详情】\n{queue_block}"
 
+    async def submit_group_message(self, context: Dict[str, Any]) -> bool:
+        """Adapter-facing entry for normalized ONLINE group events."""
+        normalized = dict(context)
+        identity = self._identity(normalized)
+        if identity.chat_type != "group":
+            return False
+        normalized.update(
+            {
+                "runtime_key": identity.runtime_key,
+                "platform": identity.platform,
+                "chat_id": identity.platform_chat_id,
+                "memory_scope_id": identity.memory_scope_id,
+                "place_scope_id": identity.place_scope_id,
+            }
+        )
+        return await self.group_listener.receive(normalized)
+
+    def group_presence_for(self, runtime_key: str) -> GroupPresence:
+        return self.group_listener.mode_for(runtime_key)
+
+    async def _persist_online_group_message(self, context: Dict[str, Any]) -> None:
+        """Persist one ONLINE event immediately into the existing shared history."""
+        if context.get("_message_saved"):
+            return
+        identity = self._identity(context)
+        text = str(context.get("text") or "")
+        user_name = str(context.get("user_name") or identity.actor_display_name or "User")
+        metadata: Dict[str, Any] = {"source": "group_listener"}
+        platform_ids = _context_platform_message_ids(context)
+        if platform_ids:
+            metadata["platform_message_ids"] = platform_ids
+        reply_metadata = {
+            key: context.get(key)
+            for key in (
+                "reply_to_message_id",
+                "reply_to_user_id",
+                "reply_to_user_name",
+                "reply_to_text",
+            )
+            if context.get(key) not in (None, "")
+        }
+        if reply_metadata:
+            metadata["reply"] = reply_metadata
+        self.message_history.add_message(
+            platform=identity.platform,
+            chat_id=identity.storage_id,
+            role="user",
+            content=group_message_content(context, user_name, text, identity.chat_type),
+            user_id=identity.actor_user_id,
+            metadata=metadata,
+            memory_scope_id=identity.memory_scope_id,
+            place_scope_id=identity.place_scope_id,
+            actor_display_name=identity.actor_display_name,
+        )
+        context["_message_saved"] = True
+
+    @staticmethod
+    def _format_group_events(events: List[GroupMessageEvent]) -> str:
+        lines = []
+        for event in events:
+            reply = ""
+            if event.reply_to_message_id:
+                target = event.reply_to_user_name or event.reply_to_user_id or "未知成员"
+                reply = f"（回复 {target}#{event.reply_to_message_id}）"
+            message_id = f" id={event.platform_message_id}" if event.platform_message_id else ""
+            lines.append(f"[{event.sequence}] {event.sender_name}{message_id}{reply}: {event.text}")
+        return "\n".join(lines)
+
+    async def _collect_fast_text(self, runtime_key: str, system_prompt: str, user_prompt: str) -> str:
+        async def collect() -> str:
+            chunks: List[str] = []
+            async for chunk in self._chat_stream_wrapper(
+                self.fast_llm,
+                runtime_key,
+                system_prompt=system_prompt,
+                user_prompt=user_prompt,
+                history=[],
+                tools=[],
+            ):
+                if isinstance(chunk, dict) and chunk.get("type") == "text":
+                    chunks.append(str(chunk.get("content") or ""))
+                elif isinstance(chunk, str):
+                    chunks.append(chunk)
+            return "".join(chunks).strip()
+
+        return await asyncio.wait_for(collect(), timeout=self.group_listener_decision_timeout)
+
+    async def _decide_group_passive_action(
+        self,
+        runtime_key: str,
+        events: List[GroupMessageEvent],
+    ) -> PassiveAction:
+        system_prompt = render_template("group_listener.jinja", "passive_system")
+        user_prompt = render_template(
+            "group_listener.jinja",
+            "passive_user",
+            events_text=self._format_group_events(list(events)),
+        )
+        result = await self._collect_fast_text(
+            runtime_key,
+            system_prompt,
+            user_prompt,
+        )
+        match = re.search(r"\b(KEEP_LISTENING|REPLY|SEMI_ONLINE)\b", result.upper())
+        return PassiveAction(match.group(1)) if match else PassiveAction.KEEP_LISTENING
+
+    async def _decide_group_append_action(
+        self,
+        runtime_key: str,
+        base: List[GroupMessageEvent],
+        batch: List[GroupMessageEvent],
+    ) -> AppendAction:
+        system_prompt = render_template("group_listener.jinja", "append_system")
+        user_prompt = render_template(
+            "group_listener.jinja",
+            "append_user",
+            base_events_text=self._format_group_events(list(base)),
+            new_events_text=self._format_group_events(list(batch)),
+        )
+        result = await self._collect_fast_text(runtime_key, system_prompt, user_prompt)
+        match = re.search(r"\b(APPEND|KEEP_PENDING)\b", result.upper())
+        return AppendAction(match.group(1)) if match else AppendAction.KEEP_PENDING
+
+    def _group_batch_context(
+        self,
+        events: List[GroupMessageEvent],
+        reason: str,
+        continuation_token: Optional[int] = None,
+    ) -> Dict[str, Any]:
+        latest = events[-1]
+        context = dict(latest.context)
+        context.update(
+            {
+                "runtime_key": latest.runtime_key,
+                "platform": latest.platform,
+                "chat_id": latest.platform_chat_id,
+                "chat_type": "group",
+                "memory_scope_id": latest.memory_scope_id,
+                "place_scope_id": latest.place_scope_id,
+                "text": self._format_group_events(events),
+                "group_message_batch": [event.context for event in events],
+                "_message_saved": True,
+                "_group_listener_promoted": True,
+                "_group_listener_reason": reason,
+            }
+        )
+        if continuation_token is not None:
+            context["_group_listener_continuation_token"] = continuation_token
+        return context
+
+    async def _promote_group_message_batch(
+        self,
+        runtime_key: str,
+        events: List[GroupMessageEvent],
+        reason: str,
+    ) -> None:
+        if not events:
+            return
+        await self.handle_new_message(self._group_batch_context(list(events), reason))
+
+    async def _interrupt_group_generation(
+        self,
+        runtime_key: str,
+        events: List[GroupMessageEvent],
+        reason: str,
+        token: int,
+    ) -> None:
+        current = self.front_brain_tasks.get(runtime_key)
+        if current and not current.done():
+            current.cancel()
+            try:
+                await asyncio.wait_for(asyncio.shield(current), timeout=1.0)
+            except (asyncio.CancelledError, asyncio.TimeoutError, Exception):
+                pass
+        restart_events = list(events)
+        if reason == "mention":
+            restart_events = await self.group_listener.priority_restart_events(
+                runtime_key,
+                token,
+                replacement_events=events,
+            )
+        if restart_events:
+            await self.handle_new_message(
+                self._group_batch_context(
+                    restart_events,
+                    reason,
+                    continuation_token=token,
+                )
+            )
+
     async def handle_new_message(self, context: Dict[str, Any]):
         """处理来自适配器的新消息/命令。"""
         # copy context to allow safe mutation (inject multimodal payloads, flags, etc.)
@@ -204,13 +396,11 @@ class MessageHandlerMixin:
                 )
 
         # 用户在前脑还在生成时又发了一条消息：取消前脑的当前生成，按聚合器语义合并：
-        #   - 如果前脑还没输出任何文本：直接 cancel，DB 里已经存有上一条用户消息，
-        #     新消息走正常流程时会从历史读到上一条 user 消息，相当于"未输出阶段合并消息"。
-        #   - 如果前脑已经生成了部分文本：cancel 后保留 self.front_brain_partial[chat_id]，
-        #     下一次前脑生成时会把这段草稿作为系统备注（仅模型可见）注入，
-        #     让模型基于已生成内容 + 新消息重新组织回复，而不是从零开始。
+        # ONLINE 群监听的 promoted/restart 输入由 GroupListenerManager 自己协调取消和重启，
+        # 不能在这里再次把刚登记的新逻辑周期取消掉。
         prev_front_task = self.front_brain_tasks.get(chat_id)
-        if prev_front_task and not prev_front_task.done():
+        listener_managed = bool(context.get("_group_listener_promoted"))
+        if prev_front_task and not prev_front_task.done() and not listener_managed:
             partial_len = len((self.front_brain_partial.get(chat_id) or ""))
             logger.info(
                 f"[{chat_id}] 检测到前脑仍在生成回复（已生成 {partial_len} 字），新消息到达，"
@@ -596,13 +786,45 @@ class MessageHandlerMixin:
             context["_message_saved"] = True
 
         # 2) 前脑生成即时回复 + 路由判断（包成 task 以便后续到达的新消息能打断它）
+        listener_token = None
+        if context.get("_group_listener_promoted") and chat_type == "group":
+            listener_events = [
+                GroupMessageEvent.from_context(item, index + 1)
+                for index, item in enumerate(context.get("group_message_batch") or [])
+                if isinstance(item, dict)
+            ]
+            continuation_token = context.get("_group_listener_continuation_token")
+            listener_token = await self.group_listener.begin_generation(
+                chat_id,
+                listener_events,
+                continuation_token=continuation_token,
+            )
+            if continuation_token is not None:
+                await self.group_listener.mark_restart_started(
+                    chat_id,
+                    continuation_token,
+                    listener_token,
+                )
         front_task = asyncio.create_task(self._generate_front_chat_response(context))
         self.front_brain_tasks[chat_id] = front_task
+        if listener_token is not None:
+            await self.group_listener.bind_generation_task(chat_id, listener_token, front_task)
         try:
             front_result = await front_task
+            if listener_token is not None and not await self.group_listener.is_generation_current(
+                chat_id, listener_token
+            ):
+                logger.info(f"[{chat_id}] 丢弃过期群聊生成结果 token={listener_token}")
+                return
+            if listener_token is not None:
+                await self.group_listener.finish_generation(chat_id, listener_token)
         except asyncio.CancelledError:
             logger.info(f"[{chat_id}] 前脑生成已被新消息打断，丢弃本轮结果。")
             return
+        except Exception:
+            if listener_token is not None:
+                await self.group_listener.finish_generation(chat_id, listener_token)
+            raise
         finally:
             # 仅在仍指向当前 task 时清理
             if self.front_brain_tasks.get(chat_id) is front_task:
@@ -690,9 +912,13 @@ class MessageHandlerMixin:
             if len(session_history) > 20:
                 session["history"] = session_history[-20:]
 
-        if front_result.get("force_semi_online"):
-            logger.info(f"[{chat_id}] 前脑触发 [SEMI_ONLINE]，立即进入半在线状态。")
-            self._transition_to_semi_online(chat_id)
+        presence_ended = await self._apply_presence_markers(
+            chat_id,
+            chat_type,
+            force_online=bool(front_result.get("force_online")),
+            force_semi_online=bool(front_result.get("force_semi_online")),
+        )
+        if presence_ended:
             return
 
         followup_delay = self.FOLLOWUP_NEED_FOLLOW_DELAY if front_result.get("need_follow") else None

@@ -73,7 +73,8 @@ core/controller.py            NoraController.handle_message()
 
 ### `core/scheduler.py`
 - `ProactiveScheduler` — APScheduler 驱动主动消息调度
-- `AIPresence` — 全局 AI 在线状态（ONLINE / SEMI_ONLINE）
+- `AIPresence` — 共享会话/主动调度使用的全局状态（ONLINE / SEMI_ONLINE），**不等同于每个群的监听模式**
+- 每群运行状态由 `core/group_listener.py` + `core/group_presence_store.py` 按 `platform:chat_id` 管理；ONLINE 群绕过 sender aggregator，SEMI_ONLINE 群仍仅由 @/回复进入正常聚合路径
 - 手动重建接口：`regenerate_today_plan(clear_existing=True)`
 - 每日总结：每日 00:00 触发 `_on_daily_summary_trigger`，调用 `daily_summary_callback` 生成上一日摘要
 

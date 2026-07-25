@@ -225,6 +225,41 @@ def get_message_history_config():
     cfg = _safe_config()
     return cfg.get("memory", {}).get("message_history", {})
 
+def get_group_listener_config() -> dict:
+    """获取群聊独立在线监听配置，并补齐安全默认值。"""
+    cfg = _safe_config()
+    raw = ((cfg.get("interaction", {}) or {}).get("group_listener", {}) or {})
+    defaults = {
+        "enabled": True,
+        "default_mode": "semi_online",
+        "evaluation_batch_size": 3,
+        "idle_seconds": 180.0,
+        "max_pending_messages": 20,
+        "decision_timeout_seconds": 30.0,
+    }
+    merged = dict(defaults)
+    if isinstance(raw, dict):
+        merged.update(raw)
+
+    mode = str(merged.get("default_mode") or "semi_online").strip().lower()
+    merged["default_mode"] = mode if mode in {"online", "semi_online"} else "semi_online"
+    merged["enabled"] = bool(merged.get("enabled", True))
+
+    numeric_fields = {
+        "evaluation_batch_size": (int, 1),
+        "idle_seconds": (float, 0.01),
+        "max_pending_messages": (int, 1),
+        "decision_timeout_seconds": (float, 0.01),
+    }
+    for key, (converter, minimum) in numeric_fields.items():
+        try:
+            value = converter(merged.get(key, defaults[key]))
+            merged[key] = max(minimum, value)
+        except (TypeError, ValueError):
+            merged[key] = defaults[key]
+    return merged
+
+
 def get_workspace_config():
     """Gets the workspace configuration."""
     cfg = _safe_config()

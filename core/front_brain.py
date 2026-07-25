@@ -660,6 +660,8 @@ class FrontBrainMixin:
             "should_reply": parsed.get("should_reply", True),
             "use_image_model": parsed.get("use_image_model", False),
             "need_follow": parsed.get("need_follow", False),
+            "force_semi_online": parsed.get("force_semi_online", False),
+            "force_online": parsed.get("force_online", False),
             "keep_segment_open": parsed.get("keep_segment_open", False),
             "retract_message_target": parsed.get("retract_message_target", ""),
             "route": parsed.get("route"),

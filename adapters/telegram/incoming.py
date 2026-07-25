@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+from typing import Any, Dict
 
 from telegram import Update
 from telegram.ext import ContextTypes
@@ -83,6 +84,13 @@ class TelegramIncomingMixin:
         except Exception as exc:
             logger.debug("[telegram] 记录用户显示名失败: %s", exc)
 
+    def _is_reply_to_bot(self, update: Update) -> bool:
+        message = update.message if update else None
+        replied = getattr(message, "reply_to_message", None)
+        sender = getattr(replied, "from_user", None)
+        sender_id = str(getattr(sender, "id", "") or "")
+        return bool(sender_id and sender_id == str(getattr(self, "bot_user_id", "") or ""))
+
     async def _should_process_message(self, update: Update) -> bool:
         """判断是否应该处理收到的消息。"""
         self._remember_update_users(update)
@@ -99,10 +107,30 @@ class TelegramIncomingMixin:
                 return False
             if self._is_known_media_group_continuation(update):
                 return True
-            return self._has_bot_mention(update)
+            if self._has_bot_mention(update) or self._is_reply_to_bot(update):
+                return True
+            presence_for = getattr(self, "_group_presence_for", None)
+            if callable(presence_for):
+                mode = presence_for(f"telegram:{update.effective_chat.id}")
+                return str(getattr(mode, "value", mode)).lower() == "online"
+            return False
         
         # 默认不处理
         return False
+
+    async def _dispatch_normalized_message(
+        self,
+        chat_id: str,
+        text: str,
+        context: Dict[str, Any],
+    ) -> None:
+        """ONLINE 群消息直达监听器，其余消息沿用聚合器。"""
+        group_handler = getattr(self, "_group_message_handler", None)
+        if context.get("chat_type") == "group" and callable(group_handler):
+            if await group_handler(context):
+                return
+        if self._aggregator:
+            await self._aggregator.add_message(chat_id, text, context)
 
     async def _handle_incoming_message(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not await self._should_process_message(update):
@@ -154,9 +182,11 @@ class TelegramIncomingMixin:
         
         if self._aggregator:
             full_context = await self._context_from_update_with_group(update, text)
+            if reply_info:
+                full_context["reply_to_text"] = reply_info
             if mentioned_user_ids:
                 full_context["mentioned_user_ids"] = mentioned_user_ids
-            await self._aggregator.add_message(chat_id, text or "", full_context)
+            await self._dispatch_normalized_message(chat_id, text or "", full_context)
 
     async def _handle_photo(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """处理图片消息（支持单图和多图相册 media_group）"""
@@ -231,7 +261,7 @@ class TelegramIncomingMixin:
                 full_context = await self._context_from_update_with_group(update, text)
                 if mentioned_user_ids:
                     full_context["mentioned_user_ids"] = mentioned_user_ids
-                await self._aggregator.add_message(chat_id, text, full_context)
+                await self._dispatch_normalized_message(chat_id, text, full_context)
             
             logger.info(f"[{chat_id}] 收到图片: {rel_file_path}")
 
@@ -268,13 +298,15 @@ class TelegramIncomingMixin:
                     "platform_message_ids": platform_ids,
                 }
             )
+            if buf.get("reply_info"):
+                full_context["reply_to_text"] = buf["reply_info"]
             if mentioned_user_ids:
                 full_context["mentioned_user_ids"] = mentioned_user_ids
             source_update = buf.get("update")
             source_chat = getattr(source_update, "effective_chat", None)
             if source_chat is not None:
                 full_context = await self._enrich_group_context(full_context, source_chat, update=source_update)
-            await self._aggregator.add_message(chat_id, text, full_context)
+            await self._dispatch_normalized_message(chat_id, text, full_context)
         
         logger.info(f"[{chat_id}] 媒体组合并完成: {len(buf['photos'])} 个媒体 (group={media_group_id})")
 
@@ -362,7 +394,7 @@ class TelegramIncomingMixin:
                 full_context = await self._context_from_update_with_group(update, text)
                 if mentioned_user_ids:
                     full_context["mentioned_user_ids"] = mentioned_user_ids
-                await self._aggregator.add_message(chat_id, text, full_context)
+                await self._dispatch_normalized_message(chat_id, text, full_context)
 
             logger.info(f"[{chat_id}] 收到视频: {rel_file_path}")
 
@@ -399,9 +431,11 @@ class TelegramIncomingMixin:
 
         if self._aggregator:
             full_context = await self._context_from_update_with_group(update, text)
+            if reply_info:
+                full_context["reply_to_text"] = reply_info
             if mentioned_user_ids:
                 full_context["mentioned_user_ids"] = mentioned_user_ids
-            await self._aggregator.add_message(chat_id, text, full_context)
+            await self._dispatch_normalized_message(chat_id, text, full_context)
         
         logger.info(f"[{chat_id}] 收到文档: {rel_file_path}")
 
@@ -437,8 +471,10 @@ class TelegramIncomingMixin:
 
         if self._aggregator:
             full_context = await self._context_from_update_with_group(update, text)
+            if reply_info:
+                full_context["reply_to_text"] = reply_info
             if mentioned_user_ids:
                 full_context["mentioned_user_ids"] = mentioned_user_ids
-            await self._aggregator.add_message(chat_id, text, full_context)
+            await self._dispatch_normalized_message(chat_id, text, full_context)
         
         logger.info(f"[{chat_id}] 收到贴纸: {rel_file_path}")

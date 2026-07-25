@@ -123,6 +123,30 @@ def test_front_brain_review_no_reply_signal_silences_user_reply():
     assert result["user_reply"] == ""
 
 
+def test_front_brain_online_signal_is_parsed_and_hidden():
+    result = parse_front_brain_response("我继续听着。[ONLINE]")
+    assert result["force_online"] is True
+    assert result["force_semi_online"] is False
+    assert result["user_reply"] == "我继续听着。"
+
+
+def test_front_brain_presence_conflict_prefers_semi_online():
+    result = parse_front_brain_response("先安静一下。[ONLINE][SEMI_ONLINE]")
+    assert result["force_online"] is False
+    assert result["force_semi_online"] is True
+    assert "[ONLINE]" not in result["user_reply"]
+    assert "[SEMI_ONLINE]" not in result["user_reply"]
+
+
+def test_front_brain_review_online_signal_is_parsed_and_hidden():
+    from core.routing import parse_front_brain_review
+
+    result = parse_front_brain_review("处理完成啦 [TASK_DONE] [ONLINE]")
+    assert result["action"] == "done"
+    assert result["force_online"] is True
+    assert result["user_reply"] == "处理完成啦"
+
+
 def test_front_brain_keep_segment_open_signal_is_parsed():
     result = parse_front_brain_response("你想改哪个文件呀？ [KEEP_SEGMENT_OPEN]")
     assert result["keep_segment_open"] is True
@@ -237,6 +261,11 @@ def test_sanitize_user_visible_text_strips_route_markers_as_safety_net():
     assert "[platform:" not in cleaned
     assert "[scene:" not in cleaned
     assert cleaned == "漏网的标记也要抹掉"
+
+
+def test_sanitize_user_visible_text_strips_presence_markers_as_safety_net():
+    cleaned = sanitize_user_visible_text("还在听。[ONLINE][SEMI_ONLINE]")
+    assert cleaned == "还在听。"
 
 
 def test_adapter_output_sanitizer_preserves_native_message_controls():

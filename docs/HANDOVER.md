@@ -3,6 +3,17 @@
 - 目标：多平台智能体内核，包含 LLM 适配、工具/技能体系、成本追踪、记忆/RAG。
 - 当前状态：可运行，自测通过；已完成图片记忆链路（入库/检索/回查再分析）、`view_media` 工具增强、CLI 高危清理保护、**跨平台接力 + 主人/访客分离（五层身份模型，全 5 Phase 完成）**。
 
+## 近期关键改动（截至 2026-07-26）
+
+### 👥 群聊独立 ONLINE / SEMI_ONLINE 监听
+
+- 新增 `core/group_listener.py` 与 `core/group_presence_store.py`：群模式按 `platform:chat_id` 隔离并持久化，但 `MessageHistory`、RAG、压缩和摘要继续使用共享 `memory_scope_id`。
+- ONLINE 群内每个标准化事件立即写共享历史；累计 3 条或末条消息静默 180 秒后由 fast 决定 `KEEP_LISTENING / REPLY / SEMI_ONLINE`，运行窗口最多 20 条。
+- smart 生成中每 3 条普通消息由 fast 决定追加；一个逻辑周期只允许一次普通中断。显式 @ 可立即 priority replacement，reply-only 不走立即中断。
+- Telegram 与 OneBot v11 的 ONLINE 群事件绕过 sender aggregator；SEMI_ONLINE 的 @/回复继续使用原有 3 秒聚合。Telegram 相册保持一个多 ID 原子事件。
+- `[ONLINE]` / `[SEMI_ONLINE]` 在群聊中只切当前群，均不会显示给用户。全局 `AIPresence` 不等同于所有群的统一状态。
+- 配置位于 `interaction.group_listener`；架构、竞态与排障见 `docs/architecture/group-chat-listener.md`，核心测试入口为 `tests/test_group_listener.py`。
+
 ## 近期关键改动（截至 2026-07-11）
 
 ### ✉️ OB11 主动发送私聊/群聊消息工具 — 2026-07-11

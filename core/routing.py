@@ -1,6 +1,9 @@
+import logging
 import re
 
 from adapters.message_controls import strip_message_control_markers
+
+logger = logging.getLogger(__name__)
 
 
 def parse_route_decision_response(response_text: str) -> str:
@@ -59,6 +62,8 @@ _FOLLOW_SIGNAL = "[NEED_FOLLOW]"
 _NO_REPLY_SIGNAL = "[NO_REPLY]"
 # 可选：立即进入半在线状态
 _SEMI_ONLINE_SIGNAL = "[SEMI_ONLINE]"
+# 可选：将当前群聊切换为在线监听
+_ONLINE_SIGNAL = "[ONLINE]"
 # 可选：允许当前消息段暂不闭合，并暂停 followup detect，直到下次长时间沉默
 _KEEP_SEGMENT_OPEN_SIGNAL = "[KEEP_SEGMENT_OPEN]"
 # 可选：撤回历史某条 assistant 消息
@@ -161,6 +166,8 @@ def sanitize_adapter_output_text(text: str) -> str:
     cleaned = _SOURCE_LABEL_PATTERN.sub("", cleaned)
     cleaned = _ROUTE_PLATFORM_PATTERN.sub("", cleaned)
     cleaned = _ROUTE_SCENE_PATTERN.sub("", cleaned)
+    cleaned = cleaned.replace(_SEMI_ONLINE_SIGNAL, "")
+    cleaned = cleaned.replace(_ONLINE_SIGNAL, "")
     cleaned = re.sub(r"\n{3,}", "\n\n", cleaned)
     return cleaned.strip()
 
@@ -192,6 +199,7 @@ def parse_front_brain_response(response_text: str) -> dict:
             "use_image_model": False,
             "need_follow": False,
             "force_semi_online": False,
+            "force_online": False,
             "keep_segment_open": False,
             "retract_message_target": "",
             "route": _empty_route(),
@@ -205,6 +213,10 @@ def parse_front_brain_response(response_text: str) -> dict:
     force_image_model = bool(_USE_IMAGE_MODEL_PATTERN.search(response_text))
     should_reply = _NO_REPLY_SIGNAL not in response_text
     force_semi_online = _SEMI_ONLINE_SIGNAL in response_text
+    force_online = _ONLINE_SIGNAL in response_text
+    if force_semi_online and force_online:
+        logger.warning("前脑同时输出 ONLINE 与 SEMI_ONLINE，按 SEMI_ONLINE 处理")
+        force_online = False
     keep_segment_open = _KEEP_SEGMENT_OPEN_SIGNAL in response_text
     retract_target = ""
     retract_match = _RETRACT_MESSAGE_PATTERN.search(response_text)
@@ -235,6 +247,7 @@ def parse_front_brain_response(response_text: str) -> dict:
     if keep_segment_open:
         need_follow = False
         force_semi_online = False
+        force_online = False
 
     # 清理内部标记，同时保留应由目标 Adapter 解释的 reply/@ 控制标记
     user_reply = response_text
@@ -242,6 +255,7 @@ def parse_front_brain_response(response_text: str) -> dict:
     user_reply = user_reply.replace(_FOLLOW_SIGNAL, "")
     user_reply = user_reply.replace(_NO_REPLY_SIGNAL, "")
     user_reply = user_reply.replace(_SEMI_ONLINE_SIGNAL, "")
+    user_reply = user_reply.replace(_ONLINE_SIGNAL, "")
     user_reply = user_reply.replace(_KEEP_SEGMENT_OPEN_SIGNAL, "")
     user_reply = _RETRACT_MESSAGE_PATTERN.sub("", user_reply)
     user_reply = _USE_IMAGE_MODEL_PATTERN.sub("", user_reply)
@@ -259,6 +273,7 @@ def parse_front_brain_response(response_text: str) -> dict:
         "use_image_model": force_image_model,
         "need_follow": need_follow,
         "force_semi_online": force_semi_online,
+        "force_online": force_online,
         "keep_segment_open": keep_segment_open,
         "retract_message_target": retract_target,
         "route": route,
@@ -289,6 +304,7 @@ def parse_front_brain_review(response_text: str) -> dict:
             "use_image_model": False,
             "need_follow": False,
             "force_semi_online": False,
+            "force_online": False,
             "keep_segment_open": False,
             "retract_message_target": "",
             "route": _empty_route(),
@@ -304,6 +320,10 @@ def parse_front_brain_review(response_text: str) -> dict:
     force_image_model = bool(_USE_IMAGE_MODEL_PATTERN.search(response_text))
     should_reply = _NO_REPLY_SIGNAL not in response_text
     force_semi_online = _SEMI_ONLINE_SIGNAL in response_text
+    force_online = _ONLINE_SIGNAL in response_text
+    if force_semi_online and force_online:
+        logger.warning("前脑同时输出 ONLINE 与 SEMI_ONLINE，按 SEMI_ONLINE 处理")
+        force_online = False
     keep_segment_open = _KEEP_SEGMENT_OPEN_SIGNAL in response_text
     retract_target = ""
     retract_match = _RETRACT_MESSAGE_PATTERN.search(response_text)
@@ -327,6 +347,7 @@ def parse_front_brain_review(response_text: str) -> dict:
     if keep_segment_open:
         need_follow = False
         force_semi_online = False
+        force_online = False
 
     # 清理内部标记，同时保留应由目标 Adapter 解释的 reply/@ 控制标记
     user_reply = response_text
@@ -335,6 +356,7 @@ def parse_front_brain_review(response_text: str) -> dict:
     user_reply = user_reply.replace(_FOLLOW_SIGNAL, "")
     user_reply = user_reply.replace(_NO_REPLY_SIGNAL, "")
     user_reply = user_reply.replace(_SEMI_ONLINE_SIGNAL, "")
+    user_reply = user_reply.replace(_ONLINE_SIGNAL, "")
     user_reply = user_reply.replace(_KEEP_SEGMENT_OPEN_SIGNAL, "")
     user_reply = _RETRACT_MESSAGE_PATTERN.sub("", user_reply)
     user_reply = _USE_IMAGE_MODEL_PATTERN.sub("", user_reply)
@@ -355,6 +377,7 @@ def parse_front_brain_review(response_text: str) -> dict:
             "use_image_model": force_image_model,
             "need_follow": need_follow,
             "force_semi_online": force_semi_online,
+            "force_online": force_online,
             "keep_segment_open": keep_segment_open,
             "retract_message_target": retract_target,
             "route": route,
@@ -368,6 +391,7 @@ def parse_front_brain_review(response_text: str) -> dict:
             "use_image_model": force_image_model,
             "need_follow": need_follow,
             "force_semi_online": force_semi_online,
+            "force_online": force_online,
             "keep_segment_open": keep_segment_open,
             "retract_message_target": retract_target,
             "route": route,
@@ -382,6 +406,7 @@ def parse_front_brain_review(response_text: str) -> dict:
             "use_image_model": force_image_model,
             "need_follow": need_follow,
             "force_semi_online": force_semi_online,
+            "force_online": force_online,
             "keep_segment_open": keep_segment_open,
             "retract_message_target": retract_target,
             "route": route,
