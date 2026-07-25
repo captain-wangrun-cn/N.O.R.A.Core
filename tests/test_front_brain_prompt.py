@@ -4,6 +4,7 @@ from types import SimpleNamespace
 from brain.prompts import render_template
 from core.conversation_identity import build_identity_from_parts, set_owner_resolver
 from core.front_brain import FrontBrainMixin
+from core.group_presence_store import GroupPresence
 from core.worker_status import BackendTaskQueue, WorkerStatus
 
 
@@ -32,6 +33,10 @@ class _FrontBrainProbe(FrontBrainMixin):
         self.tool_manager = SimpleNamespace(get_tool_intros=lambda: {})
         self.worker_status = {}
         self.task_queues = {}
+        self.group_presences = {}
+
+    def group_presence_for(self, runtime_key):
+        return self.group_presences.get(runtime_key, GroupPresence.SEMI_ONLINE)
 
     def _identity(self, context):
         return build_identity_from_parts(
@@ -202,6 +207,55 @@ def test_front_brain_prompt_includes_current_onebot_group_scene():
     assert "当前入站消息 ID: 345" in system_prompt
     assert "[reply:MESSAGE_ID]" in system_prompt
     assert "看到当前消息 ID 不代表必须回复或自动引用" in system_prompt
+
+
+def test_front_brain_prompt_includes_group_presence_trigger_and_online_examples():
+    probe = _FrontBrainProbe(["当然呀，我在呢。[ONLINE]"])
+
+    result = asyncio.run(
+        probe._generate_front_chat_response(
+            {
+                "platform": "onebotv11",
+                "chat_id": "10001",
+                "user_id": "20002",
+                "chat_type": "group",
+                "user_name": "群友A",
+                "text": "陪我聊天",
+                "explicit_bot_mention": True,
+                "reply_to_bot": False,
+            }
+        )
+    )
+
+    assert result["force_online"] is True
+    assert result["user_reply"] == "当然呀，我在呢。"
+    system_prompt = probe.system_prompts[0]
+    assert "【群监听运行状态（可信系统元数据）】" in system_prompt
+    assert "当前群监听模式: SEMI_ONLINE" in system_prompt
+    assert "本轮触发方式: 用户明确 @ 你" in system_prompt
+    assert "陪我聊天" in system_prompt
+    assert "必须输出 `[ONLINE]`" in system_prompt
+    assert "一次性问答" in system_prompt
+
+
+def test_front_brain_private_prompt_omits_group_presence_runtime_block():
+    probe = _FrontBrainProbe(["我在呀。"])
+
+    asyncio.run(
+        probe._generate_front_chat_response(
+            {
+                "platform": "telegram",
+                "chat_id": "private-chat",
+                "user_id": "owner",
+                "chat_type": "private",
+                "user_name": "Owner",
+                "text": "陪我聊天",
+                "explicit_bot_mention": True,
+            }
+        )
+    )
+
+    assert "【群监听运行状态（可信系统元数据）】" not in probe.system_prompts[0]
 
 
 def test_front_brain_prompt_includes_ordered_aggregate_and_distinct_reply_ids():

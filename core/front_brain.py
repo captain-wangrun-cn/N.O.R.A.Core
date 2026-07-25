@@ -45,6 +45,43 @@ class FrontBrainMixin:
         "抱歉，处理请求时遇到问题",
     )
 
+    def _build_group_presence_context_block(self, identity, context: Dict[str, Any]) -> str:
+        """Expose trusted group-listener state without copying user content."""
+        if identity.chat_type != "group":
+            return ""
+
+        mode = "unknown"
+        presence_getter = getattr(self, "group_presence_for", None)
+        if callable(presence_getter):
+            try:
+                current_mode = presence_getter(identity.runtime_key)
+                mode = str(getattr(current_mode, "value", current_mode)).lower()
+            except Exception:
+                logger.warning(
+                    "[%s] 获取群监听状态失败，前脑将按 unknown 处理。",
+                    identity.runtime_key,
+                    exc_info=True,
+                )
+
+        triggers = []
+        if context.get("explicit_bot_mention"):
+            triggers.append("用户明确 @ 你")
+        if context.get("reply_to_bot"):
+            triggers.append("用户回复了你的消息")
+        if context.get("_group_listener_promoted"):
+            triggers.append("群监听器将被动消息窗口提升给前脑")
+        if not triggers:
+            triggers.append("普通群聊上下文")
+
+        batch_type = "多消息群聊批次" if context.get("group_message_batch") else "单次/聚合入站消息"
+        return (
+            "【群监听运行状态（可信系统元数据）】\n"
+            f"- 当前群监听模式: {mode.upper()}\n"
+            f"- 本轮触发方式: {'；'.join(triggers)}\n"
+            f"- 本轮输入形态: {batch_type}\n"
+            "- 这里的 ONLINE / SEMI_ONLINE 只指当前群的监听模式，不是全局 AI 状态。"
+        )
+
     @classmethod
     def _strip_timestamp_markers(cls, text: str) -> str:
         if not text:
@@ -269,6 +306,7 @@ class FrontBrainMixin:
             group_online_count_status=str(context.get("group_online_count_status") or ""),
         )
         scene_context_block = build_current_scene_block(identity, context)
+        group_presence_context_block = self._build_group_presence_context_block(identity, context)
 
         # 可选注入块默认空串：下面这些块都是按条件/try 注入，
         # 若条件不满足或注入失败必须有兜底空值，否则渲染模板时会 UnboundLocalError。
@@ -385,6 +423,8 @@ class FrontBrainMixin:
             system_prompt = system_prompt + "\n\n---\n" + yesterday_memory_block
         if scene_context_block:
             system_prompt = system_prompt + "\n\n---\n" + scene_context_block
+        if group_presence_context_block:
+            system_prompt = system_prompt + "\n\n---\n" + group_presence_context_block
 
         # 后脑忙碌或队列非空时，把"正在处理什么 + 已排队什么"作为运行时上下文块注入前脑系统提示，
         # 让前脑天然知道"刚才下达过哪些任务、现在还在做"，从而避免对用户的简单承接（嗯/好的/收到）
@@ -719,6 +759,7 @@ class FrontBrainMixin:
             group_online_count_status=str(context.get("group_online_count_status") or ""),
         )
         scene_context_block = build_current_scene_block(identity, context)
+        group_presence_context_block = self._build_group_presence_context_block(identity, context)
         schedule_block = ""
         custom_block = ""
         tool_intro_block = ""
@@ -773,7 +814,9 @@ class FrontBrainMixin:
         )
         if scene_context_block:
             system_prompt = system_prompt + "\n\n---\n" + scene_context_block
-        
+        if group_presence_context_block:
+            system_prompt = system_prompt + "\n\n---\n" + group_presence_context_block
+
         user_prompt = render_template(
             'front_brain_review.jinja',
             'user',
