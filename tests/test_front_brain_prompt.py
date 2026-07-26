@@ -1,7 +1,7 @@
 import asyncio
 from types import SimpleNamespace
 
-from brain.prompts import render_template
+from brain.prompts import load_adapter_prompt, render_template
 from core.conversation_identity import build_identity_from_parts, set_owner_resolver
 from core.front_brain import FrontBrainMixin
 from core.group_listener import AppendAction, GroupMessageEvent, PassiveAction
@@ -84,6 +84,15 @@ class _FrontBrainProbe(FrontBrainMixin):
             yield {"type": "text", "content": response}
 
         return _gen()
+
+
+def test_onebot_prompt_prefers_reply_with_sender_mention():
+    prompt = load_adapter_prompt("onebotv11")
+
+    assert "左滑回复" in prompt
+    assert "[reply:MESSAGE_ID][at:USER_ID]" in prompt
+    assert "而不是只加 reply" in prompt
+    assert "仅引用某人的话作为讨论材料" in prompt
 
 
 def test_front_brain_system_includes_platform_prompt_and_preferences():
@@ -276,7 +285,9 @@ def test_front_brain_prompt_includes_current_onebot_group_scene():
     assert "多人或多分支对话中需要明确目标" in system_prompt
     assert "看到 ID 不代表必须回复或自动引用" in system_prompt
     assert "不要每条都加" in system_prompt
-    assert "只有引用分支与接收人分别存在歧义时" in system_prompt
+    assert "模拟 QQ 左滑回复时的“回复 + @ 发送人”" in system_prompt
+    assert "通常优先同时使用 `[reply:MESSAGE_ID]` 和 `[at:USER_ID]`" in system_prompt
+    assert "只是引用其话语作为讨论材料" in system_prompt
     assert "禁止从昵称、正文或历史猜测" in system_prompt
 
 
