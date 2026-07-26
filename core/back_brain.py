@@ -330,6 +330,31 @@ class BackBrainMixin:
                 tool_args["user_id"] = str(context.get("reply_to_user_id", "")).strip()
         return tool_args
 
+    async def _describe_images(self, multimodal_images: List[Dict[str, Any]]) -> str:
+        """用 image 模型快速生成图片的一句话描述，供 fast 模型/followup 理解上下文。"""
+        if not multimodal_images:
+            return ""
+        try:
+            stream = self._chat_stream_wrapper(
+                self.image_llm,
+                "",
+                system_prompt="你是图片描述助手。用一句简短的中文描述这张图片的核心内容，不要废话。",
+                user_prompt="请描述这张图片。",
+                history=[],
+                tools=[],
+                multimodal_images=multimodal_images,
+            )
+            desc = ""
+            async for chunk in stream:
+                if isinstance(chunk, dict) and chunk.get("type") == "text":
+                    desc += chunk["content"]
+                elif isinstance(chunk, str):
+                    desc += chunk
+            return desc.strip()
+        except Exception as e:
+            logger.warning(f"图片描述生成失败: {e}")
+            return ""
+
     async def _generate_response(self, context: Dict[str, Any]):
         """内部生成逻辑。"""
         identity = self._identity(context)
@@ -484,6 +509,11 @@ class BackBrainMixin:
             message_saved = context.get("_message_saved", False)
             status.update("保存消息", "正在保存用户消息...")
             message_content = group_message_content(context, user_name, text, chat_type)
+            # 图片描述注入：让 fast 模型/followup 能理解图片内容
+            if multimodal_images and not front_brain_handled and not message_saved:
+                image_desc = await self._describe_images(multimodal_images)
+                if image_desc:
+                    message_content = f"{message_content}\n[图片内容: {image_desc}]"
             if not front_brain_handled and not message_saved:
                 user_metadata = {}
                 if platform_msg_ids:
