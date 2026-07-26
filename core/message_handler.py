@@ -265,7 +265,7 @@ class MessageHandlerMixin:
         events: List[GroupMessageEvent],
     ) -> PassiveAction:
         system_prompt = render_template("group_listener.jinja", "passive_system")
-        batch_size = max(1, int(getattr(self.group_listener, "batch_size", 3)))
+        batch_size = max(1, int(getattr(self.group_listener, "batch_size", 2)))
         new_sequences = {event.sequence for event in events[-batch_size:]}
         max_pending = max(1, int(getattr(self.group_listener, "max_pending", 20)))
         user_prompt = render_template(

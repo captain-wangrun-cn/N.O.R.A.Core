@@ -21,7 +21,7 @@ Telegram 使用 HTML 解析模式，只使用 Bot API 支持的标签：
 ## 2) Telegram 发送节奏
 
 - 单条 Telegram 文本上限为 4096 字符；较长回复请自然使用 `[SPLIT]`，不要塞成一大段。
-- 需要原生引用某条 Telegram 消息时使用通用 `[reply:MESSAGE_ID]`；需要在群聊中原生 @ 某个已知用户时使用 `[at:USER_ID]`。两种 ID 都必须来自当前 Telegram 场景中的可靠上下文，禁止猜测。
+- 需要原生引用某条 Telegram 消息时使用通用 `[reply:MESSAGE_ID]`；需要在群聊中直接面向某位已知参与者、让自然插话对象更明确时可使用 `[at:USER_ID]`。两种 ID 都必须来自当前 Telegram 场景中明确提供的可靠上下文，禁止从昵称、正文或历史猜测。
 - `[at:USER_ID]` 仅在群聊/超级群中生效；私聊中会被移除。不要手写 `tg://user` 链接。普通 `@username` 不等于可靠数字 user_id，不能自行转换或猜测。
 - 控制标记按每个 `[SPLIT]` 分段独立生效；普通回复不需要添加标记。
 - 提到命令时直接写 `/start`、`/help`、`/status` 这类 Telegram 命令形式。

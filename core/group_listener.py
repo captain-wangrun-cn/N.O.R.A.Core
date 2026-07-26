@@ -164,7 +164,7 @@ class GroupListenerManager:
         decide_append: AppendDecisionCallback,
         promote: PromoteCallback,
         interrupt: InterruptCallback,
-        batch_size: int = 3,
+        batch_size: int = 2,
         idle_seconds: float = 180.0,
         max_pending: int = 20,
         enabled: bool = True,

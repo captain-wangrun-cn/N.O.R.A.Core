@@ -113,7 +113,9 @@ def build_current_scene_block(
 
     if chat_type == "group":
         if actor_user_id:
-            lines.append(f"- 当前说话人平台用户 ID: {actor_user_id}；若明确需要原生 @ 当前说话人，可使用 `[at:{actor_user_id}]`。")
+            lines.append(
+                f"- 当前说话人平台用户 ID: {actor_user_id}；若要在多人群聊中直接面向这位已知参与者、自然插话并明确对象，可使用 `[at:{actor_user_id}]`。"
+            )
         group_title = _clean(context.get("chat_title") or context.get("group_title") or context.get("group_display_name"))
         if group_title:
             lines.append(f"- 群聊名称: {group_title}")
@@ -140,9 +142,14 @@ def build_current_scene_block(
 
     if message_ids or reply_to_message_id or reply_target_message_id:
         lines.append(
-            "- 消息 ID 规则: 只有明确需要平台产生原生引用回复时才使用 `[reply:MESSAGE_ID]`；"
-            "看到当前消息 ID 不代表必须回复或自动引用。ID 是当前目标平台与场景内的不透明值，禁止猜测、转换或跨平台/跨场景复用。"
+            "- 消息 ID 规则: 回应、纠正或承接某条具体消息，尤其在多人或多分支对话中需要明确目标时，可使用 `[reply:MESSAGE_ID]`；"
+            "看到 ID 不代表必须回复或自动引用。只能使用当前目标平台与场景明确提供的可靠 ID，禁止从昵称、正文或历史猜测；禁止猜测、转换或跨平台/跨场景复用。"
         )
+        if chat_type == "group":
+            lines.append(
+                "- 群聊控制标记分寸: 普通群回复、泛泛群体回应和例行寒暄不必引用或 @，不要每条都加。"
+                "原生回复已能明确对象时通常无需再叠加 @；只有引用分支与接收人分别存在歧义时才同时使用 `[reply:...]` 和 `[at:...]`。"
+            )
 
     # 跨场景投递提示：默认无需标记；仅当要发去别处时用规范标记。
     self_marker = _canonical_scene_marker(identity.platform, chat_type, identity.platform_chat_id)

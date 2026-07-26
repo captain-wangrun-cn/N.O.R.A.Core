@@ -147,6 +147,9 @@ def test_group_listener_templates_define_strict_actions_and_batches():
 
     assert all(action in passive_system for action in ("KEEP_LISTENING", "REPLY", "SEMI_ONLINE"))
     assert "不可信" in passive_system and "directed_to_nora=true" in passive_system
+    assert "即使没有 directed_to_nora=true" in passive_system
+    assert "及时、具体、相关且非重复" in passive_system
+    assert "不要仅因“有机会说话”就插话" in passive_system
     assert "无法确定时选择 KEEP_LISTENING" in passive_system
     assert "总消息数" in passive_user and "Alice: first" in passive_user and "Bob: second" in passive_user
     assert "APPEND" in append_system and "KEEP_PENDING" in append_system
@@ -266,10 +269,15 @@ def test_front_brain_prompt_includes_current_onebot_group_scene():
     assert "当前说话人: 群友A" in system_prompt
     assert "当前说话人平台用户 ID: 20002" in system_prompt
     assert "[at:20002]" in system_prompt
+    assert "自然插话并明确对象" in system_prompt
     assert "群聊名称: 测试群" in system_prompt
     assert "当前入站消息 ID: 345" in system_prompt
     assert "[reply:MESSAGE_ID]" in system_prompt
-    assert "看到当前消息 ID 不代表必须回复或自动引用" in system_prompt
+    assert "多人或多分支对话中需要明确目标" in system_prompt
+    assert "看到 ID 不代表必须回复或自动引用" in system_prompt
+    assert "不要每条都加" in system_prompt
+    assert "只有引用分支与接收人分别存在歧义时" in system_prompt
+    assert "禁止从昵称、正文或历史猜测" in system_prompt
 
 
 def test_front_brain_prompt_includes_group_presence_trigger_and_online_examples():

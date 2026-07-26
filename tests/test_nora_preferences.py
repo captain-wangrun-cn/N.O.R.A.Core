@@ -42,6 +42,34 @@ def test_get_nora_preferences_merge_existing(monkeypatch):
     assert prefs["assertiveness_level"] == 0.5
 
 
+def test_get_group_listener_config_defaults_and_override(monkeypatch):
+    monkeypatch.setattr(config, "_config", {})
+    assert config.get_group_listener_config()["evaluation_batch_size"] == 2
+
+    monkeypatch.setattr(
+        config,
+        "_config",
+        {"interaction": {"group_listener": {"evaluation_batch_size": 3}}},
+    )
+    assert config.get_group_listener_config()["evaluation_batch_size"] == 3
+
+
+def test_get_group_listener_config_normalizes_batch_size(monkeypatch):
+    monkeypatch.setattr(
+        config,
+        "_config",
+        {"interaction": {"group_listener": {"evaluation_batch_size": 0}}},
+    )
+    assert config.get_group_listener_config()["evaluation_batch_size"] == 1
+
+    monkeypatch.setattr(
+        config,
+        "_config",
+        {"interaction": {"group_listener": {"evaluation_batch_size": "invalid"}}},
+    )
+    assert config.get_group_listener_config()["evaluation_batch_size"] == 2
+
+
 def test_scheduled_event_persists_message_kind():
     event = ScheduledEvent(
         trigger_time=__import__("datetime").datetime(2026, 4, 26, 8, 30),

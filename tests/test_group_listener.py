@@ -117,7 +117,7 @@ def test_group_presence_store_recovers_from_corrupt_state(tmp_path, monkeypatch)
 
 
     asyncio.run(run())
-def test_third_message_triggers_full_retained_window(tmp_path, monkeypatch):
+def test_second_message_triggers_full_retained_window(tmp_path, monkeypatch):
     async def run():
         _patch_workspace(monkeypatch, tmp_path)
         store = GroupPresenceStore()
@@ -154,18 +154,18 @@ def test_third_message_triggers_full_retained_window(tmp_path, monkeypatch):
             idle_seconds=30,
         )
         try:
-            for index in range(1, 4):
+            for index in range(1, 3):
                 assert await manager.receive(_context(index))
             await asyncio.sleep(0.02)
-            assert evaluated == [["1", "2", "3"]]
-            assert [event.platform_message_id for event in manager.pending_events("telegram:g1")] == ["1", "2", "3"]
+            assert evaluated == [["1", "2"]]
+            assert [event.platform_message_id for event in manager.pending_events("telegram:g1")] == ["1", "2"]
 
-            for index in range(4, 7):
+            for index in range(3, 5):
                 await manager.receive(_context(index))
             await asyncio.sleep(0.02)
-            assert evaluated[-1] == ["1", "2", "3", "4", "5", "6"]
-            assert promoted == [(["1", "2", "3", "4", "5", "6"], "passive_reply")]
-            assert persisted == ["1", "2", "3", "4", "5", "6"]
+            assert evaluated[-1] == ["1", "2", "3", "4"]
+            assert promoted == [(["1", "2", "3", "4"], "passive_reply")]
+            assert persisted == ["1", "2", "3", "4"]
         finally:
             await manager.shutdown()
 
@@ -284,7 +284,7 @@ def test_semi_online_action_only_clears_current_group(tmp_path, monkeypatch):
         )
         try:
             await manager.receive(_context(1, runtime_key="telegram:g2"))
-            for index in range(1, 4):
+            for index in range(1, 3):
                 await manager.receive(_context(index, runtime_key="telegram:g1"))
             await asyncio.sleep(0.02)
             assert store.get("telegram:g1") == GroupPresence.SEMI_ONLINE
@@ -319,14 +319,14 @@ def test_generation_finish_releases_pending_messages(tmp_path, monkeypatch):
         )
         try:
             token = await manager.begin_generation("telegram:g1", [_event(10)])
-            for index in range(1, 4):
+            for index in range(1, 3):
                 await manager.receive(_context(index))
             await asyncio.sleep(0.02)
             assert evaluated == []
 
             assert await manager.finish_generation("telegram:g1", token)
             await asyncio.sleep(0.02)
-            assert evaluated == [["1", "2", "3"]]
+            assert evaluated == [["1", "2"]]
             assert not await manager.finish_generation("telegram:g1", token)
         finally:
             await manager.shutdown()
@@ -351,7 +351,7 @@ def test_restart_preserves_ordinary_interrupt_and_handoff_events(tmp_path, monke
         )
         try:
             old_token = await manager.begin_generation("telegram:g1", [_event(10)])
-            for index in range(1, 4):
+            for index in range(1, 3):
                 await manager.receive(_context(index))
             await asyncio.sleep(0.02)
 
@@ -359,12 +359,12 @@ def test_restart_preserves_ordinary_interrupt_and_handoff_events(tmp_path, monke
             assert state.generation.ordinary_interrupt_used is True
             state.generation.priority_handoff = True
             state.generation.restart_pending = True
-            await manager.receive(_context(4))
+            await manager.receive(_context(3))
 
             restart_events = await manager.priority_restart_events(
                 "telegram:g1", old_token, replacement_events=[_event(10), _event(1)]
             )
-            assert [event.platform_message_id for event in restart_events] == ["1", "4", "10"]
+            assert [event.platform_message_id for event in restart_events] == ["1", "3", "10"]
 
             new_token = await manager.begin_generation(
                 "telegram:g1", restart_events, continuation_token=old_token
@@ -412,14 +412,14 @@ def test_generation_append_interrupts_once_then_keeps_pending(tmp_path, monkeypa
         )
         try:
             token = await manager.begin_generation("telegram:g1", [_event(10)])
-            for index in range(1, 4):
+            for index in range(1, 3):
                 await manager.receive(_context(index))
             await asyncio.sleep(0.02)
-            assert interrupts == [(["1", "2", "3", "10"], "ordinary_append", token)]
+            assert interrupts == [(["1", "2", "10"], "ordinary_append", token)]
 
-            for index in range(4, 7):
+            for index in range(3, 5):
                 await manager.receive(_context(index))
-            assert [event.platform_message_id for event in manager.pending_events("telegram:g1")] == ["4", "5", "6"]
+            assert [event.platform_message_id for event in manager.pending_events("telegram:g1")] == ["3", "4"]
         finally:
             await manager.shutdown()
 
@@ -541,16 +541,16 @@ def test_reply_to_bot_during_generation_uses_ordinary_append(tmp_path, monkeypat
         )
         try:
             await manager.begin_generation("telegram:g1", [_event(10)])
-            for index in range(1, 4):
+            for index in range(1, 3):
                 context = _context(index)
                 context["reply_to_bot"] = index == 1
                 await manager.receive(context)
             await asyncio.sleep(0.02)
 
-            assert append_batches == [["1", "2", "3"]]
+            assert append_batches == [["1", "2"]]
             assert interrupts == []
             assert [event.platform_message_id for event in manager.pending_events("telegram:g1")] == [
-                "1", "2", "3"
+                "1", "2"
             ]
         finally:
             await manager.shutdown()
@@ -581,16 +581,16 @@ def test_stale_semi_online_decision_preserves_concurrent_suffix(tmp_path, monkey
             idle_seconds=30,
         )
         try:
-            for index in range(1, 4):
+            for index in range(1, 3):
                 await manager.receive(_context(index))
             await asyncio.wait_for(decision_started.wait(), timeout=0.3)
-            await manager.receive(_context(4))
+            await manager.receive(_context(3))
             release_decision.set()
             await asyncio.sleep(0.02)
 
             assert store.get("telegram:g1") == GroupPresence.ONLINE
             assert [event.platform_message_id for event in manager.pending_events("telegram:g1")] == [
-                "1", "2", "3", "4"
+                "1", "2", "3"
             ]
         finally:
             release_decision.set()
@@ -622,6 +622,85 @@ def test_directed_snapshot_cannot_switch_group_semi_online(tmp_path, monkeypatch
 
             assert store.get("telegram:g1") == GroupPresence.ONLINE
             assert [event.platform_message_id for event in manager.pending_events("telegram:g1")] == ["1"]
+        finally:
+            await manager.shutdown()
+
+    asyncio.run(run())
+
+
+def test_configured_batch_size_three_delays_passive_reply(tmp_path, monkeypatch):
+    async def run():
+        _patch_workspace(monkeypatch, tmp_path)
+        store = GroupPresenceStore()
+        store.set("telegram:g1", GroupPresence.ONLINE)
+        evaluated = []
+        promoted = []
+
+        async def decide_passive(runtime_key, events):
+            evaluated.append([event.platform_message_id for event in events])
+            return PassiveAction.REPLY
+
+        async def promote(runtime_key, events, reason):
+            promoted.append(([event.platform_message_id for event in events], reason))
+
+        manager = GroupListenerManager(
+            store=store,
+            persist_message=lambda context: asyncio.sleep(0),
+            decide_passive=decide_passive,
+            decide_append=lambda *args: asyncio.sleep(0, result=AppendAction.KEEP_PENDING),
+            promote=promote,
+            interrupt=lambda *args: asyncio.sleep(0),
+            batch_size=3,
+            idle_seconds=30,
+        )
+        try:
+            await manager.receive(_context(1))
+            await manager.receive(_context(2))
+            await asyncio.sleep(0.02)
+            assert evaluated == []
+
+            await manager.receive(_context(3))
+            await asyncio.sleep(0.02)
+            assert evaluated == [["1", "2", "3"]]
+            assert promoted == [(["1", "2", "3"], "passive_reply")]
+            assert store.get("telegram:g1") == GroupPresence.ONLINE
+        finally:
+            await manager.shutdown()
+
+    asyncio.run(run())
+
+
+def test_configured_batch_size_three_controls_generation_append(tmp_path, monkeypatch):
+    async def run():
+        _patch_workspace(monkeypatch, tmp_path)
+        store = GroupPresenceStore()
+        store.set("telegram:g1", GroupPresence.ONLINE)
+        batches = []
+
+        async def decide_append(runtime_key, base, batch):
+            batches.append([event.platform_message_id for event in batch])
+            return AppendAction.KEEP_PENDING
+
+        manager = GroupListenerManager(
+            store=store,
+            persist_message=lambda context: asyncio.sleep(0),
+            decide_passive=lambda *args: asyncio.sleep(0, result=PassiveAction.KEEP_LISTENING),
+            decide_append=decide_append,
+            promote=lambda *args: asyncio.sleep(0),
+            interrupt=lambda *args: asyncio.sleep(0),
+            batch_size=3,
+            idle_seconds=30,
+        )
+        try:
+            await manager.begin_generation("telegram:g1", [_event(10)])
+            await manager.receive(_context(1))
+            await manager.receive(_context(2))
+            await asyncio.sleep(0.02)
+            assert batches == []
+
+            await manager.receive(_context(3))
+            await asyncio.sleep(0.02)
+            assert batches == [["1", "2", "3"]]
         finally:
             await manager.shutdown()
 

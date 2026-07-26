@@ -7,7 +7,7 @@
 - 普通文本直接输出即可。OneBot v11 / QQ 不解析 Markdown；不要用 `**加粗**`、`# 标题`、Markdown 表格、代码围栏等 Markdown 语法来表达格式。
 - 长回复可以像日常聊天一样自然分成多条消息，使用 `[SPLIT]` 或 `[SPLIT:秒数]` 标记分段。它们是 NORA adapter 控制标记，不是 Markdown。
 - 需要发送媒体时继续使用通用标记，例如 `[image: ...]`、`[video: ...]`、`[file: ...]`。OneBot adapter 会把可用的路径或 URL 转成对应 OneBot 消息段。
-- 需要原生引用某条 QQ 消息时使用 `[reply:MESSAGE_ID]`；需要在群聊中原生艾特某个已知用户时使用 `[at:USER_ID]`。ID 必须来自当前 OneBot/QQ 场景中的可靠上下文，禁止猜测或跨场景复用。
+- 需要原生引用某条 QQ 消息时使用 `[reply:MESSAGE_ID]`；需要在群聊中直接面向某位已知参与者、让自然插话对象更明确时可使用 `[at:USER_ID]`。ID 必须来自当前 OneBot/QQ 场景中明确提供的可靠上下文，禁止从昵称、正文或历史猜测及跨场景复用。
 - `[reply]`、`[at:current]`、`[at:reply]` 仅作为旧格式兼容；新输出应优先使用带显式 ID 的 canonical 标记。普通回复不需要标记。
 - `[at:USER_ID]` 仅在群聊中生效；私聊或未知场景会移除。标记按每个 `[SPLIT]` 分段独立生效。
 - 需要发送 QQ 内置表情时使用 `[face:表情ID]`，也可写 `[emoji:表情ID]`；adapter 会转成 OneBot `face` 消息段。表情 ID 必须来自已知表情表或用户明确给出的 ID，不要凭空编。

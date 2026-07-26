@@ -208,7 +208,7 @@ interaction:
   group_listener:
     enabled: true                 # 启用按群隔离的 ONLINE / SEMI_ONLINE 监听
     default_mode: semi_online     # 未记录群的安全默认状态
-    evaluation_batch_size: 3      # ONLINE 累计多少条新事件后调用 fast 判断
+    evaluation_batch_size: 2      # passive 与生成期 append 累计多少条新事件后调用 fast 判断
     idle_seconds: 180             # pending 非空且最后消息静默多久后判断
     max_pending_messages: 20      # 仅限制运行时待判断窗口，不截断共享历史
     decision_timeout_seconds: 30  # fast 被动/追加判断超时
