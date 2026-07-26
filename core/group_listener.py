@@ -141,6 +141,7 @@ class GroupRuntimeState:
     idle_generation: int = 0
     idle_task: Optional[asyncio.Task] = None
     passive_task: Optional[asyncio.Task] = None
+    directed_handoff: bool = False
     generation: Optional[GenerationCycle] = None
 
 
@@ -196,18 +197,30 @@ class GroupListenerManager:
         platform: str = "",
         platform_chat_id: str = "",
         reason: str = "unspecified",
-    ) -> None:
+        expected_last_sequence: Optional[int] = None,
+    ) -> bool:
+        """Set one group's mode, optionally only if no newer event has arrived."""
         mode = GroupPresence(mode)
-        old_mode = self.mode_for(runtime_key)
-        self.store.set(
-            runtime_key,
-            mode,
-            platform=platform,
-            platform_chat_id=platform_chat_id,
-        )
         state = self._state(runtime_key)
-        if mode == GroupPresence.SEMI_ONLINE:
-            async with state.lock:
+        async with state.lock:
+            if expected_last_sequence is not None:
+                if state.generation or state.directed_handoff or not state.pending_window:
+                    return False
+                if any(
+                    event.sequence > expected_last_sequence
+                    or event.explicit_bot_mention
+                    or event.reply_to_bot
+                    for event in state.pending_window
+                ):
+                    return False
+            old_mode = self.mode_for(runtime_key)
+            self.store.set(
+                runtime_key,
+                mode,
+                platform=platform,
+                platform_chat_id=platform_chat_id,
+            )
+            if mode == GroupPresence.SEMI_ONLINE:
                 state.pending_window.clear()
                 state.new_since_passive_eval = 0
                 state.idle_generation += 1
@@ -228,6 +241,7 @@ class GroupListenerManager:
                 mode.value,
                 reason,
             )
+        return True
 
     async def receive(self, context: Dict[str, Any]) -> bool:
         """Accept an ONLINE group event. Returns False when normal handling should be used."""
@@ -249,6 +263,7 @@ class GroupListenerManager:
 
         interrupt_payload: Optional[Tuple[List[GroupMessageEvent], str, int]] = None
         append_payload: Optional[Tuple[List[GroupMessageEvent], List[GroupMessageEvent], int]] = None
+        direct_promote: Optional[List[GroupMessageEvent]] = None
         run_passive = False
         async with state.lock:
             state.last_received_at = event.received_at
@@ -274,6 +289,13 @@ class GroupListenerManager:
                         batch = generation.ordinary_bucket[:self.batch_size]
                         del generation.ordinary_bucket[:self.batch_size]
                         append_payload = (list(generation.input_events), batch, generation.token)
+            elif event.explicit_bot_mention or event.reply_to_bot:
+                reply_target = event.replied_target_event()
+                direct_promote = self._merge_events(
+                    [reply_target] if reply_target is not None else [],
+                    [event],
+                )
+                state.directed_handoff = True
             else:
                 self._append_pending(state, event)
                 run_passive = state.new_since_passive_eval >= self.batch_size
@@ -284,6 +306,20 @@ class GroupListenerManager:
         if append_payload:
             base, batch, token = append_payload
             asyncio.create_task(self._run_append_decision(runtime_key, base, batch, token))
+        if direct_promote:
+            logger.info(
+                "[%s] 群监听定向消息直达前脑: mention=%s reply_to_bot=%s events=%d",
+                runtime_key,
+                event.explicit_bot_mention,
+                event.reply_to_bot,
+                len(direct_promote),
+            )
+            try:
+                await self.promote(runtime_key, direct_promote, "directed_message")
+            finally:
+                async with state.lock:
+                    if state.directed_handoff and state.generation is None:
+                        state.directed_handoff = False
         if run_passive:
             self._ensure_passive_task(runtime_key, trigger="count")
         return True
@@ -316,6 +352,7 @@ class GroupListenerManager:
             if continuation and previous:
                 cycle.ordinary_bucket.extend(previous.ordinary_bucket)
             state.generation = cycle
+            state.directed_handoff = False
             self._cancel_task(state.idle_task)
             state.idle_task = None
             return cycle.token
@@ -415,7 +452,12 @@ class GroupListenerManager:
             await asyncio.sleep(self.idle_seconds)
             state = self._state(runtime_key)
             async with state.lock:
-                if generation != state.idle_generation or state.generation or not state.pending_window:
+                if (
+                    generation != state.idle_generation
+                    or state.generation
+                    or state.directed_handoff
+                    or not state.pending_window
+                ):
                     return
             self._ensure_passive_task(runtime_key, trigger="idle")
         except asyncio.CancelledError:
@@ -439,7 +481,7 @@ class GroupListenerManager:
         snapshot_last_sequence = 0
         try:
             async with state.lock:
-                if state.generation or not state.pending_window:
+                if state.generation or state.directed_handoff or not state.pending_window:
                     return
                 snapshot = list(state.pending_window)
                 snapshot_last_sequence = snapshot[-1].sequence
@@ -450,7 +492,18 @@ class GroupListenerManager:
                 logger.warning("[%s] 群监听 fast 判断失败，保留窗口", runtime_key, exc_info=True)
                 action = PassiveAction.KEEP_LISTENING
 
+            if action == PassiveAction.SEMI_ONLINE and any(
+                event.explicit_bot_mention or event.reply_to_bot for event in snapshot
+            ):
+                logger.warning(
+                    "[%s] 群监听拒绝定向窗口的 SEMI_ONLINE 决策: window=%d",
+                    runtime_key,
+                    len(snapshot),
+                )
+                action = PassiveAction.KEEP_LISTENING
+
             promote_events: List[GroupMessageEvent] = []
+            semi_online_candidate = False
             async with state.lock:
                 prefix = [event for event in state.pending_window if event.sequence <= snapshot_last_sequence]
                 suffix = [event for event in state.pending_window if event.sequence > snapshot_last_sequence]
@@ -458,27 +511,36 @@ class GroupListenerManager:
                     promote_events = prefix
                     state.pending_window = deque(suffix)
                 elif action == PassiveAction.SEMI_ONLINE:
-                    state.pending_window.clear()
-                    state.new_since_passive_eval = 0
-                if state.pending_window:
+                    semi_online_candidate = bool(prefix) and not suffix
+                if state.pending_window and not semi_online_candidate:
                     self._reset_idle_timer(runtime_key, state)
 
             logger.info(
-                "[%s] 群监听 fast=%s trigger=%s window=%d",
+                "[%s] 群监听 fast=%s trigger=%s window=%d concurrent_suffix=%d",
                 runtime_key,
                 action.value,
                 trigger,
                 len(snapshot),
+                len(suffix),
             )
-            if action == PassiveAction.SEMI_ONLINE:
+            if semi_online_candidate:
                 first = snapshot[0]
-                await self.set_mode(
+                changed = await self.set_mode(
                     runtime_key,
                     GroupPresence.SEMI_ONLINE,
                     platform=first.platform,
                     platform_chat_id=first.platform_chat_id,
                     reason="fast_passive_semi_online",
+                    expected_last_sequence=snapshot_last_sequence,
                 )
+                if not changed:
+                    logger.info(
+                        "[%s] 群监听忽略过期 SEMI_ONLINE 决策，新消息或生成已出现",
+                        runtime_key,
+                    )
+                    async with state.lock:
+                        if state.pending_window:
+                            self._reset_idle_timer(runtime_key, state)
             elif promote_events:
                 await self.promote(runtime_key, promote_events, "passive_reply")
         finally:

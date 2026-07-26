@@ -474,3 +474,155 @@ def test_priority_handoff_coalesces_following_messages(tmp_path, monkeypatch):
             await manager.shutdown()
 
     asyncio.run(run())
+
+
+def test_idle_directed_messages_promote_without_passive_fast(tmp_path, monkeypatch):
+    async def run():
+        _patch_workspace(monkeypatch, tmp_path)
+        store = GroupPresenceStore()
+        store.set("telegram:g1", GroupPresence.ONLINE)
+        passive_calls = []
+        promoted = []
+
+        async def decide_passive(runtime_key, events):
+            passive_calls.append(list(events))
+            return PassiveAction.KEEP_LISTENING
+
+        async def promote(runtime_key, events, reason):
+            promoted.append(([event.platform_message_id for event in events], reason))
+
+        manager = GroupListenerManager(
+            store=store,
+            persist_message=lambda context: asyncio.sleep(0),
+            decide_passive=decide_passive,
+            decide_append=lambda *args: asyncio.sleep(0, result=AppendAction.KEEP_PENDING),
+            promote=promote,
+            interrupt=lambda *args: asyncio.sleep(0),
+            idle_seconds=30,
+        )
+        try:
+            assert await manager.receive(_context(1, mention=True))
+            reply = _context(2)
+            reply["reply_to_bot"] = True
+            assert await manager.receive(reply)
+
+            assert passive_calls == []
+            assert promoted == [(["1"], "directed_message"), (["2"], "directed_message")]
+            assert manager.pending_events("telegram:g1") == []
+        finally:
+            await manager.shutdown()
+
+    asyncio.run(run())
+
+
+def test_reply_to_bot_during_generation_uses_ordinary_append(tmp_path, monkeypatch):
+    async def run():
+        _patch_workspace(monkeypatch, tmp_path)
+        store = GroupPresenceStore()
+        store.set("telegram:g1", GroupPresence.ONLINE)
+        append_batches = []
+        interrupts = []
+
+        async def decide_append(runtime_key, base, batch):
+            append_batches.append([event.platform_message_id for event in batch])
+            return AppendAction.KEEP_PENDING
+
+        async def interrupt(runtime_key, events, reason, token):
+            interrupts.append(reason)
+
+        manager = GroupListenerManager(
+            store=store,
+            persist_message=lambda context: asyncio.sleep(0),
+            decide_passive=lambda *args: asyncio.sleep(0, result=PassiveAction.KEEP_LISTENING),
+            decide_append=decide_append,
+            promote=lambda *args: asyncio.sleep(0),
+            interrupt=interrupt,
+            idle_seconds=30,
+        )
+        try:
+            await manager.begin_generation("telegram:g1", [_event(10)])
+            for index in range(1, 4):
+                context = _context(index)
+                context["reply_to_bot"] = index == 1
+                await manager.receive(context)
+            await asyncio.sleep(0.02)
+
+            assert append_batches == [["1", "2", "3"]]
+            assert interrupts == []
+            assert [event.platform_message_id for event in manager.pending_events("telegram:g1")] == [
+                "1", "2", "3"
+            ]
+        finally:
+            await manager.shutdown()
+
+    asyncio.run(run())
+
+
+def test_stale_semi_online_decision_preserves_concurrent_suffix(tmp_path, monkeypatch):
+    async def run():
+        _patch_workspace(monkeypatch, tmp_path)
+        store = GroupPresenceStore()
+        store.set("telegram:g1", GroupPresence.ONLINE)
+        decision_started = asyncio.Event()
+        release_decision = asyncio.Event()
+
+        async def decide_passive(runtime_key, events):
+            decision_started.set()
+            await release_decision.wait()
+            return PassiveAction.SEMI_ONLINE
+
+        manager = GroupListenerManager(
+            store=store,
+            persist_message=lambda context: asyncio.sleep(0),
+            decide_passive=decide_passive,
+            decide_append=lambda *args: asyncio.sleep(0, result=AppendAction.KEEP_PENDING),
+            promote=lambda *args: asyncio.sleep(0),
+            interrupt=lambda *args: asyncio.sleep(0),
+            idle_seconds=30,
+        )
+        try:
+            for index in range(1, 4):
+                await manager.receive(_context(index))
+            await asyncio.wait_for(decision_started.wait(), timeout=0.3)
+            await manager.receive(_context(4))
+            release_decision.set()
+            await asyncio.sleep(0.02)
+
+            assert store.get("telegram:g1") == GroupPresence.ONLINE
+            assert [event.platform_message_id for event in manager.pending_events("telegram:g1")] == [
+                "1", "2", "3", "4"
+            ]
+        finally:
+            release_decision.set()
+            await manager.shutdown()
+
+    asyncio.run(run())
+
+
+def test_directed_snapshot_cannot_switch_group_semi_online(tmp_path, monkeypatch):
+    async def run():
+        _patch_workspace(monkeypatch, tmp_path)
+        store = GroupPresenceStore()
+        store.set("telegram:g1", GroupPresence.ONLINE)
+        manager = GroupListenerManager(
+            store=store,
+            persist_message=lambda context: asyncio.sleep(0),
+            decide_passive=lambda *args: asyncio.sleep(0, result=PassiveAction.SEMI_ONLINE),
+            decide_append=lambda *args: asyncio.sleep(0, result=AppendAction.KEEP_PENDING),
+            promote=lambda *args: asyncio.sleep(0),
+            interrupt=lambda *args: asyncio.sleep(0),
+            idle_seconds=30,
+        )
+        try:
+            state = manager._state("telegram:g1")
+            directed = _event(1, mention=True)
+            async with state.lock:
+                manager._append_pending(state, directed)
+            await manager._run_passive_decision("telegram:g1", "test")
+
+            assert store.get("telegram:g1") == GroupPresence.ONLINE
+            assert [event.platform_message_id for event in manager.pending_events("telegram:g1")] == ["1"]
+        finally:
+            await manager.shutdown()
+
+    asyncio.run(run())

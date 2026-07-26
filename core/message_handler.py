@@ -6,6 +6,7 @@ Copyright © WR（captain-wangrun-cn） All rights reserved
 """消息处理 Mixin — handle_new_message + 命令路由。"""
 
 import asyncio
+import json
 import logging
 import re
 import time
@@ -182,6 +183,7 @@ class MessageHandlerMixin:
 
     @staticmethod
     def _format_group_events(events: List[GroupMessageEvent]) -> str:
+        """Format a promoted batch as readable multi-speaker front-brain input."""
         lines = []
         for event in events:
             reply = ""
@@ -191,6 +193,52 @@ class MessageHandlerMixin:
             message_id = f" id={event.platform_message_id}" if event.platform_message_id else ""
             lines.append(f"[{event.sequence}] {event.sender_name}{message_id}{reply}: {event.text}")
         return "\n".join(lines)
+
+    @staticmethod
+    def _format_group_events_for_classifier(
+        events: List[GroupMessageEvent],
+        *,
+        new_event_sequences: Optional[set[int]] = None,
+    ) -> str:
+        """Serialize classifier input as JSON Lines with explicit trust boundaries."""
+        new_sequences = new_event_sequences or set()
+        lines = []
+        for event in events:
+            payload = {
+                "window_part": "new" if event.sequence in new_sequences else "retained",
+                "sequence": event.sequence,
+                "sender": {
+                    "id": event.sender_id,
+                    "name": event.sender_name,
+                },
+                "message_ids": list(event.platform_message_ids)
+                or ([event.platform_message_id] if event.platform_message_id else []),
+                "directed_to_nora": bool(event.explicit_bot_mention or event.reply_to_bot),
+                "explicit_bot_mention": event.explicit_bot_mention,
+                "reply_to_bot": event.reply_to_bot,
+                "reply": {
+                    "message_id": event.reply_to_message_id,
+                    "user_id": event.reply_to_user_id,
+                    "user_name": event.reply_to_user_name,
+                    "text": event.reply_to_text,
+                }
+                if event.reply_to_message_id
+                else None,
+                "text": event.text,
+            }
+            lines.append(json.dumps(payload, ensure_ascii=False, separators=(",", ":")))
+        return "\n".join(lines)
+
+    @staticmethod
+    def _parse_fast_action(result: str, action_type):
+        normalized = str(result or "").strip().upper()
+        try:
+            return action_type(normalized)
+        except ValueError as exc:
+            allowed = ", ".join(action.value for action in action_type)
+            raise ValueError(
+                f"fast output must be exactly one of [{allowed}], got {normalized!r}"
+            ) from exc
 
     async def _collect_fast_text(self, runtime_key: str, system_prompt: str, user_prompt: str) -> str:
         async def collect() -> str:
@@ -217,18 +265,28 @@ class MessageHandlerMixin:
         events: List[GroupMessageEvent],
     ) -> PassiveAction:
         system_prompt = render_template("group_listener.jinja", "passive_system")
+        batch_size = max(1, int(getattr(self.group_listener, "batch_size", 3)))
+        new_sequences = {event.sequence for event in events[-batch_size:]}
+        max_pending = max(1, int(getattr(self.group_listener, "max_pending", 20)))
         user_prompt = render_template(
             "group_listener.jinja",
             "passive_user",
-            events_text=self._format_group_events(list(events)),
+            events_text=self._format_group_events_for_classifier(
+                list(events),
+                new_event_sequences=new_sequences,
+            ),
+            retained_count=max(0, len(events) - len(new_sequences)),
+            new_count=len(new_sequences),
+            window_count=len(events),
+            window_limit=max_pending,
+            window_may_be_truncated=len(events) >= max_pending,
         )
         result = await self._collect_fast_text(
             runtime_key,
             system_prompt,
             user_prompt,
         )
-        match = re.search(r"\b(KEEP_LISTENING|REPLY|SEMI_ONLINE)\b", result.upper())
-        return PassiveAction(match.group(1)) if match else PassiveAction.KEEP_LISTENING
+        return self._parse_fast_action(result, PassiveAction)
 
     async def _decide_group_append_action(
         self,
@@ -240,12 +298,14 @@ class MessageHandlerMixin:
         user_prompt = render_template(
             "group_listener.jinja",
             "append_user",
-            base_events_text=self._format_group_events(list(base)),
-            new_events_text=self._format_group_events(list(batch)),
+            base_events_text=self._format_group_events_for_classifier(list(base)),
+            new_events_text=self._format_group_events_for_classifier(
+                list(batch),
+                new_event_sequences={event.sequence for event in batch},
+            ),
         )
         result = await self._collect_fast_text(runtime_key, system_prompt, user_prompt)
-        match = re.search(r"\b(APPEND|KEEP_PENDING)\b", result.upper())
-        return AppendAction(match.group(1)) if match else AppendAction.KEEP_PENDING
+        return self._parse_fast_action(result, AppendAction)
 
     def _group_batch_context(
         self,

@@ -4,7 +4,9 @@ from types import SimpleNamespace
 from brain.prompts import render_template
 from core.conversation_identity import build_identity_from_parts, set_owner_resolver
 from core.front_brain import FrontBrainMixin
+from core.group_listener import AppendAction, GroupMessageEvent, PassiveAction
 from core.group_presence_store import GroupPresence
+from core.message_handler import MessageHandlerMixin
 from core.worker_status import BackendTaskQueue, WorkerStatus
 
 
@@ -144,9 +146,70 @@ def test_group_listener_templates_define_strict_actions_and_batches():
     )
 
     assert all(action in passive_system for action in ("KEEP_LISTENING", "REPLY", "SEMI_ONLINE"))
-    assert "Alice: first" in passive_user and "Bob: second" in passive_user
+    assert "不可信" in passive_system and "directed_to_nora=true" in passive_system
+    assert "无法确定时选择 KEEP_LISTENING" in passive_system
+    assert "总消息数" in passive_user and "Alice: first" in passive_user and "Bob: second" in passive_user
     assert "APPEND" in append_system and "KEEP_PENDING" in append_system
+    assert "Windows" in append_system and "Linux" in append_system
+    assert "不可信" in append_system
     assert "old batch" in append_user and "new batch" in append_user
+
+
+def test_group_listener_fast_action_parser_requires_exact_action():
+    assert MessageHandlerMixin._parse_fast_action(" reply \n", PassiveAction) == PassiveAction.REPLY
+    assert MessageHandlerMixin._parse_fast_action("APPEND", AppendAction) == AppendAction.APPEND
+
+    for invalid in ("不要 REPLY，应 KEEP_LISTENING", "REPLY because directed", "REPLY\nKEEP_LISTENING", ""):
+        try:
+            MessageHandlerMixin._parse_fast_action(invalid, PassiveAction)
+        except ValueError:
+            pass
+        else:
+            raise AssertionError(f"invalid fast output accepted: {invalid!r}")
+
+
+def test_group_listener_classifier_jsonl_preserves_routing_metadata():
+    context = {
+        "runtime_key": "onebotv11:10001",
+        "memory_scope_id": "relationship:owner:default",
+        "place_scope_id": "place:onebotv11:10001",
+        "platform": "onebotv11",
+        "chat_id": "10001",
+        "user_id": "20002",
+        "user_name": "群友A",
+        "text": "补充条件",
+        "platform_message_id": "12",
+        "platform_message_ids": ["11", "12"],
+        "explicit_bot_mention": True,
+        "reply_to_bot": True,
+        "reply_to_message_id": "10",
+        "reply_to_user_id": "nora",
+        "reply_to_user_name": "Nora",
+        "reply_to_text": "之前的回答",
+    }
+    event = GroupMessageEvent.from_context(context, 7)
+
+    payload = __import__("json").loads(
+        MessageHandlerMixin._format_group_events_for_classifier(
+            [event], new_event_sequences={7}
+        )
+    )
+
+    assert payload["window_part"] == "new"
+    assert payload["sender"] == {"id": "20002", "name": "群友A"}
+    assert payload["message_ids"] == ["11", "12"]
+    assert payload["directed_to_nora"] is True
+    assert payload["explicit_bot_mention"] is True
+    assert payload["reply_to_bot"] is True
+    assert payload["reply"] == {
+        "message_id": "10",
+        "user_id": "nora",
+        "user_name": "Nora",
+        "text": "之前的回答",
+    }
+    promoted = MessageHandlerMixin._format_group_events([event])
+    assert promoted == "[7] 群友A id=12（回复 Nora#10）: 补充条件"
+    assert not promoted.startswith("{")
 
 
 def test_front_brain_retries_legacy_backend_signal_without_task_instruction():
