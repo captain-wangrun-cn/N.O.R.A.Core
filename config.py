@@ -233,7 +233,7 @@ def get_group_listener_config() -> dict:
         "enabled": True,
         "default_mode": "semi_online",
         "evaluation_batch_size": 2,
-        "idle_seconds": 180.0,
+        "idle_seconds": 90.0,
         "max_pending_messages": 20,
         "decision_timeout_seconds": 30.0,
     }

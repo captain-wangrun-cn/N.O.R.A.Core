@@ -44,7 +44,9 @@ def test_get_nora_preferences_merge_existing(monkeypatch):
 
 def test_get_group_listener_config_defaults_and_override(monkeypatch):
     monkeypatch.setattr(config, "_config", {})
-    assert config.get_group_listener_config()["evaluation_batch_size"] == 2
+    listener_config = config.get_group_listener_config()
+    assert listener_config["evaluation_batch_size"] == 2
+    assert listener_config["idle_seconds"] == 90.0
 
     monkeypatch.setattr(
         config,

@@ -26,7 +26,7 @@ Telegram 与 OneBot v11 都先完成平台事件标准化，并明确提供：
 每个群维护最多 20 条的 `pending_window`。ONLINE 消息一到达就写入共享历史，窗口截断不会删除历史。
 
 - 自上次判断后累计 `evaluation_batch_size` 条（默认 2）：立即调用 fast。
-- 最后消息后 180 秒且窗口非空：调用 fast。
+- 最后消息后 90 秒且窗口非空：调用 fast。
 - `KEEP_LISTENING`：保留完整窗口，下一批继续合并判断。
 - `REPLY`：提升完整快照到现有 smart/front-brain 流水线，并通过 `_message_saved=True` 防止重复入历史。除定向消息和明确求助外，Nora 能对当前话题作出及时、相关且非重复的自然贡献时也可选择；价值或时机不明确时继续监听。
 - `SEMI_ONLINE`：只切换当前群并清空其运行窗口。
@@ -40,7 +40,7 @@ fast 判断使用序号快照；判断期间新到的 suffix 不会因旧结果�
 - 生成期间普通消息每累计 `evaluation_batch_size` 条（默认 2），fast 判断 `APPEND / KEEP_PENDING`。
 - 每个逻辑周期最多一次普通 `APPEND` 中断；重启不重置额度。
 - `KEEP_PENDING` 和额度用完后的消息回到同一 passive window，当前生成结束后继续判断。
-- 只有 `explicit_bot_mention=True` 立即中断，不消耗普通额度；reply-only 仍按配置的普通批次规则处理。
+- 只有 `explicit_bot_mention=True` 立即中断，不消耗普通额度；reply-only 仍按配置的普通批次规则处理。显式 @ 直达或中断时会一并取当前 pending 窗口中紧邻的最多 5 条消息作为话题上下文，并从 pending 中移除以避免后续重复处理。
 - @ replacement 合并旧输入、可靠回复目标、@ 消息及 cancellation/handoff 期间到达的消息，按平台与群本地消息 ID 去重并保持顺序。
 
 后脑工具任务沿用现有共享 scope 队列；普通群聊插话不会任意取消后脑工具执行。

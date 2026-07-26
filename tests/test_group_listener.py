@@ -476,6 +476,43 @@ def test_priority_handoff_coalesces_following_messages(tmp_path, monkeypatch):
     asyncio.run(run())
 
 
+def test_mention_interrupt_includes_five_recent_pending_messages(tmp_path, monkeypatch):
+    async def run():
+        _patch_workspace(monkeypatch, tmp_path)
+        store = GroupPresenceStore()
+        store.set("telegram:g1", GroupPresence.ONLINE)
+        interrupts = []
+
+        async def interrupt(runtime_key, events, reason, token):
+            interrupts.append(([event.platform_message_id for event in events], reason, token))
+
+        manager = GroupListenerManager(
+            store=store,
+            persist_message=lambda context: asyncio.sleep(0),
+            decide_passive=lambda *args: asyncio.sleep(0, result=PassiveAction.KEEP_LISTENING),
+            decide_append=lambda *args: asyncio.sleep(0, result=AppendAction.KEEP_PENDING),
+            promote=lambda *args: asyncio.sleep(0),
+            interrupt=interrupt,
+            batch_size=100,
+            idle_seconds=30,
+        )
+        try:
+            for index in range(1, 8):
+                await manager.receive(_context(index))
+            token = await manager.begin_generation("telegram:g1", [_event(10)])
+            await manager.receive(_context(8, mention=True))
+            await asyncio.sleep(0.02)
+
+            assert interrupts == [(["3", "4", "5", "6", "7", "8", "10"], "mention", token)]
+            assert [event.platform_message_id for event in manager.pending_events("telegram:g1")] == [
+                "1", "2"
+            ]
+        finally:
+            await manager.shutdown()
+
+    asyncio.run(run())
+
+
 def test_idle_directed_messages_promote_without_passive_fast(tmp_path, monkeypatch):
     async def run():
         _patch_workspace(monkeypatch, tmp_path)
@@ -509,6 +546,41 @@ def test_idle_directed_messages_promote_without_passive_fast(tmp_path, monkeypat
             assert passive_calls == []
             assert promoted == [(["1"], "directed_message"), (["2"], "directed_message")]
             assert manager.pending_events("telegram:g1") == []
+        finally:
+            await manager.shutdown()
+
+    asyncio.run(run())
+
+
+def test_mention_promotes_five_recent_pending_messages(tmp_path, monkeypatch):
+    async def run():
+        _patch_workspace(monkeypatch, tmp_path)
+        store = GroupPresenceStore()
+        store.set("telegram:g1", GroupPresence.ONLINE)
+        promoted = []
+
+        async def promote(runtime_key, events, reason):
+            promoted.append(([event.platform_message_id for event in events], reason))
+
+        manager = GroupListenerManager(
+            store=store,
+            persist_message=lambda context: asyncio.sleep(0),
+            decide_passive=lambda *args: asyncio.sleep(0, result=PassiveAction.KEEP_LISTENING),
+            decide_append=lambda *args: asyncio.sleep(0, result=AppendAction.KEEP_PENDING),
+            promote=promote,
+            interrupt=lambda *args: asyncio.sleep(0),
+            batch_size=100,
+            idle_seconds=30,
+        )
+        try:
+            for index in range(1, 8):
+                await manager.receive(_context(index))
+            await manager.receive(_context(8, mention=True))
+
+            assert promoted == [(["3", "4", "5", "6", "7", "8"], "directed_message")]
+            assert [event.platform_message_id for event in manager.pending_events("telegram:g1")] == [
+                "1", "2"
+            ]
         finally:
             await manager.shutdown()
 

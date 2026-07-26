@@ -165,7 +165,7 @@ class GroupListenerManager:
         promote: PromoteCallback,
         interrupt: InterruptCallback,
         batch_size: int = 2,
-        idle_seconds: float = 180.0,
+        idle_seconds: float = 90.0,
         max_pending: int = 20,
         enabled: bool = True,
     ):
@@ -273,6 +273,9 @@ class GroupListenerManager:
                 if generation.priority_handoff or generation.restart_pending:
                     generation.priority_events.append(event)
                 elif event.explicit_bot_mention:
+                    self._cancel_task(state.passive_task)
+                    state.passive_task = None
+                    generation.priority_events.extend(self._take_recent_pending(state, limit=5))
                     reply_target = event.replied_target_event()
                     if reply_target is not None:
                         generation.priority_events.append(reply_target)
@@ -290,8 +293,15 @@ class GroupListenerManager:
                         del generation.ordinary_bucket[:self.batch_size]
                         append_payload = (list(generation.input_events), batch, generation.token)
             elif event.explicit_bot_mention or event.reply_to_bot:
+                if event.explicit_bot_mention:
+                    self._cancel_task(state.passive_task)
+                    state.passive_task = None
+                    recent_context = self._take_recent_pending(state, limit=5)
+                else:
+                    recent_context = []
                 reply_target = event.replied_target_event()
                 direct_promote = self._merge_events(
+                    recent_context,
                     [reply_target] if reply_target is not None else [],
                     [event],
                 )
@@ -440,6 +450,25 @@ class GroupListenerManager:
         while len(state.pending_window) > self.max_pending:
             state.pending_window.popleft()
         state.new_since_passive_eval += 1
+
+    @staticmethod
+    def _take_recent_pending(
+        state: GroupRuntimeState,
+        *,
+        limit: int,
+    ) -> List[GroupMessageEvent]:
+        """Remove and return recent pending events consumed as directed context."""
+        count = min(max(0, int(limit)), len(state.pending_window))
+        if not count:
+            return []
+        events = list(state.pending_window)[-count:]
+        for _ in range(count):
+            state.pending_window.pop()
+        state.new_since_passive_eval = min(
+            max(0, state.new_since_passive_eval - count),
+            len(state.pending_window),
+        )
+        return events
 
     def _reset_idle_timer(self, runtime_key: str, state: GroupRuntimeState) -> None:
         state.idle_generation += 1
