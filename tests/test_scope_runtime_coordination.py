@@ -10,6 +10,7 @@ from core.scheduler import (
     set_ai_presence,
 )
 from core.scheduler_mixin import SchedulerMixin
+from core.private_presence_store import PrivatePresence, PrivatePresenceStore
 from core.worker_status import BackendTaskQueue, WorkerStatus
 
 
@@ -24,6 +25,15 @@ class _DummyHistory:
 
     def get_current_segment_messages(self, *args, **kwargs):
         return list(self.current_messages)
+
+
+class _DummyGroupListener:
+    def __init__(self):
+        self._modes = {}
+
+    def mode_for(self, runtime_key):
+        from core.group_presence_store import GroupPresence
+        return self._modes.get(runtime_key, GroupPresence.SEMI_ONLINE)
 
 
 class _ScopeController(SchedulerMixin):
@@ -53,6 +63,8 @@ class _ScopeController(SchedulerMixin):
         self._followup_delay_override = {}
         self._followup_suspended_until_idle = {}
         self.message_history = _DummyHistory()
+        self.private_presence = PrivatePresenceStore()
+        self.group_listener = _DummyGroupListener()
 
     def add_identity(self, platform, chat_id, user_id, chat_type="private"):
         identity = build_identity_from_parts(
@@ -92,21 +104,26 @@ def test_busy_backend_runtime_is_scope_wide():
 
 
 def test_transition_waits_until_whole_scope_is_idle():
+    """第一个 runtime 切 semi_online 时 scope 仍 active → private presence 保持 ONLINE；
+    第二个也切时 → private presence 变 SEMI_ONLINE。"""
     controller = _ScopeController()
     tg = controller.add_identity("telegram", "tg-chat", "owner")
     web = controller.add_identity("web", "web-chat", "owner")
 
-    set_ai_presence(AIPresence.ONLINE)
+    # 设置私聊为 ONLINE（模拟正在聊天）
+    controller.private_presence.set(tg.memory_scope_id, PrivatePresence.ONLINE, reason="test_setup")
     record_user_activity(web.runtime_key)
 
+    # 第一个 runtime 切 semi_online — scope 仍有 web 活跃
     controller._transition_to_semi_online(tg.runtime_key)
     assert controller.message_history.closed == []
-    assert get_ai_presence() == AIPresence.ONLINE
+    assert controller.private_presence.get(tg.memory_scope_id) == PrivatePresence.ONLINE
 
+    # 第二个 runtime 切 semi_online — scope 全部空闲
     controller._transition_to_semi_online(web.runtime_key)
     assert len(controller.message_history.closed) == 1
     assert controller.message_history.closed[0]["memory_scope_id"] == tg.memory_scope_id
-    assert get_ai_presence() == AIPresence.SEMI_ONLINE
+    assert controller.private_presence.get(tg.memory_scope_id) == PrivatePresence.SEMI_ONLINE
 
 
 def test_active_runtime_includes_scope_queue():
@@ -125,23 +142,24 @@ def test_active_runtime_includes_scope_queue():
     assert web.runtime_key in active
 
 
-def test_backend_start_still_promotes_global_presence():
+def test_backend_start_writes_private_presence():
+    """私聊后脑启动后，PrivatePresenceStore 变为 ONLINE；
+    is_backend_busy / is_generating 为 True。"""
     controller = _ScopeController()
     tg = controller.add_identity("telegram", "tg-chat", "owner")
-    set_ai_presence(AIPresence.SEMI_ONLINE, reason="test_setup")
 
     controller._update_scheduler_state(tg.runtime_key, busy=True)
 
+    assert controller.private_presence.get(tg.memory_scope_id) == PrivatePresence.ONLINE
     state = get_ai_state_summary()
-    assert state["presence"] == AIPresence.ONLINE.value
     assert state["is_backend_busy"] is True
     assert state["is_generating"] is True
 
     controller._transition_to_semi_online(tg.runtime_key)
     cleanup_state = get_ai_state_summary()
-    assert cleanup_state["presence"] == AIPresence.SEMI_ONLINE.value
     assert cleanup_state["is_backend_busy"] is False
     assert cleanup_state["is_generating"] is False
+    assert controller.private_presence.get(tg.memory_scope_id) == PrivatePresence.SEMI_ONLINE
 
 
 def test_followup_context_is_limited_to_current_place():

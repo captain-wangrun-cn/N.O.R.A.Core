@@ -1,4 +1,6 @@
-﻿'''
+﻿from __future__ import annotations
+
+'''
 author:        captain-wangrun-cn <wangrun114514@foxmail.com>
 date:          2026-03-12 13:28:21
 Copyright © WR（captain-wangrun-cn） All rights reserved
@@ -16,6 +18,7 @@ from brain.multimodal import extract_image_payloads, extract_video_payloads
 from brain.prompts import render_template, get_soul_prompt, load_identity_context
 from core.group_listener import AppendAction, GroupMessageEvent, PassiveAction
 from core.group_presence_store import GroupPresence
+from core.private_presence_store import PrivatePresenceStore
 from core.routing import has_image_input, sanitize_adapter_output_text, sanitize_user_visible_text
 from core.conversation_identity import conversation_target_dict, normalize_chat_type
 from core.scene_context import build_current_scene_block, should_redact_cross_place_details
@@ -32,15 +35,18 @@ import config
 logger = logging.getLogger(__name__)
 
 
-def _update_message_entry_presence(runtime_key: str, chat_type: str) -> Dict[str, Any]:
+def _update_message_entry_presence(
+    runtime_key: str,
+    chat_type: str,
+    *,
+    private_presence: "PrivatePresenceStore | None" = None,
+    memory_scope_id: str = "",
+) -> Dict[str, Any]:
     """Record activity while keeping group presence independent from global presence."""
     normalized_chat_type = normalize_chat_type(chat_type)
-    if normalized_chat_type != "group":
-        set_ai_presence(
-            AIPresence.ONLINE,
-            reason="private_message_received",
-            runtime_key=runtime_key,
-        )
+    if normalized_chat_type != "group" and private_presence and memory_scope_id:
+        from core.private_presence_store import PrivatePresence
+        private_presence.set(memory_scope_id, PrivatePresence.ONLINE, reason="private_message_received")
     record_user_activity(runtime_key)
     return get_ai_state_summary()
 
@@ -443,9 +449,14 @@ class MessageHandlerMixin:
             len(text),
         )
 
-        # 私聊输入维持既有全局活跃会话语义；群聊的监听模式由群级 marker/fast 独立决定。
-        # 群内 @ 或回复只负责唤醒本轮处理，不能因此提升全局或当前群的 presence。
-        ai_state = _update_message_entry_presence(chat_id, chat_type)
+        # 私聊输入维持私聊会话活跃语义；群聊的监听模式由群级 marker/fast 独立决定。
+        # 群内 @ 或回复只负责唤醒本轮处理，不能因此提升私聊或当前群的 presence。
+        ai_state = _update_message_entry_presence(
+            chat_id,
+            chat_type,
+            private_presence=getattr(self, "private_presence", None),
+            memory_scope_id=memory_scope_id,
+        )
         logger.info(
             "[%s] 消息入口状态: chat_type=%s global_presence=%s "
             "generating=%s backend_busy=%s explicit_mention=%s reply_to_bot=%s",

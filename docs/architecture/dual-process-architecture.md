@@ -90,10 +90,14 @@ N.O.R.A. Core 引入了 **"脑口分离" (Brain-Mouth Separation)** 的设计理
 1) **异步后台任务**：后脑始终以 `asyncio.Task` 形式运行，不阻塞前脑；状态实时写入 `WorkerStatus`。
 2) **忙碌轮询**：当后脑忙碌时，前脑收到新消息会触发 `_detect_interrupt_intent_and_reply`（fast_llm），按 STOP / CHANGE / QUEUE 路径处理。
 3) **队列协同**：QUEUE 结果会将消息放入 per-chat `BackendTaskQueue`；当前任务完成的 `finally` 中会轮询队列并启动下一任务。
-  - 2026-03-25 更新：如果是“前脑主动判定需要后脑”的新请求，而此时后脑仍忙碌，则不会直接入队；会先进入“待确认入队”状态，由前脑展示当前进度与队列详情，用户确认后才真正入队。
-4) **在线状态轮询**：`_update_scheduler_state` / `_mark_scheduler_idle` 同步到全局在线状态，驱动对话延续计时器（FOLLOWUP 循环）。
+  - 2026-03-25 更新：如果是”前脑主动判定需要后脑”的新请求，而此时后脑仍忙碌，则不会直接入队；会先进入”待确认入队”状态，由前脑展示当前进度与队列详情，用户确认后才真正入队。
+4) **在线状态三层模型**（2026-07-26 重构）：
+   - **全局 `AIPresence`**（`core/scheduler.py`）：系统级忙碌标志（`is_generating` / `is_backend_busy`），不表示任何私聊在线状态。
+   - **私聊 `PrivatePresenceStore`**（`core/private_presence_store.py`）：按 `memory_scope_id` 存储私聊的 `ONLINE` / `SEMI_ONLINE` 状态，持久化到 JSON，重启后过期自动重置。
+   - **群聊 `GroupPresenceStore`**（`core/group_presence_store.py`）：按群 `runtime_key` 独立存储。
+   - `_update_scheduler_state` / `_mark_scheduler_idle` 同步到私聊 `PrivatePresenceStore`，驱动对话延续计时器（FOLLOWUP 循环）。
 5) **对话分段闭环**：FOLLOWUP 循环判定 END 或追话超限后，调用 `_transition_to_semi_online` 触发 `close_session`，封闭本轮对话段落。
-6) **结果交接**：后脑结束后构建“工作报告”（包含分段输出、工具步骤、关键结果），前脑调用 `_front_brain_review` 审查并生成最终用户向回复；后脑在轮询模式下不直接触达用户。
+6) **结果交接**：后脑结束后构建”工作报告”（包含分段输出、工具步骤、关键结果），前脑调用 `_front_brain_review` 审查并生成最终用户向回复；后脑在轮询模式下不直接触达用户。
 
 ### 时序（轮询协同）
 

@@ -29,6 +29,8 @@ from core.scheduler import (
 )
 from core.routing import parse_route_markers, sanitize_adapter_output_text
 from core.group_presence_store import GroupPresence
+from core.private_presence_store import PrivatePresence
+from core.conversation_identity import normalize_chat_type
 from core.delivery_target_store import load_known_scenes
 from workspace_config import get_workspace_manager
 from memory.message_history import MessageHistory
@@ -239,30 +241,52 @@ class SchedulerMixin:
     # 状态同步
     # ------------------------------------------------------------------
 
+    def _active_presence_for_runtime(self, chat_id: str, chat_type: str = "") -> str:
+        """Return the online presence value ('online' / 'semi_online') for the given runtime.
+
+        - private → PrivatePresenceStore.get(memory_scope_id)
+        - group   → GroupListenerManager.mode_for(chat_id).value
+        """
+        normalized = normalize_chat_type(chat_type)
+        if normalized == "group":
+            return self.group_listener.mode_for(chat_id).value
+        identity = self._identity_for_runtime_key(chat_id)
+        return self.private_presence.get(identity.memory_scope_id).value
+
     def _update_scheduler_state(self, chat_id: str, busy: bool):
         """同步 controller 的忙碌状态到全局 AI 状态。"""
         if busy:
             set_ai_backend_busy(True)
-            set_ai_presence(
-                AIPresence.ONLINE,
-                reason="backend_started",
-                runtime_key=chat_id,
-            )
             set_ai_generating(True)
+            # 私聊后脑启动 → 标记该 scope 私聊 ONLINE
+            identity = self._identity_for_runtime_key(chat_id)
+            if normalize_chat_type(identity.chat_type) != "group":
+                self.private_presence.set(
+                    identity.memory_scope_id,
+                    PrivatePresence.ONLINE,
+                    reason="backend_started",
+                )
         else:
             self._sync_global_backend_flags()
         state = get_ai_state_summary()
+        private_mode = self.private_presence.get(
+            self._identity_for_runtime_key(chat_id).memory_scope_id
+        )
         logger.info(
-            f"[{chat_id}] 同步在线状态: presence={state['presence']}, "
+            f"[{chat_id}] 同步在线状态: global={state['presence']}, "
+            f"private={private_mode.value}, "
             f"generating={state['is_generating']}, backend_busy={state['is_backend_busy']}"
         )
 
     def _mark_scheduler_idle(self, chat_id: str, *, initial_delay: float | None = None):
-        """标记 AI 生成完毕。保持 ONLINE 状态并启动对话延续定时器。"""
+        """标记 AI 生成完毕。启动对话延续定时器。"""
         self._sync_global_backend_flags()
         state = get_ai_state_summary()
+        identity = self._identity_for_runtime_key(chat_id)
+        private_mode = self.private_presence.get(identity.memory_scope_id)
         logger.info(
-            f"[{chat_id}] 进入空闲跟进状态: presence={state['presence']}, "
+            f"[{chat_id}] 进入空闲跟进状态: global={state['presence']}, "
+            f"private={private_mode.value}, "
             f"generating={state['is_generating']}, backend_busy={state['is_backend_busy']}"
         )
         if self._followup_suspended_until_idle.pop(chat_id, False):
@@ -426,11 +450,12 @@ class SchedulerMixin:
             skipped_followups = 0  # FOLLOWUP 命中但因概率未发送的次数
 
             while True:
-                if get_ai_presence() != AIPresence.ONLINE:
-                    logger.debug(f"[{chat_id}] AI 状态非 ONLINE，对话延续循环退出")
+                identity = self._identity_for_runtime_key(chat_id)
+                current_presence = self._active_presence_for_runtime(chat_id, identity.chat_type)
+                if current_presence != "online":
+                    logger.debug(f"[{chat_id}] 当前对话在线状态非 online ({current_presence})，followup 退出")
                     return
 
-                identity = self._identity_for_runtime_key(chat_id)
                 busy_runtime = self.get_busy_backend_runtime(identity.memory_scope_id)
                 status = self.worker_status.get(busy_runtime) if busy_runtime else self.worker_status.get(chat_id)
                 if status and status.busy:
@@ -550,6 +575,15 @@ class SchedulerMixin:
                 )
             return False
 
+        # 私聊分支
+        identity = self._identity_for_runtime_key(chat_id)
+        if force_online:
+            self.private_presence.set(
+                identity.memory_scope_id,
+                PrivatePresence.ONLINE,
+                reason="front_marker_online",
+            )
+            return False
         if force_semi_online:
             self._transition_to_semi_online(chat_id)
             return True
@@ -564,24 +598,20 @@ class SchedulerMixin:
 
         active_keys = self.get_active_runtime_keys(identity.memory_scope_id)
         if active_keys:
-            set_ai_presence(
-                AIPresence.ONLINE,
-                reason="shared_scope_still_active",
-                runtime_key=chat_id,
-            )
             self._sync_global_backend_flags()
             logger.info(
-                f"[{chat_id}] 当前地点已空闲，但共享作用域仍活跃: {active_keys}，暂不关闭全局消息段"
+                f"[{chat_id}] 当前地点已空闲，但共享作用域仍活跃: {active_keys}，暂不关闭消息段"
             )
             return
 
-        set_ai_presence(
-            AIPresence.SEMI_ONLINE,
-            reason="shared_scope_idle",
-            runtime_key=chat_id,
-        )
+        if normalize_chat_type(identity.chat_type) != "group":
+            self.private_presence.set(
+                identity.memory_scope_id,
+                PrivatePresence.SEMI_ONLINE,
+                reason="shared_scope_idle",
+            )
         self._sync_global_backend_flags()
-        
+
         try:
             session_id = self.message_history.close_session(
                 platform=identity.platform,
@@ -593,8 +623,8 @@ class SchedulerMixin:
                 logger.info(f"[{chat_id}] 对话段落 #{session_id} 已封闭")
         except Exception as e:
             logger.error(f"[{chat_id}] 关闭对话段落失败: {e}", exc_info=True)
-        
-        logger.info(f"[{chat_id}] 对话结束，AI 进入 SEMI_ONLINE 状态")
+
+        logger.info(f"[{chat_id}] 对话结束，私聊进入 SEMI_ONLINE 状态")
 
     async def _detect_followup_intent(self, chat_id: str, idle_secs: float, followup_count: int) -> str:
         """

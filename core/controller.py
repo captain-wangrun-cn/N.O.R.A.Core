@@ -55,6 +55,7 @@ from core.conversation_identity import (
 )
 from core.group_listener import GroupListenerManager
 from core.group_presence_store import GroupPresence, GroupPresenceStore
+from core.private_presence_store import PrivatePresence, PrivatePresenceStore
 from core.routing import sanitize_adapter_output_text, sanitize_user_visible_text, parse_route_markers
 from adapters.message_controls import parse_message_controls, strip_message_control_markers
 from triggers import TriggerManager
@@ -228,6 +229,8 @@ class NoraController(
         group_listener_cfg = config.get_group_listener_config()
         default_group_mode = GroupPresence(group_listener_cfg["default_mode"])
         self.group_presence_store = GroupPresenceStore(default_mode=default_group_mode)
+        self.private_presence = PrivatePresenceStore()
+        self.private_presence.expire_stale_entries()
         self.group_listener = GroupListenerManager(
             store=self.group_presence_store,
             persist_message=self._persist_online_group_message,
@@ -276,6 +279,8 @@ class NoraController(
                 send_proactive_callback=self._send_proactive_message,
                 daily_summary_callback=self._generate_daily_summary,
                 resolve_delivery_callback=resolve_delivery_runtime_key,
+                private_presence_store=self.private_presence,
+                identity_resolver=self._identity_for_runtime_key,
             )
             if persisted_default_chat_id:
                 self.scheduler.default_chat_id = persisted_default_chat_id

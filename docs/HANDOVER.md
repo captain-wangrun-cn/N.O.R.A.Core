@@ -1074,6 +1074,46 @@
 - 生成阶段开始时 Telegram 是否立即出现 typing（而不是等首个 chunk）。
 - workspace 首次运行时是否自动复制 `SOUL.md`/`USER.md`/`MEMORY.md`。
 
+---
+
+### 🔄 私聊与群聊在线状态拆分 — 2026-07-26
+
+将全局 `AIPresence` 从"私聊在线状态 + 系统忙碌状态"混用，拆分为三层独立状态：
+
+**架构变更：**
+- **全局 `AIPresence`**（`core/scheduler.py`）：重定义为系统级忙碌标志（`is_generating` / `is_backend_busy`），不再表示任何私聊的在线状态。
+- **私聊 `PrivatePresenceStore`**（`core/private_presence_store.py`，新建）：按 `memory_scope_id` 存储私聊的 `ONLINE` / `SEMI_ONLINE` 状态，持久化到 `private_presence_state.json`，重启后过期（6 小时）自动重置。
+- **群聊 `GroupPresenceStore`**（`core/group_presence_store.py`）：保持不变，按群 `runtime_key` 独立存储。
+
+**关键改动：**
+- `core/message_handler.py:35` `_update_message_entry_presence`：私聊消息入口改为写 `PrivatePresenceStore`（不再写全局 `AIPresence`）。
+- `core/scheduler_mixin.py:244` `_update_scheduler_state(busy=True)`：后脑启动不再无条件设全局 `AIPresence.ONLINE`；私聊后脑启动写 `PrivatePresenceStore.ONLINE`，群聊后脑启动不写私聊状态。
+- `core/scheduler_mixin.py:552` `_apply_presence_markers`：私聊分支补全 `force_online`（之前被忽略），路由到 `PrivatePresenceStore`。
+- `core/scheduler_mixin.py:582` `_transition_to_semi_online`：改为写 `PrivatePresenceStore.SEMI_ONLINE`（不再写全局 `AIPresence`）。
+- `core/scheduler_mixin.py:452` `_followup_loop` 退出守卫：从 `get_ai_presence() != ONLINE` 改为按当前 runtime 的 `chat_type` 路由查状态（私聊查 `PrivatePresenceStore`，群聊查 `GroupPresence`）。
+- `core/scheduler.py:139` `should_skip_proactive_for_target`：新增函数，按目标用户的 `memory_scope_id` 查询私聊在线状态决策是否跳过主动消息。
+- `core/scheduler.py:596` `_on_event_trigger`：主动消息触发时解析目标用户的 `memory_scope_id`，使用 `should_skip_proactive_for_target` 判断是否跳过。
+
+**日志改进：**
+- 全局状态日志改为 `global=semi_online`（不再叫 `presence=online`）。
+- 消息入口状态日志增加 `private=online` / `group=online` 区分。
+- 启动过期清理日志：`启动过期清理: N 个私聊 ONLINE 记录已重置为 SEMI_ONLINE`。
+
+**测试改写：**
+- `tests/test_presence_entry.py:22` `test_private_message_entry_writes_private_presence`：断言 `PrivatePresenceStore` 而非全局 `AIPresence`。
+- `tests/test_scope_runtime_coordination.py:94` `test_transition_waits_until_whole_scope_is_idle`：断言 `PrivatePresenceStore` 按 scope 共享。
+- `tests/test_scope_runtime_coordination.py:128` `test_backend_start_writes_private_presence`：断言私聊后脑启动写 `PrivatePresenceStore`。
+
+**新增测试：**
+- `tests/test_private_presence_store.py`：覆盖默认值、set/get 往返、持久化、冗余 set 无日志、all() 查询、启动过期清理。
+
+**验证**：
+- `py_compile core/private_presence_store.py core/scheduler.py core/message_handler.py core/scheduler_mixin.py core/controller.py` 全部通过。
+- `pytest tests/test_presence_entry.py tests/test_scope_runtime_coordination.py tests/test_private_presence_store.py -v` → 16 passed。
+- 全量 `pytest tests/` → 419 passed（已知环境问题：CLI 测试需要 Windows console、`test_cost_tracker` 文件锁定、`test_message_history_retry_queue` 需要 pytest-asyncio、`test_timezone` 段落逻辑问题）。
+
+---
+
 ## 交接
 - 记录人：GitHub Copilot
 - 日期：2026-03-08

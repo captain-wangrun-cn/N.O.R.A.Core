@@ -117,8 +117,9 @@ MessageHistory.close_session(platform, chat_id, trigger_type="user")
 
 - `memory/message_history.py` — 分段逻辑与摘要生成
 - `core/controller.py` — 在 `_transition_to_semi_online` 触发 `close_session`
+- `core/private_presence_store.py` — 私聊在线状态存储（`ONLINE` / `SEMI_ONLINE`）
 - `docs/architecture/message_history.md` — 总体消息历史结构说明
 
 ---
 
-**最后更新**：2026-03-11
+**最后更新**：2026-07-26

@@ -14,11 +14,12 @@ core/scheduler.py — N.O.R.A. 主动消息调度系统 (Proactive Scheduler)
 基于 APScheduler AsyncIOScheduler 的事件驱动调度，替代旧版 30 秒轮询。
 
 功能:
-1. 全局 AI 在线状态管理 (AIPresence): ONLINE / SEMI_ONLINE（两态模型，已取消 OFFLINE）
-2. 每天凌晨 00:00 (CronTrigger) 根据 SCHEDULE.md + 身份文件生成今日主动消息触发计划
-3. 每个触发点使用 DateTrigger 精准调度，到时直接回调
-4. 动态闹钟: 允许 AI 实时添加定时/倒计时闹钟 (DateTrigger)，持久化到本地缓存
-5. AI 处于 ONLINE 状态时（正在生成消息或后端忙碌）忽略主动消息
+1. 全局系统忙碌状态管理 (AIPresence): ONLINE / SEMI_ONLINE（系统级，不表示私聊在线）
+2. 私聊在线状态管理 (PrivatePresenceStore): 按 memory_scope_id 独立存储
+3. 每天凌晨 00:00 (CronTrigger) 根据 SCHEDULE.md + 身份文件生成今日主动消息触发计划
+4. 每个触发点使用 DateTrigger 精准调度，到时直接回调
+5. 动态闹钟: 允许 AI 实时添加定时/倒计时闹钟 (DateTrigger)，持久化到本地缓存
+6. 主动消息在目标用户私聊在线或系统忙碌时被跳过
 """
 
 import asyncio
@@ -43,15 +44,18 @@ logger = logging.getLogger(__name__)
 # ==================================================================
 
 class AIPresence(Enum):
-    """AI 在线状态（全局）。
+    """全局系统级忙碌状态（System Presence）。
 
     两态模型:
-    - SEMI_ONLINE: 空闲待命 — 允许调度好的主动消息（每日计划/闹钟）
-    - ONLINE: 活跃对话中 — 忽略调度好的主动消息，但会启动对话延续检测
-                （用户停止发言 2 分钟后，AI 可能主动追话）
+    - SEMI_ONLINE: 系统空闲 — 允许调度主动消息
+    - ONLINE: 系统忙碌 — 忽略调度主动消息
+
+    注：此状态不再表示某个私聊的在线状态。
+    私聊在线状态由 PrivatePresenceStore 按 scope 管理。
+    群聊在线状态由 GroupPresenceStore 按群管理。
     """
-    SEMI_ONLINE = "semi_online"  # 空闲待命 — 允许调度主动消息
-    ONLINE = "online"            # 活跃对话中 — 忽略调度主动消息，启用对话延续检测
+    SEMI_ONLINE = "semi_online"  # 系统空闲 — 允许调度主动消息
+    ONLINE = "online"            # 系统忙碌 — 忽略调度主动消息
 
 
 class _AIPresenceState:
@@ -68,8 +72,7 @@ class _AIPresenceState:
 
     @property
     def should_skip_proactive(self) -> bool:
-        if self.presence == AIPresence.ONLINE:
-            return True
+        """系统级忙碌检查：生成中或后脑忙时跳过主动消息。"""
         if self.is_generating or self.is_backend_busy:
             return True
         return False
@@ -139,6 +142,25 @@ def set_ai_backend_busy(is_busy: bool):
 
 def should_skip_proactive() -> bool:
     return _ai_state.should_skip_proactive
+
+
+def should_skip_proactive_for_target(
+    memory_scope_id: str,
+    private_presence_store: Any = None,
+) -> bool:
+    """Check if proactive message should be skipped for a specific target user.
+
+    Skipped when:
+    - System is busy (is_generating or is_backend_busy)
+    - Target user's private chat is ONLINE (they are actively chatting)
+    """
+    if _ai_state.should_skip_proactive:
+        return True
+    if private_presence_store is not None:
+        from core.private_presence_store import PrivatePresence
+        if private_presence_store.get(memory_scope_id) == PrivatePresence.ONLINE:
+            return True
+    return False
 
 
 def get_ai_state_summary() -> Dict[str, Any]:
@@ -256,6 +278,8 @@ class ProactiveScheduler:
         send_proactive_callback: Optional[Callable[..., Awaitable[None]]] = None,
     daily_summary_callback: Optional[Callable[[date], Awaitable[None]]] = None,
     resolve_delivery_callback: Optional[Callable[[str], str]] = None,
+    private_presence_store: Any = None,
+    identity_resolver: Optional[Callable[[str], Any]] = None,
     ):
         self.cache_dir = cache_dir
         os.makedirs(cache_dir, exist_ok=True)
@@ -268,6 +292,8 @@ class ProactiveScheduler:
         # 投递目标解析：proactive 默认发到最近活跃私聊端，不可用回退传入 fallback。
         # 注入 None 时退化为恒等（直接用 fallback），保持可独立测试。
         self._resolve_delivery_callback = resolve_delivery_callback
+        self._private_presence_store = private_presence_store
+        self._identity_resolver = identity_resolver
 
         # 事件列表（用于查询/序列化，实际触发由 APScheduler Job 驱动）
         self._daily_events: List[ScheduledEvent] = []
@@ -571,13 +597,29 @@ class ProactiveScheduler:
             return
 
         # 判断是否跳过
-        if should_skip_proactive():
+        # 解析目标用户的 memory_scope_id，用于判断该用户是否正在私聊
+        target_scope_id = ""
+        if self._identity_resolver and event.chat_id:
+            try:
+                identity = self._identity_resolver(event.chat_id)
+                if identity and hasattr(identity, "memory_scope_id"):
+                    target_scope_id = identity.memory_scope_id
+            except Exception:
+                pass
+
+        if should_skip_proactive_for_target(target_scope_id, self._private_presence_store):
             state = get_ai_state_summary()
             reason_short = (event.reason or "无")[:30]
+            private_online = (
+                self._private_presence_store is not None
+                and target_scope_id
+                and self._private_presence_store.get(target_scope_id).value == "online"
+            )
             logger.info(
                 f"跳过触发 {event.event_type} (reason: {reason_short}): "
-                f"presence={state['presence']}, generating={state['is_generating']}, "
-                f"backend_busy={state['is_backend_busy']}"
+                f"generating={state['is_generating']}, "
+                f"backend_busy={state['is_backend_busy']}, "
+                f"target_private_online={private_online}"
             )
             # 闹钟不受在线状态影响（闹钟必须触发）
             if event.event_type != "alarm":

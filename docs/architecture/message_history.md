@@ -95,7 +95,7 @@ close_session() — 将所有 session_id=NULL 的消息归入新 session
     ↓
 异步生成段落摘要
     ↓
-AI 进入 SEMI_ONLINE 状态
+私聊进入 SEMI_ONLINE 状态（PrivatePresenceStore）
 ```
 
 ### 存储结构
