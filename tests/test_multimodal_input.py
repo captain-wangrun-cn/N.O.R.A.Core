@@ -1,6 +1,9 @@
 import base64
+import io
 
-from brain.multimodal import extract_image_payloads, extract_video_payloads
+from PIL import Image
+
+from brain.multimodal import extract_image_payloads, extract_video_payloads, _convert_gif_to_png
 from brain.providers.openai import OpenAIProvider
 
 
@@ -50,3 +53,60 @@ def test_extract_video_payloads_sniffs_mp4_when_extension_is_bin(tmp_path):
     assert videos[0]["mime_type"] == "video/mp4"
     assert videos[0]["bytes"] == video_bytes
     assert videos[0]["base64"] == base64.b64encode(video_bytes).decode("utf-8")
+
+
+def _make_gif_bytes(size: tuple = (10, 10), frames: int = 1) -> bytes:
+    """用 Pillow 生成最小合法 GIF 二进制。"""
+    img = Image.new("RGB", size, color="red")
+    buf = io.BytesIO()
+    if frames > 1:
+        frames_list = [
+            Image.new("RGB", size, color=("red" if i % 2 == 0 else "blue"))
+            for i in range(frames)
+        ]
+        frames_list[0].save(
+            buf, format="GIF", save_all=True,
+            append_images=frames_list[1:], duration=100, loop=0,
+        )
+    else:
+        img.save(buf, format="GIF")
+    return buf.getvalue()
+
+
+def test_convert_gif_to_png_basic():
+    """单帧 GIF 转 PNG，验证输出是合法 PNG。"""
+    gif_bytes = _make_gif_bytes()
+    png_bytes = _convert_gif_to_png(gif_bytes)
+    assert png_bytes is not None
+    # PNG 文件头
+    assert png_bytes[:8] == b"\x89PNG\r\n\x1a\n"
+    # 可被 Pillow 重新打开
+    img = Image.open(io.BytesIO(png_bytes))
+    assert img.format == "PNG"
+
+
+def test_convert_gif_to_png_animated():
+    """多帧动图 GIF 转 PNG，应只提取第一帧。"""
+    gif_bytes = _make_gif_bytes(frames=3)
+    png_bytes = _convert_gif_to_png(gif_bytes)
+    assert png_bytes is not None
+    img = Image.open(io.BytesIO(png_bytes))
+    assert img.format == "PNG"
+    assert img.size == (10, 10)
+
+
+def test_extract_image_payloads_converts_gif(tmp_path):
+    """extract_image_payloads 对 GIF 文件自动转为 PNG。"""
+    gif_path = tmp_path / "test.gif"
+    gif_path.write_bytes(_make_gif_bytes())
+
+    text = f"[image: {gif_path}]"
+    clean_text, images = extract_image_payloads(text)
+
+    assert len(images) == 1
+    assert images[0]["mime_type"] == "image/png"
+    # base64 解码后应是 PNG 文件头
+    decoded = base64.b64decode(images[0]["base64"])
+    assert decoded[:8] == b"\x89PNG\r\n\x1a\n"
+    # bytes 字段也应是 PNG
+    assert images[0]["bytes"][:8] == b"\x89PNG\r\n\x1a\n"

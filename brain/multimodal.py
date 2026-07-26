@@ -4,6 +4,7 @@ date:          2026-03-08 17:03:43
 Copyright © WR（captain-wangrun-cn） All rights reserved
 '''
 import base64
+import io
 import logging
 import mimetypes
 import os
@@ -33,6 +34,31 @@ def _generate_image_id() -> str:
 def _generate_video_id() -> str:
     """生成短且可读的视频 ID，格式: vid_<8位hex>"""
     return f"vid_{uuid.uuid4().hex[:8]}"
+
+
+def _convert_gif_to_png(raw_bytes: bytes) -> Optional[bytes]:
+    """
+    将 GIF 图片转换为 PNG（提取第一帧）。
+    Gemini 不支持 image/gif 格式，需要在发送前转换。
+    返回 PNG bytes，失败则返回 None。
+    """
+    try:
+        from PIL import Image
+        img = Image.open(io.BytesIO(raw_bytes))
+        # 提取第一帧（GIF 可能是动图）
+        if hasattr(img, "n_frames") and img.n_frames > 1:
+            img.seek(0)
+        # 转换为 RGBA 或 RGB（处理调色板模式等）
+        if img.mode in ("P", "PA"):
+            img = img.convert("RGBA" if "transparency" in img.info else "RGB")
+        elif img.mode == "L":
+            img = img.convert("RGB")
+        buf = io.BytesIO()
+        img.save(buf, format="PNG")
+        return buf.getvalue()
+    except Exception as e:
+        logger.warning(f"GIF 转 PNG 失败: {e}")
+        return None
 
 
 def _resolve_local_image_path(raw_path: str) -> str:
@@ -207,6 +233,15 @@ def extract_image_payloads(text: str) -> Tuple[str, List[Dict[str, Any]]]:
 
             with open(resolved, "rb") as f:
                 raw_bytes = f.read()
+
+            # GIF 图片兼容性处理：Gemini 不支持 image/gif，
+            # 提取第一帧转换为 PNG
+            if mime_type == "image/gif":
+                png_bytes = _convert_gif_to_png(raw_bytes)
+                if png_bytes:
+                    raw_bytes = png_bytes
+                    mime_type = "image/png"
+                    logger.info(f"GIF 已转换为 PNG: {resolved}")
 
             image_id = _generate_image_id()
             images.append({

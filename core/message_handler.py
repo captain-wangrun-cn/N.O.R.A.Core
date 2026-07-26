@@ -321,6 +321,7 @@ class MessageHandlerMixin:
     ) -> Dict[str, Any]:
         latest = events[-1]
         context = dict(latest.context)
+        message_content = self._format_group_events(events)
         context.update(
             {
                 "runtime_key": latest.runtime_key,
@@ -329,13 +330,28 @@ class MessageHandlerMixin:
                 "chat_type": "group",
                 "memory_scope_id": latest.memory_scope_id,
                 "place_scope_id": latest.place_scope_id,
-                "text": self._format_group_events(events),
+                "text": message_content,
                 "group_message_batch": [event.context for event in events],
                 "_message_saved": True,
                 "_group_listener_promoted": True,
                 "_group_listener_reason": reason,
             }
         )
+        # 群消息持久化：确保监听期间的用户消息写入 DB，
+        # 使 followup/wrapup 能读到完整上下文。
+        try:
+            self.message_history.add_message(
+                platform=latest.platform,
+                chat_id=latest.platform_chat_id,
+                role="user",
+                content=message_content,
+                user_id=latest.sender_id,
+                memory_scope_id=latest.memory_scope_id,
+                place_scope_id=latest.place_scope_id,
+                actor_display_name=latest.sender_name,
+            )
+        except Exception as e:
+            logger.warning(f"[{latest.runtime_key}] 群消息持久化失败: {e}")
         if continuation_token is not None:
             context["_group_listener_continuation_token"] = continuation_token
         return context
