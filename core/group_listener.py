@@ -180,6 +180,7 @@ class GroupListenerManager:
         self.max_pending = max(1, int(max_pending))
         self.enabled = bool(enabled)
         self._states: Dict[str, GroupRuntimeState] = {}
+        self._mode_lock = asyncio.Lock()
         self._sequence = 0
         self._generation_token = 0
         self._closed = False
@@ -199,33 +200,59 @@ class GroupListenerManager:
         reason: str = "unspecified",
         expected_last_sequence: Optional[int] = None,
     ) -> bool:
-        """Set one group's mode, optionally only if no newer event has arrived."""
+        """Set the active group mode, demoting any previously ONLINE group."""
         mode = GroupPresence(mode)
-        state = self._state(runtime_key)
-        async with state.lock:
-            if expected_last_sequence is not None:
-                if state.generation or state.directed_handoff or not state.pending_window:
-                    return False
-                if any(
-                    event.sequence > expected_last_sequence
-                    or event.explicit_bot_mention
-                    or event.reply_to_bot
-                    for event in state.pending_window
-                ):
-                    return False
-            old_mode = self.mode_for(runtime_key)
-            self.store.set(
+        async with self._mode_lock:
+            state = self._state(runtime_key)
+            async with state.lock:
+                if expected_last_sequence is not None:
+                    if state.generation or state.directed_handoff or not state.pending_window:
+                        return False
+                    if any(
+                        event.sequence > expected_last_sequence
+                        or event.explicit_bot_mention
+                        or event.reply_to_bot
+                        for event in state.pending_window
+                    ):
+                        return False
+                old_mode = self.mode_for(runtime_key)
+
+            replaced = []
+            if mode == GroupPresence.ONLINE:
+                replaced = [
+                    key
+                    for key, current_mode in self.store.all().items()
+                    if key != runtime_key and current_mode == GroupPresence.ONLINE
+                ]
+
+            if not self.store.set(
                 runtime_key,
                 mode,
                 platform=platform,
                 platform_chat_id=platform_chat_id,
-            )
+            ):
+                return False
+
             if mode == GroupPresence.SEMI_ONLINE:
-                state.pending_window.clear()
-                state.new_since_passive_eval = 0
-                state.idle_generation += 1
-                self._cancel_task(state.idle_task)
-                state.idle_task = None
+                async with state.lock:
+                    state.pending_window.clear()
+                    state.new_since_passive_eval = 0
+                    state.idle_generation += 1
+                    self._cancel_task(state.idle_task)
+                    state.idle_task = None
+
+            for replaced_key in replaced:
+                replaced_state = self._states.get(replaced_key)
+                if replaced_state is not None:
+                    async with replaced_state.lock:
+                        self._clear_runtime_state(replaced_state, cancel_passive=True)
+                logger.info(
+                    "[GROUP PRESENCE] active group replaced: %s -> %s reason=%s",
+                    replaced_key,
+                    runtime_key,
+                    reason,
+                )
+
         if old_mode != mode:
             logger.info(
                 "[GROUP PRESENCE] runtime=%s %s -> %s reason=%s",
@@ -257,58 +284,61 @@ class GroupListenerManager:
             return False
 
         await self.persist_message(context)
-        self._sequence += 1
-        event = GroupMessageEvent.from_context(context, self._sequence)
-        state = self._state(runtime_key)
+        async with self._mode_lock:
+            if self.mode_for(runtime_key) != GroupPresence.ONLINE:
+                return False
+            self._sequence += 1
+            event = GroupMessageEvent.from_context(context, self._sequence)
+            state = self._state(runtime_key)
 
-        interrupt_payload: Optional[Tuple[List[GroupMessageEvent], str, int]] = None
-        append_payload: Optional[Tuple[List[GroupMessageEvent], List[GroupMessageEvent], int]] = None
-        direct_promote: Optional[List[GroupMessageEvent]] = None
-        run_passive = False
-        async with state.lock:
-            state.last_received_at = event.received_at
-            self._reset_idle_timer(runtime_key, state)
-            generation = state.generation
-            if generation is not None:
-                if generation.priority_handoff or generation.restart_pending:
-                    generation.priority_events.append(event)
-                elif event.explicit_bot_mention:
-                    self._cancel_task(state.passive_task)
-                    state.passive_task = None
-                    generation.priority_events.extend(self._take_recent_pending(state, limit=5))
+            interrupt_payload: Optional[Tuple[List[GroupMessageEvent], str, int]] = None
+            append_payload: Optional[Tuple[List[GroupMessageEvent], List[GroupMessageEvent], int]] = None
+            direct_promote: Optional[List[GroupMessageEvent]] = None
+            run_passive = False
+            async with state.lock:
+                state.last_received_at = event.received_at
+                self._reset_idle_timer(runtime_key, state)
+                generation = state.generation
+                if generation is not None:
+                    if generation.priority_handoff or generation.restart_pending:
+                        generation.priority_events.append(event)
+                    elif event.explicit_bot_mention:
+                        self._cancel_task(state.passive_task)
+                        state.passive_task = None
+                        generation.priority_events.extend(self._take_recent_pending(state, limit=5))
+                        reply_target = event.replied_target_event()
+                        if reply_target is not None:
+                            generation.priority_events.append(reply_target)
+                        generation.priority_events.append(event)
+                        generation.priority_handoff = True
+                        generation.restart_pending = True
+                        merged = self._merge_events(generation.input_events, generation.priority_events)
+                        interrupt_payload = (merged, "mention", generation.token)
+                    elif generation.ordinary_interrupt_used:
+                        self._append_pending(state, event)
+                    else:
+                        generation.ordinary_bucket.append(event)
+                        if len(generation.ordinary_bucket) >= self.batch_size:
+                            batch = generation.ordinary_bucket[:self.batch_size]
+                            del generation.ordinary_bucket[:self.batch_size]
+                            append_payload = (list(generation.input_events), batch, generation.token)
+                elif event.explicit_bot_mention or event.reply_to_bot:
+                    if event.explicit_bot_mention:
+                        self._cancel_task(state.passive_task)
+                        state.passive_task = None
+                        recent_context = self._take_recent_pending(state, limit=5)
+                    else:
+                        recent_context = []
                     reply_target = event.replied_target_event()
-                    if reply_target is not None:
-                        generation.priority_events.append(reply_target)
-                    generation.priority_events.append(event)
-                    generation.priority_handoff = True
-                    generation.restart_pending = True
-                    merged = self._merge_events(generation.input_events, generation.priority_events)
-                    interrupt_payload = (merged, "mention", generation.token)
-                elif generation.ordinary_interrupt_used:
+                    direct_promote = self._merge_events(
+                        recent_context,
+                        [reply_target] if reply_target is not None else [],
+                        [event],
+                    )
+                    state.directed_handoff = True
+                else:
                     self._append_pending(state, event)
-                else:
-                    generation.ordinary_bucket.append(event)
-                    if len(generation.ordinary_bucket) >= self.batch_size:
-                        batch = generation.ordinary_bucket[:self.batch_size]
-                        del generation.ordinary_bucket[:self.batch_size]
-                        append_payload = (list(generation.input_events), batch, generation.token)
-            elif event.explicit_bot_mention or event.reply_to_bot:
-                if event.explicit_bot_mention:
-                    self._cancel_task(state.passive_task)
-                    state.passive_task = None
-                    recent_context = self._take_recent_pending(state, limit=5)
-                else:
-                    recent_context = []
-                reply_target = event.replied_target_event()
-                direct_promote = self._merge_events(
-                    recent_context,
-                    [reply_target] if reply_target is not None else [],
-                    [event],
-                )
-                state.directed_handoff = True
-            else:
-                self._append_pending(state, event)
-                run_passive = state.new_since_passive_eval >= self.batch_size
+                    run_passive = state.new_since_passive_eval >= self.batch_size
 
         if interrupt_payload:
             events, reason, token = interrupt_payload
@@ -341,31 +371,34 @@ class GroupListenerManager:
         task: Optional[asyncio.Task] = None,
         *,
         continuation_token: Optional[int] = None,
-    ) -> int:
-        state = self._state(runtime_key)
-        async with state.lock:
-            previous = state.generation
-            continuation = bool(
-                previous
-                and continuation_token is not None
-                and previous.token == continuation_token
-            )
-            self._generation_token += 1
-            cycle = GenerationCycle(
-                token=self._generation_token,
-                input_events=list(events),
-                task=task,
-                ordinary_interrupt_used=(
-                    previous.ordinary_interrupt_used if continuation else False
-                ),
-            )
-            if continuation and previous:
-                cycle.ordinary_bucket.extend(previous.ordinary_bucket)
-            state.generation = cycle
-            state.directed_handoff = False
-            self._cancel_task(state.idle_task)
-            state.idle_task = None
-            return cycle.token
+    ) -> Optional[int]:
+        async with self._mode_lock:
+            if self.mode_for(runtime_key) != GroupPresence.ONLINE:
+                return None
+            state = self._state(runtime_key)
+            async with state.lock:
+                previous = state.generation
+                continuation = bool(
+                    previous
+                    and continuation_token is not None
+                    and previous.token == continuation_token
+                )
+                self._generation_token += 1
+                cycle = GenerationCycle(
+                    token=self._generation_token,
+                    input_events=list(events),
+                    task=task,
+                    ordinary_interrupt_used=(
+                        previous.ordinary_interrupt_used if continuation else False
+                    ),
+                )
+                if continuation and previous:
+                    cycle.ordinary_bucket.extend(previous.ordinary_bucket)
+                state.generation = cycle
+                state.directed_handoff = False
+                self._cancel_task(state.idle_task)
+                state.idle_task = None
+                return cycle.token
 
     async def bind_generation_task(self, runtime_key: str, token: int, task: asyncio.Task) -> bool:
         state = self._state(runtime_key)
@@ -630,6 +663,20 @@ class GroupListenerManager:
             for event in group:
                 merged.setdefault(event.unique_key, event)
         return sorted(merged.values(), key=lambda event: event.sequence)
+
+    def _clear_runtime_state(self, state: GroupRuntimeState, *, cancel_passive: bool) -> None:
+        state.pending_window.clear()
+        state.new_since_passive_eval = 0
+        state.idle_generation += 1
+        self._cancel_task(state.idle_task)
+        state.idle_task = None
+        if cancel_passive:
+            self._cancel_task(state.passive_task)
+            state.passive_task = None
+        if state.generation and state.generation.task:
+            self._cancel_task(state.generation.task)
+        state.generation = None
+        state.directed_handoff = False
 
     @staticmethod
     def _cancel_task(task: Optional[asyncio.Task]) -> None:

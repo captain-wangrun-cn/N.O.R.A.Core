@@ -75,7 +75,7 @@ core/controller.py            NoraController.handle_message()
 - `ProactiveScheduler` — APScheduler 驱动主动消息调度
 - `AIPresence` — 全局系统级忙碌标志（`is_generating` / `is_backend_busy`），**不表示任何私聊在线状态**
 - `PrivatePresenceStore`（`core/private_presence_store.py`）— 按 `memory_scope_id` 存储私聊的 `ONLINE` / `SEMI_ONLINE` 状态，持久化到 JSON，重启后过期自动重置
-- 每群运行状态由 `core/group_listener.py` + `core/group_presence_store.py` 按 `platform:chat_id` 管理；ONLINE 群绕过 sender aggregator，SEMI_ONLINE 群仍仅由 @/回复进入正常聚合路径
+- 群运行状态由 `core/group_listener.py` + `core/group_presence_store.py` 按 `platform:chat_id` 识别，但全局最多一个群 ONLINE；新群进入 ONLINE 会接管并关闭旧活跃群。ONLINE 群绕过 sender aggregator，SEMI_ONLINE 群仍仅由 @/回复进入正常聚合路径
 - 手动重建接口：`regenerate_today_plan(clear_existing=True)`
 - 每日总结：每日 00:00 触发 `_on_daily_summary_trigger`，调用 `daily_summary_callback` 生成上一日摘要
 

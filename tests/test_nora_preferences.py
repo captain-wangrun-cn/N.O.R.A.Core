@@ -47,6 +47,7 @@ def test_get_group_listener_config_defaults_and_override(monkeypatch):
     listener_config = config.get_group_listener_config()
     assert listener_config["evaluation_batch_size"] == 2
     assert listener_config["idle_seconds"] == 90.0
+    assert "default_mode" not in listener_config
 
     monkeypatch.setattr(
         config,
@@ -54,6 +55,13 @@ def test_get_group_listener_config_defaults_and_override(monkeypatch):
         {"interaction": {"group_listener": {"evaluation_batch_size": 3}}},
     )
     assert config.get_group_listener_config()["evaluation_batch_size"] == 3
+
+    monkeypatch.setattr(
+        config,
+        "_config",
+        {"interaction": {"group_listener": {"default_mode": "online"}}},
+    )
+    assert "default_mode" not in config.get_group_listener_config()
 
 
 def test_get_group_listener_config_normalizes_batch_size(monkeypatch):

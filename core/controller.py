@@ -54,7 +54,7 @@ from core.conversation_identity import (
     runtime_key_for,
 )
 from core.group_listener import GroupListenerManager
-from core.group_presence_store import GroupPresence, GroupPresenceStore
+from core.group_presence_store import GroupPresenceStore
 from core.private_presence_store import PrivatePresence, PrivatePresenceStore
 from core.routing import sanitize_adapter_output_text, sanitize_user_visible_text, parse_route_markers
 from adapters.message_controls import parse_message_controls, strip_message_control_markers
@@ -233,8 +233,13 @@ class NoraController(
         )
 
         group_listener_cfg = config.get_group_listener_config()
-        default_group_mode = GroupPresence(group_listener_cfg["default_mode"])
-        self.group_presence_store = GroupPresenceStore(default_mode=default_group_mode)
+        self.group_presence_store = GroupPresenceStore()
+        demoted_groups = self.group_presence_store.normalize_single_online()
+        if demoted_groups:
+            logger.warning(
+                "检测到遗留的多个 ONLINE 群，已保留最近活跃群并降级其余 %d 个群",
+                len(demoted_groups),
+            )
         self.private_presence = PrivatePresenceStore()
         self.private_presence.expire_stale_entries()
         self.group_listener = GroupListenerManager(

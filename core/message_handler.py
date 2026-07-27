@@ -923,6 +923,9 @@ class MessageHandlerMixin:
                 listener_events,
                 continuation_token=continuation_token,
             )
+            if listener_token is None:
+                logger.info(f"[{chat_id}] 群监听已被其它群接管，跳过过期提升")
+                return
             if continuation_token is not None:
                 await self.group_listener.mark_restart_started(
                     chat_id,

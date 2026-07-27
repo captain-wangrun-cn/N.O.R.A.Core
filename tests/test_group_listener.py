@@ -53,10 +53,113 @@ def test_group_presence_store_defaults_and_persists_per_group(tmp_path, monkeypa
         assert store.get("telegram:g1") == GroupPresence.ONLINE
         assert store.get("telegram:g2") == GroupPresence.SEMI_ONLINE
 
+        assert store.set("telegram:g2", GroupPresence.ONLINE, platform="telegram", platform_chat_id="g2")
+        assert store.get("telegram:g1") == GroupPresence.SEMI_ONLINE
+        assert store.get("telegram:g2") == GroupPresence.ONLINE
+
         restored = GroupPresenceStore()
-        assert restored.get("telegram:g1") == GroupPresence.ONLINE
+        assert restored.get("telegram:g1") == GroupPresence.SEMI_ONLINE
+        assert restored.get("telegram:g2") == GroupPresence.ONLINE
 
 
+
+    asyncio.run(run())
+
+
+def test_group_presence_store_normalizes_legacy_multiple_online_groups(tmp_path, monkeypatch):
+    _patch_workspace(monkeypatch, tmp_path)
+    (tmp_path / "group_presence_state.json").write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "groups": {
+                    "telegram:g1": {"mode": "online", "updated_at": 10},
+                    "telegram:g2": {"mode": "online", "updated_at": 20},
+                    "telegram:g3": {"mode": "semi_online", "updated_at": 30},
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    store = GroupPresenceStore()
+    assert store.normalize_single_online() == ["telegram:g1"]
+    assert store.get("telegram:g1") == GroupPresence.SEMI_ONLINE
+    assert store.get("telegram:g2") == GroupPresence.ONLINE
+    assert store.get("telegram:g3") == GroupPresence.SEMI_ONLINE
+
+
+def test_online_group_replaces_previous_runtime_state(tmp_path, monkeypatch):
+    async def run():
+        _patch_workspace(monkeypatch, tmp_path)
+        store = GroupPresenceStore()
+        store.set("telegram:g1", GroupPresence.ONLINE)
+        persisted = []
+
+        async def persist(context):
+            persisted.append((context["runtime_key"], context["platform_message_id"]))
+
+        async def noop(*args):
+            return None
+
+        manager = GroupListenerManager(
+            store=store,
+            persist_message=persist,
+            decide_passive=lambda *args: asyncio.sleep(0, result=PassiveAction.KEEP_LISTENING),
+            decide_append=lambda *args: asyncio.sleep(0, result=AppendAction.KEEP_PENDING),
+            promote=noop,
+            interrupt=noop,
+            batch_size=100,
+            idle_seconds=30,
+        )
+        try:
+            assert await manager.receive(_context(1, runtime_key="telegram:g1")) is True
+            old_idle_task = manager._state("telegram:g1").idle_task
+            assert old_idle_task is not None and not old_idle_task.done()
+
+            assert await manager.set_mode(
+                "telegram:g2",
+                GroupPresence.ONLINE,
+                reason="front_marker_online",
+            )
+            assert store.get("telegram:g1") == GroupPresence.SEMI_ONLINE
+            assert store.get("telegram:g2") == GroupPresence.ONLINE
+            assert manager.pending_events("telegram:g1") == []
+            await asyncio.sleep(0)
+            assert old_idle_task.cancelled()
+
+            assert await manager.receive(_context(2, runtime_key="telegram:g1")) is False
+            assert await manager.receive(_context(3, runtime_key="telegram:g2")) is True
+            assert persisted == [("telegram:g1", "1"), ("telegram:g2", "3")]
+        finally:
+            await manager.shutdown()
+
+    asyncio.run(run())
+
+
+def test_begin_generation_rejects_group_replaced_before_promotion(tmp_path, monkeypatch):
+    async def run():
+        _patch_workspace(monkeypatch, tmp_path)
+        store = GroupPresenceStore()
+        store.set("telegram:g1", GroupPresence.ONLINE)
+
+        async def noop(*args):
+            return None
+
+        manager = GroupListenerManager(
+            store=store,
+            persist_message=noop,
+            decide_passive=lambda *args: asyncio.sleep(0, result=PassiveAction.KEEP_LISTENING),
+            decide_append=lambda *args: asyncio.sleep(0, result=AppendAction.KEEP_PENDING),
+            promote=noop,
+            interrupt=noop,
+        )
+        try:
+            await manager.set_mode("telegram:g2", GroupPresence.ONLINE, reason="test_handoff")
+            assert await manager.begin_generation("telegram:g1", [_event(1)]) is None
+            assert manager._state("telegram:g1").generation is None
+        finally:
+            await manager.shutdown()
 
     asyncio.run(run())
 
@@ -290,11 +393,10 @@ def test_idle_timer_evaluates_non_empty_window(tmp_path, monkeypatch):
 
 
     asyncio.run(run())
-def test_semi_online_action_only_clears_current_group(tmp_path, monkeypatch):
+def test_handoff_then_semi_online_clears_active_group(tmp_path, monkeypatch):
     async def run():
         _patch_workspace(monkeypatch, tmp_path)
         store = GroupPresenceStore()
-        store.set("telegram:g1", GroupPresence.ONLINE)
         store.set("telegram:g2", GroupPresence.ONLINE)
 
         async def persist(context):
@@ -320,13 +422,14 @@ def test_semi_online_action_only_clears_current_group(tmp_path, monkeypatch):
         )
         try:
             await manager.receive(_context(1, runtime_key="telegram:g2"))
-            for index in range(1, 3):
+            await manager.set_mode("telegram:g1", GroupPresence.ONLINE, reason="test_handoff")
+            for index in range(2, 4):
                 await manager.receive(_context(index, runtime_key="telegram:g1"))
             await asyncio.sleep(0.02)
             assert store.get("telegram:g1") == GroupPresence.SEMI_ONLINE
-            assert store.get("telegram:g2") == GroupPresence.ONLINE
+            assert store.get("telegram:g2") == GroupPresence.SEMI_ONLINE
             assert manager.pending_events("telegram:g1") == []
-            assert [event.platform_message_id for event in manager.pending_events("telegram:g2")] == ["1"]
+            assert manager.pending_events("telegram:g2") == []
         finally:
             await manager.shutdown()
 

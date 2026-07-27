@@ -5,10 +5,10 @@
 群聊监听把“认知范围”和“运行状态”拆开：
 
 - **共享认知域**继续使用 `ConversationIdentity.memory_scope_id`，消息历史、RAG、压缩、段落摘要和既有后脑协调不按群拆分。
-- **群运行域**按 `runtime_key = platform:platform_chat_id` 隔离，只保存 `ONLINE / SEMI_ONLINE`、待判断窗口、定时器和生成中断状态。
+- **群运行域**以 `runtime_key = platform:platform_chat_id` 识别各群，但全局最多一个群为 `ONLINE`；新群进入 ONLINE 时自动接管并将旧活跃群切回 SEMI_ONLINE。各群仍分别保存待判断窗口、定时器和生成中断状态。
 - **场景可见性**仍由 `place_scope_id`、平台、群 ID、说话者、消息 ID 和回复关系约束。共享背景不代表其它场景内容可以在当前群公开。
 
-群模式持久化在 `data/group_presence_state.json`。只持久化模式，不持久化窗口和异步任务；重启后消息事实仍来自共享 `MessageHistory`。
+群模式持久化在 `data/group_presence_state.json`。只持久化模式，不持久化窗口和异步任务；重启后消息事实仍来自共享 `MessageHistory`。未登记或非法状态固定按 `SEMI_ONLINE` 处理；启动时若发现遗留的多个 ONLINE 记录，只保留 `updated_at` 最新的一项。
 
 ## Adapter 入口
 
@@ -47,7 +47,7 @@ fast 判断使用序号快照；判断期间新到的 suffix 不会因旧结果�
 
 ## 模型标记
 
-- `[ONLINE]`：群聊场景只把当前群切到 ONLINE。
+- `[ONLINE]`：群聊场景把当前群切到 ONLINE；若已有其它 ONLINE 群，则当前群接管监听，旧群立即回到 SEMI_ONLINE。
 - `[SEMI_ONLINE]`：群聊场景只把当前群切到半在线；私聊保持既有全局/段落语义。
 - 两者冲突时优先更保守的 `[SEMI_ONLINE]`。
 - 标记始终在用户可见输出前剥离。
@@ -63,7 +63,6 @@ fast 判断使用序号快照；判断期间新到的 suffix 不会因旧结果�
 配置位于 `interaction.group_listener`：
 
 - `enabled`
-- `default_mode`
 - `evaluation_batch_size`（默认 2，同时控制 passive 与生成期普通 append 的 fast 批次）
 - `idle_seconds`
 - `max_pending_messages`

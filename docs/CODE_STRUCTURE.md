@@ -37,8 +37,8 @@ N.O.R.A.Core/
 
 - `controller.py`：`NoraController` 主控制器（组合各 Mixin）。
 - `message_handler.py`：消息入口路由、命令分发；ONLINE 群事件立即入共享历史并提升结构化多说话者 batch。
-- `group_listener.py`：按 `platform:chat_id` 隔离的群监听状态机、窗口、fast 判断与 smart 中断协调。
-- `group_presence_store.py`：持久化每群 ONLINE/SEMI_ONLINE 模式；不保存消息或模型上下文。
+- `group_listener.py`：按 `platform:chat_id` 识别群运行态，全局单活跃监听，协调窗口、fast 判断与 smart 中断。
+- `group_presence_store.py`：持久化单个活跃群的 ONLINE/SEMI_ONLINE 模式；不保存消息或模型上下文。
 - `front_brain.py`：前脑即时回复 + 后脑结果审查。
 - `back_brain.py`：后脑执行循环（RAG、工具/技能、生成）。
 - `interrupt_handler.py`：忙碌时意图检测（stop/change/queue）。

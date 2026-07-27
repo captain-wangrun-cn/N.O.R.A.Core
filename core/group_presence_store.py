@@ -65,10 +65,7 @@ def _atomic_write(data: Dict[str, Any]) -> bool:
 
 
 class GroupPresenceStore:
-    """Persist only per-group listener mode; message windows remain runtime state."""
-
-    def __init__(self, default_mode: GroupPresence = GroupPresence.SEMI_ONLINE):
-        self.default_mode = default_mode
+    """Persist one active group listener mode; message windows remain runtime state."""
 
     def get(self, runtime_key: str) -> GroupPresence:
         record = (_read_state().get("groups") or {}).get(str(runtime_key), {})
@@ -76,7 +73,7 @@ class GroupPresenceStore:
         try:
             return GroupPresence(str(raw_mode))
         except (TypeError, ValueError):
-            return self.default_mode
+            return GroupPresence.SEMI_ONLINE
 
     def set(
         self,
@@ -90,14 +87,57 @@ class GroupPresenceStore:
         with _WRITE_LOCK:
             state = _read_state()
             groups = dict(state.get("groups") or {})
+            now = time.time()
+            if mode == GroupPresence.ONLINE:
+                for other_key, record in list(groups.items()):
+                    if str(other_key) == str(runtime_key) or not isinstance(record, dict):
+                        continue
+                    if record.get("mode") == GroupPresence.ONLINE.value:
+                        groups[str(other_key)] = {
+                            **record,
+                            "mode": GroupPresence.SEMI_ONLINE.value,
+                            "updated_at": now,
+                        }
             groups[str(runtime_key)] = {
                 "mode": mode.value,
                 "platform": str(platform or ""),
                 "platform_chat_id": str(platform_chat_id or ""),
-                "updated_at": time.time(),
+                "updated_at": now,
             }
             state = {"version": _SCHEMA_VERSION, "groups": groups}
             return _atomic_write(state)
+
+    def normalize_single_online(self) -> list[str]:
+        """Keep only the most recently updated ONLINE group in legacy state."""
+        with _WRITE_LOCK:
+            state = _read_state()
+            groups = dict(state.get("groups") or {})
+            online_records = []
+            for runtime_key, record in groups.items():
+                if not isinstance(record, dict) or record.get("mode") != GroupPresence.ONLINE.value:
+                    continue
+                try:
+                    updated_at = float(record.get("updated_at") or 0)
+                except (TypeError, ValueError):
+                    updated_at = 0.0
+                online_records.append((updated_at, str(runtime_key)))
+            if len(online_records) <= 1:
+                return []
+
+            online_records.sort(key=lambda item: (item[0], item[1]), reverse=True)
+            demoted = [runtime_key for _, runtime_key in online_records[1:]]
+            now = time.time()
+            for runtime_key in demoted:
+                record = groups.get(runtime_key)
+                if isinstance(record, dict):
+                    groups[runtime_key] = {
+                        **record,
+                        "mode": GroupPresence.SEMI_ONLINE.value,
+                        "updated_at": now,
+                    }
+            if not _atomic_write({"version": _SCHEMA_VERSION, "groups": groups}):
+                return []
+            return demoted
 
     def all(self) -> Dict[str, GroupPresence]:
         result: Dict[str, GroupPresence] = {}
@@ -106,5 +146,5 @@ class GroupPresenceStore:
             try:
                 result[str(runtime_key)] = GroupPresence(str(raw_mode))
             except (TypeError, ValueError):
-                result[str(runtime_key)] = self.default_mode
+                result[str(runtime_key)] = GroupPresence.SEMI_ONLINE
         return result

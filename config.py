@@ -231,7 +231,6 @@ def get_group_listener_config() -> dict:
     raw = ((cfg.get("interaction", {}) or {}).get("group_listener", {}) or {})
     defaults = {
         "enabled": True,
-        "default_mode": "semi_online",
         "evaluation_batch_size": 2,
         "idle_seconds": 90.0,
         "max_pending_messages": 20,
@@ -240,9 +239,14 @@ def get_group_listener_config() -> dict:
     merged = dict(defaults)
     if isinstance(raw, dict):
         merged.update(raw)
+        legacy_mode = str(raw.get("default_mode") or "").strip().lower()
+        if legacy_mode == "online":
+            logger.warning(
+                "interaction.group_listener.default_mode=online 已废弃并被忽略；"
+                "未登记群固定为 semi_online，且全局最多一个群 ONLINE"
+            )
+    merged.pop("default_mode", None)
 
-    mode = str(merged.get("default_mode") or "semi_online").strip().lower()
-    merged["default_mode"] = mode if mode in {"online", "semi_online"} else "semi_online"
     merged["enabled"] = bool(merged.get("enabled", True))
 
     numeric_fields = {
