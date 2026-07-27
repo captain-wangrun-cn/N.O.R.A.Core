@@ -55,7 +55,7 @@ def test_step_models_enables_security_when_security_model_configured(monkeypatch
     monkeypatch.setattr(cli.StepModels, "select_model", lambda self, models, role, provider: f"{role}-model")
     monkeypatch.setattr(cli.StepModels, "_prompt_price", lambda self, model_name: None)
 
-    confirmations = iter([False, True])
+    confirmations = iter([False, True, False])
     monkeypatch.setattr(cli.questionary, "confirm", lambda *args, **kwargs: _Confirm(next(confirmations)))
 
     step = cli.StepModels(state)

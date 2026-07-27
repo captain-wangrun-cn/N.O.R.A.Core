@@ -17,6 +17,7 @@ from typing import Any, Dict, List, Optional, Tuple
 logger = logging.getLogger(__name__)
 
 _IMAGE_TAG_PATTERN = re.compile(r'\[image:\s*(.*?)\]', re.IGNORECASE)
+_STICKER_TAG_PATTERN = re.compile(r'\[sticker:\s*(.*?)\]', re.IGNORECASE)
 _VIDEO_TAG_PATTERN = re.compile(r'\[video:\s*(.*?)\]', re.IGNORECASE)
 _FILE_TAG_PATTERN = re.compile(r'\[file:\s*(.*?)\]', re.IGNORECASE)
 _VIDEO_EXTENSIONS = {'.mp4', '.mkv', '.avi', '.mov', '.webm', '.flv', '.wmv', '.m4v', '.3gp'}
@@ -197,13 +198,76 @@ def _load_video_bytes(resolved: str) -> Tuple[Optional[bytes], Optional[str], Op
         return None, None, str(e)
 
 
+def _load_single_image(raw_path: str, seen_paths: set, is_sticker: bool = False) -> Optional[Dict[str, Any]]:
+    """尝试从 raw_path 加载一张图片，返回 image payload dict 或 None（失败/跳过时）。
+
+    Args:
+        raw_path: 原始路径字符串（来自 [image:...] 或 [sticker:...] 标签）
+        seen_paths: 已处理路径集合（去重用）
+        is_sticker: 是否是表情包/sticker（影响 payload 中的标记字段）
+    """
+    resolved = _resolve_local_image_path(raw_path)
+    if not resolved:
+        # sticker 标签可能包含 emoji 描述文本（如 "🐱 from CatStickers"），
+        # 这类非路径内容静默跳过，不打 warning
+        if not is_sticker or any(c in raw_path for c in ("/", "\\", ".")):
+            logger.warning(f"多模态图片路径不存在，已跳过: {raw_path}")
+        return None
+    if resolved in seen_paths:
+        return None
+
+    mime_type, _ = mimetypes.guess_type(resolved)
+    if not mime_type or not mime_type.startswith("image/"):
+        # 视频贴纸（.webm 等）无法作为图片解析，静默跳过
+        if not is_sticker:
+            logger.warning(f"标记为 image 但文件并非图片，已跳过: {resolved}")
+        return None
+
+    try:
+        file_size = os.path.getsize(resolved)
+        if file_size > _MAX_IMAGE_BYTES:
+            logger.warning(f"图片过大（>{_MAX_IMAGE_BYTES} bytes），已跳过: {resolved}")
+            return None
+
+        with open(resolved, "rb") as f:
+            raw_bytes = f.read()
+
+        # GIF 图片兼容性处理：Gemini 不支持 image/gif，
+        # 提取第一帧转换为 PNG
+        if mime_type == "image/gif":
+            png_bytes = _convert_gif_to_png(raw_bytes)
+            if png_bytes:
+                raw_bytes = png_bytes
+                mime_type = "image/png"
+                logger.info(f"GIF 已转换为 PNG: {resolved}")
+
+        image_id = _generate_image_id()
+        seen_paths.add(resolved)
+        payload: Dict[str, Any] = {
+            "image_id": image_id,
+            "path": resolved,
+            "mime_type": mime_type,
+            "bytes": raw_bytes,
+            "base64": base64.b64encode(raw_bytes).decode("utf-8"),
+        }
+        if is_sticker:
+            payload["is_sticker"] = True
+        return payload
+    except Exception as e:
+        logger.warning(f"读取图片失败，已跳过: {resolved} ({e})")
+        return None
+
+
 def extract_image_payloads(text: str) -> Tuple[str, List[Dict[str, Any]]]:
     """
-    从用户文本中提取 [image: ...] 标签并加载图片二进制。
+    从用户文本中提取 [image: ...] 和 [sticker: ...] 标签并加载图片二进制。
+
+    [sticker: path] 标签加载后会在 payload 中设置 is_sticker=True，
+    供下游判断"是否为表情包"（用于 fast-image 快速描述）。
 
     Returns:
-        clean_text: 移除 image 标签后的文本
-        images: [{"image_id", "path", "mime_type", "bytes", "base64"}, ...]
+        clean_text: 移除 image/sticker 标签后的文本
+        images: [{"image_id", "path", "mime_type", "bytes", "base64", "is_sticker"?}, ...]
     """
     if not text:
         return "", []
@@ -212,53 +276,25 @@ def extract_image_payloads(text: str) -> Tuple[str, List[Dict[str, Any]]]:
     seen_paths = set()
 
     for match in _IMAGE_TAG_PATTERN.finditer(text):
-        raw_path = match.group(1)
-        resolved = _resolve_local_image_path(raw_path)
-        if not resolved:
-            logger.warning(f"多模态图片路径不存在，已跳过: {raw_path}")
-            continue
-        if resolved in seen_paths:
-            continue
+        payload = _load_single_image(match.group(1), seen_paths, is_sticker=False)
+        if payload:
+            images.append(payload)
 
-        mime_type, _ = mimetypes.guess_type(resolved)
-        if not mime_type or not mime_type.startswith("image/"):
-            logger.warning(f"标记为 image 但文件并非图片，已跳过: {resolved}")
-            continue
-
-        try:
-            file_size = os.path.getsize(resolved)
-            if file_size > _MAX_IMAGE_BYTES:
-                logger.warning(f"图片过大（>{_MAX_IMAGE_BYTES} bytes），已跳过: {resolved}")
-                continue
-
-            with open(resolved, "rb") as f:
-                raw_bytes = f.read()
-
-            # GIF 图片兼容性处理：Gemini 不支持 image/gif，
-            # 提取第一帧转换为 PNG
-            if mime_type == "image/gif":
-                png_bytes = _convert_gif_to_png(raw_bytes)
-                if png_bytes:
-                    raw_bytes = png_bytes
-                    mime_type = "image/png"
-                    logger.info(f"GIF 已转换为 PNG: {resolved}")
-
-            image_id = _generate_image_id()
-            images.append({
-                "image_id": image_id,
-                "path": resolved,
-                "mime_type": mime_type,
-                "bytes": raw_bytes,
-                "base64": base64.b64encode(raw_bytes).decode("utf-8"),
-            })
-            seen_paths.add(resolved)
-        except Exception as e:
-            logger.warning(f"读取图片失败，已跳过: {resolved} ({e})")
+    for match in _STICKER_TAG_PATTERN.finditer(text):
+        payload = _load_single_image(match.group(1), seen_paths, is_sticker=True)
+        if payload:
+            images.append(payload)
 
     clean_text = _IMAGE_TAG_PATTERN.sub("", text)
+    clean_text = _STICKER_TAG_PATTERN.sub("", clean_text)
     clean_text = re.sub(r'\n{3,}', '\n\n', clean_text).strip()
 
     return clean_text, images
+
+
+def get_sticker_images(images: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """从 image payloads 列表中过滤出 is_sticker=True 的表情包图片。"""
+    return [img for img in images if img.get("is_sticker")]
 
 
 def extract_video_payloads(text: str) -> Tuple[str, List[Dict[str, Any]]]:

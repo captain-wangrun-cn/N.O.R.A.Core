@@ -31,10 +31,15 @@ def test_step_models_manual_price_prompt_deduplicated(monkeypatch):
         return selections[role_key]
 
     monkeypatch.setattr(cli.StepModels, "select_model", fake_select_model)
+    monkeypatch.setattr(
+        cli.questionary,
+        "confirm",
+        lambda *args, **kwargs: type("_Confirm", (), {"ask": lambda self: False})(),
+    )
 
     # 使用假的 CostTracker，避免真实初始化读取 config.yml
     class FakeCostTracker:
-        def __init__(self, db_path):
+        def __init__(self, db_path, custom_prices=None):
             self.db_path = db_path
 
         def get_model_price(self, provider, model_name):

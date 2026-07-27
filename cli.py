@@ -1020,7 +1020,7 @@ class StepModels(ConfigStep):
         model_providers = self.state.setdefault('model_providers', {})
         security_cfg = dict(self.state.get('security', {}) or {})
 
-        for role_key in ['smart', 'fast', 'coder', 'image', 'video', 'security', 'summary']:
+        for role_key in ['smart', 'fast', 'coder', 'image', 'video', 'security', 'fast-image', 'summary']:
             # video 模型为可选配置
             if role_key == 'video':
                 configure_video = questionary.confirm(
@@ -1050,6 +1050,19 @@ class StepModels(ConfigStep):
                     continue
                 security_cfg["enabled"] = True
                 self.state['security'] = security_cfg
+
+            # fast-image 模型为可选配置（快速描述表情包）
+            if role_key == 'fast-image':
+                configure_fast_image = questionary.confirm(
+                    "是否配置表情包快速描述模型？（可选，不配置则表情包不做内容解读）",
+                    default=bool(models.get('fast-image'))
+                ).ask()
+                if configure_fast_image is None:
+                    return False
+                if not configure_fast_image:
+                    models.pop('fast-image', None)
+                    model_providers.pop('fast-image', None)
+                    continue
 
             provider_name = self._select_provider_for_role(role_key, provider_entries)
             if provider_name is None:

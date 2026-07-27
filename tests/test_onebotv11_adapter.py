@@ -509,6 +509,35 @@ class IncomingOnlyOneBot(OneBotV11Adapter):
         return {"status": "ok", "retcode": 0, "data": {}}
 
 
+def test_onebot_image_sticker_type_variants_and_marketface():
+    async def run():
+        adapter = IncomingOnlyOneBot()
+
+        for field in ("subType", "sub_type", "type"):
+            marker = await adapter._segment_to_nora_text(
+                {"type": "image", "data": {"file": "sticker.webp", field: 1}}
+            )
+            assert marker == "[sticker: data/onebotv11/resolved.jpg]"
+
+        normal = await adapter._segment_to_nora_text(
+            {"type": "image", "data": {"file": "photo.jpg", "type": 0}}
+        )
+        marketface = await adapter._segment_to_nora_text(
+            {"type": "marketface", "data": {"file": "market.webp"}}
+        )
+        assert normal == "[image: data/onebotv11/resolved.jpg]"
+        assert marketface == "[sticker: data/onebotv11/resolved.jpg]"
+
+    asyncio.run(run())
+
+
+def test_plain_text_from_segments_labels_sticker_variants():
+    assert plain_text_from_segments([
+        {"type": "image", "data": {"file": "a.webp", "type": 1}},
+        {"type": "mface", "data": {"file": "b.webp"}},
+    ]) == "[表情包:a.webp][表情包:b.webp]"
+
+
 def test_onebot_group_mention_only_still_reaches_aggregator():
     async def run():
         adapter = IncomingOnlyOneBot()

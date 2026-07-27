@@ -35,7 +35,7 @@ core/controller.py            NoraController.handle_message()
 | OneBot v11 连接 | `adapters/onebotv11/config.json` | `websocket_url` / `access_token` / `enable_napcat_api` |
 | LLM Provider | `config.yml` → `llm.provider` | `gemini` 或 `openai` |
 | API Keys | `config.yml` → `llm.api_keys.*` | |
-| 模型别名 | `config.yml` → `llm.models.*` | `smart` / `fast` / `coder` / `summary` |
+| 模型别名 | `config.yml` → `llm.models.*` | `smart` / `fast` / `coder` / `image` / `video` / `fast-image`(可选) / `summary` |
 | 消息历史 | `config.yml` → `memory.message_history.*` | `raw_window`, `compress_window` 等 |
 | 成本跟踪 | `config.yml` → `cost_tracking.*` | `enabled`, `custom_prices` |
 | 主动消息调度 | `config.yml` → `schedule.*` | `enabled` |

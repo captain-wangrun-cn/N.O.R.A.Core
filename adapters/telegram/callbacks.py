@@ -434,7 +434,7 @@ class TelegramCallbacksMixin:
             label = f"{provider_name} ({provider_type})"
             buttons.append([InlineKeyboardButton(label, callback_data=f"model_provider:{alias}:{provider_name}")])
         # 可选模型（video, security）允许清除配置
-        if alias in ("video", "security"):
+        if alias in ("video", "security", "fast-image"):
             buttons.append([InlineKeyboardButton("🗑 清除（不使用）", callback_data=f"model_clear:{alias}")])
         buttons.append([
             InlineKeyboardButton("⬅ 返回", callback_data="model_pick:back"),

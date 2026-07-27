@@ -166,7 +166,7 @@ class MessageSegment:
             set_name = str(self.data.get("set_name") or "")
             path = str(self.data.get("path") or "")
             label = f"[sticker: {emoji} from {set_name}]".strip()
-            return f"{label}\n[file: {path}]" if path else label
+            return f"{label}\n[sticker: {path}]" if path else label
         if self.type in {"image", "video", "audio", "file", "doc"}:
             return f"[{self.type}: {self.data.get('path') or self.data.get('url') or ''}]"
         return f"[{self.type}: {self.data}]"

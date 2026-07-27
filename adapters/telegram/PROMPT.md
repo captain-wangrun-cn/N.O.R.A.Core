@@ -61,4 +61,5 @@ Telegram adapter 会向后脑暴露以下平台工具。工具返回 JSON 字符
 
 ## 5) 媒体
 
-发送媒体仍使用通用标记，例如 `[image: ...]`、`[video: ...]`、`[file: ...]`。Telegram adapter 会把真实存在的路径或 URL 转成 Telegram 图片、视频、音频或文档发送；不存在的文件不要猜。
+发送媒体仍使用通用标记，例如 `[image: ...]`、`[video: ...]`、`[file: ...]`、`[sticker: ...]`。Telegram adapter 会把真实存在的路径或 URL 转成 Telegram 图片、视频、音频或文档发送；不存在的文件不要猜。
+收到的贴纸/sticker 会被标记为 `[sticker: ...]`，系统可能附加一句 `[表情包: ...]` 描述供上下文理解。

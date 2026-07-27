@@ -21,7 +21,7 @@ from brain.prompts import (
     should_inject_custom,
     get_lazy_lexicon_user_prompt_block,
 )
-from brain.multimodal import extract_image_payloads, extract_video_payloads
+from brain.multimodal import extract_image_payloads, extract_video_payloads, get_sticker_images
 from core.message_handler import group_message_content, reply_target_message_id
 from core.scene_context import build_current_scene_block
 from core.worker_status import WorkerStatus
@@ -330,19 +330,25 @@ class BackBrainMixin:
                 tool_args["user_id"] = str(context.get("reply_to_user_id", "")).strip()
         return tool_args
 
-    async def _describe_images(self, multimodal_images: List[Dict[str, Any]]) -> str:
-        """用 image 模型快速生成图片的一句话描述，供 fast 模型/followup 理解上下文。"""
-        if not multimodal_images:
+    async def _describe_stickers(self, multimodal_images: List[Dict[str, Any]]) -> str:
+        """用 fast-image 模型快速描述表情包，供 fast 模型/followup 理解上下文。
+        仅在 fast_image_llm 已配置且存在 sticker 图片时才调用。
+        """
+        fast_llm = getattr(self, "fast_image_llm", None)
+        if not fast_llm:
+            return ""
+        sticker_images = get_sticker_images(multimodal_images)
+        if not sticker_images:
             return ""
         try:
             stream = self._chat_stream_wrapper(
-                self.image_llm,
+                fast_llm,
                 "",
-                system_prompt="你是图片描述助手。用一句简短的中文描述这张图片的核心内容，不要废话。",
-                user_prompt="请描述这张图片。",
+                system_prompt="你是表情包描述助手。用一句简短的中文描述这个表情包表达的情绪或含义，不要废话。",
+                user_prompt="请描述这个表情包。",
                 history=[],
                 tools=[],
-                multimodal_images=multimodal_images,
+                multimodal_images=sticker_images,
             )
             desc = ""
             async for chunk in stream:
@@ -352,7 +358,7 @@ class BackBrainMixin:
                     desc += chunk
             return desc.strip()
         except Exception as e:
-            logger.warning(f"图片描述生成失败: {e}")
+            logger.warning(f"表情包描述生成失败: {e}")
             return ""
 
     async def _generate_response(self, context: Dict[str, Any]):
@@ -509,11 +515,12 @@ class BackBrainMixin:
             message_saved = context.get("_message_saved", False)
             status.update("保存消息", "正在保存用户消息...")
             message_content = group_message_content(context, user_name, text, chat_type)
-            # 图片描述注入：让 fast 模型/followup 能理解图片内容
+            # 表情包描述注入：让 fast 模型/followup 能理解表情包含义
+            # 仅在 fast-image 模型已配置时才生成描述；否则表情包仅作为标记存在
             if multimodal_images and not front_brain_handled and not message_saved:
-                image_desc = await self._describe_images(multimodal_images)
-                if image_desc:
-                    message_content = f"{message_content}\n[图片内容: {image_desc}]"
+                sticker_desc = await self._describe_stickers(multimodal_images)
+                if sticker_desc:
+                    message_content = f"{message_content}\n[表情包: {sticker_desc}]"
             if not front_brain_handled and not message_saved:
                 user_metadata = {}
                 if platform_msg_ids:

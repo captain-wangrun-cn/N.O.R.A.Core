@@ -209,7 +209,13 @@ class NoraController(
             self.video_llm = get_llm_client(model_alias="video")
         except Exception:
             self.video_llm = None
-        
+
+        # 表情包快速描述模型（可选，None 表示未配置）
+        try:
+            self.fast_image_llm = get_llm_client(model_alias="fast-image")
+        except Exception:
+            self.fast_image_llm = None
+
         # 消息历史管理
         history_cfg = config.get_message_history_config()
         db_path = history_cfg.get("db_path")
@@ -801,6 +807,10 @@ class NoraController(
             self.video_llm = get_llm_client(model_alias="video")
         except Exception:
             self.video_llm = None
+        try:
+            self.fast_image_llm = get_llm_client(model_alias="fast-image")
+        except Exception:
+            self.fast_image_llm = None
 
     # ------------------------------------------------------------------
     # LLM 调用包装（支持 per-chat 非流式开关）

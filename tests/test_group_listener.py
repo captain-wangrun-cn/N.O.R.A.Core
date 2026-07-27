@@ -61,7 +61,43 @@ def test_group_presence_store_defaults_and_persists_per_group(tmp_path, monkeypa
     asyncio.run(run())
 
 
-def test_shutdown_cancels_idle_timer_and_rejects_new_events(tmp_path, monkeypatch):
+def test_persist_enrichment_is_visible_to_same_round_passive_decision(tmp_path, monkeypatch):
+    async def run():
+        _patch_workspace(monkeypatch, tmp_path)
+        store = GroupPresenceStore()
+        store.set("telegram:g1", GroupPresence.ONLINE)
+        seen_texts = []
+
+        async def persist(context):
+            context["text"] = f'{context["text"]}\n[表情包: 开心地大笑]'
+            context["_message_saved"] = True
+
+        async def decide_passive(runtime_key, events):
+            seen_texts.extend(event.text for event in events)
+            return PassiveAction.KEEP_LISTENING
+
+        manager = GroupListenerManager(
+            store=store,
+            persist_message=persist,
+            decide_passive=decide_passive,
+            decide_append=lambda *args: asyncio.sleep(0, result=AppendAction.KEEP_PENDING),
+            promote=lambda *args: asyncio.sleep(0),
+            interrupt=lambda *args: asyncio.sleep(0),
+            batch_size=1,
+            idle_seconds=30,
+        )
+
+        context = _context(1)
+        context["text"] = "[sticker: data/sticker.webp]"
+        assert await manager.receive(context) is True
+        await asyncio.wait_for(manager._state("telegram:g1").passive_task, timeout=1)
+
+        assert seen_texts == ["[sticker: data/sticker.webp]\n[表情包: 开心地大笑]"]
+        await manager.shutdown()
+
+    asyncio.run(run())
+
+
     async def run():
         _patch_workspace(monkeypatch, tmp_path)
         store = GroupPresenceStore()

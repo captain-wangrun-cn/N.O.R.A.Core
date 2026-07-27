@@ -256,9 +256,9 @@ class GroupListenerManager:
         if self.mode_for(runtime_key) != GroupPresence.ONLINE:
             return False
 
+        await self.persist_message(context)
         self._sequence += 1
         event = GroupMessageEvent.from_context(context, self._sequence)
-        await self.persist_message(event.context)
         state = self._state(runtime_key)
 
         interrupt_payload: Optional[Tuple[List[GroupMessageEvent], str, int]] = None

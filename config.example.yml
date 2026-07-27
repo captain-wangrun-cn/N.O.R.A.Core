@@ -72,6 +72,7 @@ llm:
     coder: "openai_main"
     image: "gemini_main"
     summary: "anthropic_main"
+    # fast-image: "gemini_main"  # 可选：表情包快速描述模型（不配置则表情包不做内容解读）
 
   # 兼容旧版配置（可选，建议保留）
   # api_keys:
@@ -87,7 +88,8 @@ llm:
     coder: "gpt-4o"
     image: "gemini-1.5-pro-latest" # 用于图片输入理解的模型
     video: "gemini-2.5-flash" # 用于视频输入理解的模型（可选，不配置则视频不入库）
-  summary: "claude-3-5-haiku-latest" # 用于消息历史总结的模型
+    summary: "claude-3-5-haiku-latest" # 用于消息历史总结的模型
+    # fast-image: "gemini-2.0-flash"  # 可选：表情包快速描述模型
 
   # 输出 token 上限（统一）
   max_output_tokens: 768
@@ -102,7 +104,7 @@ memory:
   # 消息历史管理
   message_history:
     raw_window: 50 # 原始消息窗口大小（完整保留）
-  compress_window: 50 # 超过此数量开始压缩（按消息数量，可在 config.yml 自定义）
+    compress_window: 50 # 超过此数量开始压缩（按消息数量，可在 config.yml 自定义）
     compress_ratio: 10 # 压缩比例（10条压缩为1条总结）
     archive_threshold: 500 # 超过此数量创建归档总结
     timezone: "Asia/Shanghai" # 时间戳显示时区（如 "Asia/Shanghai", "UTC", "America/New_York"）

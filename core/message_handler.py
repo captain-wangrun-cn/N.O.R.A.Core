@@ -174,11 +174,24 @@ class MessageHandlerMixin:
         }
         if reply_metadata:
             metadata["reply"] = reply_metadata
+        content = group_message_content(context, user_name, text, identity.chat_type)
+        # ONLINE 群在构造 GroupMessageEvent 前先完成描述，使同轮 fast 判定也能看到。
+        if getattr(self, "fast_image_llm", None) and "[sticker:" in text:
+            try:
+                _, sticker_images = extract_image_payloads(text)
+                desc = await self._describe_stickers(sticker_images)
+                if desc:
+                    sticker_context = f"[表情包: {desc}]"
+                    content = f"{content}\n{sticker_context}"
+                    context["text"] = f"{text}\n{sticker_context}"
+                    logger.debug(f"[group_persist] 表情包描述注入: {desc[:60]}")
+            except Exception as e:
+                logger.warning(f"[group_persist] 表情包描述生成失败（不影响消息持久化）: {e}")
         self.message_history.add_message(
             platform=identity.platform,
             chat_id=identity.storage_id,
             role="user",
-            content=group_message_content(context, user_name, text, identity.chat_type),
+            content=content,
             user_id=identity.actor_user_id,
             metadata=metadata,
             memory_scope_id=identity.memory_scope_id,

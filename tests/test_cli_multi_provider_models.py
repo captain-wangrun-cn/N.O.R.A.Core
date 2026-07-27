@@ -38,9 +38,14 @@ def test_step_models_supports_multi_provider_per_role(monkeypatch):
 
     monkeypatch.setattr(cli.StepModels, "_select_provider_for_role", fake_select_provider)
     monkeypatch.setattr(cli.StepModels, "select_model", fake_select_model)
+    monkeypatch.setattr(
+        cli.questionary,
+        "confirm",
+        lambda *args, **kwargs: type("_Confirm", (), {"ask": lambda self: False})(),
+    )
 
     class FakeCostTracker:
-        def __init__(self, db_path):
+        def __init__(self, db_path, custom_prices=None):
             self.db_path = db_path
 
         def get_model_price(self, provider, model_name):

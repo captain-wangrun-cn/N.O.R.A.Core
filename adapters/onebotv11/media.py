@@ -108,7 +108,13 @@ class OneBotMediaMixin:
             return f"[回复消息ID: {data.get('id') or ''}]"
         if segment_type == "image":
             media = await self._resolve_media_reference(data, "image", resolve_action="get_image")
-            return f"[image: {media}]"
+            # subType / sub_type / type 为 1 时表示表情包或市场表情
+            sticker_type = data.get("subType", data.get("sub_type", data.get("type", "")))
+            is_sticker = str(sticker_type) == "1"
+            return f"[sticker: {media}]" if is_sticker else f"[image: {media}]"
+        if segment_type in ("mface", "marketface"):
+            media = await self._resolve_media_reference(data, "sticker", resolve_action="get_image")
+            return f"[sticker: {media}]"
         if segment_type == "video":
             media = await self._resolve_media_reference(data, "video", resolve_action="get_file")
             return f"[video: {media}]"

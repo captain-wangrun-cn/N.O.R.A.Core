@@ -77,7 +77,7 @@ def test_message_segment_sticker_marker_includes_file_when_present():
     text = segment.to_text_marker()
 
     assert "[sticker: 🙂 from pack]" in text
-    assert "[file: data/telegram/sticker.webp]" in text
+    assert "[sticker: data/telegram/sticker.webp]" in text
 
 
 def _fake_update(

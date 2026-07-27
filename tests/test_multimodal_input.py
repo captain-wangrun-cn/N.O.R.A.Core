@@ -24,6 +24,34 @@ def test_extract_image_payloads_loads_local_file(tmp_path):
     assert images[0]["base64"] == base64.b64encode(images[0]["bytes"]).decode("utf-8")
 
 
+def test_extract_sticker_payloads_marks_webp_as_sticker(tmp_path):
+    img_path = tmp_path / "sticker.webp"
+    image = Image.new("RGB", (8, 8), color="blue")
+    image.save(img_path, format="WEBP")
+
+    clean_text, images = extract_image_payloads(
+        f"[sticker: 🙂 from pack]\n[sticker: {img_path}]\n看看这个表情"
+    )
+
+    assert "[sticker:" not in clean_text
+    assert "看看这个表情" in clean_text
+    assert len(images) == 1
+    assert images[0]["path"].endswith("sticker.webp")
+    assert images[0]["mime_type"] == "image/webp"
+    assert images[0]["is_sticker"] is True
+    assert images[0]["base64"] == base64.b64encode(images[0]["bytes"]).decode("utf-8")
+
+
+def test_extract_sticker_payloads_skips_webm(tmp_path):
+    sticker_path = tmp_path / "animated.webm"
+    sticker_path.write_bytes(b"\x1aE\xdf\xa3webm")
+
+    clean_text, images = extract_image_payloads(f"[sticker: {sticker_path}]")
+
+    assert clean_text == ""
+    assert images == []
+
+
 def test_openai_build_user_content_with_images():
     payload = [{
         "mime_type": "image/png",

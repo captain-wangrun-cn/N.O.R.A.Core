@@ -198,7 +198,7 @@ class TelegramCommandsMixin:
         models_cfg = llm_cfg.get("models", {}) or {}
 
         buttons = []
-        for alias in ["smart", "fast", "coder", "image", "video", "security", "summary"]:
+        for alias in ["smart", "fast", "coder", "image", "video", "security", "fast-image", "summary"]:
             current = models_cfg.get(alias, "")
             label = f"{alias}: {current or '未设置'}"
             buttons.append([InlineKeyboardButton(label, callback_data=f"model_pick:{alias}")])

@@ -3,6 +3,37 @@
 - 目标：多平台智能体内核，包含 LLM 适配、工具/技能体系、成本追踪、记忆/RAG。
 - 当前状态：可运行，自测通过；已完成图片记忆链路（入库/检索/回查再分析）、`view_media` 工具增强、CLI 高危清理保护、**跨平台接力 + 主人/访客分离（五层身份模型，全 5 Phase 完成）**。
 
+## 近期关键改动（截至 2026-07-27）
+
+### 🎭 fast-image 可选模型：表情包/sticker 快速描述
+
+新增可选模型别名 `fast-image`，用于快速生成表情包/sticker 的一句话描述，注入上下文供 fast 模型和 followup 理解。未配置则完全不解读表情包。
+
+**配置层：**
+- `core/controller.py`：`__init__` 与 `_reload_llm_clients` 新增 `self.fast_image_llm`（可选，异常时为 `None`，对齐 `video_llm` 模式）。
+- `cli.py` `StepModels`：循环新增 `'fast-image'` + `questionary.confirm` 可选询问（"是否配置表情包快速描述模型？"）。
+- `config.example.yml`：`llm.models` 与 `llm.model_providers` 新增 `fast-image` 注释示例。
+- `locales/zh_CN.yml`：`roles.fast-image` 与 `roles_usage.fast-image` 翻译条目。
+- `adapters/telegram/commands.py`：`/model` keyboard alias 列表新增 `"fast-image"`。
+- `adapters/telegram/callbacks.py`：可选清除元组新增 `"fast-image"`（获得"🗑 清除（不使用）"按钮）。
+
+**表情包字节解析：**
+- `brain/multimodal.py`：新增 `_STICKER_TAG_PATTERN`，`extract_image_payloads` 同时匹配 `[image:...]` 和 `[sticker:...]`，sticker 标签加载的图片 payload 携带 `is_sticker=True`。新增 `get_sticker_images()` 过滤 helper。`_load_single_image()` 重构为共享加载逻辑（含去重、mime 校验、GIF→PNG、大小限制）。
+- **OB11**（`adapters/onebotv11/media.py`）：`_segment_to_nora_text` 对 `image` 段检查 `subType`/`sub_type`==1（表情包）输出 `[sticker:...]`；`mface`/`marketface` 段一并归为 sticker。
+- **OB11**（`adapters/onebotv11/message.py`）：`segment_to_onebot_text` 同步对 image 段 type=1 区分为 `[表情包:...]`。
+- **TG**（`adapters/telegram/incoming.py`）：`_handle_sticker` 输出改为 `[sticker: emoji from set]\n[sticker: <path>]`（带可解析路径的标签），视频贴纸（.webm）由 multimodal 按扩展名自动跳过字节加载。
+
+**描述生成：**
+- `core/back_brain.py`：`_describe_images` 重命名为 `_describe_stickers`，模型改为 `self.fast_image_llm`，仅描述 `is_sticker=True` 的图片，未配置时返回空字符串（零开销）。system prompt 改为"描述表情包表达的情绪或含义"。调用点注入 `[表情包: {desc}]` 标签（区别于原 `[图片内容:]`）。
+- `core/message_handler.py`：`_persist_online_group_message`（ONLINE 群静默留存路径）新增表情包描述注入——若 `fast_image_llm` 已配置且文本含 `[sticker:]`，解析字节并调用 `self._chat_stream_wrapper(fast_image_llm, ...)` 生成描述，`[表情包: {desc}]` 拼入持久化 content。
+
+**文档/提示词：**
+- `adapters/onebotv11/PROMPT.md`：补充 `[sticker:]` 标记说明。
+- `adapters/telegram/PROMPT.md`：补充 `[sticker:]` 标记说明。
+- `docs/onboarding/QUICK_REFERENCE.md`：模型别名表新增 `fast-image`（可选）。
+
+---
+
 ## 近期关键改动（截至 2026-07-26）
 
 ### 👥 群聊独立 ONLINE / SEMI_ONLINE 监听

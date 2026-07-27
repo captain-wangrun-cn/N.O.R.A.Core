@@ -160,13 +160,20 @@ def plain_text_from_segments(segments: Iterable[dict[str, Any]]) -> str:
         elif segment_type == "reply":
             parts.append(f"[回复:{data.get('id') or ''}]")
         elif segment_type in {"image", "record", "video", "file"}:
-            label = {
-                "image": "图片",
-                "record": "语音",
-                "video": "视频",
-                "file": "文件",
-            }.get(segment_type, segment_type)
+            # image 的 subType / sub_type / type 为 1 时表示表情包
+            sticker_type = data.get("subType", data.get("sub_type", data.get("type", "")))
+            if segment_type == "image" and str(sticker_type) == "1":
+                label = "表情包"
+            else:
+                label = {
+                    "image": "图片",
+                    "record": "语音",
+                    "video": "视频",
+                    "file": "文件",
+                }.get(segment_type, segment_type)
             parts.append(f"[{label}:{data.get('file') or data.get('url') or ''}]")
+        elif segment_type in ("mface", "marketface"):
+            parts.append(f"[表情包:{data.get('file') or data.get('url') or ''}]")
         else:
             parts.append(f"[{segment_type}:{data}]")
     return "".join(parts).strip()

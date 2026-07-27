@@ -464,7 +464,7 @@ class TelegramIncomingMixin:
         
         # 构造消息
         reply_info = await self._extract_reply_info(update.message)
-        text = f"[sticker: {emoji} from {set_name}]\n[file: {rel_file_path}]"
+        text = f"[sticker: {emoji} from {set_name}]\n[sticker: {rel_file_path}]"
         if reply_info:
             text = f"[回复: {reply_info}]\n{text}"
         text, mentioned_user_ids = self._decorate_native_references(update, text)

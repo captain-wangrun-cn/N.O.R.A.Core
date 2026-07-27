@@ -34,6 +34,7 @@ roles:
   image: "image model (for image input understanding)"
   video: "video model (for video input understanding)"
   summary: "summary (for message history compression)"
+  fast-image: "sticker/emote description model (for sticker content understanding)"
 
 roles_usage:
   smart: "default main conversation, complex reasoning, tool planning, and multi-step decisions"
@@ -42,3 +43,4 @@ roles_usage:
   image: "used when message includes image input for visual understanding"
   video: "used when message includes video input for video content understanding and tagging"
   summary: "message history compression, archival summaries, and context condensation"
+  fast-image: "quickly describe sticker/emote emotions or meaning, injected into context for followup use"
