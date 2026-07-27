@@ -420,7 +420,7 @@ def test_telegram_native_reference_helpers_use_reliable_ids_only():
         type="text_mention",
         offset=0,
         length=5,
-        user=SimpleNamespace(id=321),
+        user=SimpleNamespace(id=321, first_name="Alice", last_name="Smith", username="alice"),
     )
     bot_mention = SimpleNamespace(
         type="text_mention",
@@ -442,17 +442,19 @@ def test_telegram_native_reference_helpers_use_reliable_ids_only():
         reply_to_message=reply,
     )
 
-    user_ids, markers = telegram_text_mention_markers(message, bot_user_id="999")
-    decorated, decorated_ids = decorate_native_references(
+    user_ids, mentioned_users, markers = telegram_text_mention_markers(message, bot_user_id="999")
+    decorated, decorated_ids, decorated_users = decorate_native_references(
         message,
         "hello",
         bot_user_id="999",
     )
 
     assert user_ids == ["321"]
+    assert mentioned_users == [{"user_id": "321", "display_name": "Alice Smith"}]
     assert markers == "[at:321]"
     assert decorated == "[reply:777][at:321]hello"
     assert decorated_ids == ["321"]
+    assert decorated_users == [{"user_id": "321", "display_name": "Alice Smith"}]
 
 
 def test_telegram_reliable_users_collects_sender_reply_and_text_mentions():
@@ -510,7 +512,7 @@ def test_telegram_user_label_cache_bounds_expires_and_allows_positive_override()
             type="text_mention",
             offset=0,
             length=5,
-            user=SimpleNamespace(id=321),
+            user=SimpleNamespace(id=321, first_name="", last_name="", username="alice"),
         ),
         SimpleNamespace(
             type="text_mention",
@@ -524,6 +526,7 @@ def test_telegram_user_label_cache_bounds_expires_and_allows_positive_override()
     context = context_from_update(update, "hello", bot_user_id="999")
 
     assert context["mentioned_user_ids"] == ["321"]
+    assert context["mentioned_users"] == [{"user_id": "321", "display_name": "@alice"}]
 
 
 def test_context_from_update_includes_sender_identity_and_platform_message_id():
@@ -743,7 +746,7 @@ def test_media_group_flush_preserves_native_reply_and_caption_mentions_once():
                 type="text_mention",
                 offset=0,
                 length=5,
-                user=SimpleNamespace(id=321),
+                user=SimpleNamespace(id=321, first_name="Alice", last_name="", username="alice"),
             )
         ]
         update = _fake_update(
@@ -752,7 +755,7 @@ def test_media_group_flush_preserves_native_reply_and_caption_mentions_once():
             reply_to_message=reply,
             caption_entities=caption_entities,
         )
-        decorated_caption, user_ids = adapter._decorate_native_references(
+        decorated_caption, user_ids, mentioned_users = adapter._decorate_native_references(
             update,
             "Alice album",
         )
@@ -766,6 +769,7 @@ def test_media_group_flush_preserves_native_reply_and_caption_mentions_once():
                 "chat_type": "group",
                 "reply_info": "quoted text",
                 "mentioned_user_ids": user_ids,
+                "mentioned_users": mentioned_users,
                 "native_references_decorated": True,
                 "platform": "telegram",
                 "message_ids": ["101", "102"],
@@ -780,6 +784,7 @@ def test_media_group_flush_preserves_native_reply_and_caption_mentions_once():
         assert text.count("[at:321]") == 1
         assert "[回复: quoted text]" in text
         assert context["mentioned_user_ids"] == ["321"]
+        assert context["mentioned_users"] == [{"user_id": "321", "display_name": "Alice"}]
         assert context["platform_message_ids"] == ["101", "102"]
 
     asyncio.run(run())

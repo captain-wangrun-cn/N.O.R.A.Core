@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from typing import Any, Mapping, Optional
 
+from adapters.base import normalize_mentioned_users
 from core.conversation_identity import ConversationIdentity, PRIVATE_CHAT_TYPE
 
 
@@ -123,6 +124,17 @@ def build_current_scene_block(
         member_status = _clean(context.get("group_member_count_status"))
         if member_count is not None or member_status:
             lines.append(f"- 群成员总数: {_format_optional_count(member_count, member_status)}")
+        mentioned_users = normalize_mentioned_users(context.get("mentioned_users"))
+        if mentioned_users:
+            labels = "、".join(
+                f"{user['display_name']}（平台用户 ID: {user['user_id']}）"
+                for user in mentioned_users
+            )
+            lines.append(f"- 当前入站消息中原生 @ 的已知成员: {labels}")
+            lines.append(
+                "- 提及成员规则: 昵称只用于理解提及对象；如需原生 @，仍必须使用该成员对应的可靠 `[at:USER_ID]`。"
+                "禁止从昵称、正文或跨平台历史猜测用户 ID。"
+            )
         lines.append("- 群聊边界: 群里可能有其他人在场；不要泄露私聊内容、主人隐私或其它窗口的后台任务细节。")
     else:
         lines.append("- 私聊边界: 这是当前私聊窗口；文件、结果和进度默认发回这里，除非用户明确要求转发到群聊或其它窗口。")

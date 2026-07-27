@@ -5,6 +5,15 @@
 
 ## 近期关键改动（截至 2026-07-27）
 
+### 👤 群聊入站 @ 成员昵称上下文
+
+- `AdapterEvent` 与 `MessageAggregator` 新增 `mentioned_users`：按原生提及顺序保存 `user_id` / `display_name`，聚合时按用户 ID 有序去重，并在 `native_reference_parts` 保留每段映射；既有 `mentioned_user_ids` 与 `[at:USER_ID]` 协议不变。
+- Telegram 仅从带可靠 `entity.user` 的 `text_mention` 提取 profile display name（姓名优先、回退 `@username`）；普通 `@username` 不猜 ID，图片、视频、文档、贴纸、相册与 ONLINE 群直达路径均保留映射。Telegram Bot API 不提供 QQ 式群名片。
+- OneBot v11 对群聊中的数字 QQ 提及 best-effort 调用 `get_group_member_info`，显示名优先 `card`、回退 `nickname`；按 `(group_id, user_id)` 做有界正/负 TTL 缓存，查询失败、自身、`qq=all` 与非数字目标均不阻断消息处理。
+- 前脑与后脑复用的 scene block 会显示“昵称（平台用户 ID）”，并明确昵称仅帮助理解；原生 @ 仍必须使用可靠的 `[at:USER_ID]`，禁止从昵称或跨平台历史猜测 ID。
+
+---
+
 ### 🎭 fast-image 可选模型：表情包/sticker 快速描述
 
 新增可选模型别名 `fast-image`，用于快速生成表情包/sticker 的一句话描述，注入上下文供 fast 模型和 followup 理解。未配置则完全不解读表情包。

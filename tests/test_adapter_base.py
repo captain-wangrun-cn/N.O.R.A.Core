@@ -57,6 +57,15 @@ def test_adapter_event_from_context_defaults_and_roundtrip():
             "reply_to_user_id": 202,
             "reply_to_user_name": "Alice",
             "mentioned_user_ids": [303, "404", ""],
+            "mentioned_users": [
+                {"user_id": 303, "display_name": "Bob"},
+                {"user_id": "404", "display_name": "  Carol  "},
+                {"user_id": "303", "display_name": "Duplicate"},
+                {"user_id": "505", "display_name": "505"},
+                {"user_id": "", "display_name": "Nobody"},
+                {"user_id": "606", "display_name": ""},
+                "invalid",
+            ],
         }
     )
 
@@ -67,12 +76,20 @@ def test_adapter_event_from_context_defaults_and_roundtrip():
     assert event.reply_to_message_id == "101"
     assert event.reply_to_user_id == "202"
     assert event.mentioned_user_ids == ["303", "404"]
+    assert event.mentioned_users == [
+        {"user_id": "303", "display_name": "Bob"},
+        {"user_id": "404", "display_name": "Carol"},
+    ]
     assert context["platform"] == "telegram"
     assert context["text"] == "hello"
     assert context["reply_to_message_id"] == "101"
     assert context["reply_to_user_id"] == "202"
     assert context["reply_to_user_name"] == "Alice"
     assert context["mentioned_user_ids"] == ["303", "404"]
+    assert context["mentioned_users"] == [
+        {"user_id": "303", "display_name": "Bob"},
+        {"user_id": "404", "display_name": "Carol"},
+    ]
 
 
 def test_base_adapter_loads_metadata():

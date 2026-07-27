@@ -500,6 +500,12 @@ class IncomingOnlyOneBot(OneBotV11Adapter):
                     "message": [{"type": "text", "data": {"text": "old message"}}],
                 },
             }
+        if action == "get_group_member_info":
+            return {
+                "status": "ok",
+                "retcode": 0,
+                "data": {"user_id": params["user_id"], "card": "Bob", "nickname": "Bobby"},
+            }
         if action == "get_image":
             return {
                 "status": "ok",
@@ -603,14 +609,18 @@ def test_onebot_online_group_message_bypasses_aggregator():
             "user_id": 20002,
             "message_id": 890,
             "sender": {"card": "Alice", "nickname": "Nick"},
-            "message": [{"type": "text", "data": {"text": "ordinary group message"}}],
+            "message": [
+                {"type": "at", "data": {"qq": "30003"}},
+                {"type": "text", "data": {"text": "ordinary group message"}},
+            ],
         }
 
         await adapter.handle_onebot_event(event)
 
         assert aggregated == []
         assert len(submitted) == 1
-        assert submitted[0]["text"] == "ordinary group message"
+        assert submitted[0]["text"] == "[at:30003]ordinary group message"
+        assert submitted[0]["mentioned_users"] == [{"user_id": "30003", "display_name": "Bob"}]
         assert submitted[0]["explicit_bot_mention"] is False
         assert submitted[0]["reply_to_bot"] is False
 
@@ -751,6 +761,40 @@ def test_onebot_group_reply_and_other_mention_use_canonical_markers():
         assert text.startswith("[reply:777][at:30003]")
         assert "[at:999]" not in text
         assert context["mentioned_user_ids"] == ["30003"]
+        assert context["mentioned_users"] == [{"user_id": "30003", "display_name": "Bob"}]
+        assert (
+            "get_group_member_info",
+            {"group_id": 10001, "user_id": 30003, "no_cache": False},
+        ) in adapter.calls
+
+    asyncio.run(run())
+
+
+def test_onebot_mentioned_user_lookup_caches_success_and_failure_by_group():
+    async def run():
+        adapter = IncomingOnlyOneBot()
+        adapter._member_label_cache_data = {}
+        calls = []
+
+        async def fake_call_api(action, params=None):
+            calls.append((action, params or {}))
+            if params["user_id"] == 30003:
+                return {"data": {"card": "群名片", "nickname": "昵称"}}
+            raise RuntimeError("lookup failed")
+
+        adapter.call_api = fake_call_api
+        first = await adapter._resolve_mentioned_users("10001", ["30003", "40004", "all", "999"])
+        second = await adapter._resolve_mentioned_users("10001", ["30003", "40004"])
+        other_group = await adapter._resolve_mentioned_users("10002", ["30003"])
+
+        assert first == [{"user_id": "30003", "display_name": "群名片"}]
+        assert second == first
+        assert other_group == first
+        assert calls == [
+            ("get_group_member_info", {"group_id": 10001, "user_id": 30003, "no_cache": False}),
+            ("get_group_member_info", {"group_id": 10001, "user_id": 40004, "no_cache": False}),
+            ("get_group_member_info", {"group_id": 10002, "user_id": 30003, "no_cache": False}),
+        ]
 
     asyncio.run(run())
 

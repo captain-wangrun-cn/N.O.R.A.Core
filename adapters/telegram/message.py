@@ -208,23 +208,32 @@ def _entity_text(message: Any, entity: Any) -> str:
     return encoded[offset * 2:(offset + length) * 2].decode("utf-16-le", errors="ignore")
 
 
-def telegram_text_mention_markers(message: Any, *, bot_user_id: str = "") -> tuple[list[str], str]:
-    """Return reliable text_mention user ids and canonical marker prefix."""
+def telegram_text_mention_markers(
+    message: Any,
+    *,
+    bot_user_id: str = "",
+) -> tuple[list[str], list[dict[str, str]], str]:
+    """Return reliable text_mention ids, display names, and marker prefix."""
     if not message:
-        return [], ""
+        return [], [], ""
     entities = list(getattr(message, "entities", None) or getattr(message, "caption_entities", None) or [])
     user_ids: list[str] = []
+    mentioned_users: list[dict[str, str]] = []
+    seen: set[str] = set()
     for entity in entities:
         entity_type = str(getattr(entity, "type", "") or "").lower()
         user = getattr(entity, "user", None)
         user_id = str(getattr(user, "id", "") or "").strip()
         if entity_type != "text_mention" or not user_id or user_id == str(bot_user_id or ""):
             continue
-        if not _entity_text(message, entity):
+        if not _entity_text(message, entity) or user_id in seen:
             continue
+        seen.add(user_id)
         user_ids.append(user_id)
-    user_ids = list(dict.fromkeys(user_ids))
-    return user_ids, "".join(format_mention_marker(user_id) for user_id in user_ids)
+        display_name = telegram_display_name(user)
+        if display_name and display_name != user_id:
+            mentioned_users.append({"user_id": user_id, "display_name": display_name})
+    return user_ids, mentioned_users, "".join(format_mention_marker(user_id) for user_id in user_ids)
 
 
 def decorate_native_references(
@@ -232,17 +241,20 @@ def decorate_native_references(
     text: str,
     *,
     bot_user_id: str = "",
-) -> tuple[str, list[str]]:
+) -> tuple[str, list[str], list[dict[str, str]]]:
     """Prefix Telegram reply/text_mention semantics using canonical markers."""
     parts: list[str] = []
     reply_message = getattr(message, "reply_to_message", None) if message else None
     reply_marker = format_reply_marker(str(getattr(reply_message, "message_id", "") or ""))
     if reply_marker:
         parts.append(reply_marker)
-    user_ids, mention_markers = telegram_text_mention_markers(message, bot_user_id=bot_user_id)
+    user_ids, mentioned_users, mention_markers = telegram_text_mention_markers(
+        message,
+        bot_user_id=bot_user_id,
+    )
     if mention_markers:
         parts.append(mention_markers)
-    return "".join(parts) + str(text or ""), user_ids
+    return "".join(parts) + str(text or ""), user_ids, mentioned_users
 
 
 def context_from_update(
@@ -279,12 +291,14 @@ def context_from_update(
             reply_user_name = telegram_display_name(reply_user)
             if reply_user_name:
                 context["reply_to_user_name"] = reply_user_name
-    mentioned_user_ids, _ = telegram_text_mention_markers(
+    mentioned_user_ids, mentioned_users, _ = telegram_text_mention_markers(
         telegram_message,
         bot_user_id=bot_user_id,
     )
     if mentioned_user_ids:
         context["mentioned_user_ids"] = mentioned_user_ids
+    if mentioned_users:
+        context["mentioned_users"] = mentioned_users
     return context
 
 

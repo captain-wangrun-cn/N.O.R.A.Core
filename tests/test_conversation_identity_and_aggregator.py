@@ -283,6 +283,7 @@ def test_aggregator_preserves_native_reference_metadata_per_part():
                 "reply_to_user_id": "u2",
                 "reply_to_user_name": "Bob",
                 "mentioned_user_ids": ["301"],
+                "mentioned_users": [{"user_id": "301", "display_name": "Dave"}],
             },
         )
         await agg.add_message(
@@ -298,6 +299,10 @@ def test_aggregator_preserves_native_reference_metadata_per_part():
                 "reply_to_user_id": "u3",
                 "reply_to_user_name": "Carol",
                 "mentioned_user_ids": ["302", "301"],
+                "mentioned_users": [
+                    {"user_id": "302", "display_name": "Eve"},
+                    {"user_id": "301", "display_name": "Later Name"},
+                ],
             },
         )
 
@@ -309,6 +314,10 @@ def test_aggregator_preserves_native_reference_metadata_per_part():
         assert context["reply_to_user_id"] == "u3"
         assert context["reply_to_user_name"] == "Carol"
         assert context["mentioned_user_ids"] == ["301", "302"]
+        assert context["mentioned_users"] == [
+            {"user_id": "301", "display_name": "Dave"},
+            {"user_id": "302", "display_name": "Eve"},
+        ]
         assert context["native_reference_parts"] == [
             {
                 "platform_message_id": "101",
@@ -317,6 +326,7 @@ def test_aggregator_preserves_native_reference_metadata_per_part():
                 "reply_to_user_id": "u2",
                 "reply_to_user_name": "Bob",
                 "mentioned_user_ids": ["301"],
+                "mentioned_users": [{"user_id": "301", "display_name": "Dave"}],
             },
             {
                 "platform_message_id": "102",
@@ -325,6 +335,10 @@ def test_aggregator_preserves_native_reference_metadata_per_part():
                 "reply_to_user_id": "u3",
                 "reply_to_user_name": "Carol",
                 "mentioned_user_ids": ["302", "301"],
+                "mentioned_users": [
+                    {"user_id": "302", "display_name": "Eve"},
+                    {"user_id": "301", "display_name": "Later Name"},
+                ],
             },
         ]
         assert not context.get("reply_target_message_id")

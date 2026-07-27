@@ -12,6 +12,25 @@ from typing import Any, Awaitable, Callable, Dict, Iterable, List, Mapping, Opti
 MessageHandler = Callable[[Dict[str, Any]], Awaitable[Any] | Any]
 
 
+def normalize_mentioned_users(value: Any) -> list[dict[str, str]]:
+    """规范化可靠的被提及用户显示名映射。"""
+    if not isinstance(value, (list, tuple)):
+        return []
+
+    seen: set[str] = set()
+    mentioned_users: list[dict[str, str]] = []
+    for item in value:
+        if not isinstance(item, Mapping):
+            continue
+        user_id = str(item.get("user_id") or "").strip()
+        display_name = str(item.get("display_name") or "").strip()
+        if not user_id or not display_name or display_name == user_id or user_id in seen:
+            continue
+        seen.add(user_id)
+        mentioned_users.append({"user_id": user_id, "display_name": display_name})
+    return mentioned_users
+
+
 @dataclass(slots=True)
 class AdapterToolSpec:
     """Adapter-provided tool exposed to the backend ToolManager."""
@@ -224,6 +243,7 @@ class AdapterEvent:
     reply_to_user_id: str | None = None
     reply_to_user_name: str | None = None
     mentioned_user_ids: list[str] = field(default_factory=list)
+    mentioned_users: list[dict[str, str]] = field(default_factory=list)
     message: AdapterMessage | None = None
     raw: Any = None
     metadata: dict[str, Any] = field(default_factory=dict)
@@ -266,6 +286,7 @@ class AdapterEvent:
                 for user_id in (context.get("mentioned_user_ids") or [])
                 if user_id is not None and str(user_id).strip()
             ],
+            mentioned_users=normalize_mentioned_users(context.get("mentioned_users")),
             message=adapter_message,
             raw=context.get("raw"),
             metadata=dict(context.get("metadata") or {}),
@@ -293,6 +314,9 @@ class AdapterEvent:
             context["reply_to_user_name"] = self.reply_to_user_name
         if self.mentioned_user_ids:
             context["mentioned_user_ids"] = list(self.mentioned_user_ids)
+        mentioned_users = normalize_mentioned_users(self.mentioned_users)
+        if mentioned_users:
+            context["mentioned_users"] = mentioned_users
         if self.message is not None:
             context["message"] = self.message
         if self.raw is not None:

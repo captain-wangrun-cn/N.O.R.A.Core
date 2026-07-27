@@ -69,7 +69,11 @@ class TelegramIncomingMixin:
             return strip_bot_mention(text, self.bot_username)
         return text
 
-    def _decorate_native_references(self, update: Update, text: str) -> tuple[str, list[str]]:
+    def _decorate_native_references(
+        self,
+        update: Update,
+        text: str,
+    ) -> tuple[str, list[str], list[dict[str, str]]]:
         message = update.message if update else None
         bot_user_id = str(getattr(self, "bot_user_id", "") or "")
         return decorate_native_references(message, text, bot_user_id=bot_user_id)
@@ -156,9 +160,10 @@ class TelegramIncomingMixin:
             reply_info = await self._extract_reply_info(update.message)
             if reply_info:
                 text = f"[回复: {reply_info}]\n{text}"
-            text, mentioned_user_ids = self._decorate_native_references(update, text)
+            text, mentioned_user_ids, mentioned_users = self._decorate_native_references(update, text)
         else:
             mentioned_user_ids = []
+            mentioned_users = []
 
         # 处理转发消息：提取来源信息
         if update.message:
@@ -186,6 +191,8 @@ class TelegramIncomingMixin:
                 full_context["reply_to_text"] = reply_info
             if mentioned_user_ids:
                 full_context["mentioned_user_ids"] = mentioned_user_ids
+            if mentioned_users:
+                full_context["mentioned_users"] = mentioned_users
             await self._dispatch_normalized_message(chat_id, text or "", full_context)
 
     async def _handle_photo(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -225,6 +232,7 @@ class TelegramIncomingMixin:
                     "chat_type": update.effective_chat.type,
                     "reply_info": reply_info,
                     "mentioned_user_ids": [],
+                    "mentioned_users": [],
                     "native_references_decorated": False,
                     "platform": "telegram",
                     "message_ids": [],
@@ -235,9 +243,10 @@ class TelegramIncomingMixin:
                 self._media_group_buffers[media_group_id]["message_ids"].append(str(update.message.message_id))
             # caption 只取第一张非空的（Telegram 相册只允许第一张图有 caption）
             if caption and not self._media_group_buffers[media_group_id]["caption"]:
-                decorated_caption, user_ids = self._decorate_native_references(update, caption)
+                decorated_caption, user_ids, mentioned_users = self._decorate_native_references(update, caption)
                 self._media_group_buffers[media_group_id]["caption"] = decorated_caption
                 self._media_group_buffers[media_group_id]["mentioned_user_ids"] = user_ids
+                self._media_group_buffers[media_group_id]["mentioned_users"] = mentioned_users
                 self._media_group_buffers[media_group_id]["native_references_decorated"] = True
             
             # 取消旧定时器，重新设置（等待所有图片到齐）
@@ -255,12 +264,14 @@ class TelegramIncomingMixin:
                 text += f"\n{caption}"
             if reply_info:
                 text = f"[回复: {reply_info}]\n{text}"
-            text, mentioned_user_ids = self._decorate_native_references(update, text)
+            text, mentioned_user_ids, mentioned_users = self._decorate_native_references(update, text)
 
             if self._aggregator:
                 full_context = await self._context_from_update_with_group(update, text)
                 if mentioned_user_ids:
                     full_context["mentioned_user_ids"] = mentioned_user_ids
+                if mentioned_users:
+                    full_context["mentioned_users"] = mentioned_users
                 await self._dispatch_normalized_message(chat_id, text, full_context)
             
             logger.info(f"[{chat_id}] 收到图片: {rel_file_path}")
@@ -282,9 +293,10 @@ class TelegramIncomingMixin:
         if buf.get("reply_info"):
             text = f"[回复: {buf['reply_info']}]\n{text}"
         if not buf.get("native_references_decorated"):
-            text, mentioned_user_ids = self._decorate_native_references(buf.get("update"), text)
+            text, mentioned_user_ids, mentioned_users = self._decorate_native_references(buf.get("update"), text)
         else:
             mentioned_user_ids = list(buf.get("mentioned_user_ids") or [])
+            mentioned_users = list(buf.get("mentioned_users") or [])
 
         chat_id = buf["chat_id"]
         platform_ids = [str(mid) for mid in buf.get("message_ids", []) if mid is not None]
@@ -302,6 +314,8 @@ class TelegramIncomingMixin:
                 full_context["reply_to_text"] = buf["reply_info"]
             if mentioned_user_ids:
                 full_context["mentioned_user_ids"] = mentioned_user_ids
+            if mentioned_users:
+                full_context["mentioned_users"] = mentioned_users
             source_update = buf.get("update")
             source_chat = getattr(source_update, "effective_chat", None)
             if source_chat is not None:
@@ -361,6 +375,7 @@ class TelegramIncomingMixin:
                     "chat_type": update.effective_chat.type,
                     "reply_info": reply_info,
                     "mentioned_user_ids": [],
+                    "mentioned_users": [],
                     "native_references_decorated": False,
                     "platform": "telegram",
                     "message_ids": [],
@@ -369,9 +384,10 @@ class TelegramIncomingMixin:
             if update.message:
                 self._media_group_buffers[media_group_id]["message_ids"].append(str(update.message.message_id))
             if caption and not self._media_group_buffers[media_group_id]["caption"]:
-                decorated_caption, user_ids = self._decorate_native_references(update, caption)
+                decorated_caption, user_ids, mentioned_users = self._decorate_native_references(update, caption)
                 self._media_group_buffers[media_group_id]["caption"] = decorated_caption
                 self._media_group_buffers[media_group_id]["mentioned_user_ids"] = user_ids
+                self._media_group_buffers[media_group_id]["mentioned_users"] = mentioned_users
                 self._media_group_buffers[media_group_id]["native_references_decorated"] = True
 
             old_timer = self._media_group_timers.pop(media_group_id, None)
@@ -388,12 +404,14 @@ class TelegramIncomingMixin:
                 text += f"\n{caption}"
             if reply_info:
                 text = f"[回复: {reply_info}]\n{text}"
-            text, mentioned_user_ids = self._decorate_native_references(update, text)
+            text, mentioned_user_ids, mentioned_users = self._decorate_native_references(update, text)
 
             if self._aggregator:
                 full_context = await self._context_from_update_with_group(update, text)
                 if mentioned_user_ids:
                     full_context["mentioned_user_ids"] = mentioned_user_ids
+                if mentioned_users:
+                    full_context["mentioned_users"] = mentioned_users
                 await self._dispatch_normalized_message(chat_id, text, full_context)
 
             logger.info(f"[{chat_id}] 收到视频: {rel_file_path}")
@@ -427,7 +445,7 @@ class TelegramIncomingMixin:
             text += f"\n{caption}"
         if reply_info:
             text = f"[回复: {reply_info}]\n{text}"
-        text, mentioned_user_ids = self._decorate_native_references(update, text)
+        text, mentioned_user_ids, mentioned_users = self._decorate_native_references(update, text)
 
         if self._aggregator:
             full_context = await self._context_from_update_with_group(update, text)
@@ -435,6 +453,8 @@ class TelegramIncomingMixin:
                 full_context["reply_to_text"] = reply_info
             if mentioned_user_ids:
                 full_context["mentioned_user_ids"] = mentioned_user_ids
+            if mentioned_users:
+                full_context["mentioned_users"] = mentioned_users
             await self._dispatch_normalized_message(chat_id, text, full_context)
         
         logger.info(f"[{chat_id}] 收到文档: {rel_file_path}")
@@ -467,7 +487,7 @@ class TelegramIncomingMixin:
         text = f"[sticker: {emoji} from {set_name}]\n[sticker: {rel_file_path}]"
         if reply_info:
             text = f"[回复: {reply_info}]\n{text}"
-        text, mentioned_user_ids = self._decorate_native_references(update, text)
+        text, mentioned_user_ids, mentioned_users = self._decorate_native_references(update, text)
 
         if self._aggregator:
             full_context = await self._context_from_update_with_group(update, text)
@@ -475,6 +495,8 @@ class TelegramIncomingMixin:
                 full_context["reply_to_text"] = reply_info
             if mentioned_user_ids:
                 full_context["mentioned_user_ids"] = mentioned_user_ids
+            if mentioned_users:
+                full_context["mentioned_users"] = mentioned_users
             await self._dispatch_normalized_message(chat_id, text, full_context)
         
         logger.info(f"[{chat_id}] 收到贴纸: {rel_file_path}")

@@ -25,6 +25,7 @@ from .message import (
     onebot_message_segments,
     remove_empty_text_edges,
     reply_id_from_event,
+    sender_display_name,
     strip_at_self,
 )
 from .sender import OneBotSenderMixin
@@ -64,6 +65,9 @@ class OneBotV11Adapter(
     """OneBot v11 adapter using WebSocket/Reverse WebSocket."""
 
     GROUP_CONTEXT_CACHE_TTL_SECONDS = 300
+    MEMBER_LABEL_CACHE_TTL_SECONDS = 1800
+    MEMBER_LABEL_NEGATIVE_CACHE_TTL_SECONDS = 60
+    MEMBER_LABEL_CACHE_MAX_SIZE = 1024
 
     @property
     def platform_name(self) -> str:
@@ -119,6 +123,7 @@ class OneBotV11Adapter(
         self.message_history = MessageHistory()
         self._chat_types: dict[str, str] = {}
         self._group_context_cache_data: dict[str, dict[str, Any]] = {}
+        self._member_label_cache_data: dict[tuple[str, str], dict[str, Any]] = {}
         self._last_incoming_contexts: dict[str, dict[str, str]] = {}
         self._runner: web.AppRunner | None = None
         self._site: web.TCPSite | None = None
@@ -311,6 +316,63 @@ class OneBotV11Adapter(
         enriched["group_online_count_status"] = "unavailable:onebotv11_standard"
         return enriched
 
+    async def _resolve_mentioned_users(
+        self,
+        group_id: str,
+        user_ids: list[str],
+    ) -> list[dict[str, str]]:
+        """Best-effort resolve group cards for reliable numeric mention targets."""
+        group_id = str(group_id or "").strip()
+        if not group_id.isdigit():
+            return []
+
+        cache = getattr(self, "_member_label_cache_data", None)
+        if cache is None:
+            cache = self._member_label_cache_data = {}
+        now = time.time()
+        mentioned_users: list[dict[str, str]] = []
+        seen: set[str] = set()
+        for raw_user_id in user_ids:
+            user_id = str(raw_user_id or "").strip()
+            if not user_id.isdigit() or user_id == self.self_id or user_id in seen:
+                continue
+            seen.add(user_id)
+            key = (group_id, user_id)
+            cached = cache.get(key)
+            if cached and float(cached.get("expires_at", 0.0)) > now:
+                display_name = str(cached.get("display_name") or "").strip()
+            else:
+                try:
+                    response = await self.call_api(
+                        "get_group_member_info",
+                        {
+                            "group_id": int(group_id),
+                            "user_id": int(user_id),
+                            "no_cache": False,
+                        },
+                    )
+                    data = response.get("data") or {}
+                    display_name = sender_display_name(data, user_id).strip()
+                    if display_name == user_id:
+                        display_name = ""
+                    ttl = self.MEMBER_LABEL_CACHE_TTL_SECONDS if display_name else self.MEMBER_LABEL_NEGATIVE_CACHE_TTL_SECONDS
+                except Exception as exc:
+                    display_name = ""
+                    ttl = self.MEMBER_LABEL_NEGATIVE_CACHE_TTL_SECONDS
+                    logger.debug(
+                        "[onebotv11] get_group_member_info failed group_id=%s user_id=%s: %s",
+                        group_id,
+                        user_id,
+                        exc,
+                    )
+                cache[key] = {"display_name": display_name, "expires_at": now + ttl}
+                if len(cache) > self.MEMBER_LABEL_CACHE_MAX_SIZE:
+                    oldest_key = min(cache, key=lambda item: float(cache[item].get("expires_at", 0.0)))
+                    cache.pop(oldest_key, None)
+            if display_name:
+                mentioned_users.append({"user_id": user_id, "display_name": display_name})
+        return mentioned_users
+
     def _remember_incoming_context(self, chat_id: str, context: dict[str, Any]) -> None:
         remembered: dict[str, str] = {}
         for key in (
@@ -411,6 +473,13 @@ class OneBotV11Adapter(
             context["reply_to_user_name"] = str(event.get("reply_to_user_name") or "")
         if mentioned_user_ids:
             context["mentioned_user_ids"] = mentioned_user_ids
+            if message_type == "group":
+                mentioned_users = await self._resolve_mentioned_users(
+                    str(event.get("group_id") or ""),
+                    mentioned_user_ids,
+                )
+                if mentioned_users:
+                    context["mentioned_users"] = mentioned_users
         context = await self._enrich_group_context(context)
 
         chat_id = context["chat_id"]

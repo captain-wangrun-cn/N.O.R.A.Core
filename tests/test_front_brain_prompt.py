@@ -265,6 +265,7 @@ def test_front_brain_prompt_includes_current_onebot_group_scene():
                 "user_name": "群友A",
                 "chat_title": "测试群",
                 "platform_message_id": 345,
+                "mentioned_users": [{"user_id": "30003", "display_name": "群友B"}],
                 "text": "老大，怎么啦？是不是等急啦",
             }
         )
@@ -280,6 +281,9 @@ def test_front_brain_prompt_includes_current_onebot_group_scene():
     assert "[at:20002]" in system_prompt
     assert "自然插话并明确对象" in system_prompt
     assert "群聊名称: 测试群" in system_prompt
+    assert "当前入站消息中原生 @ 的已知成员: 群友B（平台用户 ID: 30003）" in system_prompt
+    assert "昵称只用于理解提及对象" in system_prompt
+    assert "仍必须使用该成员对应的可靠 `[at:USER_ID]`" in system_prompt
     assert "当前入站消息 ID: 345" in system_prompt
     assert "[reply:MESSAGE_ID]" in system_prompt
     assert "多人或多分支对话中需要明确目标" in system_prompt

@@ -2,6 +2,8 @@ import asyncio
 from collections import deque
 from typing import Callable, Any, Dict, Deque
 
+from adapters.base import normalize_mentioned_users
+
 class MessageAggregator:
     """消息聚合器，用于合并用户的连续输入。"""
 
@@ -87,6 +89,7 @@ class MessageAggregator:
                 for user_id in (context.get("mentioned_user_ids") or [])
                 if user_id is not None and str(user_id).strip()
             ],
+            "mentioned_users": normalize_mentioned_users(context.get("mentioned_users")),
             "reply_target_message_id": self._reply_target_message_id(context),
         })
         self._buffers[key] = self._format_parts(parts, context)
@@ -112,6 +115,7 @@ class MessageAggregator:
                 "reply_to_user_id": part.get("reply_to_user_id") or "",
                 "reply_to_user_name": part.get("reply_to_user_name") or "",
                 "mentioned_user_ids": list(part.get("mentioned_user_ids") or []),
+                "mentioned_users": [dict(user) for user in (part.get("mentioned_users") or [])],
             }
             for part in parts
         ]
@@ -140,6 +144,16 @@ class MessageAggregator:
             self._contexts[key]["mentioned_user_ids"] = list(dict.fromkeys(mentioned_user_ids))
         else:
             self._contexts[key].pop("mentioned_user_ids", None)
+        mentioned_users_by_id: dict[str, dict[str, str]] = {}
+        for part in parts:
+            for mentioned_user in (part.get("mentioned_users") or []):
+                user_id = str(mentioned_user.get("user_id") or "").strip()
+                if user_id and user_id not in mentioned_users_by_id:
+                    mentioned_users_by_id[user_id] = dict(mentioned_user)
+        if mentioned_users_by_id:
+            self._contexts[key]["mentioned_users"] = list(mentioned_users_by_id.values())
+        else:
+            self._contexts[key].pop("mentioned_users", None)
         platform_ids = []
         for part in parts:
             part_ids = part.get("platform_message_ids") or []
