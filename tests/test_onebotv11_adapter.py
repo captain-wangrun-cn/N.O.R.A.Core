@@ -163,6 +163,7 @@ class SenderOnlyOneBot(OneBotSenderMixin):
                 "reply_to_user_id": "30003",
             }
         }
+        self.enable_napcat_api = True
         self.calls = []
 
     async def call_api(self, action, params=None):
@@ -313,17 +314,78 @@ def test_onebot_sender_parses_explicit_reply_and_reply_at_target():
 def test_onebot_sender_canonical_at_uses_native_segment_without_numeric_text():
     adapter = SenderOnlyOneBot()
 
-    asyncio.run(adapter.send_message("10001", "[at:20002] 看这里", chat_type="group"))
+    asyncio.run(adapter.send_message("10001", "[at:20002]看这里", chat_type="group"))
 
     segments = adapter.calls[0][1]["message"]
-    assert [segment for segment in segments if segment.get("type") == "at"] == [
+    assert segments == [
         {"type": "at", "data": {"qq": "20002"}},
+        {"type": "text", "data": {"text": " 看这里"}},
     ]
     assert all(
         "@20002" not in str(segment.get("data", {}).get("text", ""))
         for segment in segments
         if segment.get("type") == "text"
     )
+
+
+def test_onebot_sender_at_spacing_before_media_and_at_end():
+    adapter = SenderOnlyOneBot()
+    adapter._resolve_local_media_path = lambda path: "https://example.test/a.jpg"
+
+    asyncio.run(adapter.send_message("10001", "[at:20002][image:a.jpg]"))
+    asyncio.run(adapter.send_message("10001", "[at:20002]"))
+
+    assert adapter.calls[0][1]["message"][:3] == [
+        {"type": "at", "data": {"qq": "20002"}},
+        {"type": "text", "data": {"text": " "}},
+        {"type": "image", "data": {"file": "https://example.test/a.jpg"}},
+    ]
+    assert adapter.calls[1][1]["message"] == [
+        {"type": "at", "data": {"qq": "20002"}},
+        {"type": "text", "data": {"text": " "}},
+    ]
+
+
+def test_onebot_sender_poke_marker_side_effect_and_marker_only():
+    adapter = SenderOnlyOneBot()
+
+    ids = asyncio.run(adapter.send_message("10001", "[poke:20002][poke:20002]你好"))
+    marker_only_ids = asyncio.run(adapter.send_message("20002", "[poke:30003]", chat_type="private"))
+
+    assert ids == ["42"]
+    assert marker_only_ids == []
+    assert adapter.calls == [
+        ("send_poke", {"user_id": 20002, "group_id": 10001}),
+        (
+            "send_msg",
+            {
+                "message_type": "group",
+                "group_id": 10001,
+                "message": [{"type": "text", "data": {"text": "你好"}}],
+            },
+        ),
+        ("send_poke", {"user_id": 30003}),
+    ]
+
+
+def test_onebot_sender_poke_disabled_is_stripped_but_text_sends():
+    adapter = SenderOnlyOneBot()
+    adapter.enable_napcat_api = False
+
+    asyncio.run(adapter.send_message("10001", "[poke:20002]继续"))
+
+    assert adapter.calls == [
+        (
+            "send_msg",
+            {
+                "message_type": "group",
+                "group_id": 10001,
+                "message": [{"type": "text", "data": {"text": "继续"}}],
+            },
+        )
+    ]
+
+
 def test_onebot_sender_strips_at_control_in_private_chat():
     adapter = SenderOnlyOneBot()
 
@@ -580,6 +642,113 @@ def test_onebot_group_mention_only_still_reaches_aggregator():
         assert context["platform_message_id"] == "888"
         assert context["explicit_bot_mention"] is True
         assert context["reply_to_bot"] is False
+
+    asyncio.run(run())
+
+
+def test_onebot_target_group_poke_reaches_normal_dispatch():
+    async def run():
+        adapter = IncomingOnlyOneBot()
+        captured = []
+
+        class FakeAggregator:
+            async def add_message(self, chat_id, text, context):
+                captured.append((chat_id, text, context))
+
+        adapter._aggregator = FakeAggregator()
+        await adapter.handle_onebot_event(
+            {
+                "post_type": "notice",
+                "notice_type": "notify",
+                "sub_type": "poke",
+                "group_id": 10001,
+                "user_id": 20002,
+                "target_id": 999,
+            }
+        )
+
+        assert len(captured) == 1
+        chat_id, text, context = captured[0]
+        assert chat_id == "10001"
+        assert text == "Bob 戳了 Nora 一下"
+        assert context["chat_type"] == "group"
+        assert context["user_id"] == "20002"
+        assert context["user_name"] == "Bob"
+        assert context["explicit_bot_mention"] is True
+        assert context["event_type"] == "poke"
+        assert context["poke_to_bot"] is True
+        assert "platform_message_id" not in context
+
+    asyncio.run(run())
+
+
+def test_onebot_non_target_and_self_pokes_are_ignored():
+    async def run():
+        adapter = IncomingOnlyOneBot()
+        captured = []
+
+        class FakeAggregator:
+            async def add_message(self, chat_id, text, context):
+                captured.append((chat_id, text, context))
+
+        adapter._aggregator = FakeAggregator()
+        await adapter.handle_onebot_event(
+            {
+                "post_type": "notice",
+                "notice_type": "notify",
+                "sub_type": "poke",
+                "group_id": 10001,
+                "user_id": 20002,
+                "target_id": 30003,
+            }
+        )
+        await adapter.handle_onebot_event(
+            {
+                "post_type": "notice",
+                "notice_type": "notify",
+                "sub_type": "poke",
+                "user_id": 999,
+                "target_id": 999,
+            }
+        )
+        assert captured == []
+
+    asyncio.run(run())
+
+
+def test_onebot_online_group_poke_uses_group_listener():
+    async def run():
+        adapter = IncomingOnlyOneBot()
+        aggregated = []
+        submitted = []
+
+        class FakeAggregator:
+            async def add_message(self, chat_id, text, context):
+                aggregated.append((chat_id, text, context))
+
+        adapter._aggregator = FakeAggregator()
+        adapter._group_presence_for = lambda runtime_key: "online"
+
+        async def submit_group_message(context):
+            submitted.append(context)
+            return True
+
+        adapter._group_message_handler = submit_group_message
+        await adapter.handle_onebot_event(
+            {
+                "post_type": "notice",
+                "notice_type": "notify",
+                "sub_type": "poke",
+                "group_id": 10001,
+                "user_id": 20002,
+                "target_id": 999,
+            }
+        )
+
+        assert aggregated == []
+        assert len(submitted) == 1
+        assert submitted[0]["poke_to_bot"] is True
+        assert submitted[0]["explicit_bot_mention"] is True
 
     asyncio.run(run())
 
@@ -944,6 +1113,47 @@ def test_onebot_client_dispatches_events_without_blocking_echo_results():
             }
         )
         await asyncio.wait_for(adapter.handled.wait(), timeout=0.2)
+
+    asyncio.run(run())
+
+
+def test_onebot_client_orders_poke_with_same_chat_messages():
+    async def run():
+        class OrderedAdapter:
+            def __init__(self):
+                self.client = OneBotWebSocketClient(self)
+                self.first_can_finish = asyncio.Event()
+                self.handled = []
+
+            async def handle_onebot_event(self, payload):
+                marker = payload.get("message_id", payload.get("sub_type"))
+                if marker == 1:
+                    await self.first_can_finish.wait()
+                self.handled.append(marker)
+
+        adapter = OrderedAdapter()
+        await adapter.client.handle_payload(
+            {"post_type": "message", "message_type": "group", "group_id": 10001, "message_id": 1}
+        )
+        await adapter.client.handle_payload(
+            {
+                "post_type": "notice",
+                "notice_type": "notify",
+                "sub_type": "poke",
+                "group_id": 10001,
+                "user_id": 20002,
+                "target_id": 999,
+            }
+        )
+        await adapter.client.handle_payload(
+            {"post_type": "message", "message_type": "group", "group_id": 10001, "message_id": 2}
+        )
+        await asyncio.sleep(0)
+
+        assert adapter.handled == []
+        adapter.first_can_finish.set()
+        await asyncio.gather(*adapter.client.event_tasks)
+        assert adapter.handled == [1, "poke", 2]
 
     asyncio.run(run())
 

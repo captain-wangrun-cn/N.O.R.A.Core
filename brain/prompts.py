@@ -11,7 +11,7 @@ import os
 import sys  # Added sys import for path manipulation
 import logging
 import shutil
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Optional, Dict, Any, Iterable, List
 
 from workspace_config import get_workspace_manager
@@ -149,6 +149,30 @@ def _resolve_memory_file(filename: str) -> str:
 def _load_daily_memory() -> str:
     """（已禁用）每日记忆不再自动注入，以防上下文膨胀。"""
     return ""
+
+
+def load_recent_daily_memory(days: int = 3) -> str:
+    """按需加载最近若干自然日的每日记忆，按旧到新排列。"""
+    try:
+        day_count = max(0, int(days))
+    except (TypeError, ValueError):
+        day_count = 0
+    if day_count <= 0:
+        return ""
+
+    today = datetime.now().date()
+    sections = []
+    for offset in range(day_count - 1, -1, -1):
+        day = today - timedelta(days=offset)
+        path = _resolve_memory_file(f"{day.isoformat()}.md")
+        content = _read_file_safe(path)
+        if content:
+            sections.append(
+                f'<daily_memory date="{day.isoformat()}">\n{content}\n</daily_memory>'
+            )
+    if not sections:
+        return ""
+    return "【近期每日记忆（Recent Daily Memory）】\n" + "\n\n".join(sections)
 
 
 def get_soul_prompt() -> str:

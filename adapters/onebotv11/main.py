@@ -391,8 +391,42 @@ class OneBotV11Adapter(
 
     async def handle_onebot_event(self, event: dict[str, Any]) -> None:
         post_type = str(event.get("post_type") or "")
-        if post_type != "message":
+        is_target_bot_poke = (
+            post_type == "notice"
+            and str(event.get("notice_type") or "") == "notify"
+            and str(event.get("sub_type") or "") == "poke"
+            and bool(str(event.get("user_id") or "").strip())
+            and bool(str(self.self_id or "").strip())
+            and str(event.get("target_id") or "") == str(self.self_id)
+            and str(event.get("user_id") or "") != str(self.self_id)
+        )
+        if post_type != "message" and not is_target_bot_poke:
             return
+        if is_target_bot_poke:
+            event = dict(event)
+            actor_id = str(event.get("user_id") or "")
+            group_id = str(event.get("group_id") or "").strip()
+            event["message_type"] = "group" if group_id else "private"
+            sender = {"user_id": actor_id, "nickname": actor_id}
+            try:
+                if actor_id.isdigit() and group_id.isdigit():
+                    response = await self.call_api(
+                        "get_group_member_info",
+                        {"group_id": int(group_id), "user_id": int(actor_id), "no_cache": False},
+                    )
+                    sender.update(response.get("data") or {})
+                elif actor_id.isdigit():
+                    response = await self.call_api("get_stranger_info", {"user_id": int(actor_id), "no_cache": False})
+                    sender.update(response.get("data") or {})
+            except Exception as exc:
+                logger.debug("[onebotv11] resolve poke sender failed user_id=%s: %s", actor_id, exc)
+            display_name = sender_display_name(sender, actor_id)
+            poke_text = f"{display_name} 戳了 Nora 一下"
+            event["message"] = [{"type": "text", "data": {"text": poke_text}}]
+            event["raw_message"] = poke_text
+            event["sender"] = sender
+            event["event_type"] = "poke"
+            event["poke_to_bot"] = True
         message_type = str(event.get("message_type") or "private")
         raw_message = str(event.get("raw_message") or "")
         # 媒体落点上下文：当前消息的 message_type 与 chat_id，供媒体下载按 scenario 归档
@@ -411,7 +445,9 @@ class OneBotV11Adapter(
                 raw_message,
             )
         await self._enrich_reply_context(event, segments, include_text=False)
-        explicit_bot_mention = message_type == "group" and is_at_self(segments, self.self_id)
+        explicit_bot_mention = is_target_bot_poke or (
+            message_type == "group" and is_at_self(segments, self.self_id)
+        )
         reply_to_bot = str(event.get("reply_to_user_id") or "") == str(self.self_id)
         online_group = False
         if message_type == "group":
@@ -428,7 +464,7 @@ class OneBotV11Adapter(
                 event.get("message_id"),
                 json.dumps(event, ensure_ascii=False, default=str)[:2000],
             )
-        if not online_group and not self._message_triggers_bot(event, segments):
+        if not online_group and not is_target_bot_poke and not self._message_triggers_bot(event, segments):
             return
         await self._enrich_reply_text(event)
         reference_markers, mentioned_user_ids = native_reference_markers(
@@ -457,6 +493,10 @@ class OneBotV11Adapter(
         adapter_event = onebot_event_to_adapter_event(event, text=text)
         context = adapter_event.to_context()
         context["self_id"] = self.self_id
+        if is_target_bot_poke:
+            context["event_type"] = "poke"
+            context["poke_to_bot"] = True
+            context.pop("platform_message_id", None)
         if message_type == "group":
             context["explicit_bot_mention"] = bool(explicit_bot_mention)
             context["reply_to_bot"] = bool(reply_to_bot)

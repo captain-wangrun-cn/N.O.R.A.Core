@@ -19,7 +19,7 @@ _MEDIA_TAG_PATTERN = re.compile(
     re.IGNORECASE,
 )
 _CONTROL_TAG_PATTERN = re.compile(
-    r"\[(reply|at)(?::\s*([^\]]+))?\]",
+    r"\[(reply|at|poke)(?::\s*([^\]]+))?\]",
     re.IGNORECASE,
 )
 _FACE_TAG_PATTERN = re.compile(
@@ -175,6 +175,9 @@ class OneBotSenderMixin:
                     reply_to_message_id=reply_to_message_id,
                 )
                 return f"[reply:{reply_id}]" if reply_id else ""
+            if kind == "poke":
+                value = raw_value.strip().lstrip("@").strip()
+                return f"[poke:{value}]" if value else ""
             user_id = self._resolve_at_user_id(raw_value, chat_id)
             return f"[at:{user_id}]" if allow_mentions and user_id else ""
 
@@ -188,7 +191,26 @@ class OneBotSenderMixin:
                 parts.append(f"[reply:{token.value}]")
             elif token.type == "mention" and allow_mentions:
                 parts.append(f"[at:{token.value}]")
+            elif token.type == "poke":
+                parts.append(f"[poke:{token.value}]")
         return "".join(parts)
+
+    @staticmethod
+    def _normalize_at_spacing(segments: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        normalized: list[dict[str, Any]] = []
+        for segment in segments:
+            if normalized and str(normalized[-1].get("type") or "") == "at":
+                if str(segment.get("type") or "") == "text":
+                    data = dict(segment.get("data") or {})
+                    text = re.sub(r"^[ \t]*", " ", str(data.get("text") or ""))
+                    data["text"] = text
+                    segment = {**segment, "data": data}
+                else:
+                    normalized.append({"type": "text", "data": {"text": " "}})
+            normalized.append(segment)
+        if normalized and str(normalized[-1].get("type") or "") == "at":
+            normalized.append({"type": "text", "data": {"text": " "}})
+        return normalized
 
     def _text_to_onebot_segments(
         self,
@@ -218,7 +240,7 @@ class OneBotSenderMixin:
             reply_id = parsed.reply_message_id or str(reply_to_message_id or "").strip()
             if reply_id and not any(segment.get("type") == "reply" for segment in segments):
                 segments.insert(0, {"type": "reply", "data": {"id": reply_id}})
-            return segments or [{"type": "text", "data": {"text": "(empty message)"}}]
+            return self._normalize_at_spacing(segments)
 
         segments: list[dict[str, Any]] = []
         cursor = 0
@@ -271,11 +293,45 @@ class OneBotSenderMixin:
                 }
             )
         if not segments:
-            segments = [{"type": "text", "data": {"text": text or "(empty message)"}}]
+            return []
         reply_id = str(reply_to_message_id or "").strip()
         if reply_id and not has_reply_segment:
             segments.insert(0, {"type": "reply", "data": {"id": reply_id}})
-        return segments
+        return self._normalize_at_spacing(segments)
+
+    def _extract_poke_targets(self, text: str) -> tuple[str, list[str]]:
+        parsed = parse_message_controls(text)
+        visible: list[str] = []
+        targets: list[str] = []
+        seen: set[str] = set()
+        for token in parsed.tokens:
+            if token.type == "poke":
+                if token.value not in seen:
+                    seen.add(token.value)
+                    targets.append(token.value)
+                continue
+            if token.type == "text":
+                visible.append(token.value)
+            elif token.type == "reply":
+                visible.append(f"[reply:{token.value}]")
+            elif token.type == "mention":
+                visible.append(f"[at:{token.value}]")
+        return "".join(visible), targets
+
+    async def _send_poke_targets(self, target: dict[str, Any], user_ids: list[str]) -> None:
+        if not user_ids or not bool(getattr(self, "enable_napcat_api", False)):
+            return
+        for user_id in user_ids:
+            if not str(user_id).isdigit():
+                logger.debug("[onebotv11] ignore non-numeric poke target: %s", user_id)
+                continue
+            params: dict[str, Any] = {"user_id": int(user_id)}
+            if str(target.get("message_type") or "") == "group":
+                params["group_id"] = int(target["group_id"])
+            try:
+                await self.call_api("send_poke", params)
+            except Exception as exc:
+                logger.warning("[onebotv11] send poke failed for %s: %s", user_id, exc)
 
     def _chat_target_params(self, chat_id: str, chat_type: str = "") -> dict[str, Any]:
         chat_id = str(chat_id or "").strip()
@@ -294,13 +350,24 @@ class OneBotSenderMixin:
     ) -> list[str]:
         all_message_ids: list[str] = []
         target_chat_id = str(target.get("group_id") or target.get("user_id") or "")
-        segments = self._text_to_onebot_segments(
+        allow_mentions = str(target.get("message_type") or "") == "group"
+        normalized_text = self._normalize_message_controls(
             text,
+            chat_id=target_chat_id,
+            reply_to_message_id=reply_to_message_id,
+            allow_mentions=allow_mentions,
+        )
+        visible_text, poke_targets = self._extract_poke_targets(normalized_text)
+        await self._send_poke_targets(target, poke_targets)
+        segments = self._text_to_onebot_segments(
+            visible_text,
             parse_media=parse_media,
             chat_id=target_chat_id,
             reply_to_message_id=reply_to_message_id,
-            allow_mentions=str(target.get("message_type") or "") == "group",
+            allow_mentions=allow_mentions,
         )
+        if not segments:
+            return all_message_ids
         chunks: list[list[dict[str, Any]]] = []
         current: list[dict[str, Any]] = []
         current_text_len = 0
@@ -318,14 +385,26 @@ class OneBotSenderMixin:
             elif segment_type in {"reply", "at", "face"}:
                 current.append(segment)
             else:
-                control_prefix = [seg for seg in current if str(seg.get("type") or "") in {"reply", "at"}]
-                has_visible_text = any(str(seg.get("type") or "") == "text" for seg in current)
+                control_or_spacing = [
+                    seg
+                    for seg in current
+                    if str(seg.get("type") or "") in {"reply", "at"}
+                    or (
+                        str(seg.get("type") or "") == "text"
+                        and not str((seg.get("data") or {}).get("text") or "").strip()
+                    )
+                ]
+                has_visible_text = any(
+                    str(seg.get("type") or "") == "text"
+                    and bool(str((seg.get("data") or {}).get("text") or "").strip())
+                    for seg in current
+                )
                 if current and has_visible_text:
                     chunks.append(current)
                     current = []
                     current_text_len = 0
-                if control_prefix and not has_visible_text:
-                    current = control_prefix + [segment]
+                if control_or_spacing and not has_visible_text:
+                    current = control_or_spacing + [segment]
                     chunks.append(current)
                     current = []
                     current_text_len = 0

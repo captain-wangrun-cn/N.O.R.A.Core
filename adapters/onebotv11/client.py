@@ -89,7 +89,20 @@ class OneBotWebSocketClient:
 
     @staticmethod
     def _event_key_for(payload: dict[str, Any]) -> str:
-        if str(payload.get("post_type") or "") != "message":
+        post_type = str(payload.get("post_type") or "")
+        if post_type == "notice":
+            is_poke = (
+                str(payload.get("notice_type") or "") == "notify"
+                and str(payload.get("sub_type") or "") == "poke"
+            )
+            if not is_poke:
+                return ""
+            if payload.get("group_id") is not None:
+                return f"group:{payload.get('group_id')}"
+            if payload.get("user_id") is not None:
+                return f"private:{payload.get('user_id')}"
+            return ""
+        if post_type != "message":
             return ""
         message_type = str(payload.get("message_type") or "private")
         if message_type == "group" and payload.get("group_id") is not None:

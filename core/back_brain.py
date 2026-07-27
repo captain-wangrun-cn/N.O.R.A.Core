@@ -381,6 +381,9 @@ class BackBrainMixin:
         provided_images = context.get("multimodal_images") or []
         clean_text, extracted_images = extract_image_payloads(text)
         multimodal_images = provided_images or extracted_images
+        sticker_desc = await self._describe_stickers(multimodal_images)
+        # 表情包只使用可选 fast-image 生成一句话描述，不进入主图片模型或图片记忆管线。
+        multimodal_images = [img for img in multimodal_images if not img.get("is_sticker")]
         if clean_text:
             text = clean_text
         historical_reply_image_direct = "[NORA_HISTORICAL_REPLY_IMAGE_DIRECT]" in text
@@ -515,12 +518,10 @@ class BackBrainMixin:
             message_saved = context.get("_message_saved", False)
             status.update("保存消息", "正在保存用户消息...")
             message_content = group_message_content(context, user_name, text, chat_type)
-            # 表情包描述注入：让 fast 模型/followup 能理解表情包含义
-            # 仅在 fast-image 模型已配置时才生成描述；否则表情包仅作为标记存在
-            if multimodal_images and not front_brain_handled and not message_saved:
-                sticker_desc = await self._describe_stickers(multimodal_images)
-                if sticker_desc:
-                    message_content = f"{message_content}\n[表情包: {sticker_desc}]"
+            # 表情包描述注入：让 fast 模型和当前 segment 理解其语义。
+            # 描述已在过滤 sticker 前生成；未配置 fast-image 时为空且不回退主 image 模型。
+            if sticker_desc and not front_brain_handled and not message_saved:
+                message_content = f"{message_content}\n[表情包: {sticker_desc}]"
             if not front_brain_handled and not message_saved:
                 user_metadata = {}
                 if platform_msg_ids:

@@ -1,3 +1,16 @@
+## 近期关键改动（截至 2026-07-28）
+
+### 👥 群 fast 完整上下文、sticker 隔离与 OneBot 交互
+
+- 群聊 passive/append fast 现在接收 SOUL、USER、MEMORY、最近三天 daily memory，以及按 `place_scope_id` 隔离的完整当前未封闭 segment；判定 prompt 只重复焦点元数据，ONLINE 单条历史不再被 promoted batch 二次写入。
+- sticker 仅在配置 `fast-image` 时生成一句话描述；表情包 payload 在主图片模型和 ImageStore 管线前被过滤，不创建 stub、不参与标签/OCR/描述及补齐重试，普通图片保持原行为。
+- 通用策略统一为：回应具体消息使用 reply+at，仅提醒用 at，只引用且不打扰作者用 reply。OneBot 原生 at 后强制一个 ASCII 空格。
+- 新增 `[poke:USER_ID]`：OneBot/NapCat 作为独立 `send_poke` side effect 执行，支持 marker-only、分段内去重和失败不阻断文字；入站目标机器人 poke 作为普通群/私聊消息进入既有 dispatch，并与同会话消息保持顺序。
+- scheduler followup 在任务创建 sink 拒绝所有群聊并清理遗留 timer；群聊后续完全由 group listener 管理。
+- 聚焦回归：`.venv/Scripts/python.exe -m pytest tests/test_scope_runtime_coordination.py tests/test_group_listener.py tests/test_front_brain_prompt.py tests/test_image_memory.py tests/test_multimodal_input.py tests/test_adapter_message_controls.py tests/test_onebotv11_adapter.py -q` → 148 passed。
+
+---
+
 ## 项目概览
 - 仓库：N.O.R.A.Core（branch: main）
 - 目标：多平台智能体内核，包含 LLM 适配、工具/技能体系、成本追踪、记忆/RAG。

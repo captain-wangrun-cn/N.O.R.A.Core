@@ -279,16 +279,23 @@ class SchedulerMixin:
         )
 
     def _mark_scheduler_idle(self, chat_id: str, *, initial_delay: float | None = None):
-        """标记 AI 生成完毕。启动对话延续定时器。"""
+        """标记 AI 生成完毕；私聊启动对话延续定时器。"""
         self._sync_global_backend_flags()
         state = get_ai_state_summary()
         identity = self._identity_for_runtime_key(chat_id)
-        private_mode = self.private_presence.get(identity.memory_scope_id)
-        logger.info(
-            f"[{chat_id}] 进入空闲跟进状态: global={state['presence']}, "
-            f"private={private_mode.value}, "
-            f"generating={state['is_generating']}, backend_busy={state['is_backend_busy']}"
-        )
+        if normalize_chat_type(identity.chat_type) == "group":
+            logger.debug(
+                f"[{chat_id}] 群聊生成完毕: global={state['presence']}, "
+                f"generating={state['is_generating']}, backend_busy={state['is_backend_busy']}；"
+                "后续监听由 group listener 管理。"
+            )
+        else:
+            private_mode = self.private_presence.get(identity.memory_scope_id)
+            logger.info(
+                f"[{chat_id}] 进入空闲跟进状态: global={state['presence']}, "
+                f"private={private_mode.value}, "
+                f"generating={state['is_generating']}, backend_busy={state['is_backend_busy']}"
+            )
         if self._followup_suspended_until_idle.pop(chat_id, False):
             logger.info(f"[{chat_id}] 当前消息段标记为 KEEP_SEGMENT_OPEN，暂不启动 followup 定时器。")
             return
@@ -299,7 +306,12 @@ class SchedulerMixin:
     # ------------------------------------------------------------------
 
     def _start_followup_timer(self, chat_id: str, *, initial_delay: float | None = None):
-        """启动对话延续定时器。如果已有定时器则先取消。"""
+        """启动私聊对话延续定时器；群聊生命周期由 group listener 管理。"""
+        identity = self._identity_for_runtime_key(chat_id)
+        if normalize_chat_type(identity.chat_type) == "group":
+            self._cancel_followup_timer(chat_id)
+            logger.debug(f"[{chat_id}] 群聊不启动 scheduler followup；由 group listener 管理。")
+            return
         self._cancel_followup_timer(chat_id)
         delay = initial_delay if initial_delay is not None else self.FOLLOWUP_INITIAL_DELAY
         # 记录单次延迟，防止并发覆盖

@@ -101,9 +101,10 @@ adapters/<platform>/
 
 实现要求：
 
-- canonical 消息控制协议为 `[reply:MESSAGE_ID]` 与 `[at:USER_ID]`。支持的平台应声明 `PlatformFeatures.supports_message_controls=True`，在 adapter 内将其转换为原生能力；不支持的平台必须移除标记，不能原样泄漏。
+- canonical 消息控制协议为 `[reply:MESSAGE_ID]`、`[at:USER_ID]` 与 `[poke:USER_ID]`。支持的平台应声明 `PlatformFeatures.supports_message_controls=True`，在 adapter 内将其转换为原生能力；不支持的平台必须移除标记，不能原样泄漏。
+- `[poke:ID]` 是平台 side-effect control，不是普通消息段。仅支持的平台执行；每个 `[SPLIT]` part 独立去重和执行，失败不得阻断同 part 的正常文字/媒体发送，marker-only part 不应发送空消息。
 - 普通模型回复不自动产生原生 reply/@。显式 `[reply:ID]` 的优先级高于调用方 `reply_to_message_id`；两者都没有时不引用。
-- `[at:ID]` 只在明确群聊场景生成原生 mention；私聊或未知场景应移除。ID 必须按目标平台规则验证，禁止猜测或跨平台转换。
+- `[at:ID]` 只在明确群聊场景生成原生 mention；私聊或未知场景应移除。ID 必须按目标平台规则验证，禁止猜测或跨平台转换；mention 后的原生空格等平台格式由 adapter 统一规范化。
 - 控制标记按每个语义 `[SPLIT]` part 局部生效。平台长度切块时，reply 只附着该 part 首个实际发送项，mention 保持其逻辑文本位置，不复制到后续 chunk。
 - 入站 `reply_to_message_id`、当前 `platform_message_id` / `platform_message_ids` 和应用选择的 `reply_target_message_id` 含义不同，任何一层都不得自动互相推导。当前/聚合消息 ID 会进入共享场景提示供模型选择，但看到 ID 不表示必须原生回复。
 - 消息 ID 仅在其所属目标平台和场景内有效；跨平台或跨场景投递时不得复用来源消息 ID。

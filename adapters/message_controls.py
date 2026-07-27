@@ -6,11 +6,11 @@ from typing import Literal
 
 
 _CONTROL_MARKER_PATTERN = re.compile(
-    r"\[\s*(reply|at)\s*:\s*([^\]]*)\]",
+    r"\[\s*(reply|at|poke)\s*:\s*([^\]]*)\]",
     re.IGNORECASE,
 )
 _CONTROL_MARKER_LIKE_PATTERN = re.compile(
-    r"\[\s*(?:reply|at)(?:\s*:[^\]]*)?\s*\]",
+    r"\[\s*(?:reply|at|poke)(?:\s*:[^\]]*)?\s*\]",
     re.IGNORECASE,
 )
 _VALID_CONTROL_ID_PATTERN = re.compile(r"^[A-Za-z0-9_.:-]{1,128}$")
@@ -18,7 +18,7 @@ _VALID_CONTROL_ID_PATTERN = re.compile(r"^[A-Za-z0-9_.:-]{1,128}$")
 
 @dataclass(frozen=True, slots=True)
 class MessageControlToken:
-    type: Literal["text", "reply", "mention"]
+    type: Literal["text", "reply", "mention", "poke"]
     value: str
 
 
@@ -30,6 +30,10 @@ class ParsedMessageControls:
     @property
     def mention_user_ids(self) -> list[str]:
         return [token.value for token in self.tokens if token.type == "mention"]
+
+    @property
+    def poke_user_ids(self) -> list[str]:
+        return [token.value for token in self.tokens if token.type == "poke"]
 
     def visible_text(self) -> str:
         return "".join(token.value for token in self.tokens if token.type == "text")
@@ -47,6 +51,11 @@ def format_reply_marker(message_id: str) -> str:
 def format_mention_marker(user_id: str) -> str:
     value = str(user_id or "").strip()
     return f"[at:{value}]" if is_valid_control_id(value) else ""
+
+
+def format_poke_marker(user_id: str) -> str:
+    value = str(user_id or "").strip()
+    return f"[poke:{value}]" if is_valid_control_id(value) else ""
 
 
 def parse_message_controls(text: str) -> ParsedMessageControls:
@@ -67,6 +76,8 @@ def parse_message_controls(text: str) -> ParsedMessageControls:
                 tokens.append(MessageControlToken("reply", value))
             elif kind == "at":
                 tokens.append(MessageControlToken("mention", value))
+            elif kind == "poke":
+                tokens.append(MessageControlToken("poke", value))
         cursor = match.end()
 
     if cursor < len(raw_text):

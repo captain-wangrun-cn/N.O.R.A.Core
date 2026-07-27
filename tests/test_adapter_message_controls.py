@@ -1,5 +1,6 @@
 from adapters.message_controls import (
     format_mention_marker,
+    format_poke_marker,
     format_reply_marker,
     is_valid_control_id,
     parse_message_controls,
@@ -8,18 +9,20 @@ from adapters.message_controls import (
 
 
 def test_parse_controls_preserves_order_and_adjacent_text():
-    parsed = parse_message_controls("开头[at:user-1]中间[reply:msg:2]结尾[at:user_3]")
+    parsed = parse_message_controls("开头[at:user-1]中间[poke:user-2][reply:msg:2]结尾[at:user_3]")
 
     assert [(token.type, token.value) for token in parsed.tokens] == [
         ("text", "开头"),
         ("mention", "user-1"),
         ("text", "中间"),
+        ("poke", "user-2"),
         ("reply", "msg:2"),
         ("text", "结尾"),
         ("mention", "user_3"),
     ]
     assert parsed.reply_message_id == "msg:2"
     assert parsed.mention_user_ids == ["user-1", "user_3"]
+    assert parsed.poke_user_ids == ["user-2"]
     assert parsed.visible_text() == "开头中间结尾"
 
 
@@ -49,12 +52,13 @@ def test_format_helpers_validate_opaque_ids():
     assert is_valid_control_id("bad id") is False
     assert format_reply_marker(" 123 ") == "[reply:123]"
     assert format_mention_marker("user-1") == "[at:user-1]"
+    assert format_poke_marker("user-2") == "[poke:user-2]"
     assert format_reply_marker("") == ""
 
 
 def test_strip_controls_removes_valid_malformed_and_legacy_looking_markers():
     cleaned = strip_message_control_markers(
-        "A[reply:123]B[at:user]C[reply]D[at]E[reply:bad id]F"
+        "A[reply:123]B[at:user]C[poke:user]D[reply]E[at]F[poke]G[reply:bad id]H[poke:bad id]I"
     )
 
-    assert cleaned == "ABCDEF"
+    assert cleaned == "ABCDEFGHI"

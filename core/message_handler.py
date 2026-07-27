@@ -15,7 +15,12 @@ import time
 from typing import Dict, Any, List, Optional
 
 from brain.multimodal import extract_image_payloads, extract_video_payloads
-from brain.prompts import render_template, get_soul_prompt, load_identity_context
+from brain.prompts import (
+    render_template,
+    get_soul_prompt,
+    load_identity_context,
+    load_recent_daily_memory,
+)
 from core.group_listener import AppendAction, GroupMessageEvent, PassiveAction
 from core.group_presence_store import GroupPresence
 from core.private_presence_store import PrivatePresenceStore
@@ -239,11 +244,9 @@ class MessageHandlerMixin:
                     "message_id": event.reply_to_message_id,
                     "user_id": event.reply_to_user_id,
                     "user_name": event.reply_to_user_name,
-                    "text": event.reply_to_text,
                 }
                 if event.reply_to_message_id
                 else None,
-                "text": event.text,
             }
             lines.append(json.dumps(payload, ensure_ascii=False, separators=(",", ":")))
         return "\n".join(lines)
@@ -259,7 +262,58 @@ class MessageHandlerMixin:
                 f"fast output must be exactly one of [{allowed}], got {normalized!r}"
             ) from exc
 
-    async def _collect_fast_text(self, runtime_key: str, system_prompt: str, user_prompt: str) -> str:
+    def _group_fast_context(
+        self,
+        events: List[GroupMessageEvent],
+        classifier_prompt: str,
+    ) -> tuple[str, List[Dict[str, str]]]:
+        """Build trusted identity context and the complete same-place open segment."""
+        latest = events[-1]
+        context = latest.context
+        identity = self._identity(context)
+        identity_context = load_identity_context(
+            include_schedule=False,
+            actor_display_name=identity.actor_display_name,
+            is_owner=identity.is_owner,
+            chat_type=identity.chat_type,
+            chat_title=str(context.get("chat_title") or context.get("group_title") or ""),
+            group_member_count=context.get("group_member_count"),
+            group_member_count_status=str(context.get("group_member_count_status") or ""),
+            group_online_count=context.get("group_online_count"),
+            group_online_count_status=str(context.get("group_online_count_status") or ""),
+        )
+        daily_memory = load_recent_daily_memory(days=3)
+        system_prompt = "\n\n".join(
+            block for block in (classifier_prompt, identity_context, daily_memory) if block
+        )
+
+        messages = self.message_history.get_current_segment_messages(
+            identity.platform,
+            identity.storage_id,
+            memory_scope_id=identity.memory_scope_id,
+        ) or []
+        current_place = identity.place_scope_id or f"{identity.platform}:{identity.platform_chat_id}"
+        history = [
+            {
+                "role": str(message.get("role") or "user"),
+                "content": str(message.get("content") or ""),
+            }
+            for message in messages
+            if str(
+                message.get("place_scope_id")
+                or f"{message.get('platform') or ''}:{message.get('chat_id') or ''}"
+            ) == current_place
+            and message.get("content") not in (None, "")
+        ]
+        return system_prompt, history
+
+    async def _collect_fast_text(
+        self,
+        runtime_key: str,
+        system_prompt: str,
+        user_prompt: str,
+        history: Optional[List[Dict[str, str]]] = None,
+    ) -> str:
         async def collect() -> str:
             chunks: List[str] = []
             async for chunk in self._chat_stream_wrapper(
@@ -267,7 +321,7 @@ class MessageHandlerMixin:
                 runtime_key,
                 system_prompt=system_prompt,
                 user_prompt=user_prompt,
-                history=[],
+                history=history or [],
                 tools=[],
             ):
                 if isinstance(chunk, dict) and chunk.get("type") == "text":
@@ -283,7 +337,8 @@ class MessageHandlerMixin:
         runtime_key: str,
         events: List[GroupMessageEvent],
     ) -> PassiveAction:
-        system_prompt = render_template("group_listener.jinja", "passive_system")
+        classifier_prompt = render_template("group_listener.jinja", "passive_system")
+        system_prompt, history = self._group_fast_context(events, classifier_prompt)
         batch_size = max(1, int(getattr(self.group_listener, "batch_size", 2)))
         new_sequences = {event.sequence for event in events[-batch_size:]}
         max_pending = max(1, int(getattr(self.group_listener, "max_pending", 20)))
@@ -304,6 +359,7 @@ class MessageHandlerMixin:
             runtime_key,
             system_prompt,
             user_prompt,
+            history=history,
         )
         return self._parse_fast_action(result, PassiveAction)
 
@@ -313,7 +369,8 @@ class MessageHandlerMixin:
         base: List[GroupMessageEvent],
         batch: List[GroupMessageEvent],
     ) -> AppendAction:
-        system_prompt = render_template("group_listener.jinja", "append_system")
+        classifier_prompt = render_template("group_listener.jinja", "append_system")
+        system_prompt, history = self._group_fast_context(list(base) + list(batch), classifier_prompt)
         user_prompt = render_template(
             "group_listener.jinja",
             "append_user",
@@ -323,7 +380,12 @@ class MessageHandlerMixin:
                 new_event_sequences={event.sequence for event in batch},
             ),
         )
-        result = await self._collect_fast_text(runtime_key, system_prompt, user_prompt)
+        result = await self._collect_fast_text(
+            runtime_key,
+            system_prompt,
+            user_prompt,
+            history=history,
+        )
         return self._parse_fast_action(result, AppendAction)
 
     def _group_batch_context(
@@ -350,21 +412,6 @@ class MessageHandlerMixin:
                 "_group_listener_reason": reason,
             }
         )
-        # 群消息持久化：确保监听期间的用户消息写入 DB，
-        # 使 followup/wrapup 能读到完整上下文。
-        try:
-            self.message_history.add_message(
-                platform=latest.platform,
-                chat_id=latest.platform_chat_id,
-                role="user",
-                content=message_content,
-                user_id=latest.sender_id,
-                memory_scope_id=latest.memory_scope_id,
-                place_scope_id=latest.place_scope_id,
-                actor_display_name=latest.sender_name,
-            )
-        except Exception as e:
-            logger.warning(f"[{latest.runtime_key}] 群消息持久化失败: {e}")
         if continuation_token is not None:
             context["_group_listener_continuation_token"] = continuation_token
         return context

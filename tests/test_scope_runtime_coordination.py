@@ -162,6 +162,44 @@ def test_backend_start_writes_private_presence():
     assert controller.private_presence.get(tg.memory_scope_id) == PrivatePresence.SEMI_ONLINE
 
 
+def test_group_followup_timer_is_rejected_and_legacy_timer_cleared():
+    async def run():
+        controller = _ScopeController()
+        group = controller.add_identity("onebotv11", "10001", "owner", chat_type="group")
+        legacy = asyncio.create_task(asyncio.sleep(60))
+        controller._followup_timers[group.runtime_key] = legacy
+        controller._followup_delay_override[group.runtime_key] = 15
+
+        controller._start_followup_timer(group.runtime_key, initial_delay=1)
+        await asyncio.sleep(0)
+
+        assert group.runtime_key not in controller._followup_timers
+        assert group.runtime_key not in controller._followup_delay_override
+        assert legacy.cancelled()
+
+    asyncio.run(run())
+
+
+def test_private_followup_timer_still_starts():
+    async def run():
+        controller = _ScopeController()
+        private = controller.add_identity("telegram", "private-chat", "owner")
+        started = asyncio.Event()
+
+        async def fake_followup_loop(runtime_key):
+            assert runtime_key == private.runtime_key
+            started.set()
+
+        controller._followup_loop = fake_followup_loop
+        controller._start_followup_timer(private.runtime_key, initial_delay=1)
+        await asyncio.wait_for(started.wait(), timeout=0.2)
+        assert private.runtime_key in controller._followup_timers
+        assert controller._followup_delay_override[private.runtime_key] == 1
+        await controller._followup_timers[private.runtime_key]
+
+    asyncio.run(run())
+
+
 def test_followup_context_is_limited_to_current_place():
     controller = _ScopeController()
     tg = controller.add_identity("telegram", "tg-chat", "owner")

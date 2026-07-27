@@ -76,6 +76,9 @@ core/controller.py            NoraController.handle_message()
 - `AIPresence` — 全局系统级忙碌标志（`is_generating` / `is_backend_busy`），**不表示任何私聊在线状态**
 - `PrivatePresenceStore`（`core/private_presence_store.py`）— 按 `memory_scope_id` 存储私聊的 `ONLINE` / `SEMI_ONLINE` 状态，持久化到 JSON，重启后过期自动重置
 - 群运行状态由 `core/group_listener.py` + `core/group_presence_store.py` 按 `platform:chat_id` 识别，但全局最多一个群 ONLINE；新群进入 ONLINE 会接管并关闭旧活跃群。ONLINE 群绕过 sender aggregator，SEMI_ONLINE 群仍仅由 @/回复进入正常聚合路径
+- 群 fast 决策显式注入 SOUL/USER/MEMORY、最近三天 daily memory，以及按 `place_scope_id` 隔离的完整当前未封闭 segment；焦点 user prompt 只携带判定元数据，不重复正文
+- 群聊生命周期完全由 group listener 管理，不启动 scheduler followup，避免两套 ONLINE/SEMI_ONLINE 状态机并行
+- 表情包仅在配置 `fast-image` 时生成一句话描述并进入普通消息上下文；sticker 不进入 ImageStore、图片标签/OCR/描述重试或向量图库
 - 手动重建接口：`regenerate_today_plan(clear_existing=True)`
 - 每日总结：每日 00:00 触发 `_on_daily_summary_trigger`，调用 `daily_summary_callback` 生成上一日摘要
 
@@ -197,10 +200,17 @@ python tui.py
 
 - `[at:USER_ID]`
   - 含义：在明确群聊场景原生 @ 已知用户。
-  - 约束：私聊、未知场景、无效 ID 或不支持的平台只移除标记；禁止猜测、跨平台复用 ID，禁止手写 CQ 码或 Telegram `tg://user` HTML。
+  - 约束：私聊、未知场景、无效 ID 或不支持的平台只移除标记；禁止猜测、跨平台复用 ID，禁止手写 CQ 码或 Telegram `tg://user` HTML。OneBot v11 会强制在原生 @ 后保留一个 ASCII 空格。
+
+- `[poke:USER_ID]`
+  - 含义：OneBot v11/NapCat 对指定用户执行一次戳一戳；它是轻量招呼、提醒或轻催促，不是普通消息段。
+  - 约束：仅在关系和语境合适时偶尔使用；禁止猜 ID。未启用或不支持时标记会被移除，marker-only 不发送空消息。
+
+- reply / at 选择
+  - 回应具体消息默认 `[reply:MESSAGE_ID][at:USER_ID]`；只提醒/点名用 `[at:USER_ID]`；只引用且不想打扰作者用 `[reply:MESSAGE_ID]`；面向全群不加标记。
 
 - 消息控制作用域
-  - 每个 `[SPLIT]` 分段独立解释 `[reply:...]` / `[at:...]`。
+  - 每个 `[SPLIT]` 分段独立解释 `[reply:...]` / `[at:...]` / `[poke:...]`。
   - 平台长度切块时，reply 只附着该分段首个实际发送项，mention 不复制到后续 chunk。
   - OneBot 的 `[reply]`、`[at:current]`、`[at:reply]` 仅为兼容旧格式；新输出优先显式 ID。
 
