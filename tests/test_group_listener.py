@@ -1,5 +1,6 @@
 import asyncio
 import json
+import time
 from types import SimpleNamespace
 
 import pytest
@@ -776,11 +777,16 @@ def test_stale_semi_online_decision_preserves_concurrent_suffix(tmp_path, monkey
         store.set("telegram:g1", GroupPresence.ONLINE)
         decision_started = asyncio.Event()
         release_decision = asyncio.Event()
+        votes = []
 
         async def decide_passive(runtime_key, events):
             decision_started.set()
             await release_decision.wait()
-            return PassiveAction.SEMI_ONLINE
+            votes.append(len(votes) + 1)
+            # 只投一次 SEMI_ONLINE：单票 + 并发后缀应保留后缀且维持 ONLINE。
+            if len(votes) == 1:
+                return PassiveAction.SEMI_ONLINE
+            return PassiveAction.KEEP_LISTENING
 
         manager = GroupListenerManager(
             store=store,
@@ -797,12 +803,54 @@ def test_stale_semi_online_decision_preserves_concurrent_suffix(tmp_path, monkey
             await asyncio.wait_for(decision_started.wait(), timeout=0.3)
             await manager.receive(_context(3))
             release_decision.set()
-            await asyncio.sleep(0.02)
+            await asyncio.sleep(0.05)
 
             assert store.get("telegram:g1") == GroupPresence.ONLINE
             assert [event.platform_message_id for event in manager.pending_events("telegram:g1")] == [
                 "1", "2", "3"
             ]
+        finally:
+            release_decision.set()
+            await manager.shutdown()
+
+    asyncio.run(run())
+
+
+def test_repeated_semi_online_votes_demote_despite_concurrent_suffix(tmp_path, monkeypatch):
+    """连续投票达到阈值时，并发后缀不再让 SEMI_ONLINE 结论静默作废。"""
+
+    async def run():
+        _patch_workspace(monkeypatch, tmp_path)
+        store = GroupPresenceStore()
+        store.set("telegram:g1", GroupPresence.ONLINE)
+        decision_started = asyncio.Event()
+        release_decision = asyncio.Event()
+
+        async def decide_passive(runtime_key, events):
+            decision_started.set()
+            await release_decision.wait()
+            return PassiveAction.SEMI_ONLINE
+
+        manager = GroupListenerManager(
+            store=store,
+            persist_message=lambda context: asyncio.sleep(0),
+            decide_passive=decide_passive,
+            decide_append=lambda *args: asyncio.sleep(0, result=AppendAction.KEEP_PENDING),
+            promote=lambda *args: asyncio.sleep(0),
+            interrupt=lambda *args: asyncio.sleep(0),
+            idle_seconds=30,
+            semi_online_vote_threshold=2,
+        )
+        try:
+            for index in range(1, 3):
+                await manager.receive(_context(index))
+            await asyncio.wait_for(decision_started.wait(), timeout=0.3)
+            await manager.receive(_context(3))
+            release_decision.set()
+            await asyncio.sleep(0.05)
+
+            assert store.get("telegram:g1") == GroupPresence.SEMI_ONLINE
+            assert manager.pending_events("telegram:g1") == []
         finally:
             release_decision.set()
             await manager.shutdown()
@@ -912,6 +960,200 @@ def test_configured_batch_size_three_controls_generation_append(tmp_path, monkey
             await manager.receive(_context(3))
             await asyncio.sleep(0.02)
             assert batches == [["1", "2", "3"]]
+        finally:
+            await manager.shutdown()
+
+    asyncio.run(run())
+
+
+def test_group_presence_store_expires_stale_online_records(tmp_path, monkeypatch):
+    _patch_workspace(monkeypatch, tmp_path)
+    now = time.time()
+    (tmp_path / "group_presence_state.json").write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "groups": {
+                    "telegram:stale": {"mode": "online", "updated_at": now - 7 * 3600},
+                    "telegram:fresh": {"mode": "online", "updated_at": now - 60},
+                    "telegram:semi": {"mode": "semi_online", "updated_at": now - 9 * 3600},
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    store = GroupPresenceStore()
+    assert store.expire_stale_entries() == ["telegram:stale"]
+    assert store.get("telegram:stale") == GroupPresence.SEMI_ONLINE
+    assert store.get("telegram:fresh") == GroupPresence.ONLINE
+    assert store.expire_stale_entries() == []
+
+
+def test_set_mode_persists_platform_metadata_from_runtime_key(tmp_path, monkeypatch):
+    async def run():
+        _patch_workspace(monkeypatch, tmp_path)
+        store = GroupPresenceStore()
+        manager = _idle_manager(store, idle_seconds=30)
+        try:
+            assert await manager.set_mode(
+                "onebotv11:12345", GroupPresence.ONLINE, reason="test"
+            )
+            record = json.loads(
+                (tmp_path / "group_presence_state.json").read_text(encoding="utf-8")
+            )["groups"]["onebotv11:12345"]
+            assert record["platform"] == "onebotv11"
+            assert record["platform_chat_id"] == "12345"
+        finally:
+            await manager.shutdown()
+
+    asyncio.run(run())
+
+
+def _idle_manager(store, **kwargs):
+    defaults = dict(
+        persist_message=lambda context: asyncio.sleep(0),
+        decide_passive=lambda *args: asyncio.sleep(0, result=PassiveAction.KEEP_LISTENING),
+        decide_append=lambda *args: asyncio.sleep(0, result=AppendAction.KEEP_PENDING),
+        promote=lambda *args: asyncio.sleep(0),
+        interrupt=lambda *args: asyncio.sleep(0),
+    )
+    defaults.update(kwargs)
+    return GroupListenerManager(store=store, **defaults)
+
+
+def test_empty_window_idle_demotes_on_no_interaction_timeout(tmp_path, monkeypatch):
+    """被 @ → 回复 → 群彻底安静后窗口为空，此前永远不会再降级。"""
+
+    async def run():
+        _patch_workspace(monkeypatch, tmp_path)
+        store = GroupPresenceStore()
+        store.set("telegram:g1", GroupPresence.ONLINE)
+        passive_calls = []
+
+        async def decide_passive(runtime_key, events):
+            passive_calls.append(list(events))
+            return PassiveAction.KEEP_LISTENING
+
+        manager = _idle_manager(
+            store,
+            decide_passive=decide_passive,
+            idle_seconds=0.02,
+            no_interaction_timeout_seconds=0.01,
+            idle_exit_seconds=0.01,
+            watchdog_interval_seconds=1000,
+        )
+        try:
+            # 定向消息直达前脑，pending_window 保持为空
+            assert await manager.receive(_context(1, mention=True))
+            assert manager.pending_events("telegram:g1") == []
+            await asyncio.sleep(0.15)
+
+            assert passive_calls == []
+            assert store.get("telegram:g1") == GroupPresence.SEMI_ONLINE
+        finally:
+            await manager.shutdown()
+
+    asyncio.run(run())
+
+
+def test_watchdog_force_demotes_online_group_without_runtime_state(tmp_path, monkeypatch):
+    """重启后只剩持久化 ONLINE 记录、没有任何运行时状态时也应被降级。"""
+
+    async def run():
+        _patch_workspace(monkeypatch, tmp_path)
+        store = GroupPresenceStore()
+        store.set("telegram:g1", GroupPresence.ONLINE, platform="telegram", platform_chat_id="g1")
+        manager = _idle_manager(
+            store,
+            idle_seconds=1000,
+            no_interaction_timeout_seconds=0.01,
+            idle_exit_seconds=0.01,
+            watchdog_interval_seconds=0.02,
+        )
+        try:
+            manager.start()
+            for _ in range(40):
+                await asyncio.sleep(0.02)
+                if store.get("telegram:g1") == GroupPresence.SEMI_ONLINE:
+                    break
+            assert store.get("telegram:g1") == GroupPresence.SEMI_ONLINE
+        finally:
+            await manager.shutdown()
+
+    asyncio.run(run())
+
+
+def test_watchdog_skips_group_with_recent_interaction(tmp_path, monkeypatch):
+    async def run():
+        _patch_workspace(monkeypatch, tmp_path)
+        store = GroupPresenceStore()
+        store.set("telegram:g1", GroupPresence.ONLINE)
+        manager = _idle_manager(
+            store,
+            idle_seconds=1000,
+            no_interaction_timeout_seconds=600,
+            idle_exit_seconds=600,
+            max_online_seconds=0,
+            watchdog_interval_seconds=1000,
+        )
+        try:
+            assert await manager.receive(_context(1, mention=True))
+            await manager._run_watchdog_once()
+            assert store.get("telegram:g1") == GroupPresence.ONLINE
+        finally:
+            await manager.shutdown()
+
+    asyncio.run(run())
+
+
+def test_stale_directed_event_no_longer_vetoes_semi_online(tmp_path, monkeypatch):
+    """生成期滞留进窗口的 reply_to_bot 事件不应无限期否决降级。"""
+
+    async def run():
+        _patch_workspace(monkeypatch, tmp_path)
+        store = GroupPresenceStore()
+        store.set("telegram:g1", GroupPresence.ONLINE)
+        manager = _idle_manager(
+            store,
+            decide_passive=lambda *args: asyncio.sleep(0, result=PassiveAction.SEMI_ONLINE),
+            idle_seconds=1000,
+            directed_veto_seconds=60,
+        )
+        try:
+            state = manager._state("telegram:g1")
+            stale = _event(1, mention=True)
+            stale.received_at = time.time() - 600  # 10 分钟前的定向事件
+            async with state.lock:
+                manager._append_pending(state, stale)
+            await manager._run_passive_decision("telegram:g1", "test")
+
+            assert store.get("telegram:g1") == GroupPresence.SEMI_ONLINE
+        finally:
+            await manager.shutdown()
+
+    asyncio.run(run())
+
+
+def test_listening_stats_expose_timing_signals(tmp_path, monkeypatch):
+    async def run():
+        _patch_workspace(monkeypatch, tmp_path)
+        store = GroupPresenceStore()
+        store.set("telegram:g1", GroupPresence.ONLINE)
+        manager = _idle_manager(
+            store,
+            idle_seconds=1000,
+            no_interaction_timeout_seconds=1800,
+            idle_exit_seconds=600,
+            watchdog_interval_seconds=1000,
+        )
+        try:
+            await manager.receive(_context(1))
+            stats = manager.listening_stats("telegram:g1")
+            assert stats["no_interaction_timeout_seconds"] == 1800
+            assert stats["idle_exit_seconds"] == 600
+            assert stats["consecutive_keep_listening"] == 0
+            assert stats["seconds_since_message"] >= 0
         finally:
             await manager.shutdown()
 

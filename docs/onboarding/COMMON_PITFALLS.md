@@ -108,6 +108,36 @@
 - 群聊默认只处理 @机器人或回复机器人消息；可通过 `group_message_policy` 调整。
 - 群管/撤回/全员禁言/改群名片等真实 QQ 操作必须先向主人确认，且实际成功取决于登录号权限和 OneBot 实现。
 
+## 5.2 群监听 ONLINE 退不出去 / 没被 @ 的群也在监听
+
+这两个现象是同一条链：**ONLINE 一旦点亮，能关掉它的路径极少**；而只要某群挂着 ONLINE，
+两个 adapter 就对它整群放行（`adapters/onebotv11/main.py` 的 `online_group` 分支、
+`adapters/telegram/incoming.py` 的同类分支），看起来就是"没 @ 也在监听"。
+
+历史上同时踩到的坑（均已修复，改动时不要退回去）：
+
+- **`GroupPresenceStore` 曾无任何时间过期。** 只有 `normalize_single_online()`，而它的语义是
+  "保留最近更新的 ONLINE"——保护而非清理。几天前进 ONLINE 的群重启多少次仍是 ONLINE。
+  现在启动时先跑 `expire_stale_entries()`（6 小时，对齐 `PrivatePresenceStore`）。
+- **窗口为空时不再评估。** `_idle_wait` 旧版在 `not pending_window` 时直接 return，而
+  "被 @ → 回复 → 群安静"恰好清空窗口（定向路径会 `_take_recent_pending` 抽走待判断消息），
+  于是最安静的群反而最不可能被关掉。现在空窗口走 `_demote_reason` 硬超时判定。
+- **并发后缀让 SEMI_ONLINE 结论静默作废。** fast 调用期间到达任意新消息就丢弃结论，活跃群里这是常态。
+  现在连续 `semi_online_vote_threshold` 轮都投 SEMI_ONLINE 时按当前窗口末尾强制降级。
+- **滞留的 `reply_to_bot` 永久否决降级。** 生成期到达的 reply 会经 `finish_generation` 落进
+  pending window，旧版 `any(explicit_bot_mention or reply_to_bot)` 无时效，会卡到它被 20 条上限挤出。
+  现在按 `directed_veto_seconds` 只否决近期定向事件。
+- **分类器拿不到时间信息。** `passive_user` 旧版只给窗口计数，模型客观上无法知道已经听了几小时——
+  "主动性不够"不是模型判断力问题。现在注入 `listening_stats()`：已监听秒数、距最近互动秒数、
+  距最近消息秒数、连续 KEEP_LISTENING 轮数 + 两个参考阈值。新增分类信号时记得同步 prompt 与渲染参数。
+- **看门狗必须显式启动。** `controller.start_triggers()` 调 `group_listener.start()`。重启后若某群
+  仍持久化为 ONLINE 但一直没有新消息，懒启动（`receive` / `set_mode`）永远不会触发。
+- **`set_mode` 必须带 platform 元数据。** 缺省时由 runtime_key 拆分补齐，否则持久化记录里
+  `platform` / `platform_chat_id` 是空串，任何基于记录的巡检都拿不到平台。
+
+排障先看日志：`群监听 fast=... keep_streak=N semi_votes=N`、`群监听拒绝近期定向窗口的 SEMI_ONLINE 决策`、
+`群监听空窗口静默降级`、`群监听看门狗强制降级`、`启动过期清理: N 个群 ONLINE 记录已重置`。
+
 ---
 
 ## 6. 成本跟踪

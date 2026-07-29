@@ -572,10 +572,15 @@ class SchedulerMixin:
     ) -> bool:
         """Apply model presence markers without conflating group mode and shared presence."""
         if chat_type == "group":
+            group_platform, group_chat_id = "", ""
+            if ":" in str(chat_id):
+                group_platform, group_chat_id = str(chat_id).split(":", 1)
             if force_semi_online:
                 await self.group_listener.set_mode(
                     chat_id,
                     GroupPresence.SEMI_ONLINE,
+                    platform=group_platform,
+                    platform_chat_id=group_chat_id,
                     reason="front_marker_semi_online",
                 )
                 return True
@@ -583,6 +588,8 @@ class SchedulerMixin:
                 await self.group_listener.set_mode(
                     chat_id,
                     GroupPresence.ONLINE,
+                    platform=group_platform,
+                    platform_chat_id=group_chat_id,
                     reason="front_marker_online",
                 )
             return False

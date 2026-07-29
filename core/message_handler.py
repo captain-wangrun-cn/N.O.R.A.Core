@@ -347,6 +347,8 @@ class MessageHandlerMixin:
         batch_size = max(1, int(getattr(self.group_listener, "batch_size", 2)))
         new_sequences = {event.sequence for event in events[-batch_size:]}
         max_pending = max(1, int(getattr(self.group_listener, "max_pending", 20)))
+        stats_getter = getattr(self.group_listener, "listening_stats", None)
+        stats = stats_getter(runtime_key) if callable(stats_getter) else {}
         user_prompt = render_template(
             "group_listener.jinja",
             "passive_user",
@@ -359,6 +361,12 @@ class MessageHandlerMixin:
             window_count=len(events),
             window_limit=max_pending,
             window_may_be_truncated=len(events) >= max_pending,
+            online_seconds=int(stats.get("online_seconds", 0) or 0),
+            seconds_since_interaction=int(stats.get("seconds_since_interaction", 0) or 0),
+            seconds_since_message=int(stats.get("seconds_since_message", 0) or 0),
+            consecutive_keep_listening=int(stats.get("consecutive_keep_listening", 0) or 0),
+            no_interaction_timeout_seconds=int(stats.get("no_interaction_timeout_seconds", 0) or 0),
+            idle_exit_seconds=int(stats.get("idle_exit_seconds", 0) or 0),
         )
         result = await self._collect_fast_text(
             runtime_key,

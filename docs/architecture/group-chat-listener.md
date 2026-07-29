@@ -8,7 +8,7 @@
 - **群运行域**以 `runtime_key = platform:platform_chat_id` 识别各群，但全局最多一个群为 `ONLINE`；新群进入 ONLINE 时自动接管并将旧活跃群切回 SEMI_ONLINE。各群仍分别保存待判断窗口、定时器和生成中断状态。
 - **场景可见性**仍由 `place_scope_id`、平台、群 ID、说话者、消息 ID 和回复关系约束。共享背景不代表其它场景内容可以在当前群公开。
 
-群模式持久化在 `data/group_presence_state.json`。只持久化模式，不持久化窗口和异步任务；重启后消息事实仍来自共享 `MessageHistory`。未登记或非法状态固定按 `SEMI_ONLINE` 处理；启动时若发现遗留的多个 ONLINE 记录，只保留 `updated_at` 最新的一项。
+群模式持久化在 `data/group_presence_state.json`。只持久化模式，不持久化窗口和异步任务；重启后消息事实仍来自共享 `MessageHistory`。未登记或非法状态固定按 `SEMI_ONLINE` 处理；启动时先过期清理超过 6 小时未更新的 ONLINE 记录（`expire_stale_entries`），再对遗留的多个 ONLINE 记录只保留 `updated_at` 最新的一项（`normalize_single_online`）。**没有过期清理时，一个几天前进 ONLINE 的群在重启后仍是 ONLINE，两个 adapter 会继续对它整群放行，表现为「没被 @ 也在监听」。** 写入记录始终带 `platform` / `platform_chat_id`（缺省时由 runtime_key 拆分补齐）。
 
 ## Adapter 入口
 
@@ -27,11 +27,24 @@ Telegram 与 OneBot v11 都先完成平台事件标准化，并明确提供：
 
 - 自上次判断后累计 `evaluation_batch_size` 条（默认 2）：立即调用 fast。
 - 最后消息后 90 秒且窗口非空：调用 fast。
-- `KEEP_LISTENING`：保留完整窗口，下一批继续合并判断。
+- 最后消息后 90 秒且**窗口为空**：不调用 fast，直接按硬超时判定是否降级（见下）。此前这条分支直接 return，导致「被 @ → 回复 → 群彻底安静」后再无任何评估，ONLINE 永久挂着。
+- `KEEP_LISTENING`：保留完整窗口，下一批继续合并判断，并累加 `consecutive_keep_listening`。
 - `REPLY`：提升完整快照到现有 smart/front-brain 流水线，并通过 `_message_saved=True` 防止重复入历史。除定向消息和明确求助外，Nora 能对当前话题作出及时、相关且非重复的自然贡献时也可选择；价值或时机不明确时继续监听。
-- `SEMI_ONLINE`：只切换当前群并清空其运行窗口。
+- `SEMI_ONLINE`：只切换当前群并清空其运行窗口。窗口内存在**近期**定向事件（`directed_veto_seconds` 内的 @/回复 Nora）时一票否决；超过该时效的滞留定向事件不再否决——生成期到达的 `reply_to_bot` 会经 `finish_generation` 落入 pending window，无时效的否决会把降级卡到它被 `max_pending` 挤出为止。
 
-fast 判断使用序号快照；判断期间新到的 suffix 不会因旧结果而丢失。解析失败、超时和异常分别保守回退到 `KEEP_LISTENING` 或 `KEEP_PENDING`。
+fast 判断使用序号快照；判断期间新到的 suffix 不会因旧结果而丢失。单轮 SEMI_ONLINE 结论遇到并发 suffix 时保留窗口并立即重判；**连续 `semi_online_vote_threshold` 轮（默认 2）都投 SEMI_ONLINE 时按当前窗口末尾强制降级**，避免活跃群里正确结论被反复静默作废。解析失败、超时和异常分别保守回退到 `KEEP_LISTENING` 或 `KEEP_PENDING`。
+
+分类器 user prompt 除窗口计数外，还注入监听时长与互动信号（`listening_stats`）：已监听秒数、距最近一次 @/回复 Nora 的秒数、距最近一条群消息的秒数、连续 KEEP_LISTENING 轮数，以及两个参考阈值。缺少这些信号时模型无从判断「已经听了几个小时」，SEMI_ONLINE 的主动性会明显不足。
+
+## 硬超时降级（看门狗）
+
+`_watchdog_loop` 每 `watchdog_interval_seconds` 巡检所有持久化为 ONLINE 的群，不经过模型、也不要求 pending window 非空。由 `controller.start_triggers()` 在事件循环就绪后通过 `group_listener.start()` 启动；`receive` / `set_mode(ONLINE)` 也会懒启动它。命中任一条件即强制 `SEMI_ONLINE`：
+
+- `max_online_seconds`：单次 ONLINE 的绝对上限（默认 6 小时）。
+- `no_interaction_timeout_seconds`：多久没有 @/回复 Nora，也没有 Nora 自己的生成（默认 30 分钟）。
+- `idle_exit_seconds`：群里多久没有任何新消息（默认 20 分钟）。
+
+生成进行中或定向 handoff 未结束时跳过该群。进程重启后运行时字段为 0，用持久化 `updated_at` 兜底，避免把「刚重启」误判成「刚进入 ONLINE、从未互动」。同一套判定也被空窗口 idle 分支复用（`_demote_reason`）。
 
 ## 生成中断
 
@@ -67,5 +80,11 @@ fast 判断使用序号快照；判断期间新到的 suffix 不会因旧结果�
 - `idle_seconds`
 - `max_pending_messages`
 - `decision_timeout_seconds`
+- `watchdog_interval_seconds`（默认 30）
+- `no_interaction_timeout_seconds`（默认 1800，0 关闭）
+- `idle_exit_seconds`（默认 1200，0 关闭）
+- `max_online_seconds`（默认 21600，0 关闭）
+- `directed_veto_seconds`（默认 300，0 表示永久否决）
+- `semi_online_vote_threshold`（默认 2）
 
-日志以 runtime key 记录模式转换、触发原因、窗口大小、generation token 和 fast action，不打印完整消息窗口。核心测试入口为 `tests/test_group_listener.py`，平台入口回归分别在 Telegram 与 OneBot adapter 测试中。
+日志以 runtime key 记录模式转换、触发原因、窗口大小、generation token 和 fast action，不打印完整消息窗口。排障 ONLINE 不退出时看这几条：`群监听 fast=... keep_streak=N semi_votes=N`、`群监听拒绝近期定向窗口的 SEMI_ONLINE 决策`、`群监听空窗口静默降级`、`群监听看门狗强制降级`、`启动过期清理: N 个群 ONLINE 记录已重置`。核心测试入口为 `tests/test_group_listener.py`，平台入口回归分别在 Telegram 与 OneBot adapter 测试中。

@@ -15,6 +15,9 @@ logger = logging.getLogger(__name__)
 _STATE_FILE = "group_presence_state.json"
 _SCHEMA_VERSION = 1
 _WRITE_LOCK = threading.RLock()
+# 超过这个时间（秒）未更新的 ONLINE 记录，在重启时视为过期并重置为 SEMI_ONLINE。
+# 与私聊 PrivatePresenceStore 的语义对齐：进程重启前挂着的 ONLINE 不应无限继承。
+_RESTART_EXPIRE_SECONDS = 6 * 3600  # 6 小时
 
 
 class GroupPresence(str, Enum):
@@ -148,3 +151,53 @@ class GroupPresenceStore:
             except (TypeError, ValueError):
                 result[str(runtime_key)] = GroupPresence.SEMI_ONLINE
         return result
+
+    def updated_at(self, runtime_key: str) -> float:
+        """Return when this group's mode was last written (0.0 when unknown)."""
+        record = (_read_state().get("groups") or {}).get(str(runtime_key), {})
+        if not isinstance(record, dict):
+            return 0.0
+        try:
+            return float(record.get("updated_at") or 0.0)
+        except (TypeError, ValueError):
+            return 0.0
+
+    def expire_stale_entries(self) -> list[str]:
+        """Reset ONLINE records not touched for _RESTART_EXPIRE_SECONDS.
+
+        群 ONLINE 记录此前没有任何时间过期，一个几天前进入 ONLINE 的群在重启后
+        依然 ONLINE，两个 adapter 就会继续对该群整群放行（绕过 @/回复门）。
+        启动时调用一次，返回被降级的 runtime_key 列表。
+        """
+        now = time.time()
+        demoted: list[str] = []
+        with _WRITE_LOCK:
+            state = _read_state()
+            groups = dict(state.get("groups") or {})
+            for runtime_key, record in list(groups.items()):
+                if not isinstance(record, dict):
+                    continue
+                if record.get("mode") != GroupPresence.ONLINE.value:
+                    continue
+                try:
+                    updated_at = float(record.get("updated_at") or 0.0)
+                except (TypeError, ValueError):
+                    updated_at = 0.0
+                if now - updated_at <= _RESTART_EXPIRE_SECONDS:
+                    continue
+                groups[str(runtime_key)] = {
+                    **record,
+                    "mode": GroupPresence.SEMI_ONLINE.value,
+                    "updated_at": now,
+                }
+                demoted.append(str(runtime_key))
+            if not demoted:
+                return []
+            if not _atomic_write({"version": _SCHEMA_VERSION, "groups": groups}):
+                return []
+        logger.info(
+            "启动过期清理: %d 个群 ONLINE 记录已重置为 SEMI_ONLINE (%s)",
+            len(demoted),
+            ", ".join(demoted),
+        )
+        return demoted

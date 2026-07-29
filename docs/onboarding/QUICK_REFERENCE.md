@@ -76,7 +76,8 @@ core/controller.py            NoraController.handle_message()
 - `AIPresence` — 全局系统级忙碌标志（`is_generating` / `is_backend_busy`），**不表示任何私聊在线状态**
 - `PrivatePresenceStore`（`core/private_presence_store.py`）— 按 `memory_scope_id` 存储私聊的 `ONLINE` / `SEMI_ONLINE` 状态，持久化到 JSON，重启后过期自动重置
 - 群运行状态由 `core/group_listener.py` + `core/group_presence_store.py` 按 `platform:chat_id` 识别，但全局最多一个群 ONLINE；新群进入 ONLINE 会接管并关闭旧活跃群。ONLINE 群绕过 sender aggregator，SEMI_ONLINE 群仍仅由 @/回复进入正常聚合路径
-- 群 fast 决策显式注入 SOUL/USER/MEMORY、最近三天 daily memory，以及按 `place_scope_id` 隔离的完整当前未封闭 segment；焦点 user prompt 只携带判定元数据，不重复正文
+- 群 ONLINE 有三重硬超时兜底（`no_interaction_timeout_seconds` / `idle_exit_seconds` / `max_online_seconds`），由 `_watchdog_loop` 巡检强制降级，不经过 fast 模型；持久化 ONLINE 记录超过 6 小时未更新会在启动时过期重置
+- 群 fast 决策显式注入 SOUL/USER/MEMORY、最近三天 daily memory，以及按 `place_scope_id` 隔离的完整当前未封闭 segment；焦点 user prompt 只携带判定元数据 + 监听时长/互动信号（`listening_stats()`），不重复正文
 - 群聊生命周期完全由 group listener 管理，不启动 scheduler followup，避免两套 ONLINE/SEMI_ONLINE 状态机并行
 - 表情包仅在配置 `fast-image` 时生成一句话描述并进入普通消息上下文；sticker 不进入 ImageStore、图片标签/OCR/描述重试或向量图库
 - 手动重建接口：`regenerate_today_plan(clear_existing=True)`

@@ -214,3 +214,11 @@ interaction:
     idle_seconds: 90              # pending 非空且最后消息静默多久后判断
     max_pending_messages: 20      # 仅限制运行时待判断窗口，不截断共享历史
     decision_timeout_seconds: 30  # fast 被动/追加判断超时
+    # 硬超时降级（不依赖 fast 模型，也不要求待判断窗口非空）；设为 0 关闭对应项
+    watchdog_interval_seconds: 30       # 看门狗巡检间隔
+    no_interaction_timeout_seconds: 1800  # 多久没人 @ / 回复 Nora 就退出监听
+    idle_exit_seconds: 1200            # 群里多久没有任何新消息就退出监听
+    max_online_seconds: 21600          # 单次 ONLINE 的绝对上限（6 小时）
+    directed_veto_seconds: 300         # 窗口内定向消息一票否决 SEMI_ONLINE 的时效
+    semi_online_vote_threshold: 2      # 连续多少轮 fast 投 SEMI_ONLINE 后允许带并发新消息强制降级
+    # 持久化的 ONLINE 记录超过 6 小时未更新时，在进程启动时自动重置为 SEMI_ONLINE

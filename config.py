@@ -235,6 +235,15 @@ def get_group_listener_config() -> dict:
         "idle_seconds": 90.0,
         "max_pending_messages": 20,
         "decision_timeout_seconds": 30.0,
+        # 硬超时降级（不经过模型），防止 ONLINE 永久挂着
+        "watchdog_interval_seconds": 30.0,
+        "no_interaction_timeout_seconds": 1800.0,
+        "idle_exit_seconds": 1200.0,
+        "max_online_seconds": 21600.0,
+        # 窗口内定向消息（@/回复 Nora）一票否决 SEMI_ONLINE 的时效
+        "directed_veto_seconds": 300.0,
+        # 连续多少轮 fast 都投 SEMI_ONLINE 时，允许带并发后缀强制降级
+        "semi_online_vote_threshold": 2,
     }
     merged = dict(defaults)
     if isinstance(raw, dict):
@@ -254,6 +263,13 @@ def get_group_listener_config() -> dict:
         "idle_seconds": (float, 0.01),
         "max_pending_messages": (int, 1),
         "decision_timeout_seconds": (float, 0.01),
+        "watchdog_interval_seconds": (float, 1.0),
+        # 0 表示关闭对应的硬超时
+        "no_interaction_timeout_seconds": (float, 0.0),
+        "idle_exit_seconds": (float, 0.0),
+        "max_online_seconds": (float, 0.0),
+        "directed_veto_seconds": (float, 0.0),
+        "semi_online_vote_threshold": (int, 1),
     }
     for key, (converter, minimum) in numeric_fields.items():
         try:

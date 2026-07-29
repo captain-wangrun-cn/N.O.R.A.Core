@@ -138,11 +138,28 @@ class GroupRuntimeState:
     pending_window: Deque[GroupMessageEvent] = field(default_factory=deque)
     new_since_passive_eval: int = 0
     last_received_at: float = 0.0
+    # 本群进入 ONLINE 的时间；进程重启后由持久化 updated_at 兜底。
+    online_since: float = 0.0
+    # 最近一次「与 Nora 的互动」：定向消息（@/回复 Nora）或 Nora 自己开始生成。
+    last_interaction_at: float = 0.0
+    last_passive_at: float = 0.0
+    # 连续 KEEP_LISTENING 次数 / 连续 SEMI_ONLINE 投票次数（供 prompt 与降级判定使用）。
+    consecutive_keep_listening: int = 0
+    consecutive_semi_online_votes: int = 0
     idle_generation: int = 0
     idle_task: Optional[asyncio.Task] = None
     passive_task: Optional[asyncio.Task] = None
     directed_handoff: bool = False
     generation: Optional[GenerationCycle] = None
+
+
+def _split_runtime_key(runtime_key: str) -> Tuple[str, str]:
+    """Split ``platform:chat_id`` so persisted records never lose platform metadata."""
+    key = str(runtime_key or "")
+    if ":" in key:
+        platform, chat_id = key.split(":", 1)
+        return platform.strip(), chat_id.strip()
+    return "", key.strip()
 
 
 PersistCallback = Callable[[Dict[str, Any]], Awaitable[None]]
@@ -168,6 +185,12 @@ class GroupListenerManager:
         idle_seconds: float = 90.0,
         max_pending: int = 20,
         enabled: bool = True,
+        watchdog_interval_seconds: float = 30.0,
+        no_interaction_timeout_seconds: float = 1800.0,
+        idle_exit_seconds: float = 1200.0,
+        max_online_seconds: float = 21600.0,
+        directed_veto_seconds: float = 300.0,
+        semi_online_vote_threshold: int = 2,
     ):
         self.store = store
         self.persist_message = persist_message
@@ -179,16 +202,148 @@ class GroupListenerManager:
         self.idle_seconds = max(0.01, float(idle_seconds))
         self.max_pending = max(1, int(max_pending))
         self.enabled = bool(enabled)
+        # 看门狗：唯一不依赖模型、也不依赖 pending 窗口非空的降级路径。
+        self.watchdog_interval_seconds = max(1.0, float(watchdog_interval_seconds))
+        self.no_interaction_timeout_seconds = max(0.0, float(no_interaction_timeout_seconds))
+        self.idle_exit_seconds = max(0.0, float(idle_exit_seconds))
+        self.max_online_seconds = max(0.0, float(max_online_seconds))
+        self.directed_veto_seconds = max(0.0, float(directed_veto_seconds))
+        self.semi_online_vote_threshold = max(1, int(semi_online_vote_threshold))
         self._states: Dict[str, GroupRuntimeState] = {}
         self._mode_lock = asyncio.Lock()
         self._sequence = 0
         self._generation_token = 0
         self._closed = False
+        self._watchdog_task: Optional[asyncio.Task] = None
 
     def mode_for(self, runtime_key: str) -> GroupPresence:
         if not self.enabled:
             return GroupPresence.SEMI_ONLINE
         return self.store.get(runtime_key)
+
+    def _event_vetoes_semi_online(self, event: GroupMessageEvent, now: float) -> bool:
+        """Whether a directed event is recent enough to block a SEMI_ONLINE decision."""
+        if not (event.explicit_bot_mention or event.reply_to_bot):
+            return False
+        if not self.directed_veto_seconds:
+            return True
+        received_at = float(event.received_at or 0.0)
+        if not received_at:
+            return True
+        return (now - received_at) < self.directed_veto_seconds
+
+    def _online_marks(self, runtime_key: str, state: GroupRuntimeState) -> Tuple[float, float]:
+        """Return (online_since, last_interaction_at), seeding from persisted state.
+
+        进程重启后运行时字段为 0，用持久化的 updated_at 兜底，
+        否则看门狗会把「刚重启」误判成「刚进入 ONLINE、从未互动」。
+        """
+        if not state.online_since:
+            persisted = 0.0
+            getter = getattr(self.store, "updated_at", None)
+            if callable(getter):
+                try:
+                    persisted = float(getter(runtime_key) or 0.0)
+                except Exception:
+                    persisted = 0.0
+            state.online_since = persisted or time.time()
+        if not state.last_interaction_at:
+            state.last_interaction_at = state.online_since
+        return state.online_since, state.last_interaction_at
+
+    def _ensure_watchdog(self) -> None:
+        if self._closed or not self.enabled:
+            return
+        if self._watchdog_task and not self._watchdog_task.done():
+            return
+        try:
+            self._watchdog_task = asyncio.create_task(self._watchdog_loop())
+        except RuntimeError:
+            # 无运行中的事件循环（同步构造/测试环境）——下次 receive 时再试。
+            self._watchdog_task = None
+
+    def start(self) -> None:
+        """Arm the demotion watchdog once the event loop is running.
+
+        必须在启动时显式调用：重启后如果某群仍持久化为 ONLINE 但一直没有新消息，
+        懒启动（receive / set_mode）永远不会触发，那条 ONLINE 就又挂住了。
+        """
+        self._ensure_watchdog()
+
+    async def _watchdog_loop(self) -> None:
+        """Force-demote ONLINE groups on hard timeouts, independent of the fast model.
+
+        这是唯一不经过模型、也不要求 pending_window 非空的降级路径。此前
+        「被 @ → 回复 → 群彻底安静」会把窗口清空，之后既不会再触发 fast 判断，
+        也没有任何超时，ONLINE 于是永久挂着。
+        """
+        try:
+            while not self._closed:
+                await asyncio.sleep(self.watchdog_interval_seconds)
+                if self._closed or not self.enabled:
+                    return
+                try:
+                    await self._run_watchdog_once()
+                except asyncio.CancelledError:
+                    raise
+                except Exception:
+                    logger.warning("群监听看门狗轮次异常", exc_info=True)
+        except asyncio.CancelledError:
+            return
+
+    def _demote_reason(
+        self,
+        runtime_key: str,
+        state: GroupRuntimeState,
+        now: float,
+        *,
+        prefix: str = "watchdog",
+    ) -> str:
+        """Compute a hard-timeout demotion reason. Caller must hold ``state.lock``."""
+        online_since, last_interaction_at = self._online_marks(runtime_key, state)
+        last_activity = max(state.last_received_at, last_interaction_at)
+        if self.max_online_seconds and now - online_since >= self.max_online_seconds:
+            return f"{prefix}_max_online"
+        if (
+            self.no_interaction_timeout_seconds
+            and now - last_interaction_at >= self.no_interaction_timeout_seconds
+        ):
+            return f"{prefix}_no_interaction"
+        if self.idle_exit_seconds and now - last_activity >= self.idle_exit_seconds:
+            return f"{prefix}_group_idle"
+        return ""
+
+    async def _run_watchdog_once(self) -> None:
+        now = time.time()
+        try:
+            online_keys = [
+                key for key, mode in self.store.all().items() if mode == GroupPresence.ONLINE
+            ]
+        except Exception:
+            logger.warning("群监听看门狗读取群状态失败", exc_info=True)
+            return
+
+        for runtime_key in online_keys:
+            state = self._state(runtime_key)
+            async with state.lock:
+                if state.generation or state.directed_handoff:
+                    continue
+                reason = self._demote_reason(runtime_key, state, now)
+                online_since = state.online_since
+                last_interaction_at = state.last_interaction_at
+            if not reason:
+                continue
+            logger.info(
+                "[%s] 群监听看门狗强制降级: reason=%s online_for=%.0fs "
+                "since_interaction=%.0fs since_message=%.0fs window=%d",
+                runtime_key,
+                reason,
+                now - online_since,
+                now - last_interaction_at,
+                now - state.last_received_at if state.last_received_at else -1,
+                len(state.pending_window),
+            )
+            await self.set_mode(runtime_key, GroupPresence.SEMI_ONLINE, reason=reason)
 
     async def set_mode(
         self,
@@ -202,16 +357,20 @@ class GroupListenerManager:
     ) -> bool:
         """Set the active group mode, demoting any previously ONLINE group."""
         mode = GroupPresence(mode)
+        now = time.time()
         async with self._mode_lock:
             state = self._state(runtime_key)
             async with state.lock:
                 if expected_last_sequence is not None:
                     if state.generation or state.directed_handoff or not state.pending_window:
                         return False
+                    if any(event.sequence > expected_last_sequence for event in state.pending_window):
+                        return False
+                    # 定向事件只在「近期」内一票否决。生成期到达的 reply_to_bot 会经
+                    # finish_generation 落进 pending_window，若无限期否决，它会一直
+                    # 卡住降级直到被 max_pending 挤出窗口。
                     if any(
-                        event.sequence > expected_last_sequence
-                        or event.explicit_bot_mention
-                        or event.reply_to_bot
+                        self._event_vetoes_semi_online(event, now)
                         for event in state.pending_window
                     ):
                         return False
@@ -225,11 +384,13 @@ class GroupListenerManager:
                     if key != runtime_key and current_mode == GroupPresence.ONLINE
                 ]
 
+            # 持久化记录必须带平台元数据，供过期巡检与跨平台排查使用。
+            key_platform, key_chat_id = _split_runtime_key(runtime_key)
             if not self.store.set(
                 runtime_key,
                 mode,
-                platform=platform,
-                platform_chat_id=platform_chat_id,
+                platform=platform or key_platform,
+                platform_chat_id=platform_chat_id or key_chat_id,
             ):
                 return False
 
@@ -237,9 +398,19 @@ class GroupListenerManager:
                 async with state.lock:
                     state.pending_window.clear()
                     state.new_since_passive_eval = 0
+                    state.consecutive_keep_listening = 0
+                    state.consecutive_semi_online_votes = 0
+                    state.online_since = 0.0
+                    state.last_interaction_at = 0.0
                     state.idle_generation += 1
                     self._cancel_task(state.idle_task)
                     state.idle_task = None
+            elif mode == GroupPresence.ONLINE and old_mode != GroupPresence.ONLINE:
+                async with state.lock:
+                    state.online_since = now
+                    state.last_interaction_at = now
+                    state.consecutive_keep_listening = 0
+                    state.consecutive_semi_online_votes = 0
 
             for replaced_key in replaced:
                 replaced_state = self._states.get(replaced_key)
@@ -252,6 +423,9 @@ class GroupListenerManager:
                     runtime_key,
                     reason,
                 )
+
+        if mode == GroupPresence.ONLINE:
+            self._ensure_watchdog()
 
         if old_mode != mode:
             logger.info(
@@ -297,6 +471,10 @@ class GroupListenerManager:
             run_passive = False
             async with state.lock:
                 state.last_received_at = event.received_at
+                self._online_marks(runtime_key, state)
+                if event.explicit_bot_mention or event.reply_to_bot:
+                    # 与 Nora 的真实互动：刷新看门狗的「无互动」计时。
+                    state.last_interaction_at = event.received_at
                 self._reset_idle_timer(runtime_key, state)
                 generation = state.generation
                 if generation is not None:
@@ -362,6 +540,7 @@ class GroupListenerManager:
                         state.directed_handoff = False
         if run_passive:
             self._ensure_passive_task(runtime_key, trigger="count")
+        self._ensure_watchdog()
         return True
 
     async def begin_generation(
@@ -396,6 +575,11 @@ class GroupListenerManager:
                     cycle.ordinary_bucket.extend(previous.ordinary_bucket)
                 state.generation = cycle
                 state.directed_handoff = False
+                self._online_marks(runtime_key, state)
+                # Nora 自己开始生成也算一次互动，避免生成期间被看门狗掐掉。
+                state.last_interaction_at = time.time()
+                state.consecutive_keep_listening = 0
+                state.consecutive_semi_online_votes = 0
                 self._cancel_task(state.idle_task)
                 state.idle_task = None
                 return cycle.token
@@ -425,7 +609,9 @@ class GroupListenerManager:
             state.generation = None
             if state.pending_window:
                 run_passive = state.new_since_passive_eval >= self.batch_size
-                self._reset_idle_timer(runtime_key, state)
+            # 窗口为空时同样重装 idle 定时器：这条路径（回复完 → 群安静）此前不装表，
+            # 于是再也没有任何本地检查会跑到，只能等看门狗。
+            self._reset_idle_timer(runtime_key, state)
         if run_passive:
             self._ensure_passive_task(runtime_key, trigger="post_generation")
         return True
@@ -464,9 +650,43 @@ class GroupListenerManager:
     def pending_events(self, runtime_key: str) -> List[GroupMessageEvent]:
         return list(self._state(runtime_key).pending_window)
 
+    def listening_stats(self, runtime_key: str) -> Dict[str, Any]:
+        """Timing signals for the fast classifier prompt.
+
+        分类器此前只拿到窗口计数，无从知道这个群已经开着多久、连续多少轮没插话，
+        所以「主动性不够」并非模型判断力问题，而是缺少判断依据。
+        """
+        state = self._state(runtime_key)
+        now = time.time()
+        online_since = state.online_since
+        if not online_since:
+            getter = getattr(self.store, "updated_at", None)
+            if callable(getter):
+                try:
+                    online_since = float(getter(runtime_key) or 0.0)
+                except Exception:
+                    online_since = 0.0
+        last_interaction_at = state.last_interaction_at or online_since
+        last_activity = state.last_received_at or online_since
+        return {
+            "online_seconds": max(0.0, now - online_since) if online_since else 0.0,
+            "seconds_since_interaction": (
+                max(0.0, now - last_interaction_at) if last_interaction_at else 0.0
+            ),
+            "seconds_since_message": max(0.0, now - last_activity) if last_activity else 0.0,
+            "consecutive_keep_listening": int(state.consecutive_keep_listening),
+            "consecutive_semi_online_votes": int(state.consecutive_semi_online_votes),
+            "no_interaction_timeout_seconds": float(self.no_interaction_timeout_seconds),
+            "idle_exit_seconds": float(self.idle_exit_seconds),
+        }
+
     async def shutdown(self) -> None:
         self._closed = True
         tasks: List[asyncio.Task] = []
+        if self._watchdog_task and not self._watchdog_task.done():
+            self._watchdog_task.cancel()
+            tasks.append(self._watchdog_task)
+        self._watchdog_task = None
         for state in self._states.values():
             for task in (state.idle_task, state.passive_task):
                 if task and not task.done():
@@ -513,14 +733,34 @@ class GroupListenerManager:
         try:
             await asyncio.sleep(self.idle_seconds)
             state = self._state(runtime_key)
+            demote_reason = ""
             async with state.lock:
                 if (
                     generation != state.idle_generation
                     or state.generation
                     or state.directed_handoff
-                    or not state.pending_window
                 ):
                     return
+                if not state.pending_window:
+                    # 窗口为空此前直接 return：这正是「被 @ → 回复 → 群彻底安静」
+                    # 之后再也不会被评估、ONLINE 永久挂着的原因。改为按硬超时判定降级。
+                    demote_reason = self._demote_reason(runtime_key, state, time.time())
+                    if not demote_reason:
+                        return
+                    # 摘掉自身引用，避免 set_mode 里的 _cancel_task 取消当前任务。
+                    if state.idle_task is asyncio.current_task():
+                        state.idle_task = None
+            if demote_reason:
+                if self.mode_for(runtime_key) != GroupPresence.ONLINE:
+                    return
+                logger.info(
+                    "[%s] 群监听空窗口静默降级: reason=%s idle_seconds=%.0f",
+                    runtime_key,
+                    demote_reason,
+                    self.idle_seconds,
+                )
+                await self.set_mode(runtime_key, GroupPresence.SEMI_ONLINE, reason=demote_reason)
+                return
             self._ensure_passive_task(runtime_key, trigger="idle")
         except asyncio.CancelledError:
             return
@@ -541,6 +781,7 @@ class GroupListenerManager:
         state = self._state(runtime_key)
         snapshot: List[GroupMessageEvent] = []
         snapshot_last_sequence = 0
+        force_rerun = False
         try:
             async with state.lock:
                 if state.generation or state.directed_handoff or not state.pending_window:
@@ -548,42 +789,70 @@ class GroupListenerManager:
                 snapshot = list(state.pending_window)
                 snapshot_last_sequence = snapshot[-1].sequence
                 state.new_since_passive_eval = 0
+                state.last_passive_at = time.time()
             try:
                 action = PassiveAction(await self.decide_passive(runtime_key, snapshot))
             except Exception:
                 logger.warning("[%s] 群监听 fast 判断失败，保留窗口", runtime_key, exc_info=True)
                 action = PassiveAction.KEEP_LISTENING
 
+            now = time.time()
             if action == PassiveAction.SEMI_ONLINE and any(
-                event.explicit_bot_mention or event.reply_to_bot for event in snapshot
+                self._event_vetoes_semi_online(event, now) for event in snapshot
             ):
                 logger.warning(
-                    "[%s] 群监听拒绝定向窗口的 SEMI_ONLINE 决策: window=%d",
+                    "[%s] 群监听拒绝近期定向窗口的 SEMI_ONLINE 决策: window=%d veto_window=%.0fs",
                     runtime_key,
                     len(snapshot),
+                    self.directed_veto_seconds,
                 )
                 action = PassiveAction.KEEP_LISTENING
 
             promote_events: List[GroupMessageEvent] = []
             semi_online_candidate = False
+            semi_online_expected: Optional[int] = None
             async with state.lock:
                 prefix = [event for event in state.pending_window if event.sequence <= snapshot_last_sequence]
                 suffix = [event for event in state.pending_window if event.sequence > snapshot_last_sequence]
                 if action == PassiveAction.REPLY:
                     promote_events = prefix
                     state.pending_window = deque(suffix)
+                    state.consecutive_keep_listening = 0
+                    state.consecutive_semi_online_votes = 0
                 elif action == PassiveAction.SEMI_ONLINE:
-                    semi_online_candidate = bool(prefix) and not suffix
+                    state.consecutive_keep_listening = 0
+                    state.consecutive_semi_online_votes += 1
+                    if not prefix:
+                        pass
+                    elif not suffix:
+                        semi_online_candidate = True
+                        semi_online_expected = snapshot_last_sequence
+                    elif state.consecutive_semi_online_votes >= self.semi_online_vote_threshold:
+                        # 并发后缀此前会让 SEMI_ONLINE 结论静默作废；活跃群里这是常态，
+                        # 于是正确的降级判断被反复丢掉。连续多轮都投 SEMI_ONLINE 时
+                        # 直接按当前窗口末尾降级，后缀随 set_mode 一起清空。
+                        semi_online_candidate = True
+                        semi_online_expected = state.pending_window[-1].sequence
+                    else:
+                        force_rerun = True
+                else:
+                    state.consecutive_keep_listening += 1
+                    state.consecutive_semi_online_votes = 0
                 if state.pending_window and not semi_online_candidate:
                     self._reset_idle_timer(runtime_key, state)
+                keep_streak = state.consecutive_keep_listening
+                semi_votes = state.consecutive_semi_online_votes
 
             logger.info(
-                "[%s] 群监听 fast=%s trigger=%s window=%d concurrent_suffix=%d",
+                "[%s] 群监听 fast=%s trigger=%s window=%d concurrent_suffix=%d "
+                "keep_streak=%d semi_votes=%d",
                 runtime_key,
                 action.value,
                 trigger,
                 len(snapshot),
                 len(suffix),
+                keep_streak,
+                semi_votes,
             )
             if semi_online_candidate:
                 first = snapshot[0]
@@ -593,11 +862,11 @@ class GroupListenerManager:
                     platform=first.platform,
                     platform_chat_id=first.platform_chat_id,
                     reason="fast_passive_semi_online",
-                    expected_last_sequence=snapshot_last_sequence,
+                    expected_last_sequence=semi_online_expected,
                 )
                 if not changed:
                     logger.info(
-                        "[%s] 群监听忽略过期 SEMI_ONLINE 决策，新消息或生成已出现",
+                        "[%s] 群监听忽略过期 SEMI_ONLINE 决策，新消息或生成已出现（保留投票计数）",
                         runtime_key,
                     )
                     async with state.lock:
@@ -611,8 +880,8 @@ class GroupListenerManager:
                     state.passive_task = None
                 rerun = bool(
                     not state.generation
-                    and state.new_since_passive_eval >= self.batch_size
                     and state.pending_window
+                    and (force_rerun or state.new_since_passive_eval >= self.batch_size)
                 )
             if rerun:
                 self._ensure_passive_task(runtime_key, trigger="queued")

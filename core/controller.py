@@ -234,6 +234,12 @@ class NoraController(
 
         group_listener_cfg = config.get_group_listener_config()
         self.group_presence_store = GroupPresenceStore()
+        expired_groups = self.group_presence_store.expire_stale_entries()
+        if expired_groups:
+            logger.warning(
+                "检测到 %d 个长时间未更新的 ONLINE 群记录，已重置为 SEMI_ONLINE",
+                len(expired_groups),
+            )
         demoted_groups = self.group_presence_store.normalize_single_online()
         if demoted_groups:
             logger.warning(
@@ -253,6 +259,12 @@ class NoraController(
             idle_seconds=group_listener_cfg["idle_seconds"],
             max_pending=group_listener_cfg["max_pending_messages"],
             enabled=group_listener_cfg["enabled"],
+            watchdog_interval_seconds=group_listener_cfg["watchdog_interval_seconds"],
+            no_interaction_timeout_seconds=group_listener_cfg["no_interaction_timeout_seconds"],
+            idle_exit_seconds=group_listener_cfg["idle_exit_seconds"],
+            max_online_seconds=group_listener_cfg["max_online_seconds"],
+            directed_veto_seconds=group_listener_cfg["directed_veto_seconds"],
+            semi_online_vote_threshold=group_listener_cfg["semi_online_vote_threshold"],
         )
         self.group_listener_decision_timeout = group_listener_cfg["decision_timeout_seconds"]
         
@@ -396,10 +408,31 @@ class NoraController(
         for known in self.conversation_identities.values():
             if known.platform_chat_id == key:
                 return known
+        # 群在线状态表里只会出现群 runtime_key。重启后身份缓存为空时，
+        # 用它兜底判断 chat_type，避免把群 key 当私聊登记进缓存。
+        fallback_chat_type = "group" if self._is_known_group_runtime_key(key) else "private"
         if ":" in key:
             platform, chat_id = key.split(":", 1)
-            return self._identity_from_parts(chat_id=chat_id, user_id=chat_id, platform=platform)
-        return self._identity_from_parts(chat_id=key, user_id=key)
+            return self._identity_from_parts(
+                chat_id=chat_id,
+                user_id=chat_id,
+                chat_type=fallback_chat_type,
+                platform=platform,
+            )
+        return self._identity_from_parts(
+            chat_id=key,
+            user_id=key,
+            chat_type=fallback_chat_type,
+        )
+
+    def _is_known_group_runtime_key(self, runtime_key: str) -> bool:
+        store = getattr(self, "group_presence_store", None)
+        if store is None:
+            return False
+        try:
+            return str(runtime_key) in (store.all() or {})
+        except Exception:
+            return False
 
     def _target_for_key(self, chat_or_runtime_key: str) -> Dict[str, Any]:
         return conversation_target_dict(self._identity_for_runtime_key(str(chat_or_runtime_key)))
@@ -745,6 +778,11 @@ class NoraController(
 
     async def start_triggers(self, default_chat_id: str = ""):
         """启动 Trigger 系统。应在 adapter 就绪后调用。"""
+        # 群监听降级看门狗需要运行中的事件循环，随公共服务一起启动。
+        try:
+            self.group_listener.start()
+        except Exception:
+            logger.warning("群监听看门狗启动失败", exc_info=True)
         if self.trigger_manager:
             if default_chat_id:
                 self.trigger_manager.default_chat_id = default_chat_id
