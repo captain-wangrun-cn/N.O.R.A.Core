@@ -1,3 +1,44 @@
+## 近期关键改动（截至 2026-07-29）
+
+### 🐛 修复长期存在的"AI 说用户发了两次消息"
+
+根因不是某个平台/场景的 bug，而是设计层面的错配：写库侧 `add_message` 会**改写**内容
+（时间戳前缀、跨地点来源标签、表情包描述，群聊批次还会整体重排），而去重侧靠**字符串相等**
+比较内存里的原文与历史尾部的 content。每新增一种内容加工，比较就重新失配，历史里的当前消息
+没被剔除，模型看到同一句话两遍。时间线上 02-08 引入「存库→读回→又单独传」结构，02-09 加时间戳前缀，
+03-14 才补上剥离但正则只认分钟精度，03-16 默认格式换成带秒与星期（`%Y-%m-%d %H:%M:%S %A`）后彻底失效至今。
+
+**主修：按行 id 去重（内容怎么加工都不影响）**
+- 新增 `core/message_dedup.py`：`record_persisted_user_message` / `persisted_user_message_ids` /
+  `clear_persisted_user_messages` / `merge_persisted_user_messages` / `drop_current_user_message`。
+  id 列表整体重绑而非原地 append（context 常被浅拷贝传递）。
+- 全部 6 处 `role="user"` 的 `add_message` 调用点改为接住返回的行 id 并记入 context：
+  `core/back_brain.py`、`core/message_handler.py`（ONLINE 群留存 / busy+媒体 / busy+文本 / 前脑优先常规路径 / 排队确认）。
+- 两处比较点（`core/front_brain.py`、`core/back_brain.py`）改用 `drop_current_user_message`：
+  有 id 记录时按 id 精确剔除（任意位置、任意条数），无记录时才退回旧的尾部内容比较，兼容旧调用方与既有测试。
+- 生命周期打通：群聊 promoted 批次合并各 ONLINE 事件的 id；图片合并重启携带上一轮 id；
+  轮询 continue 分支把 `context["text"]` 改写成"继续处理"后清除 id 记录。
+
+**顺带：时间戳正则收敛**
+- `core/routing.py` 的宽正则提升为公开 `strip_timestamp_markers`，成为唯一实现；
+  `front_brain` / `back_brain` / `interrupt_handler` 里三份只认分钟精度的窄副本删除，classmethod 改为委托。
+  这同时修掉了原始时间戳泄漏进模型可见历史的问题。
+
+**顺带修的两个群聊缺陷**
+- `core/message_handler.py` busy 路径的媒体分支与文本分支此前无条件写库，忽略 `_message_saved`，
+  ONLINE 群消息会被写两条；现已加守卫。
+
+**回归测试（此前完全没有覆盖，才让 bug 活了几个月）**
+- `tests/test_message_dedup.py`：单元覆盖 id 记录/浅拷贝隔离/合并/清除/按 id 剔除（含群聊多条批次）/字符串兜底。
+- `tests/test_current_message_dedup_e2e.py`：用真实 `MessageHistory`（临时目录、生产时间戳格式
+  `%Y-%m-%d %H:%M:%S %A`）走一遍前脑，断言当前消息在 history 中出现 0 次、历史里无裸时间戳前缀。
+  已验证：把去重退回旧行为（窄正则 + 纯字符串比较）后这 3 个测试全部失败。
+- 全量：`.venv/Scripts/python.exe -m pytest tests/ -q` → 457 passed, 9 failed，
+  失败全部是既有基线（`test_context_pricing` 4、`test_cost_tracker` 2、`test_message_history_retry_queue` 2
+  缺 pytest-asyncio、`test_timezone` 1），与本次改动无关。
+
+---
+
 ## 近期关键改动（截至 2026-07-28）
 
 ### 👥 群 fast 完整上下文、sticker 隔离与 OneBot 交互

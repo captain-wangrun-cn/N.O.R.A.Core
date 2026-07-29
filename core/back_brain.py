@@ -23,6 +23,12 @@ from brain.prompts import (
 )
 from brain.multimodal import extract_image_payloads, extract_video_payloads, get_sticker_images
 from core.message_handler import group_message_content, reply_target_message_id
+from core.message_dedup import (
+    drop_current_user_message,
+    persisted_user_message_ids,
+    record_persisted_user_message,
+)
+from core.routing import strip_timestamp_markers
 from core.scene_context import build_current_scene_block
 from core.worker_status import WorkerStatus
 import config
@@ -71,7 +77,6 @@ def _image_ids_by_platform_message_id(
 class BackBrainMixin:
     """后脑工具循环执行 + 文本清洗工具方法。"""
 
-    _TIMESTAMP_PATTERN = re.compile(r"\[\d{4}-\d{2}-\d{2} \d{2}:\d{2}\]\s*")
     TOOL_LOOP_HINT_COUNT = 3
     TOOL_LOOP_FORCE_COUNT = 5
     EDIT_FILE_HINT_COUNT = 3
@@ -104,9 +109,7 @@ class BackBrainMixin:
     @classmethod
     def _strip_timestamp_markers(cls, text: str) -> str:
         """移除消息中的自动时间戳标记，避免泄漏到用户侧。"""
-        if not text:
-            return ""
-        return cls._TIMESTAMP_PATTERN.sub("", text).strip()
+        return strip_timestamp_markers(text)
 
     @classmethod
     def _strip_stream_think_segment(cls, text: str, in_think_block: bool) -> tuple[str, bool]:
@@ -431,6 +434,9 @@ class BackBrainMixin:
             "text": text,
             "multimodal_images": list(multimodal_images),
             "multimodal_videos": list(multimodal_videos),
+            # 合并重启时新 context 会把旧文本拼进本轮输入，因此旧文本对应的库行 id
+            # 也要一起带过去，否则那一条会在历史里再出现一次。
+            "persisted_user_message_ids": sorted(persisted_user_message_ids(context)),
         }
         # 初始化本次后脑流式缓冲（被打断时作为草稿带入合并重启）
         self.back_brain_partial[chat_id] = ""
@@ -527,7 +533,7 @@ class BackBrainMixin:
                 if platform_msg_ids:
                     user_metadata["platform_message_ids"] = platform_msg_ids
 
-                self.message_history.add_message(
+                saved_message_id = self.message_history.add_message(
                     platform=platform,
                     chat_id=storage_id,
                     role="user",
@@ -538,6 +544,7 @@ class BackBrainMixin:
                     place_scope_id=place_scope_id,
                     actor_display_name=actor_display_name,
                 )
+                record_persisted_user_message(context, saved_message_id)
 
             # --- 1. RAG 记忆检索 (Memory Retrieval) ---
             rag_context = ""
@@ -767,10 +774,9 @@ class BackBrainMixin:
                     front_brain_handled or context.get("_message_saved")
                 ):
                     db_context.pop()
-                
-                # 再看看末部的是不是刚好就是本轮要处理的用户消息
-                if db_context and db_context[-1].get("role") == "user" and str(db_context[-1].get("content", "")) == message_content:
-                    db_context.pop()
+
+                # 再剔除本轮要处理的用户消息本身（按写库行 id，内容加工不影响）
+                db_context = drop_current_user_message(db_context, context, message_content)
 
             in_polling_mode = context.get("_in_polling_loop", False)
             polling_backend_history = list(session.get("_polling_backend_history") or [])

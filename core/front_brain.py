@@ -6,7 +6,6 @@ Copyright © WR（captain-wangrun-cn） All rights reserved
 """前脑 Mixin — 即时回复 + 审查后脑结果。"""
 
 import logging
-import re
 from typing import Dict, Any, List, Optional, cast
 
 from brain.prompts import (
@@ -23,7 +22,12 @@ from brain.prompts import (
 )
 from skills.loader import SkillLoader
 from core.message_handler import group_message_content
-from core.routing import parse_front_brain_response, parse_front_brain_review
+from core.message_dedup import drop_current_user_message
+from core.routing import (
+    parse_front_brain_response,
+    parse_front_brain_review,
+    strip_timestamp_markers,
+)
 from core.scene_context import build_current_scene_block, should_redact_cross_place_details
 import config
 
@@ -33,7 +37,6 @@ logger = logging.getLogger(__name__)
 class FrontBrainMixin:
     """前脑即时回复 + 后脑结果审查。"""
 
-    _TIMESTAMP_PATTERN = re.compile(r"\[\d{4}-\d{2}-\d{2} \d{2}:\d{2}\]\s*")
     _BLOCK_TAG_PAIRS = [
         ("[TASK_INSTRUCTION]", "[/TASK_INSTRUCTION]"),
     ]
@@ -84,9 +87,7 @@ class FrontBrainMixin:
 
     @classmethod
     def _strip_timestamp_markers(cls, text: str) -> str:
-        if not text:
-            return ""
-        return cls._TIMESTAMP_PATTERN.sub("", text).strip()
+        return strip_timestamp_markers(text)
 
     @classmethod
     def _find_unclosed_block_tags(cls, text: str) -> List[str]:
@@ -484,13 +485,10 @@ class FrontBrainMixin:
             platform, storage_id, memory_scope_id=memory_scope_id, current_place_scope_id=place_scope_id
         )
 
-        # 去掉最后一条 user 消息（避免和 user_prompt 重复）
+        # 剔除历史里"本轮当前用户消息"那一条（它已经作为 user_prompt 单独传入）。
+        # 按写库时记录的行 id 精确剔除；没有 id 记录时才退回内容比较。
         message_content = group_message_content(context, user_name, text, chat_type)
-        if db_context:
-            last_msg = db_context[-1]
-            last_content = self._strip_timestamp_markers(str(last_msg.get("content", "")))
-            if last_msg.get("role") == "user" and last_content == message_content:
-                db_context = db_context[:-1]
+        db_context = drop_current_user_message(db_context, context, message_content)
 
         history = [
             {

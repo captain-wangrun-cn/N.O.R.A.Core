@@ -316,7 +316,14 @@ class MessageHistory:
         添加一条消息
 
     自动插入时间戳（每条消息都会插入）:
-    - 时间戳格式: [YYYY-MM-DD HH:MM]
+    - 格式由 self.timestamp_format 决定（配置项 memory.message_history.timestamp_format，
+      默认 "%Y-%m-%d %H:%M:%S %A"），入库内容会被改写成 "[<时间>] <原文>"。
+    - 解析/剥离时间戳前缀请统一用 core.routing.strip_timestamp_markers，
+      不要在别处写窄正则——内容加工一变，窄正则就会静默失配。
+
+    注意：入库内容还可能被继续加工（跨地点来源标签、表情包描述等），
+    所以「判断某条历史是否等于本轮输入」不要比较字符串，改用本函数返回的行 id
+    （见 core/message_dedup.py）。
 
     跨平台接力字段（默认值保证旧调用方兼容）:
     - memory_scope_id: 共享上下文主键；缺省归入默认共享作用域。

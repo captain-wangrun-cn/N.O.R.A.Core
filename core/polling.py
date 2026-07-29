@@ -10,6 +10,7 @@ import logging
 import time
 from typing import Dict, Any
 
+from core.message_dedup import clear_persisted_user_messages
 from core.message_handler import reply_target_message_id
 
 logger = logging.getLogger(__name__)
@@ -258,6 +259,9 @@ class PollingMixin:
                     context = context.copy()
                     context["text"] = new_instruction
                     context["_front_brain_handled"] = True
+                    # 本轮输入已被改写成"继续处理"的指示，原用户消息回归普通历史；
+                    # 清除其行 id 记录，避免后脑把这条真实历史误当成当前输入剔除。
+                    clear_persisted_user_messages(context)
                     context["_front_brain_reply"] = review_reply if should_reply else ""
                     context["task_instruction"] = task_instruction
                     context["_polling_previous_backend_result"] = self._compact_polling_handoff(backend_result)

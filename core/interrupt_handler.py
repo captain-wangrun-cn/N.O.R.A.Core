@@ -17,6 +17,7 @@ from brain.prompts import (
     should_inject_custom,
     load_identity_context,
 )
+from core.routing import strip_timestamp_markers
 from core.scene_context import build_current_scene_block, should_redact_cross_place_details
 from core.worker_status import WorkerStatus
 
@@ -26,13 +27,9 @@ logger = logging.getLogger(__name__)
 class InterruptHandlerMixin:
     """后端忙碌时的用户意图检测与任务打断。"""
 
-    _TIMESTAMP_PATTERN = re.compile(r"\[\d{4}-\d{2}-\d{2} \d{2}:\d{2}\]\s*")
-
     @classmethod
     def _strip_timestamp_markers(cls, text: str) -> str:
-        if not text:
-            return ""
-        return cls._TIMESTAMP_PATTERN.sub("", text).strip()
+        return strip_timestamp_markers(text)
 
     async def _detect_interrupt_intent_and_reply(
         self,

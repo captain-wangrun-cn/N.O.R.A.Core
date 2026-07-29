@@ -148,11 +148,21 @@ _SOURCE_LABEL_PATTERN = re.compile(
 )
 
 
-def _strip_timestamp_markers(text: str) -> str:
-    """移除消息中的自动时间戳标记，避免泄漏到用户侧。"""
+def strip_timestamp_markers(text: str) -> str:
+    """移除 add_message 注入的自动时间戳标记，避免泄漏到用户/模型可见文本。
+
+    时间戳格式由 memory.message_history.timestamp_format 配置（默认带秒和星期），
+    因此这里的模式必须宽松匹配到「秒 + 任意尾部字段」。全项目共用此实现，
+    不要再各自复制窄版正则——历史上正是三份窄正则跟不上配置格式，导致
+    时间戳既泄漏给模型，又让依赖字符串比较的去重逻辑长期失效。
+    """
     if not text:
         return ""
     return _TIMESTAMP_PATTERN.sub("", text).strip()
+
+
+# 向后兼容的内部别名
+_strip_timestamp_markers = strip_timestamp_markers
 
 
 def sanitize_adapter_output_text(text: str) -> str:

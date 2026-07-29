@@ -52,6 +52,26 @@
 - `get_context_messages()` 在跨段落消息之间自动插入分隔标记，帮助 LLM 理解时间结构。
 - `clear_chat_history` / `clear_all_history` 会同时清理 `conversation_sessions` 表。
 
+### ❌ 本轮用户消息在模型输入里出现两次（AI 反馈"你发了两次"）
+
+所有大脑的输入都是「历史上下文 + 当前用户消息」，而当前用户消息在生成前就已写进
+`messages` 表，因此历史里必然包含它一次，**必须在拼 history 时剔除**。
+
+- **不要按字符串相等判断。** `add_message` 会改写入库内容：时间戳前缀、跨地点来源标签
+  `[来自 …]`、表情包描述 `[表情包: …]`；群聊提升批次更会把多条消息重排成另一种格式。
+  每新增一种内容加工，字符串比较就重新失配，去重静默失效——这个问题因此活了好几个月。
+- **正确做法：按行 id 去重。** 写库时把 `add_message` 返回的自增 id 记进 context
+  （`core/message_dedup.py` → `record_persisted_user_message`），下游用
+  `drop_current_user_message(db_context, context, fallback)` 排除。内容怎么加工都不影响，
+  也能覆盖"一次输入对应多条库记录"的群聊批次。
+- **新增 `role="user"` 的 `add_message` 调用点时，必须同时记录返回的 id**，否则该路径又会退化
+  成字符串兜底。context 被改写成别的指示时（如轮询 continue 分支）要调用
+  `clear_persisted_user_messages`。
+- **剥时间戳只用 `core.routing.strip_timestamp_markers`**，不要在各处再写窄正则。历史上曾有三份
+  只认分钟精度的副本，而实际格式默认带秒和星期（`%Y-%m-%d %H:%M:%S %A`），全部失配。
+- context 常被 `dict(...)` / `.copy()` 浅拷贝传递，所以 id 列表是**整体重绑**而非原地 append，
+  避免串改上游 context。
+
 ---
 
 ## 4. 流式输出 / [SPLIT]

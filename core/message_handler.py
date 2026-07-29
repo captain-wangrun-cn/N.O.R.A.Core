@@ -23,6 +23,10 @@ from brain.prompts import (
 )
 from core.group_listener import AppendAction, GroupMessageEvent, PassiveAction
 from core.group_presence_store import GroupPresence
+from core.message_dedup import (
+    merge_persisted_user_messages,
+    record_persisted_user_message,
+)
 from core.private_presence_store import PrivatePresenceStore
 from core.routing import has_image_input, sanitize_adapter_output_text, sanitize_user_visible_text
 from core.conversation_identity import conversation_target_dict, normalize_chat_type
@@ -192,7 +196,7 @@ class MessageHandlerMixin:
                     logger.debug(f"[group_persist] 表情包描述注入: {desc[:60]}")
             except Exception as e:
                 logger.warning(f"[group_persist] 表情包描述生成失败（不影响消息持久化）: {e}")
-        self.message_history.add_message(
+        saved_message_id = self.message_history.add_message(
             platform=identity.platform,
             chat_id=identity.storage_id,
             role="user",
@@ -203,6 +207,7 @@ class MessageHandlerMixin:
             place_scope_id=identity.place_scope_id,
             actor_display_name=identity.actor_display_name,
         )
+        record_persisted_user_message(context, saved_message_id)
         context["_message_saved"] = True
 
     @staticmethod
@@ -414,6 +419,9 @@ class MessageHandlerMixin:
         )
         if continuation_token is not None:
             context["_group_listener_continuation_token"] = continuation_token
+        # 批次里的每条 ONLINE 消息都已经各自入库；把它们的行 id 全部并入批次 context，
+        # 这样下游按 id 去重时能整段剔除，而不必去匹配被重排过的批次文本。
+        merge_persisted_user_messages(context, [event.context for event in events])
         return context
 
     async def _promote_group_message_batch(
@@ -682,17 +690,19 @@ class MessageHandlerMixin:
                 if platform_msg_ids:
                     user_metadata["platform_message_ids"] = platform_msg_ids
 
-                self.message_history.add_message(
-                    platform=platform,
-                    chat_id=storage_id,
-                    role="user",
-                    content=message_content,
-                    user_id=user_id,
-                    metadata=user_metadata or None,
-                    memory_scope_id=memory_scope_id,
-                    place_scope_id=place_scope_id,
-                    actor_display_name=actor_display_name,
-                )
+                if not context.get("_message_saved"):
+                    saved_message_id = self.message_history.add_message(
+                        platform=platform,
+                        chat_id=storage_id,
+                        role="user",
+                        content=message_content,
+                        user_id=user_id,
+                        metadata=user_metadata or None,
+                        memory_scope_id=memory_scope_id,
+                        place_scope_id=place_scope_id,
+                        actor_display_name=actor_display_name,
+                    )
+                    record_persisted_user_message(context, saved_message_id)
                 context["_message_saved"] = True
 
                 # 收集旧后脑的输入快照与已生成草稿
@@ -754,6 +764,12 @@ class MessageHandlerMixin:
                 if prior_partial:
                     merged_context["_back_brain_prior_partial"] = prior_partial
                 merged_context["_message_saved"] = True
+                # 旧后脑那一轮的用户消息也被合进本轮输入了，把它的库行 id 一起带上，
+                # 否则历史里会再出现一次同样的话。
+                merge_persisted_user_messages(
+                    merged_context,
+                    [prior_input.get("persisted_user_message_ids") or []],
+                )
                 # 清理上一轮残留：旧 input_context 和 partial 我们已经吃掉了
                 self.back_brain_partial.pop(backend_runtime, None)
                 self.back_brain_input_context.pop(backend_runtime, None)
@@ -773,17 +789,19 @@ class MessageHandlerMixin:
             if platform_msg_ids:
                 user_metadata["platform_message_ids"] = platform_msg_ids
 
-            self.message_history.add_message(
-                platform=platform,
-                chat_id=storage_id,
-                role="user",
-                content=message_content,
-                user_id=user_id,
-                metadata=user_metadata or None,
-                memory_scope_id=memory_scope_id,
-                place_scope_id=place_scope_id,
-                actor_display_name=actor_display_name,
-            )
+            if not context.get("_message_saved"):
+                saved_message_id = self.message_history.add_message(
+                    platform=platform,
+                    chat_id=storage_id,
+                    role="user",
+                    content=message_content,
+                    user_id=user_id,
+                    metadata=user_metadata or None,
+                    memory_scope_id=memory_scope_id,
+                    place_scope_id=place_scope_id,
+                    actor_display_name=actor_display_name,
+                )
+                record_persisted_user_message(context, saved_message_id)
             decision = await self._detect_interrupt_intent_and_reply(chat_id, text, status, backend_runtime=backend_runtime)
             action = decision.get("action", "queue")
             reply = decision.get("reply", "")
@@ -943,7 +961,7 @@ class MessageHandlerMixin:
             if platform_msg_ids:
                 user_metadata["platform_message_ids"] = platform_msg_ids
 
-            self.message_history.add_message(
+            saved_message_id = self.message_history.add_message(
                 platform=platform,
                 chat_id=storage_id,
                 role="user",
@@ -954,6 +972,7 @@ class MessageHandlerMixin:
                 place_scope_id=place_scope_id,
                 actor_display_name=actor_display_name,
             )
+            record_persisted_user_message(context, saved_message_id)
             context["_message_saved"] = True
 
         # 2) 前脑生成即时回复 + 路由判断（包成 task 以便后续到达的新消息能打断它）
@@ -1461,7 +1480,7 @@ class MessageHandlerMixin:
         if platform_msg_ids:
             user_metadata["platform_message_ids"] = platform_msg_ids
 
-        self.message_history.add_message(
+        saved_message_id = self.message_history.add_message(
             platform=platform,
             chat_id=storage_id,
             role="user",
@@ -1472,6 +1491,7 @@ class MessageHandlerMixin:
             place_scope_id=place_scope_id,
             actor_display_name=actor_display_name,
         )
+        record_persisted_user_message(context, saved_message_id)
         context["_message_saved"] = True
 
         session_history = session.setdefault("history", [])
