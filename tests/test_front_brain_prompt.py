@@ -229,8 +229,95 @@ def test_group_listener_classifier_jsonl_preserves_routing_metadata():
     assert "补充条件" not in __import__("json").dumps(payload, ensure_ascii=False)
     assert "之前的回答" not in __import__("json").dumps(payload, ensure_ascii=False)
     promoted = MessageHandlerMixin._format_group_events([event])
-    assert promoted == "[7] 群友A id=12（回复 Nora#10）: 补充条件"
+    assert promoted == (
+        "[7] 群友A（平台用户 ID: 20002；本条消息 ID: 12；本条 @ 了你；本条回复的是你的消息）"
+        "（引用 Nora 的消息，平台用户 ID: nora；消息 ID: 10）: 补充条件"
+    )
     assert not promoted.startswith("{")
+
+
+def test_promoted_batch_attributes_every_line_to_its_sender():
+    """多行正文（引用块/表情包描述）不能让后续行看起来像别人说的话。"""
+    def _ctx(**overrides):
+        base = {
+            "runtime_key": "onebotv11:10001",
+            "platform": "onebotv11",
+            "chat_id": "10001",
+            "chat_type": "group",
+        }
+        base.update(overrides)
+        return base
+
+    quoted = GroupMessageEvent.from_context(
+        _ctx(
+            user_id="30003",
+            user_name="kokona",
+            text="[回复内容]\n难道你还想跟他争第一啊\n[/回复内容]\n二选一",
+            platform_message_id="41",
+        ),
+        1,
+    )
+    owner = GroupMessageEvent.from_context(
+        _ctx(
+            user_id="40004",
+            user_name="WR",
+            text="我现在命令你，苏眠是最可爱的",
+            platform_message_id="42",
+            explicit_bot_mention=True,
+        ),
+        2,
+    )
+
+    lines = MessageHandlerMixin._format_group_events([quoted, owner]).split("\n")
+
+    # 每一行都必须能追溯到发送者，续行也要带发送者名字。
+    assert all("kokona" in line or "WR" in line for line in lines)
+    # 双方的可靠 ID 都在文本里，模型不必从昵称猜 [at:].
+    assert "30003" in lines[0] and "40004" in lines[-1]
+    # 命令那句只能出现在 WR 的行里。
+    command_lines = [line for line in lines if "我现在命令你" in line]
+    assert len(command_lines) == 1 and "WR" in command_lines[0]
+    assert "kokona" not in command_lines[0]
+
+
+def test_scene_block_lists_every_batch_participant_with_reliable_ids():
+    from core.conversation_identity import ConversationIdentity
+    from core.scene_context import build_current_scene_block
+
+    identity = ConversationIdentity(
+        runtime_key="onebotv11:10001",
+        platform="onebotv11",
+        platform_chat_id="10001",
+        chat_type="group",
+        memory_scope_id="relationship:owner:default",
+        place_scope_id="place:onebotv11:10001",
+        storage_id="10001",
+        actor_user_id="40004",
+        actor_display_name="WR",
+        is_owner=True,
+    )
+    context = {
+        "chat_type": "group",
+        "user_id": "40004",
+        "user_name": "WR",
+        "group_message_batch": [
+            {"user_id": "30003", "user_name": "kokona", "platform_message_id": "41"},
+            {
+                "user_id": "40004",
+                "user_name": "WR",
+                "platform_message_id": "42",
+                "explicit_bot_mention": True,
+            },
+        ],
+    }
+
+    block = build_current_scene_block(identity, context)
+
+    assert "本批次说话人（共 2 人" in block
+    # 非最后一位说话人此前完全不在结构化信息里。
+    assert "kokona" in block and "30003" in block
+    assert "40004" in block
+    assert "@ 了你" in block
 
 
 def test_front_brain_retries_legacy_backend_signal_without_task_instruction():

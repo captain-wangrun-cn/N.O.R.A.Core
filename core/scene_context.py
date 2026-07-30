@@ -81,6 +81,65 @@ def _platform_message_ids(context: Mapping[str, Any]) -> list[str]:
     return message_ids
 
 
+def _batch_participant_lines(context: Mapping[str, Any]) -> list[str]:
+    """列出本批次每位说话人及其可靠 ID，供多人群聊 `[at:]` / `[reply:]` 取值。
+
+    只有最后一条消息的发送者会进入「当前说话人」，多人同时说话时其余人在结构化信息里
+    完全不存在，模型只能从正文猜 ID。这里按批次原始 context 逐条汇总，不做任何推断。
+    """
+    batch = context.get("group_message_batch")
+    if not isinstance(batch, (list, tuple)) or len(batch) < 2:
+        return []
+
+    order: list[str] = []
+    participants: dict[str, dict[str, Any]] = {}
+    for item in batch:
+        if not isinstance(item, Mapping):
+            continue
+        user_id = _clean(item.get("user_id"))
+        name = _clean(item.get("user_name")) or _clean(item.get("actor_display_name"))
+        key = user_id or name
+        if not key:
+            continue
+        if key not in participants:
+            order.append(key)
+            participants[key] = {"user_id": user_id, "name": name or "未知", "message_ids": []}
+        entry = participants[key]
+        if not entry["name"] or entry["name"] == "未知":
+            entry["name"] = name or entry["name"]
+        for message_id in _platform_message_ids(item):
+            if message_id not in entry["message_ids"]:
+                entry["message_ids"].append(message_id)
+        if item.get("explicit_bot_mention"):
+            entry["mentioned_bot"] = True
+        if item.get("reply_to_bot"):
+            entry["replied_bot"] = True
+
+    if len(participants) < 2:
+        return []
+
+    lines = [f"- 本批次说话人（共 {len(participants)} 人，每条消息的归属只能按此表和正文行前缀判断）:"]
+    for key in order:
+        entry = participants[key]
+        parts = [entry["name"]]
+        parts.append(f"平台用户 ID: {entry['user_id']}" if entry["user_id"] else "平台用户 ID: 未知")
+        if entry["message_ids"]:
+            parts.append(f"本批次消息 ID: {', '.join(entry['message_ids'])}")
+        flags = []
+        if entry.get("mentioned_bot"):
+            flags.append("@ 了你")
+        if entry.get("replied_bot"):
+            flags.append("回复了你的消息")
+        if flags:
+            parts.append("、".join(flags))
+        lines.append(f"  · {'；'.join(parts)}")
+    lines.append(
+        "- 多人归属规则: 回应谁、@ 谁、引用哪条，必须取自上表中该人自己的 ID，不能把某人的话算到另一个人头上，"
+        "也不能默认所有内容都出自最后一位说话人。表中没有的人不要 @，禁止从昵称或正文猜测 ID。"
+    )
+    return lines
+
+
 def build_current_scene_block(
     identity: ConversationIdentity,
     context: Optional[Mapping[str, Any]] = None,
@@ -135,6 +194,7 @@ def build_current_scene_block(
                 "- 提及成员规则: 昵称只用于理解提及对象；如需原生 @，仍必须使用该成员对应的可靠 `[at:USER_ID]`。"
                 "禁止从昵称、正文或跨平台历史猜测用户 ID。"
             )
+        lines.extend(_batch_participant_lines(context))
         lines.append("- 群聊边界: 群里可能有其他人在场；不要泄露私聊内容、主人隐私或其它窗口的后台任务细节。")
     else:
         lines.append("- 私聊边界: 这是当前私聊窗口；文件、结果和进度默认发回这里，除非用户明确要求转发到群聊或其它窗口。")

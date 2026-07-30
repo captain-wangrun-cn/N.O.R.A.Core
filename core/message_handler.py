@@ -212,15 +212,32 @@ class MessageHandlerMixin:
 
     @staticmethod
     def _format_group_events(events: List[GroupMessageEvent]) -> str:
-        """Format a promoted batch as readable multi-speaker front-brain input."""
+        """Format a promoted batch as readable multi-speaker front-brain input.
+
+        每一行都必须能追溯到发送者：单条消息的正文可能自带换行（引用块、表情包描述），
+        只给首行加发送者前缀会让后续行看起来像别人说的话，多人同时 @ 时正是认错人的来源。
+        """
         lines = []
         for event in events:
+            meta = [f"平台用户 ID: {event.sender_id or '未知'}"]
+            if event.platform_message_id:
+                meta.append(f"本条消息 ID: {event.platform_message_id}")
+            if event.explicit_bot_mention:
+                meta.append("本条 @ 了你")
+            if event.reply_to_bot:
+                meta.append("本条回复的是你的消息")
             reply = ""
             if event.reply_to_message_id:
                 target = event.reply_to_user_name or event.reply_to_user_id or "未知成员"
-                reply = f"（回复 {target}#{event.reply_to_message_id}）"
-            message_id = f" id={event.platform_message_id}" if event.platform_message_id else ""
-            lines.append(f"[{event.sequence}] {event.sender_name}{message_id}{reply}: {event.text}")
+                reply_meta = f"消息 ID: {event.reply_to_message_id}"
+                if event.reply_to_user_id:
+                    reply_meta = f"平台用户 ID: {event.reply_to_user_id}；{reply_meta}"
+                reply = f"（引用 {target} 的消息，{reply_meta}）"
+            header = f"[{event.sequence}] {event.sender_name}（{'；'.join(meta)}）{reply}"
+            text_lines = str(event.text or "").split("\n")
+            lines.append(f"{header}: {text_lines[0]}")
+            for extra in text_lines[1:]:
+                lines.append(f"    ↳[{event.sequence}] {event.sender_name} 同条续行: {extra}")
         return "\n".join(lines)
 
     @staticmethod
@@ -1006,6 +1023,26 @@ class MessageHandlerMixin:
                     continuation_token,
                     listener_token,
                 )
+            # 提升与生成周期登记之间到达的定向消息（多人同时 @）已经入库，必须并入同一轮，
+            # 否则两轮并发生成会各自读到对方的消息，出现「答甲的内容、@乙」。
+            folded_events = await self.group_listener.flush_directed_pending(
+                chat_id, listener_token
+            )
+            if folded_events:
+                logger.info(
+                    "[%s] 并入提升窗口内到达的定向消息: events=%d token=%s",
+                    chat_id,
+                    len(folded_events),
+                    listener_token,
+                )
+                await self.handle_new_message(
+                    self._group_batch_context(
+                        folded_events,
+                        "mention",
+                        continuation_token=listener_token,
+                    )
+                )
+                return
         logger.info(
             "[%s] 前脑生成开始: source=%s listener_token=%s batch_size=%d",
             chat_id,

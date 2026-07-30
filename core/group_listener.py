@@ -150,6 +150,9 @@ class GroupRuntimeState:
     idle_task: Optional[asyncio.Task] = None
     passive_task: Optional[asyncio.Task] = None
     directed_handoff: bool = False
+    # 定向批次已提升、但生成周期还没登记（begin_generation 之前）时到达的定向事件。
+    # 这段窗口里再开一轮会造成两轮并发生成、互相看到对方已入库的消息，从而张冠李戴。
+    directed_pending: List[GroupMessageEvent] = field(default_factory=list)
     generation: Optional[GenerationCycle] = None
 
 
@@ -508,12 +511,19 @@ class GroupListenerManager:
                     else:
                         recent_context = []
                     reply_target = event.replied_target_event()
-                    direct_promote = self._merge_events(
+                    directed_events = self._merge_events(
                         recent_context,
                         [reply_target] if reply_target is not None else [],
                         [event],
                     )
-                    state.directed_handoff = True
+                    if state.directed_handoff:
+                        # 上一条定向消息已提升但生成周期尚未登记：此刻再开一轮会出现两轮
+                        # 并发生成，各自都能读到对方已入库的消息，于是「回答甲的内容、@乙」。
+                        # 先寄存，等 begin_generation 把它并入同一周期的优先事件。
+                        state.directed_pending.extend(directed_events)
+                    else:
+                        direct_promote = directed_events
+                        state.directed_handoff = True
                 else:
                     self._append_pending(state, event)
                     run_passive = state.new_since_passive_eval >= self.batch_size
@@ -538,6 +548,12 @@ class GroupListenerManager:
                 async with state.lock:
                     if state.directed_handoff and state.generation is None:
                         state.directed_handoff = False
+                    if state.directed_pending and state.generation is None:
+                        # 提升没能登记生成周期（群被换掉/提升提前返回）：寄存的定向事件
+                        # 退回被动窗口，宁可晚一轮判断，也不能凭空丢掉。
+                        for pending_event in state.directed_pending:
+                            self._append_pending(state, pending_event)
+                        state.directed_pending = []
         if run_passive:
             self._ensure_passive_task(runtime_key, trigger="count")
         self._ensure_watchdog()
@@ -573,6 +589,17 @@ class GroupListenerManager:
                 )
                 if continuation and previous:
                     cycle.ordinary_bucket.extend(previous.ordinary_bucket)
+                if previous is not None:
+                    # 旧周期里已登记、但没进入本轮输入的优先事件（打断与登记之间到达的 @）
+                    # 不能随旧周期一起消失：它们已经入库，必须转成寄存事件再折进下一轮。
+                    input_keys = {event.unique_key for event in cycle.input_events}
+                    leftover = [
+                        event
+                        for event in previous.priority_events
+                        if event.unique_key not in input_keys
+                    ]
+                    if leftover:
+                        state.directed_pending.extend(leftover)
                 state.generation = cycle
                 state.directed_handoff = False
                 self._online_marks(runtime_key, state)
@@ -583,6 +610,33 @@ class GroupListenerManager:
                 self._cancel_task(state.idle_task)
                 state.idle_task = None
                 return cycle.token
+
+    async def flush_directed_pending(
+        self,
+        runtime_key: str,
+        token: int,
+    ) -> List[GroupMessageEvent]:
+        """Fold @-events that arrived during promotion into the registered cycle.
+
+        返回非空列表表示需要按 mention 优先级重启本周期：这些消息已经入库，
+        必须进入同一轮输入，否则并发两轮会各自读到对方的消息而认错说话人。
+        """
+        state = self._state(runtime_key)
+        async with state.lock:
+            pending = state.directed_pending
+            if not pending:
+                return []
+            generation = state.generation
+            if generation is None or generation.token != token:
+                for event in pending:
+                    self._append_pending(state, event)
+                state.directed_pending = []
+                return []
+            state.directed_pending = []
+            generation.priority_events.extend(pending)
+            generation.priority_handoff = True
+            generation.restart_pending = True
+            return self._merge_events(generation.input_events, generation.priority_events)
 
     async def bind_generation_task(self, runtime_key: str, token: int, task: asyncio.Task) -> bool:
         state = self._state(runtime_key)
@@ -946,6 +1000,7 @@ class GroupListenerManager:
             self._cancel_task(state.generation.task)
         state.generation = None
         state.directed_handoff = False
+        state.directed_pending = []
 
     @staticmethod
     def _cancel_task(task: Optional[asyncio.Task]) -> None:

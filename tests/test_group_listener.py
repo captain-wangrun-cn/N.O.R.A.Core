@@ -165,6 +165,102 @@ def test_begin_generation_rejects_group_replaced_before_promotion(tmp_path, monk
     asyncio.run(run())
 
 
+def test_concurrent_mentions_fold_into_one_generation(tmp_path, monkeypatch):
+    """多人同时 @：第二条不得另开一轮，必须并入同一周期的优先事件。"""
+
+    async def run():
+        _patch_workspace(monkeypatch, tmp_path)
+        store = GroupPresenceStore()
+        store.set("telegram:g1", GroupPresence.ONLINE)
+        promoted = []
+        observed = {}
+
+        async def promote(runtime_key, events, reason):
+            promoted.append(([event.platform_message_id for event in events], reason))
+            if len(promoted) > 1:
+                return
+            # 模拟提升到 begin_generation 之间的真实窗口：期间第二个人也 @ 了。
+            second = _context(2, mention=True)
+            second["user_id"] = "u2"
+            await manager.receive(second)
+            state = manager._state(runtime_key)
+            observed["pending_before_begin"] = [
+                event.platform_message_id for event in state.directed_pending
+            ]
+            # 与 message_handler 的真实顺序一致：登记生成周期后立刻并入寄存事件。
+            token = await manager.begin_generation(runtime_key, list(events))
+            observed["token"] = token
+            observed["folded"] = [
+                event.platform_message_id
+                for event in await manager.flush_directed_pending(runtime_key, token)
+            ]
+
+        manager = GroupListenerManager(
+            store=store,
+            persist_message=lambda context: asyncio.sleep(0),
+            decide_passive=lambda *args: asyncio.sleep(0, result=PassiveAction.KEEP_LISTENING),
+            decide_append=lambda *args: asyncio.sleep(0, result=AppendAction.KEEP_PENDING),
+            promote=promote,
+            interrupt=lambda *args: asyncio.sleep(0),
+            idle_seconds=30,
+        )
+        try:
+            assert await manager.receive(_context(1, mention=True))
+
+            # 第二条没有另开一轮定向提升，而是寄存后并入同一周期。
+            assert promoted == [(["1"], "directed_message")]
+            assert observed["pending_before_begin"] == ["2"]
+            assert observed["folded"] == ["1", "2"]
+
+            state = manager._state("telegram:g1")
+            assert state.directed_pending == []
+            assert state.generation is not None
+            assert state.generation.restart_pending is True
+            assert manager.pending_events("telegram:g1") == []
+        finally:
+            await manager.shutdown()
+
+    asyncio.run(run())
+
+
+def test_directed_pending_returns_to_window_without_generation(tmp_path, monkeypatch):
+    """提升没能登记生成周期时，寄存的定向事件退回被动窗口而不是丢失。"""
+
+    async def run():
+        _patch_workspace(monkeypatch, tmp_path)
+        store = GroupPresenceStore()
+        store.set("telegram:g1", GroupPresence.ONLINE)
+        second_received = asyncio.Event()
+
+        async def promote(runtime_key, events, reason):
+            await manager.receive(_context(2, mention=True))
+            second_received.set()
+
+        manager = GroupListenerManager(
+            store=store,
+            persist_message=lambda context: asyncio.sleep(0),
+            decide_passive=lambda *args: asyncio.sleep(0, result=PassiveAction.KEEP_LISTENING),
+            decide_append=lambda *args: asyncio.sleep(0, result=AppendAction.KEEP_PENDING),
+            promote=promote,
+            interrupt=lambda *args: asyncio.sleep(0),
+            batch_size=100,
+            idle_seconds=30,
+        )
+        try:
+            assert await manager.receive(_context(1, mention=True))
+            await second_received.wait()
+
+            state = manager._state("telegram:g1")
+            assert state.directed_pending == []
+            assert [event.platform_message_id for event in manager.pending_events("telegram:g1")] == [
+                "2"
+            ]
+        finally:
+            await manager.shutdown()
+
+    asyncio.run(run())
+
+
 def test_persist_enrichment_is_visible_to_same_round_passive_decision(tmp_path, monkeypatch):
     async def run():
         _patch_workspace(monkeypatch, tmp_path)
