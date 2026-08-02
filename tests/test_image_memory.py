@@ -654,6 +654,97 @@ def test_view_media_tool_schema_has_text_query():
     assert "text_query" in view_media_schema["parameters"]["properties"]
 
 
+def test_view_media_page_translates_to_offset():
+    """page=N 应换算为 offset=(N-1)*limit 传给 ImageStore"""
+    from unittest.mock import MagicMock
+    from brain.tools import ToolManager
+
+    mock_adapter = MagicMock()
+    mock_adapter.platform_features = MagicMock()
+    mock_store = MagicMock()
+    mock_store.enabled = True
+    mock_store.search_images.return_value = [
+        {"image_id": "img_p3", "file_path": "/tmp/p3.png", "tags": "猫"}
+    ]
+
+    tm = ToolManager(mock_adapter, image_store=mock_store)
+    result = tm.view_media(keyword="猫", limit=5, page=3)
+
+    assert mock_store.search_images.call_args[1]["offset"] == 10
+    assert "[Page] page=3" in result
+    # 序号应延续到全局位置，而不是每页都从 1 开始
+    assert "--- Image 11 ---" in result
+
+
+def test_view_media_defaults_to_first_page():
+    """未传 page 时按第 1 页处理，offset=0"""
+    from unittest.mock import MagicMock
+    from brain.tools import ToolManager
+
+    mock_adapter = MagicMock()
+    mock_adapter.platform_features = MagicMock()
+    mock_store = MagicMock()
+    mock_store.enabled = True
+    mock_store.search_images.return_value = [
+        {"image_id": "img_a", "file_path": "/tmp/a.png", "tags": "猫"}
+    ]
+
+    tm = ToolManager(mock_adapter, image_store=mock_store)
+    result = tm.view_media(keyword="猫")
+
+    assert mock_store.search_images.call_args[1]["offset"] == 0
+    assert "--- Image 1 ---" in result
+
+
+def test_view_media_invalid_page_falls_back_to_one():
+    """page<=0 应被夹到 1，而不是产生负偏移"""
+    from unittest.mock import MagicMock
+    from brain.tools import ToolManager
+
+    mock_adapter = MagicMock()
+    mock_adapter.platform_features = MagicMock()
+    mock_store = MagicMock()
+    mock_store.enabled = True
+    mock_store.search_images.return_value = []
+
+    tm = ToolManager(mock_adapter, image_store=mock_store)
+    tm.view_media(keyword="猫", page=0)
+
+    assert mock_store.search_images.call_args[1]["offset"] == 0
+
+
+def test_view_media_empty_page_hints_end_of_results():
+    """翻过头时应提示结果集已结束，而不是笼统的 no media found"""
+    from unittest.mock import MagicMock
+    from brain.tools import ToolManager
+
+    mock_adapter = MagicMock()
+    mock_adapter.platform_features = MagicMock()
+    mock_store = MagicMock()
+    mock_store.enabled = True
+    mock_store.search_images.return_value = []
+
+    tm = ToolManager(mock_adapter, image_store=mock_store)
+    result = tm.view_media(keyword="猫", page=4)
+
+    assert "page 4" in result
+    assert "smaller page number" in result
+
+
+def test_view_media_tool_schema_has_page():
+    """view_media schema 应包含 page 参数"""
+    from unittest.mock import MagicMock
+    from brain.tools import ToolManager
+
+    mock_adapter = MagicMock()
+    mock_adapter.platform_features = MagicMock()
+    tm = ToolManager(mock_adapter, image_store=None)
+
+    schemas = tm.get_tool_schemas()
+    view_media_schema = next(s for s in schemas if s["name"] == "view_media")
+    assert "page" in view_media_schema["parameters"]["properties"]
+
+
 def test_view_media_tool_schema_has_question():
     """view_media schema 应包含 question 参数"""
     from unittest.mock import MagicMock
@@ -916,9 +1007,64 @@ def test_search_images_text_query_only():
 
     results = store.search_images(text_query="测试文字")
 
-    store.search_by_ocr_text.assert_called_once_with("测试文字", user_id="", limit=10)
+    store.search_by_ocr_text.assert_called_once_with("测试文字", user_id="", limit=10, offset=0)
     assert len(results) == 1
     assert results[0]["image_id"] == "img_ocr1"
+
+
+def test_search_images_offset_forwarded_to_backends():
+    """search_images 的 offset 应透传给底层检索方法（翻页）"""
+    from unittest.mock import MagicMock
+
+    from memory.image_store import ImageStore
+
+    store = ImageStore.__new__(ImageStore)
+    store.mongo_col = MagicMock()
+    store.qdrant = MagicMock()
+    store.embed_client = MagicMock()
+    store.embed_client.enabled = True
+    store.enabled = True
+
+    store.search_by_ocr_text = MagicMock(return_value=[])
+    store.search_images(text_query="测试文字", limit=5, offset=10)
+    assert store.search_by_ocr_text.call_args[1]["offset"] == 10
+
+    store.search_by_semantic = MagicMock(return_value=[])
+    store.search_by_keyword = MagicMock(return_value=[])
+    store.search_images(keyword="猫", limit=5, offset=10)
+    assert store.search_by_semantic.call_args[1]["offset"] == 10
+
+    store.search_by_time_range = MagicMock(return_value=[])
+    store.search_images(limit=5, offset=10)
+    assert store.search_by_time_range.call_args[1]["offset"] == 10
+
+
+def test_search_images_merged_path_slices_after_merge():
+    """text_query + keyword 合并路径必须先取足再切片，避免两路各自跳过导致错位"""
+    from unittest.mock import MagicMock
+
+    from memory.image_store import ImageStore
+
+    store = ImageStore.__new__(ImageStore)
+    store.mongo_col = MagicMock()
+    store.qdrant = MagicMock()
+    store.embed_client = MagicMock()
+    store.embed_client.enabled = True
+    store.enabled = True
+
+    store.search_by_ocr_text = MagicMock(
+        return_value=[{"image_id": f"img_{i}"} for i in range(4)]
+    )
+    store.search_by_semantic = MagicMock(return_value=[])
+    store.search_by_keyword = MagicMock(return_value=[])
+    store._enrich_with_mongo = MagicMock(side_effect=lambda r: r)
+
+    results = store.search_images(text_query="a", keyword="b", limit=2, offset=2)
+
+    # 两路子查询都不自己跳过，而是各取 limit+offset 条
+    assert store.search_by_ocr_text.call_args[1]["offset"] == 0
+    assert store.search_by_ocr_text.call_args[1]["limit"] == 4
+    assert [r["image_id"] for r in results] == ["img_2", "img_3"]
 
 
 def test_search_images_text_query_and_keyword():

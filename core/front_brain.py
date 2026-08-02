@@ -77,11 +77,30 @@ class FrontBrainMixin:
             triggers.append("普通群聊上下文")
 
         batch_type = "多消息群聊批次" if context.get("group_message_batch") else "单次/聚合入站消息"
+
+        # 定时计划开启的监听没有任何人叫过 Nora，前脑需要据此更克制。
+        trigger_kind = ""
+        stats_getter = getattr(getattr(self, "group_listener", None), "listening_stats", None)
+        if mode == "online" and callable(stats_getter):
+            try:
+                trigger_kind = str((stats_getter(identity.runtime_key) or {}).get("trigger_kind") or "")
+            except Exception:
+                trigger_kind = ""
+        listen_origin_line = ""
+        if trigger_kind == "scheduled":
+            listen_origin_line = (
+                "- 本次监听由系统按当日计划自动开启：没有人叫你，你只是自己进来旁听。"
+                "默认只听不说；除非出现真实、具体、你确实能帮上的需要，否则不要开口，也不要宣告自己来了。\n"
+            )
+        elif trigger_kind == "interaction":
+            listen_origin_line = "- 本次监听由 @ / 回复 / 明确的持续参与意图开启。\n"
+
         return (
             "【群监听运行状态（可信系统元数据）】\n"
             f"- 当前群监听模式: {mode.upper()}\n"
             f"- 本轮触发方式: {'；'.join(triggers)}\n"
             f"- 本轮输入形态: {batch_type}\n"
+            f"{listen_origin_line}"
             "- 这里的 ONLINE / SEMI_ONLINE 只指当前群的监听模式，不是全局 AI 状态。"
         )
 

@@ -379,6 +379,7 @@ class MessageHandlerMixin:
             window_limit=max_pending,
             window_may_be_truncated=len(events) >= max_pending,
             online_seconds=int(stats.get("online_seconds", 0) or 0),
+            trigger_kind=str(stats.get("trigger_kind", "interaction") or "interaction"),
             seconds_since_interaction=int(stats.get("seconds_since_interaction", 0) or 0),
             seconds_since_message=int(stats.get("seconds_since_message", 0) or 0),
             consecutive_keep_listening=int(stats.get("consecutive_keep_listening", 0) or 0),

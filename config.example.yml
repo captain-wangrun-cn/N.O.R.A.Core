@@ -199,6 +199,11 @@ schedule:
   #   - 支持动态闹钟工具 (set_alarm / list_alarms / cancel_alarm)
   #   - 闹钟数据持久化到 workspace/cache/alarms.json
   #   - 编辑 SCHEDULE.md (workspace 目录下) 自定义作息和日程
+  #   - 群聊定时监听同属本开关：每天 00:00 依据 workspace/GROUP_LISTEN.json 的候选群池
+  #     生成当日「时间 + 平台 + 群号」计划，到点把该群切到 ONLINE 开始被动监听。
+  #     一个时间点只激活一个群；若该群触发时已是 ONLINE 则跳过（与私聊主动消息一致）。
+  #     GROUP_LISTEN.json 由 Nora 自己维护（候选群 groups / 偏好 preferences），
+  #     把 enabled 设为 false 可单独关闭群聊定时监听。
 
 # 外部触发器配置已迁移到 `triggers/config.yml`
 # 请复制：`triggers/config.example.yml` -> `triggers/config.yml`

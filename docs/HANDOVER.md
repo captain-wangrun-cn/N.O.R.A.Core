@@ -1,3 +1,85 @@
+## 近期关键改动（截至 2026-08-02）
+
+### 🗓️ 群聊定时 ONLINE 监听 + `view_media` 翻页 + 群内主动开口的保守化
+
+三件事一起做，主线是「让 Nora 能自己安排去群里旁听，但开口要克制」。
+
+**1. `view_media` 支持页码**
+
+- `brain/tools.py` 的 `view_media` 新增 `page` 参数（默认 1），换算成 `offset=(page-1)*limit`
+  传给 `ImageStore.search_images`。`limit` 语义改为「每页条数」，仍是 1-50。
+- `memory/image_store.py` 的四个检索方法（`search_by_time_range` / `search_by_keyword` /
+  `search_by_ocr_text` / `search_by_semantic`）与 `search_images` 全部加 `offset`：
+  Mongo 走 `.skip()`，Qdrant 取 `limit=top_k+offset` 后在上下文过滤之后再切片。
+- **合并路径（text_query + keyword 同时给）不能让两路各自 skip**，否则去重合并后页码错位；
+  改为两路都取 `limit+offset` 条，合并去重后统一 `merged[offset:offset+limit]`。
+- 输出加 `[Page]` 行说明当前页与「可能还有下一页」；翻过头时返回专门的
+  "No media found on page N" 提示而不是笼统的 no media found。结果序号延续全局位置。
+- 指定 `image_id` 或 `local_path` 时 `page` 无效（精确查询/本地文件没有分页语义）。
+- 提示词：`brain/templates/system.jinja` §3 补了翻页规则——第一页没找到就翻页而不是加大 limit，
+  翻页时除 `page` 外参数必须一致。
+
+**2. 群聊定时 ONLINE 监听（`workspace/GROUP_LISTEN.json`）**
+
+机制与私聊主动消息对称：私聊是 `SCHEDULE.md` → 00:00 生成 `cache/daily_plan.json` → 到点发消息；
+群聊是 `GROUP_LISTEN.json` 的 `groups`/`preferences` → 00:00 在同一文件里生成当日 `entries`
+→ 到点把该群切 ONLINE 开始被动监听（**只是开始听，不是开始说**）。
+
+- 新增 `core/group_listen_plan.py`：单文件存候选群池 + 偏好 + 当日计划 + 已触发标记，
+  Nora 可直接用文件工具读写维护。关键函数 `read_plan` / `write_plan` / `ensure_plan_file` /
+  `candidate_groups` / `normalize_entries` / `due_entry` / `mark_entry` / `expire_stale_entries` /
+  `save_generated_entries`。
+- **一个时间点只触发一个群**：`normalize_entries` 按 `HH:MM` 去重，`due_entry` 一次最多返回一个条目
+  （多个同时到点取最晚的那个，更贴近当下）。
+- **目标群已 ONLINE 则跳过**：`_activate_scheduled_group_listen` 先查 `mode_for`，已在线就
+  记 `skipped_already_online` 并标记 fired，不重试——与私聊 proactive 在对方正在聊天时跳过一致。
+  系统忙碌时同样跳过（`skipped_system_busy`）。
+- `core/scheduler.py` 新增两个 job：`group_listen_plan_cron`（00:00 生成）与
+  `group_listen_tick_cron`（每分钟检查到点）。**用 tick 轮询文件而不是预注册 DateTrigger**，
+  这样 Nora 中途改文件立刻生效，不需要 reload。到点后 10 分钟宽限窗口内仍可补触发，
+  超过则由 `expire_stale_entries` 标 `missed`，不会永远卡在待触发。
+- `core/scheduler_mixin.py` 新增 `_generate_group_listen_plan_via_llm`（读候选池 + 作息 +
+  SOUL/MEMORY，渲染 `schedule.jinja#group_listen_plan_*`）与 `_activate_scheduled_group_listen`。
+  **模型返回的 platform/group_id 会再过一遍候选池白名单**，防止编造群号。
+- `mark_entry` / `save_generated_entries` 都是就地重读再写回，不会覆盖 Nora 手工编辑的
+  `groups` / `preferences`。
+- `core/controller.py` 启动时 `ensure_plan_file()` 生成骨架并注入两个回调；
+  `config.example.yml` 的 `schedule.enabled` 注释说明群聊定时监听同属该开关。
+
+**3. 群内主动开口：允许，但保守**
+
+- `core/group_listener.py` 的 `GroupRuntimeState` 新增 `online_trigger_kind`，
+  `set_mode` 时 `reason == "scheduled_group_listen"` 记为 `scheduled`，其余为 `interaction`；
+  经 `listening_stats()` 透出，注入 fast 分类器 prompt 与前脑的群监听状态块。
+  **定时开启意味着没人叫过 Nora**，两处 prompt 据此再提高一档门槛。
+- `brain/templates/group_listener.jinja#passive_system`：把「可以自主 REPLY」明确成
+  **克制的许可而非鼓励**，给出四条必须同时成立的判据（具体 / 及时 / 缺位 / 简短），
+  任一条只是「大概成立」就 KEEP_LISTENING；新增 `trigger_kind=scheduled` 时的更高门槛规则与边界示例。
+- `brain/templates/front_brain.jinja` 新增「群里主动开口：可以，但要保守」小节，同四条判据，
+  外加「少说一次几乎没有代价，多说一次会显得话多抢话」的取向、明确不该开口的情形、
+  自主接话用 `[reply:MESSAGE_ID]` 锚定、定时监听不要发「我来了」之类的宣告。
+- `brain/templates/system.jinja` §5 身份文件表加入 `GROUP_LISTEN.json`，并补一节说明结构、
+  「一个时间点一个群」「已 ONLINE 则跳过」「群号不能编造，用 `onebotv11_get_group_list()` 查」
+  「进去只是开始听不是开始说」。
+- `adapters/onebotv11/PROMPT.md` 群聊语境补充 ONLINE 监听下的开口标准。
+
+**测试**
+
+- 新增 `tests/test_group_listen_plan.py`（11 项）：骨架文件字段、一个时间点一个群、宽限窗口与
+  fired 标记、多条同时到点只取一个、过期日期/禁用计划跳过、`mark_entry` 不覆盖手工字段、
+  `expire_stale_entries` 标 missed、候选池过滤，以及触发侧的
+  已 ONLINE 跳过 / 正常激活带 `scheduled_group_listen` reason / 缺平台拒绝。
+- `tests/test_image_memory.py` 新增 7 项：page→offset 换算、默认第一页、page<=0 夹到 1、
+  翻过头的提示、schema 含 `page`、offset 透传各后端、合并路径先取足再切片。
+- `tests/test_front_brain_prompt.py` 补断言：四条判据、`trigger_kind=scheduled`、
+  「克制的许可」「少说一次几乎没有代价」「系统按计划自动开启的」。
+- 全量：`.venv/Scripts/python.exe -m pytest -q` → **490 passed, 11 failed**；
+  11 个失败与 stash 后的基线**完全一致**（`test_context_pricing` 4、`test_cost_tracker` 2、
+  `test_message_history_retry_queue` 2、`test_timezone` 1、`test_adapter_selection` 2——
+  后者仅在全量下因跨测试污染失败，单独跑改动前后均通过），与本次改动无关。
+
+---
+
 ## 近期关键改动（截至 2026-07-29）
 
 ### 🐛 修复长期存在的"AI 说用户发了两次消息"

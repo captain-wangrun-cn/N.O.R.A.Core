@@ -304,9 +304,17 @@ class NoraController(
                 resolve_delivery_callback=resolve_delivery_runtime_key,
                 private_presence_store=self.private_presence,
                 identity_resolver=self._identity_for_runtime_key,
+                generate_group_listen_plan_callback=self._generate_group_listen_plan_via_llm,
+                activate_group_listen_callback=self._activate_scheduled_group_listen,
             )
             if persisted_default_chat_id:
                 self.scheduler.default_chat_id = persisted_default_chat_id
+            # 计划文件由 Nora 自己维护，首次启动先生成骨架供她读写
+            try:
+                from core.group_listen_plan import ensure_plan_file
+                ensure_plan_file()
+            except Exception as e:
+                logger.warning(f"初始化群聊监听计划文件失败: {e}")
             logger.info("主动消息调度器已初始化")
         else:
             self.scheduler = None

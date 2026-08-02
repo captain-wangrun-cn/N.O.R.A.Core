@@ -757,8 +757,9 @@ class ImageStore:
         platform: str = "",
         chat_id: str = "",
         memory_scope_id: str = "",
+        offset: int = 0,
     ) -> List[Dict[str, Any]]:
-        """按时间范围查询图片（MongoDB）。"""
+        """按时间范围查询图片（MongoDB）。offset 用于翻页跳过前 N 条。"""
         if self.mongo_col is None:
             return []
         try:
@@ -780,7 +781,10 @@ class ImageStore:
             if time_filter:
                 query["timestamp"] = time_filter
 
-            cursor = self.mongo_col.find(query, {"_id": 0}).sort("timestamp", -1).limit(limit)
+            cursor = self.mongo_col.find(query, {"_id": 0}).sort("timestamp", -1)
+            if offset > 0:
+                cursor = cursor.skip(int(offset))
+            cursor = cursor.limit(limit)
             return list(cursor)
         except Exception as e:
             logger.error(f"按时间范围查询图片失败: {e}")
@@ -795,8 +799,9 @@ class ImageStore:
         platform: str = "",
         chat_id: str = "",
         memory_scope_id: str = "",
+        offset: int = 0,
     ) -> List[Dict[str, Any]]:
-        """按关键词在 tags 中做文本搜索（MongoDB $text）。"""
+        """按关键词在 tags 中做文本搜索（MongoDB $text）。offset 用于翻页。"""
         if self.mongo_col is None:
             return []
         try:
@@ -813,8 +818,10 @@ class ImageStore:
             cursor = (
                 self.mongo_col.find(query, {"_id": 0, "score": {"$meta": "textScore"}})
                 .sort([("score", {"$meta": "textScore"})])
-                .limit(limit)
             )
+            if offset > 0:
+                cursor = cursor.skip(int(offset))
+            cursor = cursor.limit(limit)
             return list(cursor)
         except Exception as e:
             logger.error(f"关键词搜索图片失败: {e}")
@@ -829,6 +836,7 @@ class ImageStore:
         platform: str = "",
         chat_id: str = "",
         memory_scope_id: str = "",
+        offset: int = 0,
     ) -> List[Dict[str, Any]]:
         """
         在图片 OCR 文字中做模糊搜索（支持类搜索引擎的模糊匹配）。
@@ -839,6 +847,7 @@ class ImageStore:
         3. 忽略大小写
         4. 支持部分匹配（子串匹配）
         5. 忽略空格和标点差异
+        6. offset 用于翻页跳过前 N 条
         """
         if self.mongo_col is None:
             return []
@@ -881,7 +890,10 @@ class ImageStore:
                 else:
                     query["user_id"] = user_id
 
-            cursor = self.mongo_col.find(query, {"_id": 0}).sort("timestamp", -1).limit(limit)
+            cursor = self.mongo_col.find(query, {"_id": 0}).sort("timestamp", -1)
+            if offset > 0:
+                cursor = cursor.skip(int(offset))
+            cursor = cursor.limit(limit)
             return list(cursor)
         except Exception as e:
             logger.error(f"OCR 文字搜索图片失败: {e}")
@@ -896,8 +908,9 @@ class ImageStore:
         platform: str = "",
         chat_id: str = "",
         memory_scope_id: str = "",
+        offset: int = 0,
     ) -> List[Dict[str, Any]]:
-        """语义向量检索（Qdrant）。"""
+        """语义向量检索（Qdrant）。offset 用于翻页（在上下文过滤后按序跳过）。"""
         if self.qdrant is None or not self.embed_client.enabled:
             return []
         try:
@@ -912,11 +925,12 @@ class ImageStore:
             if must_conditions:
                 qdrant_filter = qdrant_models.Filter(must=must_conditions)
 
+            offset = max(0, int(offset or 0))
             response = self.qdrant.query_points(
                 collection_name=IMAGE_COLLECTION,
                 query=vector,
                 query_filter=qdrant_filter,
-                limit=top_k,
+                limit=top_k + offset,
             )
             results = []
             for hit in response.points:
@@ -931,9 +945,9 @@ class ImageStore:
                     continue
                 item["score"] = hit.score
                 results.append(item)
-                if len(results) >= top_k:
+                if len(results) >= top_k + offset:
                     break
-            return results
+            return results[offset:offset + top_k]
         except Exception as e:
             logger.error(f"语义搜索图片失败: {e}")
             return []
@@ -952,6 +966,7 @@ class ImageStore:
         platform: str = "",
         chat_id: str = "",
         memory_scope_id: str = "",
+        offset: int = 0,
     ) -> List[Dict[str, Any]]:
         """
         统一检索入口 —— 自动选择最佳策略：
@@ -962,6 +977,7 @@ class ImageStore:
         5. 什么都没有     → 返回最近的图片/视频
 
         media_type: 可选 "image"/"video"/""（空=不过滤）
+        offset: 结果偏移量（翻页用）。image_id 精确查询时忽略。
         当 text_query 和 keyword 同时存在时，text_query 结果优先，
         keyword 结果作为补充（去重合并）。
         """
@@ -969,6 +985,8 @@ class ImageStore:
         if image_id:
             doc = self.get_by_id(image_id)
             return [doc] if doc else []
+
+        offset = max(0, int(offset or 0))
 
         def _apply_media_filter(results: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
             if not media_type:
@@ -980,6 +998,7 @@ class ImageStore:
             if include_user:
                 kwargs["user_id"] = user_id
             kwargs[limit_key] = limit
+            kwargs["offset"] = offset
             if storage_id:
                 kwargs["storage_id"] = storage_id
             if platform:
@@ -991,11 +1010,18 @@ class ImageStore:
             return kwargs
 
         # OCR 文字搜索 + 关键词搜索组合
+        # 合并路径需要先取到 offset+limit 条再统一切片，否则两路各自跳过会错位。
         if text_query and keyword:
-            ocr_results = self.search_by_ocr_text(text_query, **_context_kwargs())
-            keyword_results = self.search_by_semantic(keyword, **_context_kwargs(limit_key="top_k"))
+            merged_kwargs = _context_kwargs()
+            merged_kwargs["limit"] = limit + offset
+            merged_kwargs["offset"] = 0
+            semantic_kwargs = dict(merged_kwargs)
+            semantic_kwargs["top_k"] = semantic_kwargs.pop("limit")
+
+            ocr_results = self.search_by_ocr_text(text_query, **merged_kwargs)
+            keyword_results = self.search_by_semantic(keyword, **semantic_kwargs)
             if not keyword_results:
-                keyword_results = self.search_by_keyword(keyword, **_context_kwargs())
+                keyword_results = self.search_by_keyword(keyword, **merged_kwargs)
             # Qdrant 语义搜索结果需要从 MongoDB 补全 ocr_text 等字段
             keyword_results = self._enrich_with_mongo(keyword_results)
             # 合并去重（以 image_id 去重，OCR 结果优先）
@@ -1006,7 +1032,7 @@ class ImageStore:
                 if rid and rid not in seen_ids:
                     seen_ids.add(rid)
                     merged.append(r)
-            return _apply_media_filter(merged[:limit])
+            return _apply_media_filter(merged[offset:offset + limit])
 
         # 纯 OCR 文字搜索
         if text_query:

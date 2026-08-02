@@ -20,6 +20,8 @@ core/scheduler.py — N.O.R.A. 主动消息调度系统 (Proactive Scheduler)
 4. 每个触发点使用 DateTrigger 精准调度，到时直接回调
 5. 动态闹钟: 允许 AI 实时添加定时/倒计时闹钟 (DateTrigger)，持久化到本地缓存
 6. 主动消息在目标用户私聊在线或系统忙碌时被跳过
+7. 群聊定时 ONLINE 监听: 凌晨生成当日「时间 + 平台 + 群号」计划（workspace/GROUP_LISTEN.json），
+   每分钟 tick 检查到点条目，一个时间点只激活一个群；目标群已 ONLINE 时跳过
 """
 
 import asyncio
@@ -280,6 +282,8 @@ class ProactiveScheduler:
     resolve_delivery_callback: Optional[Callable[[str], str]] = None,
     private_presence_store: Any = None,
     identity_resolver: Optional[Callable[[str], Any]] = None,
+    generate_group_listen_plan_callback: Optional[Callable[[], Awaitable[List[Dict[str, Any]]]]] = None,
+    activate_group_listen_callback: Optional[Callable[[Dict[str, Any]], Awaitable[str]]] = None,
     ):
         self.cache_dir = cache_dir
         os.makedirs(cache_dir, exist_ok=True)
@@ -294,6 +298,9 @@ class ProactiveScheduler:
         self._resolve_delivery_callback = resolve_delivery_callback
         self._private_presence_store = private_presence_store
         self._identity_resolver = identity_resolver
+        # 群聊定时 ONLINE 监听：生成当日计划 + 到点激活。两个回调都缺省时该子系统不启用。
+        self._generate_group_listen_plan_callback = generate_group_listen_plan_callback
+        self._activate_group_listen_callback = activate_group_listen_callback
 
         # 事件列表（用于查询/序列化，实际触发由 APScheduler Job 驱动）
         self._daily_events: List[ScheduledEvent] = []
@@ -336,6 +343,23 @@ class ProactiveScheduler:
             name="每日对话总结",
         )
 
+        # 群聊定时 ONLINE 监听：凌晨生成当日计划 + 每分钟 tick 检查是否到点
+        if self._group_listen_enabled:
+            self._scheduler.add_job(
+                self._on_group_listen_plan_trigger,
+                CronTrigger(hour=self.DAILY_PLAN_HOUR, minute=self.DAILY_PLAN_MINUTE, timezone=self.tz),
+                id="group_listen_plan_cron",
+                replace_existing=True,
+                name="群聊监听计划生成",
+            )
+            self._scheduler.add_job(
+                self._on_group_listen_tick,
+                CronTrigger(minute="*", timezone=self.tz),
+                id="group_listen_tick_cron",
+                replace_existing=True,
+                name="群聊监听到点检查",
+            )
+
         # 恢复之前加载的未触发闹钟 → DateTrigger
         now = datetime.now(self.tz)
         for alarm in self._alarms:
@@ -359,6 +383,15 @@ class ProactiveScheduler:
                 except Exception as e:
                     logger.error(f"初始生成今日计划失败: {e}", exc_info=True)
             asyncio.ensure_future(_safe_initial_plan())
+
+        # 群聊监听计划同理：进程在白天启动时补生成一次当日计划
+        if self._group_listen_enabled:
+            async def _safe_initial_group_listen_plan():
+                try:
+                    await self._on_group_listen_plan_trigger()
+                except Exception as e:
+                    logger.error(f"初始生成群聊监听计划失败: {e}", exc_info=True)
+            asyncio.ensure_future(_safe_initial_group_listen_plan())
 
     def stop(self):
         """停止 APScheduler。"""
@@ -483,6 +516,124 @@ class ProactiveScheduler:
             生成结果摘要。
         """
         return await self._on_daily_plan_trigger(force=True, clear_existing=clear_existing)
+
+    # ----------------------------------------------------------------
+    # 群聊定时 ONLINE 监听
+    # ----------------------------------------------------------------
+
+    #: 到点后仍允许补触发的宽限分钟数（覆盖 tick 抖动与短暂重启）
+    GROUP_LISTEN_GRACE_MINUTES = 10
+
+    @property
+    def _group_listen_enabled(self) -> bool:
+        return bool(
+            self._generate_group_listen_plan_callback
+            and self._activate_group_listen_callback
+        )
+
+    def get_group_listen_plan(self) -> Dict[str, Any]:
+        """读取当前群聊监听计划（供工具/调试查看）。"""
+        from core import group_listen_plan as glp
+        return glp.read_plan()
+
+    async def regenerate_group_listen_plan(self) -> Dict[str, Any]:
+        """手动重新生成今日群聊监听计划。"""
+        return await self._on_group_listen_plan_trigger(force=True)
+
+    async def _on_group_listen_plan_trigger(self, force: bool = False) -> Dict[str, Any]:
+        """CronTrigger 回调：凌晨依据 GROUP_LISTEN.json 的候选群池生成当日 entries。"""
+        if not self._group_listen_enabled:
+            return {"success": False, "message": "群聊监听调度未启用"}
+
+        from core import group_listen_plan as glp
+
+        now = datetime.now(self.tz)
+        today_str = now.strftime("%Y-%m-%d")
+        state = glp.read_plan()
+        if not state.get("enabled", True):
+            logger.info("群聊监听计划已被禁用 (enabled=false)，跳过生成")
+            return {"success": True, "skipped": True, "message": "群聊监听计划已禁用", "count": 0}
+        if not force and state.get("generated_date") == today_str:
+            logger.debug("今日群聊监听计划已生成，跳过重复触发")
+            return {
+                "success": True,
+                "skipped": True,
+                "message": "今日群聊监听计划已生成",
+                "count": len([e for e in state.get("entries") or [] if not e.get("fired")]),
+            }
+        if not glp.candidate_groups(state):
+            logger.info("GROUP_LISTEN.json 没有候选群，跳过生成（Nora 可自行往 groups 里添加）")
+            glp.save_generated_entries([], now)
+            return {"success": True, "skipped": True, "message": "没有候选群", "count": 0}
+
+        try:
+            raw_entries = await self._generate_group_listen_plan_callback()
+        except Exception as e:
+            logger.error(f"生成群聊监听计划失败: {e}", exc_info=True)
+            return {"success": False, "message": f"生成群聊监听计划失败: {e}"}
+
+        state = glp.save_generated_entries(raw_entries or [], now)
+        entries = state.get("entries") or []
+        logger.info(f"今日群聊监听计划已生成: {len(entries)} 个触发点")
+        for entry in entries:
+            label = entry.get("name") or entry.get("group_id")
+            logger.info(f"  • {entry['time']} — {entry['platform']}:{label}")
+        return {
+            "success": True,
+            "skipped": False,
+            "date": today_str,
+            "count": len(entries),
+            "message": f"今日群聊监听计划已生成: {len(entries)} 个触发点",
+        }
+
+    async def _on_group_listen_tick(self):
+        """每分钟 tick：检查是否有群监听条目到点。一次最多激活一个群。"""
+        if not self._group_listen_enabled:
+            return
+
+        from core import group_listen_plan as glp
+
+        now = datetime.now(self.tz)
+        try:
+            index, entry = glp.due_entry(
+                glp.read_plan(), now, grace_minutes=self.GROUP_LISTEN_GRACE_MINUTES
+            )
+        except Exception as e:
+            logger.warning(f"读取群聊监听计划失败: {e}")
+            return
+
+        if entry is None:
+            # 顺手把早已错过的条目收尾，避免它们永远待触发
+            try:
+                glp.expire_stale_entries(now, grace_minutes=self.GROUP_LISTEN_GRACE_MINUTES)
+            except Exception as e:
+                logger.debug(f"清理过期群聊监听条目失败: {e}")
+            return
+
+        runtime_key = glp.runtime_key_for(entry)
+        if not runtime_key:
+            glp.mark_entry(index, result="invalid_target")
+            return
+
+        # 系统忙碌时不抢占（与私聊 proactive 一致：跳过而非轮询重试）
+        if should_skip_proactive():
+            state_summary = get_ai_state_summary()
+            logger.info(
+                "跳过群监听触发 %s: generating=%s backend_busy=%s",
+                runtime_key,
+                state_summary["is_generating"],
+                state_summary["is_backend_busy"],
+            )
+            glp.mark_entry(index, result="skipped_system_busy")
+            return
+
+        try:
+            result = await self._activate_group_listen_callback(entry)
+        except Exception as e:
+            logger.error(f"激活群监听失败 ({runtime_key}): {e}", exc_info=True)
+            result = f"error: {e}"
+
+        glp.mark_entry(index, result=str(result or "unknown"))
 
     # ----------------------------------------------------------------
     # 每日总结回调

@@ -1121,6 +1121,7 @@ class ToolManager:
         platform: str = "",
         chat_id: str = "",
         limit: int = 10,
+        page: int = 1,
         return_image: bool = True,
         local_path: str = "",
         type: str = "",
@@ -1135,6 +1136,7 @@ class ToolManager:
         5. By local_path: read a local image/video directly (workspace-relative or absolute) and return a MediaTag for model analysis.
         6. If no parameters given: returns the most recent media.
         text_query and keyword can be used together for combined results.
+        Use `page` to browse further into the result set with the same query (page 2 = the next `limit` items).
         :param image_id: Exact media ID to look up (e.g. 'img_a1b2c3d4' or 'vid_a1b2c3d4').
         :param keyword: Keyword or description for semantic/text search on media tags.
         :param text_query: Search text content (OCR) extracted from images. Supports fuzzy matching, case-insensitive, multi-keyword AND logic (space-separated). E.g. 'error message', '购物 清单'.
@@ -1146,7 +1148,10 @@ class ToolManager:
         :param platform: Filter by platform name, e.g. telegram.
         :param chat_id: Filter by platform chat ID.
         :param memory_scope_id: Shared cross-platform memory scope. Auto-injected; leave empty to use the current conversation's shared scope (recalls media sent on any platform).
-        :param limit: Maximum number of results (1-50, default 10).
+        :param limit: Page size — maximum number of results per page (1-50, default 10).
+        :param page: Page number starting at 1 (default 1). Page N skips the first (N-1)*limit results of the SAME query,
+            so keep every other parameter identical when paging. Use it when page 1 does not contain what you are looking for,
+            instead of raising limit. Ignored when image_id or local_path is given.
         :param return_image: When true, the tool returns media references via `[image: abs_path]` or `[video: abs_path]`
             MediaTags for multimodal pipeline ingestion. Default: True.
         :param local_path: Optional local file path to view directly (workspace-relative or absolute).
@@ -1155,10 +1160,13 @@ class ToolManager:
         """
         try:
             limit = max(1, min(int(limit), 50))
+            page = max(1, int(page))
             s_time = float(start_time) if start_time else None
             e_time = float(end_time) if end_time else None
         except (ValueError, TypeError) as e:
             return f"Error: Invalid parameter value: {e}"
+
+        offset = (page - 1) * limit
 
         # Local file direct view (bypass DB)
         if local_path:
@@ -1196,9 +1204,15 @@ class ToolManager:
                 limit=limit,
                 media_type=type,
                 memory_scope_id=memory_scope_id,
+                offset=offset,
             )
 
         if not results:
+            if offset > 0:
+                return (
+                    f"No media found on page {page} (offset {offset}). "
+                    "The result set likely ends earlier — try a smaller page number or a different query."
+                )
             return "No media found matching the criteria."
 
         # 如果提出了具体视觉问题，必须返回 MediaTag，供下一轮 image 模型读取真实图片。
@@ -1214,11 +1228,15 @@ class ToolManager:
         else:
             result_label = "media item(s)"
         output_lines = [f"Found {len(results)} {result_label}:\n"]
+        if offset > 0:
+            output_lines.append(f"[Page] page={page}, limit={limit} (skipped first {offset} result(s) of this query).\n")
+        elif page == 1 and len(results) >= limit:
+            output_lines.append(f"[Page] page=1, limit={limit}. More results may exist — call again with page=2 to continue.\n")
         if return_image:
             output_lines.append("[Mode] return_image=true: output includes MediaTag lines for downstream multimodal ingestion.\n")
         if question:
             output_lines.append(f"[Question] {question}\n")
-        for i, img in enumerate(results, 1):
+        for i, img in enumerate(results, offset + 1):
             item_type = img.get("media_type", "image")
             type_label = "Video" if item_type == "video" else "Image"
             output_lines.append(f"--- {type_label} {i} ---")

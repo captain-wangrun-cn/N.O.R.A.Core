@@ -116,6 +116,10 @@ def test_front_brain_system_includes_platform_prompt_and_preferences():
     assert "当前群" in system_prompt
     assert "[ONLINE]" in system_prompt
     assert "多说话者" in system_prompt
+    # 群内主动开口：允许但保守，且定时监听门槛更高
+    assert "群里主动开口：可以，但要保守" in system_prompt
+    assert "少说一次几乎没有代价" in system_prompt
+    assert "系统按计划自动开启的" in system_prompt
 
 
 def test_front_brain_review_system_includes_platform_prompt_and_preferences():
@@ -166,7 +170,12 @@ def test_group_listener_templates_define_strict_actions_and_batches():
     assert "seconds_since_interaction" in passive_system
     assert "consecutive_keep_listening" in passive_system
     assert "它的门槛应当低于 REPLY" in passive_system
+    # 自主插话是「克制的许可」：四条判据 + 定时监听更高门槛
+    assert "克制的许可，不是鼓励" in passive_system
+    assert all(word in passive_system for word in ("具体", "及时", "缺位", "简短"))
+    assert "trigger_kind=scheduled" in passive_system
     assert "总消息数" in passive_user and "Alice: first" in passive_user and "Bob: second" in passive_user
+    assert "本次监听的开启方式" in passive_user
     assert "正文见完整 history" in passive_user
     assert "距最近一次与 Nora 的互动" in passive_user
     assert "APPEND" in append_system and "KEEP_PENDING" in append_system

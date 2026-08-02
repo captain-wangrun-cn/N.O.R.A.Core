@@ -140,6 +140,9 @@ class GroupRuntimeState:
     last_received_at: float = 0.0
     # 本群进入 ONLINE 的时间；进程重启后由持久化 updated_at 兜底。
     online_since: float = 0.0
+    # 本次 ONLINE 是怎么开起来的："interaction"（@/回复/明确意图）或 "scheduled"（定时计划）。
+    # 定时开启意味着没人叫过 Nora，分类器应据此进一步提高自主插话门槛。
+    online_trigger_kind: str = "interaction"
     # 最近一次「与 Nora 的互动」：定向消息（@/回复 Nora）或 Nora 自己开始生成。
     last_interaction_at: float = 0.0
     last_passive_at: float = 0.0
@@ -404,6 +407,7 @@ class GroupListenerManager:
                     state.consecutive_keep_listening = 0
                     state.consecutive_semi_online_votes = 0
                     state.online_since = 0.0
+                    state.online_trigger_kind = "interaction"
                     state.last_interaction_at = 0.0
                     state.idle_generation += 1
                     self._cancel_task(state.idle_task)
@@ -411,6 +415,10 @@ class GroupListenerManager:
             elif mode == GroupPresence.ONLINE and old_mode != GroupPresence.ONLINE:
                 async with state.lock:
                     state.online_since = now
+                    # 定时计划开启的监听没有任何人叫过 Nora，分类器需要知道这一点。
+                    state.online_trigger_kind = (
+                        "scheduled" if reason == "scheduled_group_listen" else "interaction"
+                    )
                     state.last_interaction_at = now
                     state.consecutive_keep_listening = 0
                     state.consecutive_semi_online_votes = 0
@@ -724,6 +732,7 @@ class GroupListenerManager:
         last_activity = state.last_received_at or online_since
         return {
             "online_seconds": max(0.0, now - online_since) if online_since else 0.0,
+            "trigger_kind": str(state.online_trigger_kind or "interaction"),
             "seconds_since_interaction": (
                 max(0.0, now - last_interaction_at) if last_interaction_at else 0.0
             ),

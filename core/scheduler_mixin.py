@@ -967,6 +967,157 @@ class SchedulerMixin:
             logger.error(f"LLM 生成今日计划异常: {e}", exc_info=True)
             return []
 
+    # ------------------------------------------------------------------
+    # 群聊定时 ONLINE 监听 (Scheduled Group Listening)
+    # ------------------------------------------------------------------
+
+    async def _generate_group_listen_plan_via_llm(self) -> List[Dict[str, Any]]:
+        """LLM 回调：依据 GROUP_LISTEN.json 的候选群池 + 作息，生成今日监听时间点。
+
+        平台/群号只能来自候选池，生成后会再做一次白名单校验，防止模型编造群号。
+        """
+        from core import group_listen_plan as glp
+
+        tz_str = config.get_message_history_config().get("timezone", "Asia/Shanghai")
+        now = datetime.now(ZoneInfo(tz_str))
+
+        state = glp.read_plan()
+        candidates = glp.candidate_groups(state)
+        if not candidates:
+            return []
+
+        prefs = state.get("preferences") or {}
+        try:
+            max_entries = max(1, int(prefs.get("max_entries_per_day", 3)))
+        except (TypeError, ValueError):
+            max_entries = 3
+        earliest = glp.normalize_time(prefs.get("earliest_time")) or "09:00"
+        latest = glp.normalize_time(prefs.get("latest_time")) or "23:30"
+
+        candidates_text = "\n".join(
+            f"- platform={c['platform']} group_id={c['group_id']}"
+            + (f" 群名={c['name']}" if c["name"] else "")
+            + (f" 备注={c['note']}" if c["note"] else "")
+            for c in candidates
+        )
+
+        schedule_content = _read_file_safe(WORKSPACE_SCHEDULE_FILE, max_chars=2000)
+        soul_content = _read_file_safe(WORKSPACE_SOUL_FILE, max_chars=1500)
+        memory_content = _read_file_safe(_resolve_memory_file("MEMORY.md"), max_chars=1500)
+
+        system_prompt = render_template("schedule.jinja", "group_listen_plan_system")
+        user_prompt = render_template(
+            "schedule.jinja", "group_listen_plan_user",
+            date_display=now.strftime("%Y年%m月%d日 %A"),
+            current_time=now.strftime("%H:%M"),
+            candidates_text=candidates_text,
+            max_entries_per_day=max_entries,
+            earliest_time=earliest,
+            latest_time=latest,
+            preference_notes=str(prefs.get("notes") or "").strip(),
+            schedule_content=schedule_content,
+            soul_content=soul_content,
+            memory_content=memory_content,
+        )
+
+        response = ""
+        try:
+            stream = self._chat_stream_wrapper(
+                self.llm,
+                self.scheduler.default_chat_id if self.scheduler else "",
+                system_prompt=system_prompt,
+                user_prompt=user_prompt,
+                history=[],
+                tools=[],
+            )
+            async for chunk in stream:
+                if isinstance(chunk, dict) and chunk.get("type") == "text":
+                    response += chunk["content"]
+                elif isinstance(chunk, str):
+                    response += chunk
+
+            response = response.strip()
+            if response.startswith("```"):
+                response = response.split("\n", 1)[-1]
+                if response.endswith("```"):
+                    response = response[:-3]
+                response = response.strip()
+
+            plan = json.loads(response)
+        except json.JSONDecodeError as e:
+            logger.error(f"解析群聊监听计划 JSON 失败: {e}, response={response[:200]}")
+            return []
+        except Exception as e:
+            logger.error(f"LLM 生成群聊监听计划异常: {e}", exc_info=True)
+            return []
+
+        if not isinstance(plan, list):
+            logger.warning(f"群聊监听计划返回了非数组: {type(plan)}")
+            return []
+
+        allowed = {f"{c['platform']}:{c['group_id']}" for c in candidates}
+        entries: List[Dict[str, Any]] = []
+        for item in plan:
+            if not isinstance(item, dict):
+                continue
+            platform = str(item.get("platform") or "").strip()
+            group_id = str(item.get("group_id") or item.get("chat_id") or "").strip()
+            if f"{platform}:{group_id}" not in allowed:
+                logger.warning(f"忽略候选池外的群监听条目: {platform}:{group_id}")
+                continue
+            entries.append({
+                "time": item.get("time"),
+                "platform": platform,
+                "group_id": group_id,
+                "name": item.get("name") or "",
+                "reason": item.get("reason") or "",
+            })
+        # 交给 group_listen_plan 做时间规范化与「一个时间点一个群」的去重
+        return entries[: max_entries * 2]
+
+    async def _activate_scheduled_group_listen(self, entry: Dict[str, Any]) -> str:
+        """Scheduler 回调：到点把目标群切到 ONLINE 开始监听。
+
+        返回一个简短的结果字符串写回计划文件（activated / skipped_already_online / ...）。
+        与私聊 proactive 一致：目标已在线就直接跳过，不重试。
+        """
+        from core import group_listen_plan as glp
+
+        runtime_key = glp.runtime_key_for(entry)
+        if not runtime_key:
+            return "invalid_target"
+
+        platform = str(entry.get("platform") or "").strip()
+        group_chat_id = str(entry.get("group_id") or "").strip()
+        label = entry.get("name") or group_chat_id
+
+        if getattr(self, "group_listener", None) is None or not self.group_listener.enabled:
+            logger.info("群监听未启用，跳过定时监听: %s", runtime_key)
+            return "skipped_listener_disabled"
+
+        if self.group_listener.mode_for(runtime_key) == GroupPresence.ONLINE:
+            logger.info("定时群监听跳过（该群已 ONLINE）: %s", runtime_key)
+            return "skipped_already_online"
+
+        activated = await self.group_listener.set_mode(
+            runtime_key,
+            GroupPresence.ONLINE,
+            platform=platform,
+            platform_chat_id=group_chat_id,
+            reason="scheduled_group_listen",
+        )
+        if not activated:
+            logger.warning("定时群监听激活失败: %s", runtime_key)
+            return "failed"
+
+        logger.info(
+            "定时群监听已激活: %s (%s)%s",
+            runtime_key,
+            label,
+            f" reason={entry.get('reason')}" if entry.get("reason") else "",
+        )
+        return "activated"
+
     async def _send_proactive_message(self, chat_id: str, reason: str, event_type: str = "proactive", message_kind: str = "autonomous"):
         """
         Scheduler 回调：到达触发时间后，用 LLM 生成主动消息并发送。
