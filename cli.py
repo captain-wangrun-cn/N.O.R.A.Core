@@ -1686,10 +1686,6 @@ def run_wizard():
             # 每完成一步立即保存当前进度（增量合并，不覆盖未配置项）
             try:
                 _save_wizard_checkpoint(state)
-                questionary.print(
-                    f"📦 步骤 {step_name} 完成，进度已保存到 {config_file}。",
-                    style="bold",
-                )
             except Exception as e:
                 questionary.print(
                     f"⚠️ 进度保存失败（{e}），本次步骤的配置可能未持久化。",
