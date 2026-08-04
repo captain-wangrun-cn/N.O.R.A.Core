@@ -123,6 +123,10 @@ core/controller.py            NoraController.handle_message()
 # 配置向导
 python cli.py --configure
 
+# 配置总览 + 分区修改（查看已配置/缺失项，只重配需要的分区，无需重跑整个向导）
+python cli.py configure
+python cli.py configure --no-wizard   # 无 config.yml 时不自动进向导，纯查看
+
 # 运行主程序
 python main.py
 python main.py --no-tui --adapter auto

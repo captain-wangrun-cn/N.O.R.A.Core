@@ -374,7 +374,7 @@ def history_menu():
         ]
 
         choice = questionary.select("选择操作:", choices=choices).ask()
-        if choice is None or choice == "⬅️ 返回主菜单":
+        if choice is None or choice == "⬅️ 返回主菜单" or choice == "⬅️ 返回":
             break
 
         if choice == "📊 查看聊天记录统计":
@@ -410,6 +410,275 @@ def history_menu():
             if include_costs is None:
                 continue
             clear_local_data_files(include_costs=include_costs)
+
+
+# --- 配置概览/分区修改入口 ---
+
+SECRET_KEY_HINTS = ("key", "token", "secret", "password", "passwd")
+
+def _mask_api_key(value: Any) -> Any:
+    """递归掩码敏感配置值（key/token/secret/password 等键）。"""
+    if isinstance(value, dict):
+        masked = {}
+        for key, val in value.items():
+            if isinstance(val, dict):
+                masked[key] = _mask_api_key(val)
+            elif isinstance(key, str) and any(hint in key.lower() for hint in SECRET_KEY_HINTS):
+                masked[key] = _mask_secret(val)
+            else:
+                masked[key] = val
+        return masked
+    if isinstance(value, list):
+        return [_mask_api_key(item) for item in value]
+    return value
+
+
+def _mask_secret(value: Any) -> str:
+    text = str(value)
+    if not text:
+        return ""
+    if len(text) <= 4:
+        return "*" * len(text)
+    return text[:4] + "*" * min(len(text) - 4, 6) + text[-2:]
+
+
+def _section_nonempty(section: Any) -> bool:
+    """判断配置分区是否有实际内容（跳过空串/None/空容器）。"""
+    if not isinstance(section, dict):
+        return bool(section)
+    for value in section.values():
+        if isinstance(value, dict):
+            if _section_nonempty(value):
+                return True
+        elif value not in (None, ""):
+            return True
+    return False
+
+
+def _status_emoji(present: bool) -> str:
+    return "✅" if present else "⚠️"
+
+
+def _print_kv_block(title: str, kv: Dict[str, Any], prefix: str = "    ") -> None:
+    if kv:
+        questionary.print(f"{prefix}{title}:", style="bold")
+        for key, value in kv.items():
+            questionary.print(f"{prefix}  {key}: {value}", style="")
+    else:
+        questionary.print(f"{prefix}{title}: （未配置）", style="italic")
+
+
+def show_config_summary() -> None:
+    """打印当前配置（含 adapter 私有配置）概览，标记已配置/缺失/可选未配置项。"""
+    import config as config_loader
+
+    config_file = config_loader.CONFIG_FILE
+    try:
+        cfg = config_loader.get_config()
+    except FileNotFoundError:
+        cfg = None
+
+    questionary.print("\n" + "=" * 56, style="bold")
+    questionary.print("📋 当前配置总览", style="bold")
+    questionary.print("=" * 56, style="bold")
+
+    if cfg is None:
+        questionary.print(f"⚠️ 未找到配置文件 {config_file}，尚无任何配置。", style="bold red")
+        questionary.print("请运行配置向导完成首次配置。", style="bold")
+        return
+
+    print(f"配置文件: {config_file}")
+
+    # --- 工作区 ---
+    workspace_cfg = cfg.get("workspace", {}) or {}
+    ws_path = workspace_cfg.get("root_path")
+    questionary.print(f"\n📍 工作区: {ws_path or '未配置'}", style="bold" if ws_path else "italic")
+
+    # --- 网络代理 ---
+    proxy_cfg = config_loader.get_proxy_config() or {}
+    proxy_present = bool(proxy_cfg.get("enabled"))
+    if proxy_present:
+        proxies = {k: v for k, v in proxy_cfg.items() if k != "enabled" and v}
+        questionary.print(f"{_status_emoji(True)} 网络代理: 已启用", style="bold")
+        for key, value in proxies.items():
+            questionary.print(f"    {key}: {value}")
+    else:
+        questionary.print(f"{_status_emoji(False)} 网络代理: 未启用", style="")
+
+    # --- 主人识别 ---
+    owner_cfg = config_loader.get_owner_config() or {}
+    owner_ids = owner_cfg.get("identities", []) or []
+    owner_present = bool(owner_ids)
+    questionary.print(f"{_status_emoji(owner_present)} 主人识别: " +
+                      ("已配置" if owner_present else "未配置（自动绑定首个私聊者）"), style="bold" if owner_present else "")
+
+    # --- LLM ---
+    llm_cfg = cfg.get("llm", {}) or {}
+    provider = llm_cfg.get("provider") or "未配置"
+    questionary.print(f"\n{'='*56}", style="bold")
+    questionary.print("🤖 LLM 提供商与模型", style="bold")
+    questionary.print(f"默认提供商: {provider}", style="bold" if llm_cfg.get("provider") else "italic")
+
+    providers = llm_cfg.get("providers", {}) or {}
+    if providers:
+        questionary.print("已配置提供商:", style="bold")
+        for name, pcfg in providers.items():
+            if isinstance(pcfg, dict):
+                marker = " [默认]" if name == llm_cfg.get("provider") else ""
+                masked = _mask_api_key(pcfg)
+                print(f"  - {name} ({masked.get('type', 'unknown')}){marker} key={masked.get('api_key', '')!r}")
+            else:
+                print(f"  - {name}: {pcfg}")
+    else:
+        questionary.print(f"{_status_emoji(False)} 提供商: 未配置", style="bold red")
+
+    models = llm_cfg.get("models", {}) or {}
+    model_providers = llm_cfg.get("model_providers", {}) or {}
+    if models:
+        questionary.print("模型角色:", style="bold")
+        for role in ["smart", "fast", "coder", "image", "video", "security", "fast-image", "summary"]:
+            model_name = models.get(role)
+            if model_name:
+                bound = model_providers.get(role)
+                bound_str = f" → {bound}" if bound else ""
+                questionary.print(f"  - {role}: {model_name}{bound_str}", style="")
+            elif role in ("video", "security", "fast-image"):
+                questionary.print(f"  - {role}: （可选，未配置）", style="italic")
+            else:
+                questionary.print(f"  - {role}: {_status_emoji(False)} 未配置", style="bold red")
+    else:
+        questionary.print(f"{_status_emoji(False)} 模型角色: 未配置", style="bold red")
+
+    # --- 记忆/存储 ---
+    mem_cfg = cfg.get("memory", {}) or {}
+    questionary.print(f"\n{'='*56}", style="bold")
+    questionary.print("💾 记忆与存储", style="bold")
+    mh_cfg = mem_cfg.get("message_history", {}) or {}
+    questionary.print(f"{_status_emoji(_section_nonempty(mh_cfg))} 消息历史: "
+                      + ("已配置" if _section_nonempty(mh_cfg) else "未配置"), style="bold" if mh_cfg else "")
+    qdrant_cfg = mem_cfg.get("qdrant", {}) or {}
+    questionary.print(f"{_status_emoji(_section_nonempty(qdrant_cfg))} Qdrant: "
+                      + (f"{qdrant_cfg.get('host', 'localhost')}:{qdrant_cfg.get('port', 6333)}"
+                         if _section_nonempty(qdrant_cfg) else "未配置"), style="")
+    mongo_cfg = mem_cfg.get("mongo", {}) or {}
+    questionary.print(f"{_status_emoji(_section_nonempty(mongo_cfg))} MongoDB: "
+                      + ("已配置" if _section_nonempty(mongo_cfg) else "未配置"), style="")
+    embed_cfg = mem_cfg.get("embedding", {}) or {}
+    if embed_cfg.get("api_key"):
+        print(f"  - Embedding: {embed_cfg.get('provider', '?')} / {embed_cfg.get('model', '?')} / 维度 {embed_cfg.get('dimensions', '?')}  key={_mask_secret(embed_cfg['api_key'])}")
+    elif _section_nonempty(embed_cfg):
+        print(f"  - Embedding: {embed_cfg.get('provider', '?')} / {embed_cfg.get('model', '?')}（缺 API Key）")
+    else:
+        questionary.print(f"{_status_emoji(False)} Embedding: 未配置", style="")
+
+    # --- 其余顶层分区 ---
+    questionary.print(f"\n{'='*56}", style="bold")
+    questionary.print("🧩 其他配置", style="bold")
+
+    custom_scopes = (cfg.get("custom_injection", {}) or {}).get("scopes")
+    print(f"  - CUSTOM 注入范围: {', '.join(custom_scopes) if custom_scopes else '（未设置，默认全量注入）'}")
+
+    nora_prefs = cfg.get("nora_preferences", {}) or {}
+    questionary.print(f"{_status_emoji(_section_nonempty(nora_prefs))} Nora 偏好: "
+                      + ("已配置" if _section_nonempty(nora_prefs) else "未配置（使用默认值）"), style="")
+
+    tavily_cfg = cfg.get("tavily", {}) or {}
+    if tavily_cfg.get("api_key"):
+        print(f"  - Tavily: ✅ 已配置  key={_mask_secret(tavily_cfg['api_key'])}  timeout={tavily_cfg.get('timeout', 10)}")
+    elif tavily_cfg:
+        print("  - Tavily: ⚠️ 部分配置（缺 API Key）")
+    else:
+        questionary.print("  - Tavily: （可选，未配置）", style="italic")
+
+    cost_cfg = cfg.get("cost_tracking", {}) or {}
+    questionary.print(f"{_status_emoji(bool(cost_cfg.get('enabled', True)))} 成本跟踪: "
+                      + ("已启用" if cost_cfg.get("enabled", True) else "已关闭"), style="")
+
+    security_cfg = cfg.get("security", {}) or {}
+    questionary.print(f"{_status_emoji(bool(security_cfg.get('enabled')))} 安全审查: "
+                      + ("已启用" if security_cfg.get("enabled") else "未启用"), style="")
+
+    schedule_cfg = cfg.get("schedule", {}) or {}
+    questionary.print(f"{_status_emoji(bool(schedule_cfg.get('enabled', False)))} 主动消息调度: "
+                      + ("已启用" if schedule_cfg.get("enabled") else "未启用"), style="")
+
+    interaction_cfg = cfg.get("interaction", {}) or {}
+    interaction_kv = {k: v for k, v in interaction_cfg.items() if k != "group_listener" and v not in (None, "")}
+    gl_cfg = interaction_cfg.get("group_listener", {}) or {}
+    if interaction_kv or gl_cfg:
+        questionary.print("交互配置:", style="bold")
+        for key, value in interaction_kv.items():
+            questionary.print(f"    {key}: {value}", style="")
+        questionary.print(f"    群聊监听: {'已启用' if gl_cfg.get('enabled', True) else '已关闭'}", style="")
+    else:
+        questionary.print("交互配置: （未配置，使用默认值）", style="italic")
+
+    questionary.print("\n" + "=" * 56, style="bold")
+
+
+def show_adapter_configs_summary() -> None:
+    """展示各平台 adapter 私有配置（adapters/*/config.json）的配置状态。"""
+    questionary.print("\n" + "=" * 56, style="bold")
+    questionary.print("🔌 平台适配器配置", style="bold")
+    questionary.print("=" * 56, style="bold")
+    questionary.print("提示：平台私有配置（token/地址等）存放在各适配器目录的 config.json，不在全局 config.yml。", style="yellow")
+
+    adapters_dir = Path("adapters")
+    if not adapters_dir.is_dir():
+        questionary.print("未找到 adapters/ 目录。", style="red")
+        return
+
+    for adapter_dir in sorted(adapters_dir.iterdir()):
+        if not adapter_dir.is_dir():
+            continue
+        cfg_json = adapter_dir / "config.json"
+        if not cfg_json.exists():
+            continue
+
+        name = adapter_dir.name
+        example_exists = (adapter_dir / "config.example.json").exists()
+
+        try:
+            with open(cfg_json, "r", encoding="utf-8") as f:
+                data = yaml.safe_load(f) or {}
+        except Exception as e:
+            print(f"  - {name}: ⚠️ 读取失败 ({e})")
+            continue
+
+        if isinstance(data, dict) and data:
+            masked = _mask_api_key(data)
+            joined = " ".join(f"{k}={v}" for k, v in masked.items())
+            questionary.print(f"  - {name}: ✅ {joined}", style="bold")
+        elif example_exists:
+            questionary.print(f"  - {name}: ⚠️ 未配置（参考 config.example.json 填写）", style="")
+        else:
+            questionary.print(f"  - {name}: ⚠️ 空配置", style="")
+
+
+def config_menu() -> None:
+    """配置管理菜单：先展示当前配置状态，再选择分区修改或重新运行向导。"""
+    while True:
+        show_config_summary()
+        questionary.print("\n" + "-" * 56, style="bold")
+
+        choices = [
+            "✏️ 重新运行完整配置向导",
+            "🔌 查看平台适配器配置",
+            "⬅️ 返回",
+        ]
+        choice = questionary.select(
+            "配置操作:",
+            choices=choices,
+        ).ask()
+
+        if choice is None or choice == "⬅️ 返回":
+            return
+        if choice == "🔌 查看平台适配器配置":
+            show_adapter_configs_summary()
+            input("\n按回车返回...")
+        elif choice == "✏️ 重新运行完整配置向导":
+            questionary.print("\n配置向导将逐项重新配置（当前值已预填为默认值）。", style="yellow")
+            run_wizard()
 
 
 # --- 向导步骤 ---
@@ -1375,6 +1644,7 @@ def ensure_config_exists(auto_configure: bool = True) -> bool:
 
     print(f"⚠️ 未检测到配置文件 {config_file}。")
     print("现在将启动配置向导，配置完成后会自动创建并保存该文件。")
+    print("（若只查看配置状态，可运行 `python cli.py configure --no-wizard`）")
 
     wizard_completed = run_wizard()
     if not wizard_completed:
@@ -1743,7 +2013,7 @@ def main_menu():
     load_locale()
     
     choices = [
-        "🔧 运行配置向导",
+        "🔧 配置管理（查看总览/修改）",
         "📊 查看运行状态",
         "🧪 测试 Qdrant 连接",
         "🧪 测试 RAG 系统",
@@ -1751,23 +2021,23 @@ def main_menu():
         "🧹 清理 RAG 数据",
         "❌ 退出"
     ]
-    
+
     while True:
         print("\n" + "="*50)
         print("N.O.R.A. Core - 管理工具")
         print("="*50)
-        
+
         choice = questionary.select(
             "请选择操作:",
             choices=choices
         ).ask()
-        
+
         if choice is None or choice == "❌ 退出":
             print("👋 再见！")
             break
-        
-        if choice == "🔧 运行配置向导":
-            run_wizard()
+
+        if choice == "🔧 配置管理（查看总览/修改）":
+            config_menu()
         elif choice == "📊 查看运行状态":
             show_status()
         elif choice == "🧪 测试 Qdrant 连接":
@@ -1789,6 +2059,10 @@ def main():
 
     # 'wizard' 命令
     subparsers.add_parser("wizard", help="运行交互式配置向导")
+
+    # 'configure' 命令
+    configure_parser = subparsers.add_parser("configure", help="查看配置总览并逐项修改（无需重跑整个向导）")
+    configure_parser.add_argument("--no-wizard", action="store_true", help="无配置文件时跳过自动向导，仅尝试查看")
 
     # 'status' 命令
     subparsers.add_parser("status", help="显示系统运行状态")
@@ -1814,11 +2088,18 @@ def main():
     args = parser.parse_args()
 
     # 无配置文件时自动进入首次配置流程
-    if args.command != "wizard" and not ensure_config_exists():
+    if args.command not in ("wizard", "configure"):
+        if not ensure_config_exists():
+            return
+    elif args.command == "configure" and args.no_wizard and not os.path.exists("config.yml"):
+        questionary.print("⚠️ 未找到配置文件 config.yml。", style="bold yellow")
+        questionary.print("跳过配置向导（--no-wizard），但缺少配置文件将无法查看配置状态。", style="")
         return
 
     if args.command == "wizard":
         run_wizard()
+    elif args.command == "configure":
+        config_menu()
     elif args.command == "status":
         show_status()
     elif args.command == "test-rag":

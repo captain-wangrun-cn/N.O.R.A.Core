@@ -1,4 +1,26 @@
-## 近期关键改动（截至 2026-08-02）
+## 近期关键改动（截至 2026-08-04）
+
+### 🖥️ CLI 配置管理：总览 + 分区修改（不再强制重跑整个向导）
+
+`python cli.py configure`（等价于菜单「🔧 配置管理」）现在先展示当前配置状态，再选择操作：
+
+- **`show_config_summary()`**（`cli.py`）：逐分区打印总览，标记「已配置 ✅ / 缺失 ⚠️ / 可选未配置（斜体）」：
+  - 工作区、网络代理、主人识别、LLM 提供商与模型角色（smart/fast/coder/image/video/security/fast-image/summary 全列，
+    `video`/`security`/`fast-image` 未配置只标「可选」）、记忆与存储（消息历史/Qdrant/MongoDB/Embedding）、
+    CUSTOM 注入范围、Nora 偏好、Tavily、成本跟踪、安全审查、主动消息调度、交互配置（含群聊监听开关）。
+  - **API Key/Token/Secret 一律掩码**：`_mask_api_key()` / `_mask_secret()` 按键名（key/token/secret/password）递归掩码，
+    保留首 4 + 若干 `*` + 尾 2 用于辨认（如 `sk-A******ET`）。
+- **`show_adapter_configs_summary()`**（`cli.py`）：扫描 `adapters/*/config.json` 显示各平台私有配置状态（同样掩码敏感值），
+  与全局 `config.yml` 的配置分开展示。
+- 菜单提供「✏️ 重新运行完整配置向导」与「🔌 查看平台适配器配置」；向导各步骤默认值均预填当前配置，
+  只重跑需要的分区即可，其余分区保持原值。
+- `configure` 子命令新增 `--no-wizard`：无 `config.yml` 时不自动进入向导，直接退出（纯查看模式）；
+  缺失时默认仍会启动向导完成首次配置。
+
+**测试**：新增 `tests/test_cli_config_menu.py`（掩码、分区非空判断、总览输出、菜单循环、adapter 视图）→ 6 passed。
+全量 `pytest tests/` → 493 passed，9 个失败均为已知基线（context_pricing/cost_tracker/retry_queue/timezone）。
+
+---
 
 ### 🗓️ 群聊定时 ONLINE 监听 + `view_media` 翻页 + 群内主动开口的保守化
 
