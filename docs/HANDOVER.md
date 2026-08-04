@@ -12,8 +12,11 @@
     保留首 4 + 若干 `*` + 尾 2 用于辨认（如 `sk-A******ET`）。
 - **`show_adapter_configs_summary()`**（`cli.py`）：扫描 `adapters/*/config.json` 显示各平台私有配置状态（同样掩码敏感值），
   与全局 `config.yml` 的配置分开展示。
-- 菜单提供「✏️ 重新运行完整配置向导」与「🔌 查看平台适配器配置」；向导各步骤默认值均预填当前配置，
-  只重跑需要的分区即可，其余分区保持原值。
+- 菜单提供「✏️ 修改单项配置」「🔌 查看平台适配器配置」「🔄 重新运行完整配置向导」；向导各步骤默认值均预填当前配置。
+- **「✏️ 修改单项配置」**（`_edit_single_item()`）：列出工作区/网络代理/LLM 提供商/数据库与记忆/Embedding/Tavily/时区/
+  模型角色/输出 token 上限/成本跟踪 10 个独立条目，选一项只运行对应 Step 编辑器并立即保存
+  （复用 `_save_wizard_checkpoint()` 增量合并），**其他配置原样保留**，无需重跑整个向导。
+  单项编辑前后各做一次备份/清理，异常时不残留备份文件。
 - `configure` 子命令新增 `--no-wizard`：无 `config.yml` 时不自动进入向导，直接退出（纯查看模式）；
   缺失时默认仍会启动向导完成首次配置。
 
@@ -26,8 +29,8 @@
 - 向导全部完成并确认保存后自动清理备份文件；
 - 步骤列表提取为模块级常量 `WIZARD_STEPS`，便于测试注入。
 
-**测试**：`tests/test_cli_config_menu.py` 新增检查点保存、失败保留进度、备份清理、`_build_final_config` 等 → 10 passed。
-全量 `pytest tests/` → 497 passed，9 个失败均为已知基线（context_pricing/cost_tracker/retry_queue/timezone）。
+**测试**：`tests/test_cli_config_menu.py` 新增检查点保存、失败保留进度、备份清理、`_build_final_config`、单项编辑（含无配置文件提示）等 → 12 passed。
+全量 `pytest tests/` → 499 passed，9 个失败均为已知基线（context_pricing/cost_tracker/retry_queue/timezone）。
 
 ---
 

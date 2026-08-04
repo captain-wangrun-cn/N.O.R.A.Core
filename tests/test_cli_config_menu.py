@@ -141,7 +141,7 @@ def test_config_menu_returns_via_menus(monkeypatch, tmp_path):
     (tmp_path / "config.yml").write_text("llm: {}\n", encoding="utf-8")
     monkeypatch.setitem(cli.sys.modules, "config", _EmptyConfig)
 
-    selections = iter(["✏️ 重新运行完整配置向导", "⬅️ 返回"])
+    selections = iter(["🔄 重新运行完整配置向导", "⬅️ 返回"])
     monkeypatch.setattr(cli.questionary, "select", lambda *args, **kwargs: _Answer(next(selections)))
     monkeypatch.setattr(cli.questionary, "confirm", lambda *args, **kwargs: _Answer(False))
     monkeypatch.setattr(cli.questionary, "print", lambda *args, **kwargs: None)
@@ -170,6 +170,58 @@ def test_config_menu_adapter_view(monkeypatch, tmp_path):
     monkeypatch.setattr("builtins.input", lambda *args, **kwargs: "")
 
     cli.config_menu()  # 不应抛异常
+
+
+def test_edit_single_item_only_changes_that_item(monkeypatch, tmp_path):
+    """单独修改工作区：只改该分区，其他配置原样保留。"""
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "config.yml").write_text(
+        "workspace:\n  root_path: /old\nllm:\n  provider: gemini\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setitem(cli.sys.modules, "config", _EmptyConfig)
+
+    # 选择「📍 工作区路径」
+    monkeypatch.setattr(
+        cli.questionary, "select",
+        lambda *args, **kwargs: _Answer(("workspace", cli.StepWorkspace)),
+    )
+
+    def _set_workspace(self):
+        self.state["workspace"] = {"root_path": "/new"}
+        return True
+
+    monkeypatch.setattr(cli.StepWorkspace, "run", _set_workspace)
+    monkeypatch.setattr(cli.questionary, "print", lambda *args, **kwargs: None)
+
+    cli._edit_single_item()
+
+    import yaml
+
+    with open(tmp_path / "config.yml", "r", encoding="utf-8") as f:
+        saved = yaml.safe_load(f)
+    # 工作区已修改
+    assert saved["workspace"]["root_path"] == "/new"
+    # 其他配置原样保留
+    assert saved["llm"]["provider"] == "gemini"
+    # 单项编辑不留备份文件
+    assert not (tmp_path / "config.yml.wizard-backup").exists()
+
+
+def test_edit_single_item_no_config_file(monkeypatch, tmp_path):
+    """无配置文件时单项编辑给出提示，不崩溃。"""
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setitem(cli.sys.modules, "config", _EmptyConfig)
+
+    monkeypatch.setattr(
+        cli.questionary, "select",
+        lambda *args, **kwargs: _Answer(("workspace", cli.StepWorkspace)),
+    )
+    messages = []
+    monkeypatch.setattr(cli.questionary, "print", lambda text, style="": messages.append(text))
+
+    cli._edit_single_item()
+    assert any("未找到配置文件" in msg for msg in messages)
 
 
 # --- 向导兜底：每步检查点保存 ---

@@ -656,6 +656,60 @@ def show_adapter_configs_summary() -> None:
             questionary.print(f"  - {name}: ⚠️ 空配置", style="")
 
 
+def _edit_single_item() -> None:
+    """单独修改某一项配置（复用向导单步编辑器，立即保存，不影响其他项）。"""
+    single_items = [
+        questionary.Choice("📍 工作区路径", value=("workspace", StepWorkspace)),
+        questionary.Choice("🌐 网络代理", value=("proxy", StepProxy)),
+        questionary.Choice("🤖 LLM 提供商（新增/编辑/删除/默认）", value=("providers", StepProvider)),
+        questionary.Choice("💾 数据库与记忆（Qdrant/MongoDB）", value=("database", StepDatabase)),
+        questionary.Choice("🧠 Embedding 向量化", value=("embedding", StepEmbedding)),
+        questionary.Choice("🔍 Tavily 搜索 API", value=("tavily", StepTavily)),
+        questionary.Choice("🕐 时区", value=("timezone", StepTimezone)),
+        questionary.Choice("🧩 模型角色（smart/fast/coder/image/video/summary 等）", value=("models", StepModels)),
+        questionary.Choice("🧷 输出 token 上限", value=("output_limit", StepOutputLimit)),
+        questionary.Choice("💰 成本跟踪", value=("cost_tracking", StepCostTracking)),
+    ]
+    choice = questionary.select(
+        "选择要修改的配置项:",
+        choices=single_items,
+    ).ask()
+
+    if choice is None:
+        return
+
+    _key, step_class = choice
+    state = _load_wizard_state()
+    if not state:
+        questionary.print("⚠️ 未找到配置文件 config.yml，请先完成首次配置。", style="bold yellow")
+        return
+
+    import config as config_loader
+    if os.path.exists(config_loader.CONFIG_FILE):
+        shutil.copyfile(config_loader.CONFIG_FILE, WIZARD_BACKUP_FILE)
+
+    questionary.print("\n" + "-" * 56, style="bold")
+    try:
+        step_instance = step_class(state)
+        success = step_instance.run()
+    except Exception as e:
+        questionary.print(f"❌ 修改失败（{e}）。", style="bold red")
+        return
+    finally:
+        if os.path.exists(WIZARD_BACKUP_FILE):
+            os.remove(WIZARD_BACKUP_FILE)
+
+    if not success:
+        questionary.print("⚠️ 未做任何修改。", style="bold yellow")
+        return
+
+    try:
+        _save_wizard_checkpoint(state)
+        questionary.print("✅ 已保存修改。", style="bold green")
+    except Exception as e:
+        questionary.print(f"⚠️ 保存失败（{e}），本次修改可能未持久化。", style="bold yellow")
+
+
 def config_menu() -> None:
     """配置管理菜单：先展示当前配置状态，再选择分区修改或重新运行向导。"""
     while True:
@@ -663,8 +717,9 @@ def config_menu() -> None:
         questionary.print("\n" + "-" * 56, style="bold")
 
         choices = [
-            "✏️ 重新运行完整配置向导",
+            "✏️ 修改单项配置",
             "🔌 查看平台适配器配置",
+            "🔄 重新运行完整配置向导",
             "⬅️ 返回",
         ]
         choice = questionary.select(
@@ -674,10 +729,12 @@ def config_menu() -> None:
 
         if choice is None or choice == "⬅️ 返回":
             return
-        if choice == "🔌 查看平台适配器配置":
+        if choice == "✏️ 修改单项配置":
+            _edit_single_item()
+        elif choice == "🔌 查看平台适配器配置":
             show_adapter_configs_summary()
             input("\n按回车返回...")
-        elif choice == "✏️ 重新运行完整配置向导":
+        elif choice == "🔄 重新运行完整配置向导":
             questionary.print("\n配置向导将逐项重新配置（当前值已预填为默认值）。", style="yellow")
             run_wizard()
 
@@ -1600,6 +1657,53 @@ def _wizard_backup_hint() -> None:
         )
 
 
+def _load_wizard_state() -> Dict[str, Any]:
+    """加载现有 config.yml 为向导 state（含旧配置迁移）；无配置文件时返回空 state。"""
+    state = {}
+    config_file = "config.yml"
+    if not os.path.exists(config_file):
+        return state
+
+    cfg = _read_yaml_file(config_file)
+    llm_cfg = cfg.get("llm", {})
+    providers = llm_cfg.get("providers", {}) or {}
+
+    # 旧配置自动迁移到 providers
+    if not providers:
+        api_keys = llm_cfg.get("api_keys", {}) or {}
+        if api_keys.get("gemini"):
+            providers["gemini"] = {
+                "type": "gemini",
+                "api_key": api_keys.get("gemini", ""),
+            }
+        if api_keys.get("openai"):
+            providers["openai"] = {
+                "type": "openai",
+                "api_key": api_keys.get("openai", ""),
+                "base_url": llm_cfg.get("base_url") or "https://api.openai.com/v1",
+                "user_agent": llm_cfg.get("user_agent", ""),
+            }
+
+    provider_default = llm_cfg.get("provider")
+    if not provider_default and providers:
+        provider_default = next(iter(providers.keys()))
+
+    state = {
+        'workspace': cfg.get("workspace", {}),
+        'network': cfg.get("network", {}) or ({'proxy': cfg.get('proxy', {})} if cfg.get('proxy') else {}),
+        'provider': provider_default,
+        'providers': providers,
+        'model_providers': llm_cfg.get("model_providers", {}) or {},
+        'models': llm_cfg.get("models", {}),
+        'llm': llm_cfg,
+        'memory': cfg.get("memory", {}),
+        'tavily': cfg.get("tavily", {}),
+        'cost_tracking': cfg.get("cost_tracking", {'enabled': True}),
+        'security': cfg.get("security", {}) or {},
+    }
+    return state
+
+
 def run_wizard():
     """运行交互式配置向导"""
     load_locale()
@@ -1607,45 +1711,7 @@ def run_wizard():
 
     # 加载现有配置
     config_file = "config.yml"
-    state = {}
-    if os.path.exists(config_file):
-        cfg = _read_yaml_file(config_file)
-        llm_cfg = cfg.get("llm", {})
-        providers = llm_cfg.get("providers", {}) or {}
-
-        # 旧配置自动迁移到 providers
-        if not providers:
-            api_keys = llm_cfg.get("api_keys", {}) or {}
-            if api_keys.get("gemini"):
-                providers["gemini"] = {
-                    "type": "gemini",
-                    "api_key": api_keys.get("gemini", ""),
-                }
-            if api_keys.get("openai"):
-                providers["openai"] = {
-                    "type": "openai",
-                    "api_key": api_keys.get("openai", ""),
-                    "base_url": llm_cfg.get("base_url") or "https://api.openai.com/v1",
-                    "user_agent": llm_cfg.get("user_agent", ""),
-                }
-
-        provider_default = llm_cfg.get("provider")
-        if not provider_default and providers:
-            provider_default = next(iter(providers.keys()))
-
-        state = {
-            'workspace': cfg.get("workspace", {}),
-            'network': cfg.get("network", {}) or ({'proxy': cfg.get('proxy', {})} if cfg.get('proxy') else {}),
-            'provider': provider_default,
-            'providers': providers,
-            'model_providers': llm_cfg.get("model_providers", {}) or {},
-            'models': llm_cfg.get("models", {}),
-            'llm': llm_cfg,
-            'memory': cfg.get("memory", {}),
-            'tavily': cfg.get("tavily", {}),
-            'cost_tracking': cfg.get("cost_tracking", {'enabled': True}),
-            'security': cfg.get("security", {}) or {},
-        }
+    state = _load_wizard_state()
 
     questionary.print(
         "平台 adapter 的私有配置请编辑对应目录下的 config.json，例如 adapters/telegram/config.json。",
