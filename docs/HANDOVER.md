@@ -17,8 +17,17 @@
 - `configure` 子命令新增 `--no-wizard`：无 `config.yml` 时不自动进入向导，直接退出（纯查看模式）；
   缺失时默认仍会启动向导完成首次配置。
 
-**测试**：新增 `tests/test_cli_config_menu.py`（掩码、分区非空判断、总览输出、菜单循环、adapter 视图）→ 6 passed。
-全量 `pytest tests/` → 493 passed，9 个失败均为已知基线（context_pricing/cost_tracker/retry_queue/timezone）。
+**配置向导兜底（每步自动保存）**：
+- `run_wizard()` 启动时把现有 `config.yml` 备份为 `config.yml.wizard-backup`；
+- 每成功完成一个步骤立即调用 `_save_wizard_checkpoint()` 把当前进度**增量合并**写回 `config.yml`
+  （复用 `_build_final_config()`，与最终保存同一份组装逻辑，未涉及的配置分区原样保留）；
+- 步骤失败（如请求失败）、Ctrl+C、异常中止时：已完成的步骤进度**保留在 config.yml 不丢失**，
+  打印提示可用 `config.yml.wizard-backup` 手动回退；
+- 向导全部完成并确认保存后自动清理备份文件；
+- 步骤列表提取为模块级常量 `WIZARD_STEPS`，便于测试注入。
+
+**测试**：`tests/test_cli_config_menu.py` 新增检查点保存、失败保留进度、备份清理、`_build_final_config` 等 → 10 passed。
+全量 `pytest tests/` → 497 passed，9 个失败均为已知基线（context_pricing/cost_tracker/retry_queue/timezone）。
 
 ---
 

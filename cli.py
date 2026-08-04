@@ -3,6 +3,7 @@
 import argparse
 import questionary
 import os
+import shutil
 import yaml
 import warnings
 import logging
@@ -1494,78 +1495,28 @@ class StepOutputLimit(ConfigStep):
 
 
 # --- 配置向导主流程 ---
-def run_wizard():
-    """运行交互式配置向导"""
-    load_locale()
-    print(t('wizard.welcome'))
 
-    # 加载现有配置
-    config_file = "config.yml"
-    state = {}
-    if os.path.exists(config_file):
-        with open(config_file, 'r', encoding='utf-8') as f:
-            cfg = yaml.safe_load(f) or {}
-            llm_cfg = cfg.get("llm", {})
-            providers = llm_cfg.get("providers", {}) or {}
+WIZARD_BACKUP_FILE = "config.yml.wizard-backup"
 
-            # 旧配置自动迁移到 providers
-            if not providers:
-                api_keys = llm_cfg.get("api_keys", {}) or {}
-                if api_keys.get("gemini"):
-                    providers["gemini"] = {
-                        "type": "gemini",
-                        "api_key": api_keys.get("gemini", ""),
-                    }
-                if api_keys.get("openai"):
-                    providers["openai"] = {
-                        "type": "openai",
-                        "api_key": api_keys.get("openai", ""),
-                        "base_url": llm_cfg.get("base_url") or "https://api.openai.com/v1",
-                        "user_agent": llm_cfg.get("user_agent", ""),
-                    }
+# 向导步骤顺序（模块级常量，便于测试注入）
+WIZARD_STEPS = [
+    StepWorkspace, StepProxy, StepProvider, StepAPIKeys, StepDatabase, StepEmbedding,
+    StepTavily, StepTimezone, StepModels, StepOutputLimit, StepCostTracking,
+]
 
-            provider_default = llm_cfg.get("provider")
-            if not provider_default and providers:
-                provider_default = next(iter(providers.keys()))
 
-            state = {
-                'workspace': cfg.get("workspace", {}),
-                'network': cfg.get("network", {}) or ({'proxy': cfg.get('proxy', {})} if cfg.get('proxy') else {}),
-                'provider': provider_default,
-                'providers': providers,
-                'model_providers': llm_cfg.get("model_providers", {}) or {},
-                'models': llm_cfg.get("models", {}),
-                'llm': llm_cfg,
-                'memory': cfg.get("memory", {}),
-                'tavily': cfg.get("tavily", {}),
-                'cost_tracking': cfg.get("cost_tracking", {'enabled': True}),
-                'security': cfg.get("security", {}) or {},
-            }
+def _read_yaml_file(path: str) -> Dict[str, Any]:
+    """读取 YAML 文件，缺失或解析失败返回空 dict。"""
+    try:
+        with open(path, 'r', encoding='utf-8') as f:
+            data = yaml.safe_load(f)
+        return data if isinstance(data, dict) else {}
+    except Exception:
+        return {}
 
-    questionary.print(
-        "平台 adapter 的私有配置请编辑对应目录下的 config.json，例如 adapters/telegram/config.json。",
-        style="bold yellow",
-    )
 
-    steps = [StepWorkspace, StepProxy, StepProvider, StepAPIKeys, StepDatabase, StepEmbedding, StepTavily, StepTimezone, StepModels, StepOutputLimit, StepCostTracking]
-    current_step = 0
-    
-    while current_step < len(steps):
-        step_instance = steps[current_step](state)
-        success = step_instance.run()
-
-        if not success: # User pressed Ctrl+C
-            print(t('wizard.aborted_message'))
-            return False
-        
-        # 检查是否选择了 "返回"
-        if state.get('provider') == t('wizard.back_option'):
-            current_step = max(0, current_step - 1)
-            continue
-            
-        current_step += 1
-
-    # --- 确认保存 ---
+def _build_final_config(state: Dict[str, Any]) -> Dict[str, Any]:
+    """把向导 state 组装成最终配置（与确认保存使用同一份逻辑）。"""
     final_config: Dict[str, Any] = {
         'workspace': state.get('workspace', {'root_path': '~/.nora/workspace'}),
         'network': state.get('network', {}),
@@ -1601,7 +1552,7 @@ def run_wizard():
             final_config['llm']['base_url'] = default_provider_cfg.get('base_url')
         if default_provider_cfg.get('user_agent'):
             final_config['llm']['user_agent'] = default_provider_cfg.get('user_agent')
-    
+
     # 添加 Tavily 配置（如果存在）
     if state.get('tavily'):
         final_config['tavily'] = state['tavily']
@@ -1619,6 +1570,144 @@ def run_wizard():
         existing_custom.update(model_prices)
         cost_tracking_cfg['custom_prices'] = existing_custom
 
+    return final_config
+
+
+def _save_wizard_checkpoint(state: Dict[str, Any]) -> None:
+    """向导进行中把当前进度合并写回 config.yml（增量保存，不影响未配置项）。
+
+    每次成功完成一步配置后调用；配合向导开始时的备份文件，
+    崩溃时可恢复改动前的配置。
+    """
+    import config as config_loader
+
+    existing = _read_yaml_file(config_loader.CONFIG_FILE)
+    merged = dict(existing)
+    merged.update(_build_final_config(state))
+    config_loader.save_config(merged)
+
+
+def _wizard_backup_hint() -> None:
+    """提示用户进度已保存、可用备份回退。"""
+    questionary.print(
+        "ℹ️ 已配置的步骤已保存到 config.yml（未中断前每一步都会落盘）。",
+        style="bold",
+    )
+    if os.path.exists(WIZARD_BACKUP_FILE):
+        questionary.print(
+            f"ℹ️ 如需回退到向导开始前的配置，可将 {WIZARD_BACKUP_FILE} 覆盖回 config.yml。",
+            style="bold",
+        )
+
+
+def run_wizard():
+    """运行交互式配置向导"""
+    load_locale()
+    print(t('wizard.welcome'))
+
+    # 加载现有配置
+    config_file = "config.yml"
+    state = {}
+    if os.path.exists(config_file):
+        cfg = _read_yaml_file(config_file)
+        llm_cfg = cfg.get("llm", {})
+        providers = llm_cfg.get("providers", {}) or {}
+
+        # 旧配置自动迁移到 providers
+        if not providers:
+            api_keys = llm_cfg.get("api_keys", {}) or {}
+            if api_keys.get("gemini"):
+                providers["gemini"] = {
+                    "type": "gemini",
+                    "api_key": api_keys.get("gemini", ""),
+                }
+            if api_keys.get("openai"):
+                providers["openai"] = {
+                    "type": "openai",
+                    "api_key": api_keys.get("openai", ""),
+                    "base_url": llm_cfg.get("base_url") or "https://api.openai.com/v1",
+                    "user_agent": llm_cfg.get("user_agent", ""),
+                }
+
+        provider_default = llm_cfg.get("provider")
+        if not provider_default and providers:
+            provider_default = next(iter(providers.keys()))
+
+        state = {
+            'workspace': cfg.get("workspace", {}),
+            'network': cfg.get("network", {}) or ({'proxy': cfg.get('proxy', {})} if cfg.get('proxy') else {}),
+            'provider': provider_default,
+            'providers': providers,
+            'model_providers': llm_cfg.get("model_providers", {}) or {},
+            'models': llm_cfg.get("models", {}),
+            'llm': llm_cfg,
+            'memory': cfg.get("memory", {}),
+            'tavily': cfg.get("tavily", {}),
+            'cost_tracking': cfg.get("cost_tracking", {'enabled': True}),
+            'security': cfg.get("security", {}) or {},
+        }
+
+    questionary.print(
+        "平台 adapter 的私有配置请编辑对应目录下的 config.json，例如 adapters/telegram/config.json。",
+        style="bold yellow",
+    )
+
+    # 备份现有配置：每完成一步会立即保存当前进度；
+    # 若向导中止/崩溃，已保存的进度保留在 config.yml，备份文件可用于手动回退。
+    if os.path.exists(config_file):
+        shutil.copyfile(config_file, WIZARD_BACKUP_FILE)
+        questionary.print(
+            f"🛡️ 已备份当前配置到 {WIZARD_BACKUP_FILE}，每完成一步配置会自动保存进度。",
+            style="bold",
+        )
+
+    steps = WIZARD_STEPS
+    current_step = 0
+    step_name = "未知步骤"
+    try:
+        while current_step < len(steps):
+            step_class = steps[current_step]
+            step_instance = step_class(state)
+            step_name = step_class.__name__
+            success = step_instance.run()
+
+            if not success:  # 步骤失败（如请求失败）或用户取消
+                questionary.print("⚠️ 当前步骤未完成。", style="bold yellow")
+                _wizard_backup_hint()
+                return False
+
+            # 检查是否选择了 "返回"
+            if state.get('provider') == t('wizard.back_option'):
+                current_step = max(0, current_step - 1)
+                continue
+
+            current_step += 1
+
+            # 每完成一步立即保存当前进度（增量合并，不覆盖未配置项）
+            try:
+                _save_wizard_checkpoint(state)
+                questionary.print(
+                    f"📦 步骤 {step_name} 完成，进度已保存到 {config_file}。",
+                    style="bold",
+                )
+            except Exception as e:
+                questionary.print(
+                    f"⚠️ 进度保存失败（{e}），本次步骤的配置可能未持久化。",
+                    style="bold yellow",
+                )
+    except KeyboardInterrupt:
+        print()
+        print(t('wizard.aborted_message'))
+        _wizard_backup_hint()
+        return False
+    except Exception:
+        questionary.print(f"❌ 配置向导发生异常（{step_name}），已中止。", style="bold red")
+        _wizard_backup_hint()
+        return False
+
+    # --- 确认保存 ---
+    final_config = _build_final_config(state)
+
     print(t('wizard.summary_title'))
     print(yaml.dump(final_config, indent=2, allow_unicode=True))
 
@@ -1626,10 +1715,14 @@ def run_wizard():
         import config as config_loader
 
         config_loader.save_config(final_config)
+        # 确认保存成功，清理向导备份
+        if os.path.exists(WIZARD_BACKUP_FILE):
+            os.remove(WIZARD_BACKUP_FILE)
         print(t('wizard.success_message', file=config_file))
         return True
     else:
         print(t('wizard.aborted_message'))
+        _wizard_backup_hint()
         return False
 
 
