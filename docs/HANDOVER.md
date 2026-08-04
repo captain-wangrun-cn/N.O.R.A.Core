@@ -1,5 +1,38 @@
 ## 近期关键改动（截至 2026-08-04）
 
+### 🔌 Qdrant 支持 Cloud / 远程实例（url + api_key）
+
+此前 Qdrant 只支持本地 `host:port`，所有连接点都写死 host/port，无法接入 Qdrant Cloud。
+
+- **新增 `memory/qdrant_conn.py`**：共享构造器 `build_qdrant_client(mem_cfg)`。
+  - `memory.qdrant.url` 存在 → `QdrantClient(url=..., api_key=...)`（Cloud/远程，HTTPS + API key）；
+  - 否则回落 `host` + `port`（本地实例，行为与之前完全一致）。
+- **4 处连接点全部改走共享构造器**：`memory/vector.py`、`memory/image_store.py`、
+  `cli.py` 的 `clean_qdrant()` / `test_qdrant()`。新增构造器后无其他 `QdrantClient(...)` 调用残留。
+- **展示适配 `describe_qdrant_target(mem_cfg)`**：与 `build_qdrant_client` 同一套判定，
+  避免「显示的地址 ≠ 实际连接的地址」。修掉了 4 处只会打印 host:port 的位置：
+  `show_config_summary()`、`show_status()`（原用 `vs.host/vs.port`）、`clean_qdrant()`
+  高危确认（新增目标实例展示，防误删远程数据）、`VectorStore` 连接成功日志。
+  Cloud 分支只显示 URL 不含 api_key（有用例断言不泄漏）。
+  `VectorStore.host/.port` 已无外部引用且在 Cloud 下有误导性，一并删除。
+- **`/debug_cleanup`（`adapters/telegram/cleanup.py`）与 `test_rag`** 走 `VectorStore`/`ImageStore`/
+  `RAGEngine`，随上述改动自动适配，无需单独修改。
+- **配置向导 `StepDatabase`**（`cli.py`）：已有 `url` 时先确认 URL 并（掩码）更新 API key，
+  再问本地 host/port；保存时 url 非空则一并写入 `url`/`api_key`，否则维持 host/port。
+  i18n 新增 `wizard.qdrant_url` / `wizard.qdrant_api_key`。
+- **`config.example.yml`**：`memory.qdrant` 增加 `url`/`api_key` 注释示例；
+  `.env.example` 删除从未被代码读取的死配置 `QDRANT_URL`。
+- **网络**：Cloud endpoint 需代理。`config.py` 的 `network.proxy` 会注入
+  `HTTP(S)_PROXY` 环境变量，qdrant-client 基于 httpx 自动走代理，无需额外处理。
+- **注意**：Cloud 首次连接会按 `embedding.dimensions` 自动建 collection；换 embedding 模型导致
+  维度变化时需删旧 collection（`cli.py clean_qdrant` 可清）再重建。
+- **测试**：新增 `tests/test_qdrant_conn.py`（15 个用例）：本地/Cloud 双模式、url 优先、
+  **旧 config.yml 兼容性**（qdrant 段缺失、空 dict、memory 段为 None、残留 `url: ""` / `url: null`、
+  port 为字符串——全部正确回落本地分支）、以及 `describe_qdrant_target` 不泄漏 api_key。
+  全量 `pytest tests/` → 514 passed，9 个失败均为已知基线（context_pricing/cost_tracker/retry_queue/timezone）。
+
+---
+
 ### 🖥️ CLI 配置管理：总览 + 分区修改（不再强制重跑整个向导）
 
 `python cli.py configure`（等价于菜单「🔧 配置管理」）现在先展示当前配置状态，再选择操作：

@@ -115,8 +115,12 @@ memory:
 
   # Vector Database (Qdrant)
   qdrant:
+    # 本地实例：host + port
     host: "localhost"
     port: 6333
+    # Qdrant Cloud / 远程实例：配置 url 后优先走 HTTPS + API key，host/port 失效。
+    # 例：url: "https://xxxx.us-west-1-0.aws.cloud.qdrant.io"
+    #     api_key: "eyJhbGciOi..."
 
   # Document Database (MongoDB)
   mongo:

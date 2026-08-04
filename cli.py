@@ -558,8 +558,9 @@ def show_config_summary() -> None:
     questionary.print(f"{_status_emoji(_section_nonempty(mh_cfg))} 消息历史: "
                       + ("已配置" if _section_nonempty(mh_cfg) else "未配置"), style="bold" if mh_cfg else "")
     qdrant_cfg = mem_cfg.get("qdrant", {}) or {}
+    from memory.qdrant_conn import describe_qdrant_target
     questionary.print(f"{_status_emoji(_section_nonempty(qdrant_cfg))} Qdrant: "
-                      + (f"{qdrant_cfg.get('host', 'localhost')}:{qdrant_cfg.get('port', 6333)}"
+                      + (describe_qdrant_target(mem_cfg)
                          if _section_nonempty(qdrant_cfg) else "未配置"), style="")
     mongo_cfg = mem_cfg.get("mongo", {}) or {}
     questionary.print(f"{_status_emoji(_section_nonempty(mongo_cfg))} MongoDB: "
@@ -1027,12 +1028,31 @@ class StepAPIKeys(ConfigStep):
 class StepDatabase(ConfigStep):
     def run(self):
         # Qdrant Config
-        qdrant_host_def = self.state.get('memory', {}).get('qdrant', {}).get('host', 'localhost')
-        qdrant_port_def = str(self.state.get('memory', {}).get('qdrant', {}).get('port', 6333))
-        
+        existing_qdrant = self.state.get('memory', {}).get('qdrant', {}) or {}
+        qdrant_url_def = str(existing_qdrant.get('url', '') or '').strip()
+        qdrant_host_def = existing_qdrant.get('host', 'localhost')
+        qdrant_port_def = str(existing_qdrant.get('port', 6333))
+
+        # 已有远程 URL 配置：确认 url 并（可选）更新 api_key
+        q_url = None
+        q_api_key = None
+        if qdrant_url_def:
+            q_url = questionary.text(t('wizard.qdrant_url'), default=qdrant_url_def).ask()
+            if q_url is None: return False
+            q_url = str(q_url).strip() or qdrant_url_def
+            if existing_qdrant.get('api_key'):
+                q_api_key = questionary.password(t('wizard.qdrant_api_key'), default=str(existing_qdrant.get('api_key', ''))).ask()
+                if q_api_key is None: return False
+                q_api_key = str(q_api_key).strip()
+            else:
+                q_api_key = questionary.password(t('wizard.qdrant_api_key'), default="").ask()
+                if q_api_key is None: return False
+                q_api_key = str(q_api_key).strip() or None
+
+        # 本地 host/port 连接
         q_host = questionary.text(t('wizard.qdrant_host'), default=qdrant_host_def).ask()
         if q_host is None: return False
-        
+
         q_port = questionary.text(t('wizard.qdrant_port'), default=qdrant_port_def).ask()
         if q_port is None: return False
 
@@ -1043,7 +1063,12 @@ class StepDatabase(ConfigStep):
 
         # Save to state
         if 'memory' not in self.state: self.state['memory'] = {}
-        self.state['memory']['qdrant'] = {'host': q_host, 'port': int(q_port)}
+        qdrant_save = {'host': q_host, 'port': int(q_port)}
+        if q_url:
+            qdrant_save['url'] = q_url
+        if q_api_key:
+            qdrant_save['api_key'] = q_api_key
+        self.state['memory']['qdrant'] = qdrant_save
         self.state['memory']['mongo'] = {'uri': mongo_uri}
         return True
 
@@ -1818,30 +1843,29 @@ def ensure_config_exists(auto_configure: bool = True) -> bool:
 def clean_qdrant():
     """清理 Qdrant 向量数据库（删除所有 collections）"""
     try:
-        from qdrant_client import QdrantClient
+        from memory.qdrant_conn import build_qdrant_client, describe_qdrant_target
         import config
-        
+
         logger.info("🔧 正在连接 Qdrant...")
-        
+
         # 加载配置
         cfg = config.get_config()
         mem_cfg = cfg.get("memory", {})
-        qdrant_cfg = mem_cfg.get("qdrant", {})
-        
-        host = qdrant_cfg.get("host", "localhost")
-        port = qdrant_cfg.get("port", 6333)
-        # 连接 Qdrant
-        client = QdrantClient(host=host, port=port)
-        
+
+        # 连接 Qdrant（本地 host:port 或 Cloud url+api_key）
+        client = build_qdrant_client(mem_cfg)
+        qdrant_target = describe_qdrant_target(mem_cfg)
+
         # 列出所有 collections
         collections = client.get_collections()
         collection_names = [c.name for c in collections.collections]
 
         if not collection_names:
-            logger.info("ℹ️  Qdrant 中没有任何 collection，无需清理。")
+            logger.info(f"ℹ️  Qdrant 中没有任何 collection，无需清理。({qdrant_target})")
             return
 
         logger.warning("⚠️⚠️⚠️ 高危操作：即将删除 Qdrant 中所有 collections（不可恢复）！")
+        logger.warning(f"目标实例: {qdrant_target}")
         logger.warning(f"将删除 {len(collection_names)} 个 collection: {collection_names}")
 
         # 第一次确认
@@ -1886,23 +1910,19 @@ def clean_qdrant():
 def test_qdrant():
     """测试 Qdrant 连接和基本操作"""
     try:
-        from qdrant_client import QdrantClient
         from qdrant_client.http import models
+        from memory.qdrant_conn import build_qdrant_client, describe_qdrant_target
         import config
-        
+
         logger.info("🔍 测试 Qdrant 连接...")
-        
+
         # 加载配置
         cfg = config.get_config()
         mem_cfg = cfg.get("memory", {})
-        qdrant_cfg = mem_cfg.get("qdrant", {})
-        
-        host = qdrant_cfg.get("host", "localhost")
-        port = qdrant_cfg.get("port", 6333)
-        
-        # 连接测试
-        client = QdrantClient(host=host, port=port)
-        logger.info(f"✅ 成功连接到 Qdrant ({host}:{port})")
+
+        # 连接测试（本地 host:port 或 Cloud url+api_key）
+        client = build_qdrant_client(mem_cfg)
+        logger.info(f"✅ 成功连接到 Qdrant ({describe_qdrant_target(mem_cfg)})")
         
         # 列出所有 collections
         collections = client.get_collections()
@@ -2150,11 +2170,14 @@ def show_status():
     # 3. Qdrant 连接
     try:
         from memory.vector import VectorStore
+        from memory.qdrant_conn import describe_qdrant_target
+        import config as _config
         vs = VectorStore()
+        target = describe_qdrant_target(_config.get_config().get("memory", {}))
         if vs.client:
-            logger.info(f"✅ Qdrant 向量数据库: 连接正常 ({vs.host}:{vs.port})")
+            logger.info(f"✅ Qdrant 向量数据库: 连接正常 ({target})")
         else:
-            logger.error("❌ Qdrant 向量数据库: 连接失败")
+            logger.error(f"❌ Qdrant 向量数据库: 连接失败 ({target})")
     except Exception as e:
         logger.error(f"❌ Qdrant 向量数据库: 连接失败 - {e}")
 

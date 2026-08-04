@@ -2,9 +2,9 @@ import logging
 import uuid
 import time
 from typing import List, Dict, Any, Optional
-from qdrant_client import QdrantClient
 from qdrant_client.http import models
 import config
+from memory.qdrant_conn import build_qdrant_client, describe_qdrant_target
 
 logger = logging.getLogger(__name__)
 
@@ -16,18 +16,15 @@ class VectorStore:
 
     def __init__(self):
         mem_cfg = config.get_config().get("memory", {})
-        qdrant_cfg = mem_cfg.get("qdrant", {})
         embed_cfg = mem_cfg.get("embedding", {})
 
-        self.host = qdrant_cfg.get("host", "localhost")
-        self.port = qdrant_cfg.get("port", 6333)
         self.collection_name = "nora_memory"
         self.vector_size = embed_cfg.get("dimensions", 1536) # 默认为 1536 (OpenAI small)
 
         try:
-            self.client = QdrantClient(host=self.host, port=self.port)
+            self.client = build_qdrant_client(mem_cfg)
             self._ensure_collection()
-            logger.info(f"VectorStore 已连接到 Qdrant ({self.host}:{self.port})。")
+            logger.info(f"VectorStore 已连接到 Qdrant ({describe_qdrant_target(mem_cfg)})。")
         except Exception as e:
             logger.error(f"无法连接到 Qdrant: {e}")
             self.client = None

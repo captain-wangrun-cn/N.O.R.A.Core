@@ -14,11 +14,11 @@ import uuid
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
-from qdrant_client import QdrantClient
 from qdrant_client.http import models as qdrant_models
 import pymongo
 
 from memory.embed import EmbeddingClient
+from memory.qdrant_conn import build_qdrant_client
 import config
 
 logger = logging.getLogger(__name__)
@@ -80,7 +80,6 @@ class ImageStore:
 
     def __init__(self):
         mem_cfg = config.get_config().get("memory", {})
-        qdrant_cfg = mem_cfg.get("qdrant", {})
         mongo_cfg = mem_cfg.get("mongo", {})
         embed_cfg = mem_cfg.get("embedding", {})
 
@@ -88,10 +87,7 @@ class ImageStore:
 
         # --- Qdrant ---
         try:
-            self.qdrant = QdrantClient(
-                host=qdrant_cfg.get("host", "localhost"),
-                port=qdrant_cfg.get("port", 6333),
-            )
+            self.qdrant = build_qdrant_client(mem_cfg)
             self._ensure_qdrant_collection()
         except Exception as e:
             logger.error(f"ImageStore: Qdrant 连接失败: {e}")
