@@ -1,3 +1,125 @@
+## 近期关键改动（截至 2026-08-05）
+
+### 🔍 view_media 检索/分析链路整修 + 日志时区 + 跨轮重复调用误报
+
+一次修六件事，主线是「回查媒体这条链路上，模型看到的东西和用户以为的不一致」。
+
+**1. 日志时间戳走配置时区（`brain/logging_config.py`）**
+
+同一件事在日志里有两套时间：日志行写 `02:37:00`，APScheduler 写 `scheduled at 14:37:00+08:00`。
+原因是 `logging.Formatter` 的 `%(asctime)s` 默认用**系统本地时区**，而调度器用
+`memory.message_history.timezone`（`Asia/Shanghai`）。读日志时会误判成"任务提前 12 小时触发"。
+
+- 新增 `_resolve_display_timezone()`：读 `memory.message_history.timezone`，失败/留空回落系统本地。
+- 新增 `_DisplayTimezoneMixin`：覆盖 `Formatter.converter`，`ColoredFormatter` / `SafeFormatter`
+  都继承它；`setup_logging()` 里把解析结果赋给两个类的 `display_tz`。
+- `apscheduler.executors` / `apscheduler.scheduler` 降到 WARNING：群监听 tick 是每分钟一次的
+  cron job，executor 对每次触发打两条 INFO（Running job / executed successfully），
+  把日志刷成流水账。真正需要关注的调度信息由 `core/scheduler.py` 自己打点。
+- **`cron[minute='']` 不是 bug**：`core/scheduler.py` 注册的是 `CronTrigger(minute="*")`，
+  在本仓库 `.venv`（APScheduler 3.11.2）实测渲染为 `cron[minute='*']`，空值是终端复制产物。
+
+**2. `view_media` 的 keyword 改成搜索引擎式检索（`memory/image_store.py`）**
+
+旧实现：keyword 只走 Qdrant 整句向量，空结果才回退 MongoDB `$text`。两条路都漏——
+向量是整句语义，多词部分命中会被摊平；`$text` 不对中文分词，`"橘猫 沙发"` 这种无空格
+CJK 组合基本打不中。
+
+- 新增词法检索层（模块级）：`tokenize_keyword_query()` 切词 + CJK bigram 扩展
+  （≥3 字的中文串再拆二元组），过滤中英停用词；`score_media_lexical()` 字段加权打分
+  （`tags` 3.0 / `description` 2.0 / `ocr_text` 1.5，扩展词 0.4×，整句命中额外 1.5×，
+  最后按主词覆盖率缩放 `0.35 + 0.65 * 覆盖率`）。
+- 新增 `ImageStore.search_by_lexical()`：`$or` regex 召回 → Python 侧打分排序 → 切片。
+  候选池 `max(60, min((limit+offset)*6, 400))`，既留排序空间又不被极宽泛查询拖垮。
+- 新增 `ImageStore._search_keyword_fused()`：词法 + 语义两路 RRF 融合（`k=60`，
+  词法权重 1.0 / 语义 0.9），两路皆空才回退 `$text`。
+- **两路都不自己跳 offset**（各取 `limit+offset` 条，融合排序后统一切片）——
+  和 `text_query + keyword` 合并路径同一个坑：各跳一次会页码错位。
+- `search_images` 的两个 keyword 分支（合并路径 + keyword-only）都改走融合检索。
+
+**3. 回查媒体的分析轮剥离人设（新增 `brain/templates/media_analysis.jinja`）**
+
+现象：`view_media` 带 `question` 回查一张图，返回的结果是 Nora 的口吻——把 `question`
+当成用户在搭话，回一句"好可爱呀～"，而不是做客观分析。
+
+根因是分析轮复用了正常推理的上下文：`get_system_prompt()` 里 `system.jinja` 第一行就是
+人设/SOUL，再叠上完整对话历史，模型自然按对话角色回应。
+
+- 新模板两个 block。`media_analysis_system` 把模型定义为"媒体内容分析引擎"，明确声明
+  它**没有**人设/名字/性格，输出是系统内部数据、用户看不到，因此禁止打招呼、第一人称抒情、
+  emoji、向用户提问；并专门写明"待分析的是从媒体库**回查出的历史文件**，不是用户刚发来的"
+  （防止它把回查结果当新消息回应）。
+  带 `question` 时按「直接结论 → 支撑证据 → 相关补充」组织，信息不足要明确写"无法确定"；
+  不带 `question` 时按「整体概述 / 主体与细节 / 场景与环境 / 文字内容（原样转录）/ 异常细节」。
+  准确性红线禁止推测编造、禁止参考其他媒体"补全"当前这份，并显式禁止输出
+  `[IMAGE_TAGS]` / `[IMAGE_OCR]` / `[IMAGE_DESC]` / `[VIDEO_TAGS]`（那些只用于用户**新发**媒体入库）
+  与 `[SPLIT]` / `[reply:]` / `[at:]`，也不许调工具。
+  `media_analysis_user` 说明文件数量、输出结构与截断提示，末尾要求直接输出正文。
+- `core/back_brain.py` 配套三件事，**缺一件人设都会漏回来**：
+  1. 新增 `tool_media_analysis_round` 判定（`turn > 1` 且本轮媒体带 `from_tool`），
+     命中时 `turn_system_prompt` / `turn_user_prompt` 整体换成上面两个 block；
+  2. `turn_history = []` —— 丢掉对话历史，否则模型从上文自己学回 Nora 的语气；
+  3. 该轮不给工具（折进 `video_turn_no_tools`），且流式产出**既不发用户也不进 `temp_history`**
+     （`[SPLIT]` 分支里 `if tool_media_analysis_round: continue`），只由 `media_turn_raw_parts`
+     收集后回灌。渲染失败时回落旧的内联"客观分析"提示。
+- 回灌措辞改写：原来把结果当"分析报告"交回去，正常轮容易复述成"分析显示……"。
+  现在要求"把它当作你自己亲眼看到的事实……不要说'分析显示/报告指出'之类的转述腔"。
+
+**4. 纯文本紧随图片/视频轮时折进同一轮（`core/message_handler.py`）**
+
+现象：先发一张图（直接走后脑 image 轮），紧接着补一句文字，结果图片和文本各回一次。
+
+根因不在聚合器——图片是以 `[image: path]` 文本形式过聚合器的，3 秒窗口内到达的图+文
+本来就能合并。问题在窗口外：合并逻辑只在 `backend_busy_or_queued` 为真时生效，
+一旦 image 轮在后续文本到达前跑完，`:969` 的媒体快路径和合并分支双双跳过，
+文本就成了全新一轮。（`[Image #2]` 是模型自己的措辞，不是代码插入的标记。）
+
+- 新增 `_media_turn_fold_target()`：查 `back_brain_input_context` 快照，判断正在跑的那一轮
+  是否带媒体输入、能否把这条纯文本折进去；命中则把 `backend_runtime` 指向该轮，
+  走原有的 cancel + 合并 + 重启路径。
+- 合并分支条件从"仅有新媒体"扩为"新媒体 **or** `media_fold_runtime`"，
+  并补上**视频合并**（原来只合 `multimodal_images`，视频被丢）。
+  抽出 `_merge_media_payloads(prior, incoming, id_key)` 复用去重逻辑。
+- `core/back_brain.py` 的输入快照增加 `in_polling` / `user_id` / `started_at` /
+  `sent_user_message` 四个字段；`_send_reply()` 里调 `_mark_back_brain_sent_user_message()`。
+- **五道闸门不折**（每一道都对应一种会出错的场景）：轮询模式（前脑审查驱动自己的重启节奏）、
+  已对用户发过可见回复（折 = cancel + 重写，用户会先看半截再看完整版）、
+  该轮已执行过工具（工具副作用会被重跑）、超出 `MEDIA_TURN_TEXT_FOLD_WINDOW`（90 秒）、
+  群聊里发送者不是同一个人。
+
+**5. 工具回灌媒体的数量上限（`core/back_brain.py`）**
+
+`view_media` 搜到 10+ 张图时，旧实现有几条 MediaTag 就全量回灌，单轮请求爆 token
+且模型注意力被摊薄，"同时查看+提问"的准确率反而下降。
+
+- 新增 `MAX_TOOL_IMAGES_PER_TURN = 4` / `MAX_TOOL_IMAGES_PER_TURN_WITH_QUESTION = 3`
+  （带 question 时聚焦性更重要）/ `MAX_TOOL_VIDEOS_PER_TURN = 1`，
+  与 `_cap_tool_media_payloads()` 一起做截断并打日志。
+- 被截断时在 `tool_result` 末尾追加提示：只加载了前 N 个，建议收窄查询 / 降低 `limit` / 用 `page`
+  翻页；`media_truncated_count` 随载荷带进分析轮 prompt，让模型知道自己看的是子集。
+  debug 模式额外打一行 `✂️`。
+
+**6. 前脑审查 continue 后工具被误判为重复调用（`core/back_brain.py`）**
+
+现象：前脑审查返回 continue 时，上一轮用过的工具在新一轮**第一次**调用就被提示"3 次调用"。
+
+- 根因：`sessions[chat_id]` 是 controller 级别的**长期** per-chat 字典，而
+  `last_loop_key` / `tool_loop_call_count` / `file_edit_counts` 记录的是「本次后脑连续调用」。
+  `core/polling.py` 的 continue 分支只 `context.copy()`，session 原样带进下一轮，
+  于是计数从第 4、5 次起算，直接命中 hint/force 干预。
+- 新增 `_reset_tool_loop_tracking()` 在 `_generate_response` 入口调用，
+  一并清掉 `_reset_repeated_tool_call()` 从不清的 `last_loop_key`。
+
+**测试**：新增 `tests/test_media_turn_text_fold.py`（9 用例，覆盖可折叠 + 五道闸门 + 群聊同发送者）。
+`tests/test_image_memory.py` 的 `test_search_images_offset_forwarded_to_backends` 断言随
+keyword 融合路径更新（词法/语义两路 `offset=0`、`limit`/`top_k` = `limit+offset`；
+两路皆空回退 `$text` 时才原样透传 offset/limit）。
+全量 `pytest tests/` → 517 passed / 11 failed，同一棵树 stash 后基线为 516 passed / 12 failed，
+失败集合均为已知基线（adapter_selection 单跑通过，属测试顺序污染；
+context_pricing / cost_tracker / message_history_retry_queue / timezone）。
+
+---
+
 ## 近期关键改动（截至 2026-08-04）
 
 ### 🔌 Qdrant 支持 Cloud / 远程实例（url + api_key）

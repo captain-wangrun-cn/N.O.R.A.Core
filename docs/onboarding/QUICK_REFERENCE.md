@@ -16,6 +16,8 @@ adapters/aggregator.py        聚合连续消息（3秒缓冲）
 core/controller.py            NoraController.handle_message()
   ├─ 忙碌？→ fast_llm 判定 stop/change/queue → 即时回复
   │            └─ 若前脑新判定需要后脑：先展示当前队列详情并二次确认，确认后再入队
+  ├─ 纯文本紧随自己刚发的图片/视频轮？→ 折进那一轮（cancel + 合并输入 + 重启后脑）
+  │            └─ 见 `_media_turn_fold_target()`；轮询中/已发过可见回复/已调过工具/超 90 秒/群聊换人则不折
   └─ 空闲？→ 进入生成循环：
        ├─ 加载持久化上下文（message_history.db）
        ├─ 拼接系统提示词（system.jinja + persona）
@@ -68,6 +70,9 @@ core/controller.py            NoraController.handle_message()
 - `ToolManager` — 工具注册、schema 生成、执行
   - 内置工具：`create_new_skill`, `execute_skill`, `execute_tool_plan`, `read_file`, `search`, `write_file`, `edit_file`, `list_dir`, `get_available_skills`, `exec_command`, `view_media`, `crop_image_for_llm`, `set_alarm`, `list_alarms`, `cancel_alarm`
   - `view_media`: 默认 `return_image=true`，输出 `[image: abs_path]` 或 `[video: abs_path]` MediaTag，后脑下一轮会读取真实图片/视频并临时使用 image/video 模型；可用 `question` 参数指定对媒体要问的问题，且 `question` 非空时会自动强制 `return_image=true`。可用 `type` 参数筛选（`image`/`video`，不设则全部）。只查元数据/标签/OCR 时可设 `return_image=false`。
+  - `view_media` 的 `keyword`：走**词法检索 + 语义检索 RRF 融合**（`memory/image_store.py`）。词法路 `search_by_lexical()` 分词 + CJK bigram 扩展 + 字段加权打分（tags 3.0 / description 2.0 / ocr_text 1.5），语义路走 Qdrant；两路各取 `limit+offset` 条、都不自己跳 offset，融合排序后统一切片。两路皆空才回退 MongoDB `$text`。
+  - 工具回灌媒体有**单轮数量上限**：图片 4 个（带 `question` 时 3 个）、视频 1 个（`core/back_brain.py` 的 `MAX_TOOL_IMAGES_PER_TURN` 等）。被截断时 `tool_result` 会附带提示，引导收窄查询或用 `page` 翻页。
+  - 回查媒体的**分析轮不用人设**：走 `brain/templates/media_analysis.jinja`，且该轮清空对话历史、不给工具、流式输出不发用户（详见 §6）。
   - IMAGE_TAGS / IMAGE_OCR / IMAGE_DESC 质量兜底：缺失标签或标签未使用英文逗号分隔时，会触发一次仅请求 `IMAGE_TAGS` 的补齐重试。
   - 详细说明：`docs/architecture/tools.md`
 
@@ -186,12 +191,20 @@ python tui.py
 |------|------|
 | `brain/templates/system.jinja` | **主系统提示词** — 所有行为规则、协议、约定 |
 | `brain/templates/persona_nora.jinja` | 人设提示词回退（Nora 的性格，当 SOUL.md 不存在时使用） |
+| `brain/templates/media_analysis.jinja` | **回查媒体的分析轮专用**（`view_media` 返回图片/视频后的那一轮）：无人设的"媒体内容分析引擎"，输出是给上层推理模型看的内部观察数据 |
 | `brain/prompts.py` | 提示词组装逻辑 + 身份上下文加载 |
 | `adapters/PROMPT.md` | 通用平台适配协议：跨平台人格连续性、媒体标记、`[SPLIT]` |
 | `adapters/telegram/PROMPT.md` | Telegram 平台特定提示（格式、长度等） |
 | `adapters/onebotv11/PROMPT.md` | OneBot v11 / QQ 平台特定提示（群聊、CQ/媒体、工具限制） |
 
 > ⚠️ 修改行为时，优先改 `system.jinja`；修改性格/人设时，改 `SOUL.md`（优先）或 `persona_nora.jinja`（回退）。
+
+**回查媒体分析轮为什么要单独一套 prompt**：分析轮如果沿用 `get_system_prompt()`，
+`system.jinja` 第一行就是人设/SOUL，再叠上对话历史，模型会把 `question` 当成用户在搭话，
+用 Nora 的口吻回一句寒暄而不是做客观分析。`media_analysis.jinja` 明确声明模型没有人设、
+输出是用户看不到的系统内部数据，并禁止寒暄/emoji/向用户提问/输出标签块与消息控制标记。
+**代码侧必须同时满足三条，缺一条人设都会漏回来**（`core/back_brain.py`）：
+覆盖 system + user prompt、`turn_history = []`、该轮不给工具且流式输出不发用户不进 history。
 
 ---
 

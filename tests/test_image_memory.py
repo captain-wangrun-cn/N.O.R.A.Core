@@ -1029,10 +1029,19 @@ def test_search_images_offset_forwarded_to_backends():
     store.search_images(text_query="测试文字", limit=5, offset=10)
     assert store.search_by_ocr_text.call_args[1]["offset"] == 10
 
+    # keyword 走「词法 + 语义」RRF 融合：两路都不自己跳过 offset（各取 limit+offset 条），
+    # 融合排序完再统一切片，否则两路各跳一次会错位。
+    store.search_by_lexical = MagicMock(return_value=[])
     store.search_by_semantic = MagicMock(return_value=[])
     store.search_by_keyword = MagicMock(return_value=[])
     store.search_images(keyword="猫", limit=5, offset=10)
-    assert store.search_by_semantic.call_args[1]["offset"] == 10
+    assert store.search_by_lexical.call_args[1]["offset"] == 0
+    assert store.search_by_lexical.call_args[1]["limit"] == 15
+    assert store.search_by_semantic.call_args[1]["offset"] == 0
+    assert store.search_by_semantic.call_args[1]["top_k"] == 15
+    # 两路皆空时才回退 $text，此时 offset/limit 原样透传
+    assert store.search_by_keyword.call_args[1]["offset"] == 10
+    assert store.search_by_keyword.call_args[1]["limit"] == 5
 
     store.search_by_time_range = MagicMock(return_value=[])
     store.search_images(limit=5, offset=10)

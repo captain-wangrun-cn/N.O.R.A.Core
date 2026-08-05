@@ -81,6 +81,13 @@ class BackBrainMixin:
     TOOL_LOOP_FORCE_COUNT = 5
     EDIT_FILE_HINT_COUNT = 3
     EDIT_FILE_FORCE_COUNT = 5
+    # view_media 一轮最多回灌多少个媒体给 image/video 模型。
+    # 工具输出有几条 MediaTag 就传几张的话，搜到 10+ 张时单轮请求会爆 token
+    # 且模型注意力被摊薄，"同时查看+提问"的准确率反而下降。
+    MAX_TOOL_IMAGES_PER_TURN = 4
+    MAX_TOOL_VIDEOS_PER_TURN = 1
+    # 带 question 时聚焦性更重要，进一步收紧。
+    MAX_TOOL_IMAGES_PER_TURN_WITH_QUESTION = 3
 
     # ------------------------------------------------------------------
     # 文本清洗 class methods
@@ -203,6 +210,52 @@ class BackBrainMixin:
     def _reset_repeated_tool_call(session: Dict[str, Any]) -> None:
         session["tool_loop_call_count"] = 0
         session["tool_call_loop_counter"] = 0
+
+    @classmethod
+    def _reset_tool_loop_tracking(cls, session: Dict[str, Any]) -> None:
+        """清空跨轮次的工具重复调用追踪。
+
+        必须在每次 `_generate_response` 入口调用：`session` 是 controller 级别的
+        per-chat 长期字典（`sessions[chat_id]`），而 `last_loop_key` /
+        `tool_loop_call_count` / `file_edit_counts` 记录的是「本次后脑连续调用」。
+        前脑审查 continue 走 `polling.py` 的 `continue` 分支时只 copy 了 context，
+        session 原样带进下一轮，于是上一轮用过的工具在新一轮第一次调用就被算成
+        第 4、5 次，直接命中 hint/force 干预。
+        """
+        session.pop("last_loop_key", None)
+        cls._reset_repeated_tool_call(session)
+        session["file_edit_counts"] = {}
+
+    def _mark_back_brain_sent_user_message(self, chat_id: str) -> None:
+        """标记本次后脑任务已经对用户可见地发过消息。
+
+        `back_brain_input_context` 的快照被上层用来判断「新到达的消息能不能折进
+        正在跑的这一轮」。一旦已经发过可见回复，折进去就意味着 cancel + 重写，
+        用户会先看到半截话再看到重写版，所以这里立一个不可折叠的标记。
+        """
+        snapshot = self.back_brain_input_context.get(chat_id)
+        if isinstance(snapshot, dict):
+            snapshot["sent_user_message"] = True
+
+    @classmethod
+    def _cap_tool_media_payloads(
+        cls,
+        payloads: List[Dict[str, Any]],
+        *,
+        max_items: int,
+        media_label: str,
+        chat_id: str = "",
+    ) -> tuple[List[Dict[str, Any]], int]:
+        """截断工具回灌的媒体数量，返回 (保留列表, 被丢弃数)。"""
+        total = len(payloads)
+        if total <= max_items:
+            return payloads, 0
+        dropped = total - max_items
+        logger.info(
+            f"[{chat_id}] 工具返回 {total} 个{media_label}，超过单轮上限 {max_items}，"
+            f"仅保留前 {max_items} 个（丢弃 {dropped} 个）。"
+        )
+        return payloads[:max_items], dropped
 
     @staticmethod
     def _trim_history(history: List[Dict[str, Any]], *, max_items: int = 40) -> List[Dict[str, Any]]:
@@ -422,6 +475,9 @@ class BackBrainMixin:
             send_key = _route_state.get("key") or chat_id
             send_ct = _route_state.get("chat_type") or chat_type
             reply_id = "" if _route_state.get("redirected") else reply_to_message_id
+            # 一旦对用户可见地说过话，本轮就不能再被上层"折进同一轮"的合并逻辑 cancel 重启，
+            # 否则用户会先看到半截回复、再看到重写后的完整回复。
+            self._mark_back_brain_sent_user_message(chat_id)
             return await self._send_split_message(
                 send_key,
                 send_text,
@@ -429,7 +485,7 @@ class BackBrainMixin:
                 chat_type=send_ct,
             )
 
-        # 记录本次后脑任务的输入快照：被"新图片到达"打断重启时需要把旧图+新图合并
+        # 记录本次后脑任务的输入快照：被"新消息到达"打断重启时需要把旧输入+新输入合并
         self.back_brain_input_context[chat_id] = {
             "text": text,
             "multimodal_images": list(multimodal_images),
@@ -437,6 +493,12 @@ class BackBrainMixin:
             # 合并重启时新 context 会把旧文本拼进本轮输入，因此旧文本对应的库行 id
             # 也要一起带过去，否则那一条会在历史里再出现一次。
             "persisted_user_message_ids": sorted(persisted_user_message_ids(context)),
+            # 轮询模式由前脑审查驱动自己的重启节奏，上层不能拿"折进同一轮"去 cancel 它
+            "in_polling": bool(context.get("_in_polling_loop", False)),
+            # 折进同一轮的判定依据：谁发的、什么时候开始的、有没有已经对用户说过话
+            "user_id": str(user_id or ""),
+            "started_at": time.time(),
+            "sent_user_message": False,
         }
         # 初始化本次后脑流式缓冲（被打断时作为草稿带入合并重启）
         self.back_brain_partial[chat_id] = ""
@@ -489,7 +551,12 @@ class BackBrainMixin:
         # Ensure session keys exist
         session = self.sessions.setdefault(chat_id, {"history": [], "interrupted_thought": "", "pending_text": ""})
         logger.debug(f"[{chat_id}] 开始生成响应。History length: {len(session['history'])}")
-        
+
+        # 工具重复调用追踪只在「本次后脑」内有意义。session 是 per-chat 长期字典，
+        # 不在入口清零的话，前脑 continue 续跑的新一轮会继承上一轮的连续计数，
+        # 让第一次调用就被判成重复（见 _reset_tool_loop_tracking 注释）。
+        self._reset_tool_loop_tracking(session)
+
         # --- 初始化后端状态追踪 ---
         MAX_TURNS = 30
         status = self.worker_status.setdefault(chat_id, WorkerStatus())
@@ -836,8 +903,18 @@ class BackBrainMixin:
                 last_turn_model_alias = turn_model_alias
                 last_turn_llm = turn_llm
                 media_turn_raw_parts: List[str] = [] if turn_model_alias in ("image", "video") else None
-                # 视频模型轮次不传工具，专注生成标签
-                video_turn_no_tools = (turn_model_alias == "video")
+                # 工具回查媒体的分析轮：输出不直接发给用户，而是作为观察结果回灌给正常模型。
+                # 这一轮必须剥离 Nora 人设，否则模型会把 question 当成用户搭话、用对话口吻回应，
+                # 而不是做客观分析。
+                tool_media_analysis_round = current_turn > 1 and (
+                    bool(turn_multimodal_images)
+                    and any(ti.get("from_tool") for ti in turn_multimodal_images)
+                    or bool(turn_multimodal_videos)
+                    and any(tv.get("from_tool") for tv in turn_multimodal_videos)
+                )
+                # 视频模型轮次不传工具，专注生成标签；分析轮同样不给工具——
+                # 观察完回灌给正常模型后，由它决定要不要继续调用工具（如 crop_image_for_llm）。
+                video_turn_no_tools = (turn_model_alias == "video") or tool_media_analysis_round
                 _media_info = ""
                 if turn_multimodal_images:
                     _media_info += f", images={len(turn_multimodal_images)}"
@@ -847,32 +924,69 @@ class BackBrainMixin:
                 await self._send_debug(chat_id, f"🎯 Turn {current_turn} 模型: {turn_model_alias}{_media_info}")
                 # 构造本轮 user_prompt：工具返回图片时追加提示（这些是回查的旧图，不要生成 IMAGE_TAGS）
                 turn_user_prompt = full_user_prompt if current_turn == 1 else " (Continue processing tool outputs...)"
-                if current_turn > 1 and turn_multimodal_images and any(ti.get("from_tool") for ti in turn_multimodal_images):
-                    tool_image_question = ""
-                    for ti in turn_multimodal_images:
-                        if ti.get("from_tool") and str(ti.get("question", "")).strip():
-                            tool_image_question = str(ti.get("question", "")).strip()
+                turn_system_prompt = system_prompt
+                turn_history = temp_history
+                if tool_media_analysis_round:
+                    _analysis_media = turn_multimodal_videos or turn_multimodal_images
+                    _media_kind_label = "视频" if turn_multimodal_videos else "图片"
+                    _analysis_question = ""
+                    for item in _analysis_media:
+                        candidate = str(item.get("question", "")).strip()
+                        if item.get("from_tool") and candidate:
+                            _analysis_question = candidate
                             break
-                    turn_user_prompt += "\n\n（注意：以下媒体是通过 view_media 工具回查的已有图片，**不要**生成 [IMAGE_TAGS] 标签，直接分析内容即可。"
-                    if tool_image_question:
-                        turn_user_prompt += f"请只围绕这个问题观察并回答：{tool_image_question}"
-                    turn_user_prompt += "）"
-                if current_turn > 1 and turn_multimodal_videos and any(tv.get("from_tool") for tv in turn_multimodal_videos):
-                    tool_video_question = ""
-                    for tv in turn_multimodal_videos:
-                        if tv.get("from_tool") and str(tv.get("question", "")).strip():
-                            tool_video_question = str(tv.get("question", "")).strip()
-                            break
-                    turn_user_prompt += "\n\n（注意：以下媒体是通过 view_media 工具回查的已有视频，**不要**生成 [VIDEO_TAGS] 标签，直接分析内容即可。"
-                    if tool_video_question:
-                        turn_user_prompt += f"请只围绕这个问题观察并回答：{tool_video_question}"
-                    turn_user_prompt += "）"
+                    _truncated = 0
+                    for item in _analysis_media:
+                        try:
+                            _truncated = max(_truncated, int(item.get("media_truncated_count") or 0))
+                        except (TypeError, ValueError):
+                            continue
+                    _truncated_note = ""
+                    if _truncated:
+                        _truncated_note = (
+                            f"（匹配结果超出单轮上限，另有 {_truncated} 个{_media_kind_label}未加载，"
+                            "只需分析下面这些。）"
+                        )
+                    _analysis_system = render_template(
+                        'media_analysis.jinja',
+                        'media_analysis_system',
+                        media_kind_label=_media_kind_label,
+                        question=_analysis_question,
+                    )
+                    _analysis_user = render_template(
+                        'media_analysis.jinja',
+                        'media_analysis_user',
+                        media_kind_label=_media_kind_label,
+                        media_count=len(_analysis_media),
+                        question=_analysis_question,
+                        truncated_note=_truncated_note,
+                    )
+                    if _analysis_system and _analysis_user:
+                        turn_system_prompt = _analysis_system
+                        turn_user_prompt = _analysis_user
+                        # 不带对话历史：历史里满是 Nora 的说话方式，会把分析轮再拽回对话口吻
+                        turn_history = []
+                        logger.info(
+                            f"[{chat_id}] Turn {current_turn} 使用媒体分析 prompt（无人设，"
+                            f"{_media_kind_label}×{len(_analysis_media)}"
+                            f"{'，带问题' if _analysis_question else ''}）。"
+                        )
+                    else:
+                        # 模板渲染失败时回退旧行为，至少不要中断这一轮
+                        logger.warning(f"[{chat_id}] 媒体分析 prompt 渲染失败，回退为常规 prompt。")
+                        turn_user_prompt += (
+                            f"\n\n（注意：以下媒体是通过 view_media 工具回查的已有{_media_kind_label}，"
+                            f"**不要**生成标签块，直接客观分析内容即可。"
+                        )
+                        if _analysis_question:
+                            turn_user_prompt += f"请只围绕这个问题观察并回答：{_analysis_question}"
+                        turn_user_prompt += "）"
                 stream = self._chat_stream_wrapper(
                     turn_llm,
                     chat_id,
-                    system_prompt=system_prompt,
+                    system_prompt=turn_system_prompt,
                     user_prompt=turn_user_prompt,
-                    history=temp_history,
+                    history=turn_history,
                     tools=[] if (force_no_tools or video_turn_no_tools) else self.tool_manager.get_tool_schemas(),
                     multimodal_images=turn_multimodal_images if turn_multimodal_images else None,
                     multimodal_videos=turn_multimodal_videos if turn_multimodal_videos else None,
@@ -919,6 +1033,10 @@ class BackBrainMixin:
                                     response_text_buffer,
                                     in_think_block,
                                 )
+                                if tool_media_analysis_round:
+                                    # 媒体分析轮的输出是内部观察数据，整段由 media_turn_raw_parts 保留后
+                                    # 回灌给正常模型；这里既不能发给用户，也不能进 history 冒充回复。
+                                    continue
                                 # Send and sync all complete parts
                                 for part in ready_parts:
                                     text_to_send = self._strip_thinking_content(part.strip())
@@ -1015,8 +1133,11 @@ class BackBrainMixin:
                             "role": "user",
                             "content": (
                                 f"【Multimodal Observation from view_media ({media_kind})】\n"
+                                "以下是分析引擎对回查媒体的客观观察报告（系统内部数据，用户没有看到过它，"
+                                "也不是用户说的话）：\n"
                                 f"{media_observation}\n\n"
-                                "请基于以上真实媒体观察结果，回到正常推理模型继续完成用户原始请求，给出最终回复。"
+                                "请把它当作你自己亲眼看到的事实，用你自己的方式回应用户的原始请求。"
+                                "不要照搬这段报告的措辞或结构，不要说“分析显示/报告指出”之类的转述腔。"
                             )
                         })
                         self._sync_backend_work_history(session, temp_history, in_polling_mode=in_polling_mode)
@@ -1206,22 +1327,66 @@ class BackBrainMixin:
                         and bool(tool_args.get("return_image", True))
                     ):
                         try:
+                            _tool_question = (
+                                str(tool_args.get("question", "")).strip()
+                                if tool_name == "view_media"
+                                else ""
+                            )
                             _clean, tool_images = extract_image_payloads(tool_result)
                             if tool_images:
+                                # 数量上限：搜到一堆图时全量回灌会爆 token 且摊薄注意力。
+                                # 带 question 时更强调聚焦，上限更低。
+                                _img_cap = (
+                                    self.MAX_TOOL_IMAGES_PER_TURN_WITH_QUESTION
+                                    if _tool_question
+                                    else self.MAX_TOOL_IMAGES_PER_TURN
+                                )
+                                tool_images, _dropped_imgs = self._cap_tool_media_payloads(
+                                    tool_images,
+                                    max_items=_img_cap,
+                                    media_label="图片",
+                                    chat_id=chat_id,
+                                )
                                 for ti in tool_images:
                                     ti["from_tool"] = True
-                                    if tool_name == "view_media" and str(tool_args.get("question", "")).strip():
-                                        ti["question"] = str(tool_args.get("question", "")).strip()
+                                    if _tool_question:
+                                        ti["question"] = _tool_question
+                                if _dropped_imgs:
+                                    for ti in tool_images:
+                                        ti["media_truncated_count"] = _dropped_imgs
+                                    tool_result += (
+                                        f"\n\n（注意：本次匹配到的图片超过单轮分析上限，只有前 {len(tool_images)} 张"
+                                        f"会被真正读取分析，剩余 {_dropped_imgs} 张未加载。"
+                                        "如果需要看其余图片，请缩小搜索条件、降低 limit，或用 page 参数分页后再次调用。）"
+                                    )
+                                    await self._send_debug(
+                                        chat_id,
+                                        f"✂️ {tool_name} 匹配图片过多，仅分析前 {len(tool_images)} 张（丢弃 {_dropped_imgs} 张）",
+                                    )
                                 pending_tool_multimodal_images = tool_images
                                 logger.info(f"[{chat_id}] {tool_name} 返回 {len(tool_images)} 张图片，下一轮切换 image 模型进行分析。")
                             # 同时提取视频 payload
                             _clean_v, tool_videos = extract_video_payloads(tool_result)
                             if tool_videos:
-                                for tv in tool_videos:
-                                    tv["from_tool"] = True
-                                    if tool_name == "view_media" and str(tool_args.get("question", "")).strip():
-                                        tv["question"] = str(tool_args.get("question", "")).strip()
                                 if video_llm_available:
+                                    # 视频单份 token 成本远高于图片，单轮只分析一个
+                                    tool_videos, _dropped_vids = self._cap_tool_media_payloads(
+                                        tool_videos,
+                                        max_items=self.MAX_TOOL_VIDEOS_PER_TURN,
+                                        media_label="视频",
+                                        chat_id=chat_id,
+                                    )
+                                    for tv in tool_videos:
+                                        tv["from_tool"] = True
+                                        if _tool_question:
+                                            tv["question"] = _tool_question
+                                    if _dropped_vids:
+                                        for tv in tool_videos:
+                                            tv["media_truncated_count"] = _dropped_vids
+                                        tool_result += (
+                                            f"\n\n（注意：本次匹配到多个视频，单轮只能分析 {len(tool_videos)} 个，"
+                                            f"剩余 {_dropped_vids} 个未加载。需要时请用更精确的条件或 page 参数逐个查看。）"
+                                        )
                                     pending_tool_multimodal_videos = tool_videos
                                     logger.info(f"[{chat_id}] {tool_name} 返回 {len(tool_videos)} 个视频，下一轮切换 video 模型进行分析。")
                                 else:

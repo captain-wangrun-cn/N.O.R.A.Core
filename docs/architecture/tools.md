@@ -226,7 +226,7 @@
 
 **参数**：
 - `image_id` (string, optional)
-- `keyword` (string, optional)
+- `keyword` (string, optional): 标签/描述/OCR 的**融合检索**（详见下方"keyword 检索策略"）
 - `text_query` (string, optional): OCR 文字模糊搜索（大小写不敏感、空格分词 AND 逻辑）
 - `start_time` (string, optional, Unix 时间戳)
 - `end_time` (string, optional, Unix 时间戳)
@@ -240,7 +240,30 @@
 
 OCR文本为模型回复，并非外置OCR
 
-**联动**：控制器会解析 `MediaTag`，并在下一轮切到 image 模型分析；此时为“工具回查图片”，不再要求生成 `[IMAGE_TAGS]`。
+**keyword 检索策略**（`memory/image_store.py`）：
+
+`keyword` 走**词法检索 + 语义检索的 RRF 融合**，而不是单一后端：
+
+- 词法路 `search_by_lexical()`：`tokenize_keyword_query()` 切词并对 ≥3 字的中文串做 bigram 扩展
+  （MongoDB `$text` 不对中文分词，无空格 CJK 组合原本打不中），`$or` regex 召回后由
+  `score_media_lexical()` 字段加权打分——`tags` 3.0 / `description` 2.0 / `ocr_text` 1.5，
+  扩展词 0.4×，整句命中额外 1.5×，最后按主词覆盖率缩放。
+- 语义路 `search_by_semantic()`：Qdrant 整句向量。
+- 两路**各取 `limit+offset` 条且都不自己跳 offset**，`_reciprocal_rank_fusion()`（k=60，
+  词法权重 1.0 / 语义 0.9）融合排序后统一切片。各跳一次会导致页码错位。
+- 两路皆空时才回退 MongoDB `$text`（`search_by_keyword`）。
+
+**单轮媒体数量上限**：工具回灌给 image/video 模型的媒体有上限——图片 4 个
+（带 `question` 时 3 个）、视频 1 个（`core/back_brain.py` 的 `MAX_TOOL_IMAGES_PER_TURN` /
+`MAX_TOOL_IMAGES_PER_TURN_WITH_QUESTION` / `MAX_TOOL_VIDEOS_PER_TURN`）。
+搜到 10+ 张时全量回灌会爆 token 且摊薄注意力。被截断时 `tool_result` 附带提示，
+引导收窄查询 / 降低 `limit` / 用 `page` 翻页。
+
+**联动**：控制器会解析 `MediaTag`，并在下一轮切到 image 模型分析；此时为"工具回查图片"，
+不再要求生成 `[IMAGE_TAGS]`。这一轮走 `brain/templates/media_analysis.jinja`——
+**无人设**的"媒体内容分析引擎"，同时清空对话历史、不给工具、流式输出不发给用户
+（观察结果只回灌给正常推理模型）。不这么做的话，模型会把 `question` 当成用户搭话，
+用 Nora 的口吻回一句寒暄而不是客观分析。
 
 ---
 

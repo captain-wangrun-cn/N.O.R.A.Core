@@ -94,6 +94,24 @@ def _attach_platform_ids_to_media(items: List[Dict[str, Any]], platform_msg_ids:
     return items
 
 
+def _merge_media_payloads(
+    prior: List[Dict[str, Any]],
+    incoming: List[Dict[str, Any]],
+    id_key: str,
+) -> List[Dict[str, Any]]:
+    """按 id 去重地拼接两批媒体载荷，保持"旧的在前、新的在后"的顺序。"""
+    merged: List[Dict[str, Any]] = []
+    seen: set = set()
+    for item in list(prior or []) + list(incoming or []):
+        media_id = item.get(id_key) if isinstance(item, dict) else None
+        if media_id and media_id in seen:
+            continue
+        if media_id:
+            seen.add(media_id)
+        merged.append(item)
+    return merged
+
+
 def group_message_content(context: Dict[str, Any], user_name: str, text: str, chat_type: str) -> str:
     """Return persisted user content, avoiding duplicate names for aggregated group text."""
     if str(chat_type or "private").lower() == "private":
@@ -111,6 +129,9 @@ def group_message_content(context: Dict[str, Any], user_name: str, text: str, ch
 
 class MessageHandlerMixin:
     """处理来自适配器的新消息 / 命令路由。"""
+
+    # 纯文本折进「正在进行的图片/视频轮」的时间窗（秒）。
+    MEDIA_TURN_TEXT_FOLD_WINDOW = 90.0
 
     _CONFIRM_DECISION_PATTERN = re.compile(
         r"DECISION\s*:\s*(confirm|cancel|unclear|ignore)",
@@ -490,6 +511,47 @@ class MessageHandlerMixin:
                 )
             )
 
+    def _media_turn_fold_target(
+        self,
+        *,
+        memory_scope_id: str,
+        user_id: str,
+        chat_type: str,
+    ) -> Optional[str]:
+        """找出「正在跑的图片/视频轮」，判断纯文本消息能否折进同一轮。
+
+        场景：用户先发图片（直接走后脑 image 轮），紧接着补一句文字说明。
+        用户的心智模型是"这两条是一次表达"，但代码里图片轮已经启动，后续文本
+        只能走前脑另开一轮，于是图片和文本各回一次。
+
+        这里把「后脑正忙 + 那一轮的输入含图片/视频 + 同一个人 + 在时间窗内 +
+        还没对用户说过话」的情况识别出来，交给下方合并分支折进同一轮。
+        轮询模式的任务有自己的重启节奏，不参与折叠。
+        """
+        busy_runtime = self.get_busy_backend_runtime(memory_scope_id)
+        if not busy_runtime:
+            return None
+        snapshot = self.back_brain_input_context.get(busy_runtime)
+        if not isinstance(snapshot, dict):
+            return None
+        if not (snapshot.get("multimodal_images") or snapshot.get("multimodal_videos")):
+            return None
+        if snapshot.get("in_polling") or snapshot.get("sent_user_message"):
+            return None
+        # 已经执行过工具的轮次不折：折叠 = cancel + 重启，工具副作用会被重跑一遍。
+        status = self.worker_status.get(busy_runtime)
+        if getattr(status, "tool_history", None):
+            return None
+        # 群聊里不同人各说各的，不能把别人的话折进这一轮
+        if normalize_chat_type(chat_type) == "group":
+            if str(snapshot.get("user_id") or "") != str(user_id or ""):
+                return None
+        started_at = snapshot.get("started_at")
+        if isinstance(started_at, (int, float)) and started_at > 0:
+            if (time.time() - started_at) > self.MEDIA_TURN_TEXT_FOLD_WINDOW:
+                return None
+        return busy_runtime
+
     async def handle_new_message(self, context: Dict[str, Any]):
         """处理来自适配器的新消息/命令。"""
         # copy context to allow safe mutation (inject multimodal payloads, flags, etc.)
@@ -701,16 +763,33 @@ class MessageHandlerMixin:
         queue = self._get_scope_queue_for_runtime(chat_id)
         backend_busy_or_queued = bool(busy_runtime or (queue and queue.size() > 0))
 
+        # 纯文本紧跟在自己刚发的图片/视频后面：折进那一轮，而不是另开一轮。
+        # 不折的话图片轮和文本轮会各回一次（详见 _media_turn_fold_target）。
+        media_fold_runtime: Optional[str] = None
+        if not (image_input_detected or video_input_detected):
+            media_fold_runtime = self._media_turn_fold_target(
+                memory_scope_id=memory_scope_id,
+                user_id=user_id,
+                chat_type=chat_type,
+            )
+            if media_fold_runtime:
+                backend_runtime = media_fold_runtime
+                status = self.worker_status.get(backend_runtime)
+                logger.info(
+                    f"[{chat_id}] 纯文本紧随媒体轮到达：折进正在进行的媒体轮 {backend_runtime}。"
+                )
+
         if backend_busy_or_queued:
             # 后端忙碌：允许前脑继续生成，不强制回复“在忙”。
             # 仅在有图片时直接排队，其他情况交由前脑处理并按需打断/切换。
             message_content = group_message_content(context, user_name, text, chat_type)
 
-            # 若包含真实图片/视频输入（已成功加载字节）：聚合器语义合入正在进行的后脑任务。
-            #   - 后脑还没输出任何文本：cancel 旧后脑 → 把"旧图 + 新图"合并 → 立即重启一次后脑。
+            # 若包含真实图片/视频输入（已成功加载字节），或是紧随媒体轮的补充文本：
+            # 聚合器语义合入正在进行的后脑任务。
+            #   - 后脑还没输出任何文本：cancel 旧后脑 → 把"旧输入 + 新输入"合并 → 立即重启一次后脑。
             #   - 后脑已经生成部分文本：cancel + 把已生成草稿带到合并后的新一次后脑生成里继续/重写。
             # 不再发硬编码"已排队"提示——行为对齐前脑文本聚合器的精神。
-            if image_input_detected or video_input_detected:
+            if image_input_detected or video_input_detected or media_fold_runtime:
                 user_metadata = {}
                 platform_msg_ids = _context_platform_message_ids(context)
                 if platform_msg_ids:
@@ -735,15 +814,18 @@ class MessageHandlerMixin:
                 prior_input = self.back_brain_input_context.get(backend_runtime) or {}
                 prior_text = prior_input.get("text", "") or ""
                 prior_images = list(prior_input.get("multimodal_images") or [])
+                prior_videos = list(prior_input.get("multimodal_videos") or [])
                 prior_partial = (self.back_brain_partial.get(backend_runtime) or "").strip()
 
-                # 标记当前任务为"被图片合并打断"，让后脑 finally 不要清空缓冲
+                # 标记当前任务为"被新输入合并打断"，让后脑 finally 不要清空缓冲
                 old_task = self.generation_tasks.get(backend_runtime)
                 if status:
                     status_ctx = getattr(status, "context", None)
                 # 给旧后脑 context 打标记的最稳妥方式：直接 cancel 后清理 worker_status，由新任务替代
+                _merge_reason = "补充文本" if media_fold_runtime else "新图片"
                 logger.info(
-                    f"[{chat_id}] 后脑忙碌 + 新图片到达：cancel 旧后脑并合并旧图({len(prior_images)}) + 新图重启。"
+                    f"[{chat_id}] 后脑忙碌 + {_merge_reason}到达：cancel 旧后脑并合并"
+                    f"旧媒体(图 {len(prior_images)} / 视频 {len(prior_videos)}) + 新输入重启。"
                 )
                 if old_task and not old_task.done():
                     # 让 finally 不清掉 partial / input_context（虽然此时它本来就要被新任务覆盖，
@@ -767,17 +849,13 @@ class MessageHandlerMixin:
                     except Exception:
                         pass
 
-                # 合并 multimodal_images：旧图（保持顺序）+ 新图（同样保持顺序，去重 image_id）
-                new_images = list(context.get("multimodal_images") or [])
-                merged_images: List[Dict[str, Any]] = []
-                seen_ids = set()
-                for img in (prior_images + new_images):
-                    iid = img.get("image_id") if isinstance(img, dict) else None
-                    if iid and iid in seen_ids:
-                        continue
-                    if iid:
-                        seen_ids.add(iid)
-                    merged_images.append(img)
+                # 合并媒体：旧的在前、新的在后，按 id 去重
+                merged_images = _merge_media_payloads(
+                    prior_images, list(context.get("multimodal_images") or []), "image_id"
+                )
+                merged_videos = _merge_media_payloads(
+                    prior_videos, list(context.get("multimodal_videos") or []), "video_id"
+                )
 
                 # 合并 text：把旧文本与新文本拼起来（新文本是这条消息已经处理过 [image:...] 的纯文本）
                 merged_text_parts = [t for t in (prior_text.strip(), text.strip()) if t]
@@ -786,7 +864,10 @@ class MessageHandlerMixin:
                 # 构造合并后的 context，重启后脑
                 merged_context = dict(context)
                 merged_context["text"] = merged_text
-                merged_context["multimodal_images"] = merged_images
+                if merged_images:
+                    merged_context["multimodal_images"] = merged_images
+                if merged_videos:
+                    merged_context["multimodal_videos"] = merged_videos
                 if prior_partial:
                     merged_context["_back_brain_prior_partial"] = prior_partial
                 merged_context["_message_saved"] = True
@@ -803,7 +884,8 @@ class MessageHandlerMixin:
                 task = asyncio.create_task(self._generate_response(merged_context))
                 self.generation_tasks[chat_id] = task
                 logger.info(
-                    f"[{chat_id}] 已合并 {len(merged_images)} 张图片（草稿 {len(prior_partial)} 字）重启后脑。"
+                    f"[{chat_id}] 已合并 图 {len(merged_images)} / 视频 {len(merged_videos)}"
+                    f"（草稿 {len(prior_partial)} 字）重启后脑。"
                 )
                 return
 

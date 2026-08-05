@@ -9,10 +9,11 @@
 '''
 
 import logging
+import re
 import time
 import uuid
 from datetime import datetime, timezone
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 from qdrant_client.http import models as qdrant_models
 import pymongo
@@ -39,6 +40,181 @@ IMAGE_TEXT_INDEX_WEIGHTS = {"tags": 2, "ocr_text": 3, "description": 2}
 LEGACY_IMAGE_TEXT_INDEX_WEIGHTS = {"tags": 2, "ocr_text": 3}
 LEGACY_TAGS_TEXT_INDEX_NAME = "tags_text"
 LEGACY_TAGS_TEXT_INDEX_WEIGHTS = {"tags": 1}
+
+# ---------------------------------------------------------------------------
+# keyword 检索：类搜索引擎的分词 + 打分
+# ---------------------------------------------------------------------------
+# MongoDB $text 对中文几乎无效（不做分词，只按空白切词），语义向量又只能整句比对，
+# 两者都会漏掉"红色 猫 睡觉"这种多词部分命中。这里补一层词法检索：
+#   1. 把查询切成词（CJK 额外展开 bigram，覆盖没有空格的中文串）
+#   2. 用 $or regex 在 tags/description/ocr_text 上召回候选池
+#   3. 在 Python 侧按字段权重 + 命中覆盖率 + 短语加成打分排序
+# 最终由 search_images 用 RRF 把语义与词法两路融合。
+_KEYWORD_SPLIT_RE = re.compile(
+    r"[\s,，、;；|/\\\-—_+*.。!！?？:：~'\"“”‘’()（）\[\]【】{}<>《》]+"
+)
+_CJK_CHAR_RE = re.compile(r"[぀-ヿ㐀-䶿一-鿿豈-﫿가-힯]")
+# 高频虚词/量词单独成词时检索价值极低，命中它们只会把候选池灌满噪声。
+_KEYWORD_STOPWORDS = frozenset(
+    {
+        "的", "了", "是", "在", "和", "与", "或", "有", "我", "你", "他", "她", "它",
+        "这", "那", "个", "些", "吗", "呢", "吧", "啊", "被", "把", "给", "着", "过",
+        "就", "都", "很", "也", "还", "对", "从", "到", "上", "下", "中", "里",
+        "a", "an", "the", "of", "to", "in", "on", "at", "is", "are", "was", "were",
+        "and", "or", "for", "with", "it", "this", "that", "be", "by",
+    }
+)
+# 字段权重：标签是模型主动概括的语义，最可信；OCR 常含无关水印文字，权重最低。
+KEYWORD_FIELD_WEIGHTS: Tuple[Tuple[str, float], ...] = (
+    ("tags", 3.0),
+    ("description", 2.0),
+    ("ocr_text", 1.5),
+)
+_MAX_PRIMARY_TERMS = 12
+_MAX_EXPANSION_TERMS = 24
+_RRF_K = 60
+# 融合权重：用户显式敲进来的词，词法命中比整句语义相似更可信一点。
+KEYWORD_LEXICAL_WEIGHT = 1.0
+KEYWORD_SEMANTIC_WEIGHT = 0.9
+
+
+def tokenize_keyword_query(query: str) -> Tuple[List[str], List[str]]:
+    """把 keyword 查询切成 (主词, 扩展词)。
+
+    主词：用户显式给出的词（含完整 CJK 串、ASCII 单词）。
+    扩展词：长 CJK 串的 bigram 切片，用于召回"没有空格的中文长串"里的部分匹配，
+            打分时权重低于主词，避免 bigram 噪声压过真正的主词命中。
+    """
+    raw = str(query or "").strip()
+    if not raw:
+        return [], []
+
+    primary: List[str] = []
+    expansion: List[str] = []
+    seen_primary: set = set()
+    seen_expansion: set = set()
+
+    for chunk in _KEYWORD_SPLIT_RE.split(raw):
+        chunk = chunk.strip()
+        if not chunk:
+            continue
+        lowered = chunk.lower()
+        is_cjk = bool(_CJK_CHAR_RE.search(chunk))
+        # 非 CJK 的单字符（如 "a"、"1"）和停用词不进主词
+        if lowered in _KEYWORD_STOPWORDS:
+            continue
+        if not is_cjk and len(lowered) < 2:
+            continue
+        if lowered not in seen_primary:
+            seen_primary.add(lowered)
+            primary.append(chunk)
+        # 中文长串展开 bigram：「橘猫睡觉」→ 橘猫/猫睡/睡觉
+        if is_cjk and len(chunk) >= 3:
+            for i in range(len(chunk) - 1):
+                gram = chunk[i:i + 2]
+                if not _CJK_CHAR_RE.search(gram):
+                    continue
+                gram_key = gram.lower()
+                if gram_key in seen_primary or gram_key in seen_expansion:
+                    continue
+                seen_expansion.add(gram_key)
+                expansion.append(gram)
+
+    return primary[:_MAX_PRIMARY_TERMS], expansion[:_MAX_EXPANSION_TERMS]
+
+
+def score_media_lexical(
+    doc: Dict[str, Any],
+    phrase: str,
+    primary_terms: Sequence[str],
+    expansion_terms: Sequence[str],
+) -> float:
+    """给一条媒体记录按词法命中打分（0 表示完全没命中）。
+
+    加权规则：
+    - 字段权重 tags > description > ocr_text
+    - 主词命中拿满权重，bigram 扩展词只拿 40%
+    - 整条查询作为短语出现时额外加成（"红色跑车" 命中优于 "红色"+"跑车" 分散命中）
+    - 最后按命中覆盖率（命中了几个主词 / 一共几个主词）整体缩放
+    """
+    if not primary_terms and not expansion_terms:
+        return 0.0
+
+    phrase_lower = str(phrase or "").strip().lower()
+    field_values: List[Tuple[str, float]] = []
+    for field, weight in KEYWORD_FIELD_WEIGHTS:
+        value = doc.get(field)
+        if not value:
+            continue
+        field_values.append((str(value).lower(), weight))
+    if not field_values:
+        return 0.0
+
+    score = 0.0
+    matched_primary = 0
+    for term in primary_terms:
+        term_lower = term.lower()
+        hit = False
+        for value, weight in field_values:
+            if term_lower in value:
+                score += weight
+                hit = True
+        if hit:
+            matched_primary += 1
+    for term in expansion_terms:
+        term_lower = term.lower()
+        for value, weight in field_values:
+            if term_lower in value:
+                score += weight * 0.4
+
+    if score <= 0:
+        return 0.0
+
+    # 短语整体命中加成
+    if phrase_lower:
+        for value, weight in field_values:
+            if phrase_lower in value:
+                score += weight * 1.5
+                break
+
+    # 覆盖率缩放：命中 3/3 个主词的结果应明显优于只命中 1/3 的
+    if primary_terms:
+        coverage = matched_primary / len(primary_terms)
+        score *= 0.35 + 0.65 * coverage
+    return score
+
+
+def _reciprocal_rank_fusion(
+    ranked_lists: Sequence[Tuple[Sequence[Dict[str, Any]], float]],
+) -> List[Dict[str, Any]]:
+    """RRF 融合多路检索结果：score = Σ weight / (k + rank)。
+
+    比"语义有结果就不看词法"稳健得多——两路都认可的结果自然排到前面，
+    单路独有的结果也不会被整体丢弃。
+    """
+    fused_score: Dict[str, float] = {}
+    best_doc: Dict[str, Any] = {}
+    order: List[str] = []
+    for results, weight in ranked_lists:
+        for rank, item in enumerate(results or []):
+            if not isinstance(item, dict):
+                continue
+            key = str(item.get("image_id") or "") or f"{item.get('file_path')}|{item.get('timestamp')}"
+            if key not in fused_score:
+                fused_score[key] = 0.0
+                best_doc[key] = item
+                order.append(key)
+            else:
+                # 已有记录里缺的字段用后续来源补齐（Qdrant payload 常缺 ocr_text）
+                merged = dict(best_doc[key])
+                for field, value in item.items():
+                    if value and not merged.get(field):
+                        merged[field] = value
+                best_doc[key] = merged
+            fused_score[key] += weight / (_RRF_K + rank + 1)
+    order.sort(key=lambda key: (-fused_score[key], -float(best_doc[key].get("timestamp") or 0)))
+    return [best_doc[key] for key in order]
+
 
 
 def resolve_mongo_db_name(mongo_cfg: Dict[str, Any], client: "pymongo.MongoClient") -> str:
@@ -895,6 +1071,79 @@ class ImageStore:
             logger.error(f"OCR 文字搜索图片失败: {e}")
             return []
 
+    def search_by_lexical(
+        self,
+        keyword: str,
+        user_id: str = "",
+        limit: int = 10,
+        storage_id: str = "",
+        platform: str = "",
+        chat_id: str = "",
+        memory_scope_id: str = "",
+        offset: int = 0,
+    ) -> List[Dict[str, Any]]:
+        """类搜索引擎的词法检索：分词 → regex 召回 → 加权打分排序。
+
+        补 `search_by_keyword`（MongoDB $text，中文不分词）和 `search_by_semantic`
+        （整句向量，漏部分命中）都盖不住的场景：多词部分匹配、无空格中文长串。
+        offset 在打分排序之后应用，保证翻页顺序稳定。
+        """
+        if self.mongo_col is None:
+            return []
+        primary_terms, expansion_terms = tokenize_keyword_query(keyword)
+        if not primary_terms and not expansion_terms:
+            return []
+
+        try:
+            # 召回：任一词命中任一字段即进候选池（OR），精确排序交给打分阶段
+            or_conditions: List[Dict[str, Any]] = []
+            for term in list(primary_terms) + list(expansion_terms):
+                escaped = re.escape(term)
+                for field, _weight in KEYWORD_FIELD_WEIGHTS:
+                    or_conditions.append({field: {"$regex": escaped, "$options": "i"}})
+            if not or_conditions:
+                return []
+
+            query: Dict[str, Any] = {"$or": or_conditions}
+            query = self._add_optional_context_filters(
+                query,
+                platform=platform,
+                chat_id=chat_id,
+                storage_id=storage_id,
+                memory_scope_id=memory_scope_id,
+            )
+            if user_id:
+                if "$and" in query:
+                    query["$and"].append({"user_id": user_id})
+                else:
+                    query = {"$and": [query, {"user_id": user_id}]}
+
+            # 候选池要大于目标页，才有排序空间；上限防止极宽泛查询拖垮内存
+            candidate_cap = max(60, min((limit + offset) * 6, 400))
+            candidates = list(
+                self.mongo_col.find(query, {"_id": 0})
+                .sort("timestamp", -1)
+                .limit(candidate_cap)
+            )
+
+            scored: List[Tuple[float, float, Dict[str, Any]]] = []
+            for doc in candidates:
+                score = score_media_lexical(doc, keyword, primary_terms, expansion_terms)
+                if score <= 0:
+                    continue
+                scored.append((score, float(doc.get("timestamp") or 0), doc))
+            scored.sort(key=lambda row: (-row[0], -row[1]))
+
+            results = []
+            for score, _ts, doc in scored[offset:offset + limit]:
+                item = dict(doc)
+                item["score"] = score
+                results.append(item)
+            return results
+        except Exception as e:
+            logger.error(f"词法搜索图片失败: {e}")
+            return []
+
     def search_by_semantic(
         self,
         query_text: str,
@@ -948,6 +1197,46 @@ class ImageStore:
             logger.error(f"语义搜索图片失败: {e}")
             return []
 
+    def _search_keyword_fused(
+        self,
+        keyword: str,
+        *,
+        limit: int,
+        offset: int,
+        context_kwargs: Dict[str, Any],
+    ) -> List[Dict[str, Any]]:
+        """keyword 检索：词法 + 语义两路召回后 RRF 融合。
+
+        两路都不自己跳过 offset（各取 limit+offset 条），融合完再统一切片，
+        否则两路各跳一次会错位——和 text_query+keyword 合并路径同一个坑。
+        """
+        fetch = limit + offset
+        lexical_kwargs = dict(context_kwargs)
+        lexical_kwargs["limit"] = fetch
+        lexical_kwargs["offset"] = 0
+        semantic_kwargs = dict(lexical_kwargs)
+        semantic_kwargs["top_k"] = semantic_kwargs.pop("limit")
+
+        lexical_results = self.search_by_lexical(keyword, **lexical_kwargs)
+        semantic_results = self.search_by_semantic(keyword, **semantic_kwargs)
+        if semantic_results:
+            semantic_results = self._enrich_with_mongo(semantic_results)
+
+        if not lexical_results and not semantic_results:
+            # 两路都空时回退 MongoDB $text（可能命中分词器覆盖到的西文全文）
+            legacy_kwargs = dict(context_kwargs)
+            legacy_kwargs["limit"] = limit
+            legacy_kwargs["offset"] = offset
+            return self.search_by_keyword(keyword, **legacy_kwargs)
+
+        fused = _reciprocal_rank_fusion(
+            (
+                (lexical_results, KEYWORD_LEXICAL_WEIGHT),
+                (semantic_results, KEYWORD_SEMANTIC_WEIGHT),
+            )
+        )
+        return fused[offset:offset + limit]
+
     def search_images(
         self,
         image_id: str = "",
@@ -968,7 +1257,7 @@ class ImageStore:
         统一检索入口 —— 自动选择最佳策略：
         1. 有 image_id   → 精确查询
         2. 有 text_query  → 在图片 OCR 文字中做模糊搜索
-        3. 有 keyword     → 先尝试语义搜索，再回退关键词搜索
+        3. 有 keyword     → 词法检索（分词+加权打分）与语义检索 RRF 融合，两路皆空时回退 $text
         4. 有时间范围     → 时间过滤
         5. 什么都没有     → 返回最近的图片/视频
 
@@ -1011,15 +1300,14 @@ class ImageStore:
             merged_kwargs = _context_kwargs()
             merged_kwargs["limit"] = limit + offset
             merged_kwargs["offset"] = 0
-            semantic_kwargs = dict(merged_kwargs)
-            semantic_kwargs["top_k"] = semantic_kwargs.pop("limit")
 
             ocr_results = self.search_by_ocr_text(text_query, **merged_kwargs)
-            keyword_results = self.search_by_semantic(keyword, **semantic_kwargs)
-            if not keyword_results:
-                keyword_results = self.search_by_keyword(keyword, **merged_kwargs)
-            # Qdrant 语义搜索结果需要从 MongoDB 补全 ocr_text 等字段
-            keyword_results = self._enrich_with_mongo(keyword_results)
+            keyword_results = self._search_keyword_fused(
+                keyword,
+                limit=limit + offset,
+                offset=0,
+                context_kwargs=_context_kwargs(),
+            )
             # 合并去重（以 image_id 去重，OCR 结果优先）
             seen_ids = set()
             merged = []
@@ -1034,13 +1322,16 @@ class ImageStore:
         if text_query:
             return _apply_media_filter(self.search_by_ocr_text(text_query, **_context_kwargs()))
 
-        # 语义 + 关键词
+        # keyword：词法 + 语义融合（内部含 $text 兜底）
         if keyword:
-            semantic_results = self.search_by_semantic(keyword, **_context_kwargs(limit_key="top_k"))
-            if semantic_results:
-                # Qdrant 语义搜索结果需要从 MongoDB 补全 ocr_text 等字段
-                return _apply_media_filter(self._enrich_with_mongo(semantic_results))
-            return _apply_media_filter(self.search_by_keyword(keyword, **_context_kwargs()))
+            return _apply_media_filter(
+                self._search_keyword_fused(
+                    keyword,
+                    limit=limit,
+                    offset=offset,
+                    context_kwargs=_context_kwargs(),
+                )
+            )
 
         # 时间范围
         if start_time is not None or end_time is not None:

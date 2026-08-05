@@ -140,6 +140,78 @@
 
 ---
 
+## 5.3 view_media 回查媒体：分析轮串味 / 图片太多 / 跨轮误判重复调用
+
+三个现象都出在「工具回查媒体 → 下一轮用 image/video 模型看图 → 结果回灌给正常模型」这条链上。
+
+### ❌ 回查结果带着 Nora 的口吻，把 `question` 当成用户在搭话
+
+分析轮如果沿用 `get_system_prompt()`，`system.jinja` 第一行就是人设/SOUL，再叠上对话历史，
+模型自然按对话角色回应，回一句寒暄而不是客观分析。
+
+- 该轮走 `brain/templates/media_analysis.jinja`（无人设的"媒体内容分析引擎"）。
+- **代码侧必须同时满足三条，缺一条人设都会漏回来**（`core/back_brain.py`）：
+  1. `turn_system_prompt` / `turn_user_prompt` 都换成模板的两个 block（只换 system 不够，
+     user prompt 里还带着正常轮的对话上下文）；
+  2. `turn_history = []` —— 留着历史，模型会从上文自己学回 Nora 的语气；
+  3. 该轮不给工具，且流式产出**既不发用户也不进 `temp_history`**
+     （`[SPLIT]` 分支里 `if tool_media_analysis_round: continue`）。少了这条，
+     内部观察数据会被当成回复直接发出去。
+- 回灌时的措辞也要管：交回去时写"这是你自己亲眼看到的事实"，否则正常轮会复述成
+  "分析显示……/报告指出……"这种转述腔。
+- 模板里显式禁止输出 `[IMAGE_TAGS]` / `[IMAGE_OCR]` / `[IMAGE_DESC]` / `[VIDEO_TAGS]`——
+  那些只用于用户**新发**媒体入库，回查的历史媒体不需要，否则标签块会污染观察结果。
+
+### ⚠️ 搜到一堆图时全量回灌
+
+`view_media` 命中 10+ 张时，旧实现有几条 MediaTag 就传几张，单轮请求爆 token 且注意力被摊薄，
+"同时查看+提问"的准确率反而下降。现在有单轮上限：图片 4 个（带 `question` 时 3 个）、视频 1 个
+（`core/back_brain.py` 的 `MAX_TOOL_IMAGES_PER_TURN` / `..._WITH_QUESTION` / `MAX_TOOL_VIDEOS_PER_TURN`）。
+被截断时 `tool_result` 会附提示引导收窄查询或用 `page` 翻页，`media_truncated_count`
+也会带进分析轮 prompt，让模型知道自己看的是子集。
+
+### ❌ 前脑审查 continue 后，上一轮用过的工具第一次调用就被提示"3 次调用"
+
+`sessions[chat_id]` 是 controller 级别的**长期** per-chat 字典，而 `last_loop_key` /
+`tool_loop_call_count` / `file_edit_counts` 记录的是「本次后脑连续调用」。
+`core/polling.py` 的 continue 分支只 `context.copy()`，session 原样带进下一轮，
+计数就从第 4、5 次起算，直接命中 hint/force 干预。
+
+- 修复：`_reset_tool_loop_tracking()` 在 `_generate_response` 入口调用。
+- 注意 `_reset_repeated_tool_call()` **不清** `last_loop_key`，别只调它。
+- 新增任何"跨本次生成才有意义"的 session 计数器时，记得一并加进这个 reset。
+
+## 5.4 图片和紧随其后的文本各回一次
+
+现象：先发一张图（走后脑 image 轮），紧接着补一句文字说明，Nora 回了两次。
+
+- **不是聚合器的问题。** 图片以 `[image: path]` 文本形式过聚合器，3 秒窗口内到达的图+文本来就能合并。
+- 真正的窗口在聚合之后：`core/message_handler.py` 的合并逻辑只在 `backend_busy_or_queued`
+  为真时生效。一旦 image 轮在后续文本到达前**跑完**，媒体快路径和合并分支双双跳过，
+  文本就成了全新一轮。
+- 现在由 `_media_turn_fold_target()` 判定能否折进正在跑的媒体轮，命中则走原有
+  cancel + 合并 + 重启路径。**五道闸门不折**，改动时不要放宽：轮询模式、已对用户发过可见回复
+  （折 = cancel + 重写，用户会先看半截再看完整版）、该轮已执行过工具（副作用会被重跑）、
+  超出 `MEDIA_TURN_TEXT_FOLD_WINDOW`（90 秒）、群聊里发送者不是同一个人。
+- 合并分支要同时合 `multimodal_images` **和** `multimodal_videos`——历史上只合了图片，视频被丢。
+- `[Image #N]` 是模型自己的措辞（指代历史里的图片），不是代码插入的标记，别去搜代码。
+
+## 5.5 日志时间和调度器时间对不上
+
+同一件事日志行写 `02:37:00`，APScheduler 写 `scheduled at 14:37:00+08:00`，
+容易误判成"任务提前 12 小时触发"。
+
+- 原因：`logging.Formatter` 的 `%(asctime)s` 默认用系统本地时区，调度器用
+  `memory.message_history.timezone`。现在 `brain/logging_config.py` 的 `_DisplayTimezoneMixin`
+  让两个 Formatter 都走配置时区。
+- `cron[minute='']` **不是 bug**：注册的是 `CronTrigger(minute="*")`，实测渲染为 `cron[minute='*']`，
+  空值是终端复制产物。
+- `apscheduler.executors` / `apscheduler.scheduler` 已降到 WARNING：群监听 tick 是每分钟一次的
+  cron job，executor 每次触发打两条 INFO 会把日志刷成流水账。要看调度信息请找
+  `core/scheduler.py` 自己的打点。
+
+---
+
 ## 6. 成本跟踪
 
 ### ⚠️ 无内置价格表
