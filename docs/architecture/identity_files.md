@@ -38,7 +38,7 @@
 
 两条生图路径，共用 `brain/appearance.py` 的原语（读 md / 载参考图 / 落盘 / 维护 manifest）：
 
-- **参考图（后脑工具）**：`generate_appearance_reference(requirement, view, usage, replace)` → 直接用 `APPEARANCE.md` + 已有参考图作锚生成，存 `refs/{view}.png`。不经 `draw_desc`——requirement 已是显式描述，再套一层改写只会引入漂移。
+- **参考图（后脑工具）**：`generate_appearance_reference(requirement, view, usage, replace, source_images)` → 直接用 `APPEARANCE.md` + 已有参考图作锚生成，存 `refs/{view}.png`。不经 `draw_desc`——requirement 已是显式描述，再套一层改写只会引入漂移。用户发图说"你就长这样"时，把图的本地路径传 `source_images`：来源图优先占配额、排在附图最前，提示词写"与文字描述冲突以图为准"。
 - **日常生图（前脑标记）**：`[DRAW:要求]` → `draw_desc` 读 APPEARANCE.md + 要求 + 当前消息段 + 当前时间 + SCHEDULE.md + SOUL.md，产出英文提示词并**自己挑**参考图 → `draw` 出图 → 落盘 + 入库 + 追发。文字先发、图后到；单轮只一张；失败只记日志不追发安慰文本。
 
 两个模型别名 `draw`（文生图）/ `draw_desc`（文本）都配上才启用；否则 `[DRAW:]` 说明不注入前脑提示、参考图工具不注册。OpenAI 与 Gemini 端点都支持（`BaseLLM.generate_image`）。

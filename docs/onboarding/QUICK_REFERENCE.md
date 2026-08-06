@@ -73,7 +73,8 @@ core/controller.py            NoraController.handle_message()
   - `view_media` 的 `keyword`：走**词法检索 + 语义检索 RRF 融合**（`memory/image_store.py`）。词法路 `search_by_lexical()` 分词 + CJK bigram 扩展 + 字段加权打分（tags 3.0 / description 2.0 / ocr_text 1.5），语义路走 Qdrant；两路各取 `limit+offset` 条、都不自己跳 offset，融合排序后统一切片。两路皆空才回退 MongoDB `$text`。
   - 工具回灌媒体有**单轮数量上限**：图片 4 个（带 `question` 时 3 个）、视频 1 个（`core/back_brain.py` 的 `MAX_TOOL_IMAGES_PER_TURN` 等）。被截断时 `tool_result` 会附带提示，引导收窄查询或用 `page` 翻页。
   - 回查媒体的**分析轮不用人设**：走 `brain/templates/media_analysis.jinja`，且该轮清空对话历史、不给工具、流式输出不发用户（详见 §6）。
-  - `generate_appearance_reference(requirement, view, usage, replace)`: 按 `appearance/APPEARANCE.md` 生成形象参考图存进 `appearance/refs/{view}.png` 并更新 `manifest.json`。已有同名 view 必须显式 `replace=true` 才覆盖（覆盖会改变形象，须先问用户）；生成新视角时自动带上已有参考图作锚。不经 `draw_desc`。`appearance/refs/` 被 `_is_path_safe` 目录级拦截，通用文件工具读写会被拒。
+  - `generate_appearance_reference(requirement, view, usage, replace, source_images)`: 按 `appearance/APPEARANCE.md` 生成形象参考图存进 `appearance/refs/{view}.png` 并更新 `manifest.json`。已有同名 view 必须显式 `replace=true` 才覆盖（覆盖会改变形象，须先问用户）；生成新视角时自动带上已有参考图作锚。不经 `draw_desc`。`appearance/refs/` 被 `_is_path_safe` 目录级拦截，通用文件工具读写会被拒。
+  - `source_images`（逗号分隔本地路径）: 用户发图说"你就长这样"时用，路径从 `view_media` 的 `File:` 行取。来源图**优先占用** 3 张配额、排在附图列表最前，提示词写"与文字描述冲突以图为准"；剩余名额才补已有参考图（写"保持同一个人，只改视角"）。路径过 `_is_path_safe`，读不到直接报错不生图。
   - IMAGE_TAGS / IMAGE_OCR / IMAGE_DESC 质量兜底：缺失标签或标签未使用英文逗号分隔时，会触发一次仅请求 `IMAGE_TAGS` 的补齐重试。
   - 详细说明：`docs/architecture/tools.md`
 
@@ -256,7 +257,7 @@ python tui.py
   - 落盘：`appearance/generated/YYYY-MM-DD/draw_xxxxxxxx.png`，元数据进 Mongo `appearance_images`。
   - 失败：只记日志，不向用户追发安慰或报错文本。
   - 改形象设定（不是拍照）→ 走 `[TASK_INSTRUCTION]`+`[NEED_BACKEND]`，让后脑改 `APPEARANCE.md` +
-    调 `generate_appearance_reference`。
+    调 `generate_appearance_reference`。用户发图说"你就长这样"也走这条，后脑把图路径传 `source_images`。
 
 ---
 

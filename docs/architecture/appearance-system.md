@@ -28,7 +28,7 @@
 | --- | --- | --- |
 | 触发者 | 前脑标记，用户对话中 | 后脑自己决定调工具 |
 | 提示词来源 | `draw_desc` 模型改写 | 工具的 `requirement` 参数直接用（**不过 draw_desc**） |
-| 参考图 | `draw_desc` 从 manifest 里挑 | 已有参考图全部作为锚（上限 3 张） |
+| 参考图 | `draw_desc` 从 manifest 里挑 | `source_images`（用户给的来源图）优先，剩余配额补已有参考图作锚 |
 | 落盘位置 | `generated/<日期>/` | `refs/<view>.png` |
 | 是否入库 | 是（`appearance_images`） | 否（manifest 即索引） |
 | 发送方式 | 系统自动追发 `[image: path]` | 工具返回 MediaTag 文本，由后脑决定是否带进回复 |
@@ -38,9 +38,31 @@
 
 ### 鸡生蛋问题
 
-第一张参考图从哪来？答案是 `generate_appearance_reference` 只依赖 `APPEARANCE.md`——
-先写文字设定，再让工具生成 `face`，之后生成 `side` / `front` 时会把已有参考图作为锚传给
-`draw`，保证各视角是同一个人。
+第一张参考图从哪来？两条路：
+
+1. **纯文字起步** —— `generate_appearance_reference` 只依赖 `APPEARANCE.md`，先写文字设定，
+   再让工具生成 `face`，之后生成 `side` / `front` 时会把已有参考图作为锚传给 `draw`，
+   保证各视角是同一个人。
+2. **照着用户给的图起步** —— 用户发一张图说"你就长这样"，后脑先用 `view_media` 拿到本地路径，
+   再把路径传给工具的 `source_images` 参数。
+
+### `source_images`：让参考图照着一张现成的图长
+
+`source_images` 收逗号分隔的本地图片路径（png/jpg/jpeg/webp），语义与已有参考图**不同**，
+提示词里也分开点名，否则模型分不清哪张该照抄、哪张只是保持一致：
+
+- **来源图（Source images）** —— 排在附图列表**前面**，提示词要求"跟它走，与文字描述冲突时以图为准"。
+- **已有参考图（Existing reference images）** —— 排在**后面**，提示词要求"保持同一个人，只改视角"。
+
+配额仍是 `MAX_REFERENCE_IMAGES = 3`，**来源图优先占用**，剩下的名额才补已有参考图；
+来源图占满 3 张时不再带锚（用户的意图是"重新定形象"，旧锚反而会拉回旧样子）。
+
+路径先过 `_resolve_workspace_path()` 再过 `_is_path_safe()`——所以 `appearance/refs/` 下的图
+不能当来源图传（想复用已有参考图，工具本来就自动带）。读不到就**直接报错、不生图**，
+不静默降级：用户明确给了图却按文字凭空画，比不出图更糟。
+
+改了形象之后记得同步改 `APPEARANCE.md` 的文字描述，否则文字和图会打架——
+提示词（`system.jinja` / `front_brain.jinja`）里都写了这一条。
 
 ---
 
@@ -106,7 +128,7 @@
 
 | 文件 | 职责 |
 | --- | --- |
-| `brain/appearance.py` | 共享原语：读 `APPEARANCE.md`、manifest 读写、参考图加载/落盘、生成图落盘、时区 |
+| `brain/appearance.py` | 共享原语：读 `APPEARANCE.md`、manifest 读写、参考图加载/落盘、任意本地图加载（`load_image_file`）、生成图落盘、时区 |
 | `brain/prompts.py` | 路径常量、workspace 初始化、`<appearance>` 注入（紧跟 `<soul>`） |
 | `brain/templates/draw_desc.jinja` | `draw_desc` 的 system / user prompt（无人设） |
 | `brain/interface.py` | `BaseLLM.generate_image()`，默认 `NotImplementedError` |

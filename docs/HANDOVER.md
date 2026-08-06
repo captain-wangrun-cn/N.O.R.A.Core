@@ -33,15 +33,22 @@
 
 **3. 后脑参考图工具 `generate_appearance_reference`（`brain/tools.py`）**
 
-- 参数 `requirement / view / usage / replace`。依据 `APPEARANCE.md` 生成，存
+- 参数 `requirement / view / usage / replace / source_images`。依据 `APPEARANCE.md` 生成，存
   `refs/{view}.png` 并更新 `manifest.json`（file / view / usage / updated_at）。
 - **生成新视角时自动带上已有参考图作锚**，否则"正面"和"侧面"会是两个不同的人。
+- **`source_images` 允许传入图片**（逗号分隔本地路径，从 `view_media` 的 `File:` 行取）：
+  用户发图说"你就长这样"时用。来源图与已有参考图语义不同，在提示词里**分开点名**——
+  来源图排附图列表最前、写"与文字描述冲突以图为准"，已有参考图排后、写"保持同一个人只改视角"，
+  否则模型分不清哪张该照抄。配额（3 张）**来源图优先**，占满就不带锚（用户意图是重定形象，
+  旧锚反而拉回旧样子）。路径过 `_resolve_workspace_path` + `_is_path_safe`，
+  读不到**直接报错不生图**——明确给了图却按文字凭空画，比不出图更糟。
 - 同名 view 已存在时**不覆盖**，返回提示要求先征得主人同意再用 `replace=true`。
 - 不经 `draw_desc`：`requirement` 已是后脑显式撰写的描述，`APPEARANCE.md` 也是结构化文本，
   再套一层提示词改写只会引入形象漂移。
 - 仅在配置了 `draw` 时注册（别让模型看到调不动的工具）。
 - `_is_path_safe()` 新增**唯一一条目录级规则**拦 `appearance/refs/`（此前全是文件名黑名单）：
   参考图是形象一致性的锚，被通用文件工具改掉会让形象突变，而且是二进制文件本就不该走文本工具。
+  副作用：`refs/` 下的图也不能当 `source_images` 传（想复用已有参考图，工具本来就自动带）。
 
 **4. `[DRAW:要求]` 旁路生图（`core/routing.py` + `core/appearance_gen.py`）**
 

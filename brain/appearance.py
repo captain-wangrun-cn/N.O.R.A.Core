@@ -151,6 +151,30 @@ def load_reference_images(filenames: List[str]) -> List[Dict[str, Any]]:
     return images
 
 
+def load_image_file(path: str) -> Dict[str, Any]:
+    """
+    读任意本地图片为 multimodal_images 同构结构（mime_type / bytes / base64）。
+
+    给「主人发了张图，照着它生成参考图」用：来源图不在 refs/ 下，所以不能走
+    load_reference_images。失败抛异常，由调用方决定是跳过还是报错。
+    """
+    abs_path = os.path.abspath(str(path or "").strip())
+    ext = os.path.splitext(abs_path)[1].lower()
+    if ext not in MIME_BY_EXT:
+        raise ValueError(f"不支持的图片格式 `{ext or '无后缀'}`（支持 png/jpg/jpeg/webp）")
+    if not os.path.isfile(abs_path):
+        raise FileNotFoundError(f"文件不存在: {abs_path}")
+    with open(abs_path, "rb") as f:
+        raw_bytes = f.read()
+    if not raw_bytes:
+        raise ValueError("文件为空")
+    return {
+        "mime_type": MIME_BY_EXT[ext],
+        "bytes": raw_bytes,
+        "base64": base64.b64encode(raw_bytes).decode("utf-8"),
+    }
+
+
 def save_reference_image(view: str, image_bytes: bytes, mime_type: str, usage: str = "") -> str:
     """把生成的图存成 refs/{view}{ext} 并更新 manifest，返回绝对路径。"""
     safe_view = "".join(c for c in str(view or "").strip() if c.isalnum() or c in "-_") or "ref"

@@ -1438,6 +1438,7 @@ class ToolManager:
         view: str,
         usage: str = "",
         replace: bool = False,
+        source_images: str = "",
     ) -> str:
         """
         Generates an appearance reference image for yourself and saves it to the appearance refs folder.
@@ -1449,10 +1450,16 @@ class ToolManager:
         Requires appearance/APPEARANCE.md to describe how you look; it is the only basis for
         the image. Write it first, then call this.
 
+        When the user gives you a picture and says "look like this", pass its path via
+        source_images so the generated reference follows it instead of only the text description.
+
         :param requirement: What to depict, e.g. "面部特写，正面，中性表情，白色背景". Keep it neutral and reusable, not a scene.
         :param view: Short view key used as the filename, e.g. "face" / "front" / "side".
         :param usage: When this reference should be used, written into manifest.json. E.g. "画脸/半身/自拍时优先用".
         :param replace: Set true to overwrite an existing reference for the same view. Ask the user first — overwriting changes how you look.
+        :param source_images: Optional comma-separated local image paths (png/jpg/webp) to follow as the visual source,
+            e.g. a picture the user just sent. Get the path from view_media's `File:` line. Existing reference images are
+            attached automatically — do NOT list them here.
         """
         from brain import appearance as appearance_lib
         import config
@@ -1484,12 +1491,37 @@ class ToolManager:
                 "或者换一个 view（如 front / side / back）生成新视角。"
             )
 
+        # 主人给的来源图：优先级高于已有参考图，占满配额后不再补锚。
+        source_loaded: List[Dict[str, Any]] = []
+        for raw_path in str(source_images or "").replace("\n", ",").split(","):
+            candidate = raw_path.strip().strip('"').strip("'")
+            if not candidate:
+                continue
+            if len(source_loaded) >= appearance_lib.MAX_REFERENCE_IMAGES:
+                logger.warning(f"来源图超过 {appearance_lib.MAX_REFERENCE_IMAGES} 张，多余的已忽略。")
+                break
+            resolved = self._resolve_workspace_path(candidate)
+            safe, reason = self._is_path_safe(resolved)
+            if not safe:
+                return f"Error: 来源图 `{candidate}` 不可读取：{reason}"
+            try:
+                source_loaded.append(appearance_lib.load_image_file(resolved))
+            except Exception as e:
+                return (
+                    f"Error: 读取来源图 `{candidate}` 失败：{e}\n"
+                    "确认路径来自 view_media 返回的 File 行，且是 png/jpg/webp。"
+                )
+
         # 已有的其他视角作为锚：否则"正面"和"侧面"会是两个不同的人。
-        anchor_files = [
-            name for name in appearance_lib.list_reference_files()
-            if os.path.splitext(name)[0] != view_key
-        ]
-        reference_images = appearance_lib.load_reference_images(anchor_files)
+        anchor_images: List[Dict[str, Any]] = []
+        remaining = appearance_lib.MAX_REFERENCE_IMAGES - len(source_loaded)
+        if remaining > 0:
+            anchor_files = [
+                name for name in appearance_lib.list_reference_files()
+                if os.path.splitext(name)[0] != view_key
+            ]
+            anchor_images = appearance_lib.load_reference_images(anchor_files)[:remaining]
+        reference_images = source_loaded + anchor_images
 
         prompt_lines = [
             "Generate a character reference image (reference sheet style) of the following character.",
@@ -1502,11 +1534,21 @@ class ToolManager:
             "[This reference image should depict]",
             requirement_text,
         ]
-        if reference_images:
+        # 附图按 source → anchor 的顺序传入，说明里也按这个顺序点名，
+        # 否则模型分不清哪张该照抄、哪张只是保持一致。
+        if source_loaded:
+            prompt_lines += [
+                "",
+                "[Source images]",
+                f"The FIRST {len(source_loaded)} attached image(s) are the visual source chosen by the user. "
+                "Follow them closely for the character's face, hair, colors and outfit — they take priority over "
+                "the text specification wherever the two disagree. Do not copy their background or framing.",
+            ]
+        if anchor_images:
             prompt_lines += [
                 "",
                 "[Existing reference images]",
-                "The attached images are existing reference images of the SAME character. "
+                f"The LAST {len(anchor_images)} attached image(s) are existing reference images of the SAME character. "
                 "Keep the face, hair, body proportions and distinguishing features identical to them; "
                 "only change the view/pose as requested above.",
             ]
@@ -1545,9 +1587,11 @@ class ToolManager:
         ]
         if existing_path:
             lines.append("（已覆盖同名旧参考图，你的形象锚已更新。）")
-        if reference_images:
-            lines.append(f"生成时带了 {len(reference_images)} 张已有参考图作为锚，保持是同一个人。")
-        else:
+        if source_loaded:
+            lines.append(f"参照了主人给的 {len(source_loaded)} 张来源图。")
+        if anchor_images:
+            lines.append(f"生成时带了 {len(anchor_images)} 张已有参考图作为锚，保持是同一个人。")
+        elif not source_loaded:
             lines.append("这是第一张参考图，之后生成新视角时会以它为锚。")
         lines.append(
             f"要让主人看到这张图，请在你的回复里带上这一行：[image: {saved_path}]"
