@@ -1186,3 +1186,168 @@ def test_onebot_client_keeps_same_chat_events_ordered():
         assert adapter.handled == [1, 2]
 
     asyncio.run(run())
+
+
+class ForwardOneBot(IncomingOnlyOneBot):
+    """带可编排 get_forward_msg / get_msg 返回的桩，用于聊天记录解析测试。"""
+
+    def __init__(self, forward_payloads=None, msg_payloads=None):
+        super().__init__()
+        self.forward_payloads = forward_payloads or {}
+        self.msg_payloads = msg_payloads or {}
+
+    async def call_api(self, action, params=None):
+        params = params or {}
+        self.calls.append((action, params))
+        if action == "get_forward_msg":
+            key = str(params.get("id") or params.get("message_id") or "")
+            return {"status": "ok", "retcode": 0, "data": self.forward_payloads.get(key)}
+        if action == "get_msg" and str(params.get("message_id")) in self.msg_payloads:
+            return {"status": "ok", "retcode": 0, "data": self.msg_payloads[str(params["message_id"])]}
+        return await super().call_api(action, params)
+
+
+def _node(name, segments, user_id="1001"):
+    return {"type": "node", "data": {"nickname": name, "user_id": user_id, "content": segments}}
+
+
+def _text(value):
+    return {"type": "text", "data": {"text": value}}
+
+
+def test_forward_segment_is_expanded_into_structured_text():
+    async def run():
+        adapter = ForwardOneBot(
+            forward_payloads={
+                "rec1": {
+                    "messages": [
+                        _node("Alice", [_text("今天天气不错")]),
+                        _node("Bob", [_text("确实"), {"type": "image", "data": {"file": "x.jpg"}}]),
+                    ]
+                }
+            }
+        )
+        text = await adapter._segment_to_nora_text({"type": "forward", "data": {"id": "rec1"}})
+
+        assert text.startswith("[聊天记录 id=rec1]")
+        assert text.endswith("[/聊天记录]")
+        assert "Alice: 今天天气不错" in text
+        assert "Bob: 确实[图片]" in text
+        # 记录内的图片不应触发任何媒体解析
+        assert not any(action == "get_image" for action, _ in adapter.calls)
+
+    asyncio.run(run())
+
+
+def test_forward_expansion_handles_nested_records():
+    async def run():
+        adapter = ForwardOneBot(
+            forward_payloads={
+                "outer": {
+                    "messages": [
+                        _node("Alice", [_text("看这个")]),
+                        _node("Alice", [{"type": "forward", "data": {"id": "inner"}}]),
+                    ]
+                },
+                "inner": {"messages": [_node("Carol", [_text("内层内容")])]},
+            }
+        )
+        text = await adapter._segment_to_nora_text({"type": "forward", "data": {"id": "outer"}})
+
+        assert "Alice: 看这个" in text
+        assert "Carol: 内层内容" in text
+        # 嵌套层带缩进且有独立包裹
+        assert "  [聊天记录]" in text
+        assert "  Carol: 内层内容" in text
+
+    asyncio.run(run())
+
+
+def test_forward_expansion_uses_inline_nodes_without_api_call():
+    async def run():
+        adapter = ForwardOneBot()
+        text = await adapter._segment_to_nora_text(
+            {"type": "forward", "data": {"id": "rec9", "content": [_node("Dave", [_text("内联节点")])]}}
+        )
+
+        assert "Dave: 内联节点" in text
+        assert not any(action == "get_forward_msg" for action, _ in adapter.calls)
+
+    asyncio.run(run())
+
+
+def test_forward_expansion_truncates_long_records_with_tool_hint():
+    async def run():
+        adapter = ForwardOneBot(
+            forward_payloads={
+                "big": {"messages": [_node(f"U{i}", [_text("内容" * 40)]) for i in range(40)]}
+            }
+        )
+        text = await adapter._segment_to_nora_text({"type": "forward", "data": {"id": "big"}})
+
+        assert "内容过长已截断" in text
+        assert "onebotv11_get_chat_history" in text
+        assert len(text) < 3000
+        assert text.endswith("[/聊天记录]")
+
+    asyncio.run(run())
+
+
+def test_forward_expansion_falls_back_when_record_unavailable():
+    async def run():
+        adapter = ForwardOneBot(forward_payloads={})
+        text = await adapter._segment_to_nora_text({"type": "forward", "data": {"id": "gone"}})
+
+        assert "无法获取" in text
+        assert "gone" in text
+
+    asyncio.run(run())
+
+
+def test_get_chat_history_tool_accepts_record_id_and_returns_full_content():
+    async def run():
+        adapter = ForwardOneBot(
+            forward_payloads={"rec1": {"messages": [_node("Alice", [_text("完整内容")])]}}
+        )
+        payload = _loads(await adapter.onebotv11_get_chat_history("rec1"))
+
+        assert payload["ok"] is True
+        assert payload["action"] == "get_chat_history"
+        assert "Alice: 完整内容" in payload["result"]
+
+    asyncio.run(run())
+
+
+def test_get_chat_history_tool_resolves_message_id_containing_record():
+    async def run():
+        adapter = ForwardOneBot(
+            forward_payloads={"rec2": {"messages": [_node("Bob", [_text("藏在消息里")])]}},
+            msg_payloads={"555": {"message": [{"type": "forward", "data": {"id": "rec2"}}]}},
+        )
+        payload = _loads(await adapter.onebotv11_get_chat_history("555"))
+
+        assert payload["ok"] is True
+        assert payload["forward_id"] == "rec2"
+        assert "Bob: 藏在消息里" in payload["result"]
+
+    asyncio.run(run())
+
+
+def test_get_chat_history_tool_reports_missing_record():
+    async def run():
+        adapter = ForwardOneBot()
+        empty = _loads(await adapter.onebotv11_get_chat_history(""))
+        assert empty["ok"] is False
+
+        missing = _loads(await adapter.onebotv11_get_chat_history("nope"))
+        assert missing["ok"] is False
+        assert "No chat record" in missing["error"]
+
+    asyncio.run(run())
+
+
+def test_get_chat_history_tool_is_registered():
+    adapter = ToolOnlyOneBot(enable_napcat_api=False)
+    names = {spec.name for spec in adapter.get_adapter_tools()}
+    assert "onebotv11_get_chat_history" in names
+    assert "onebotv11_get_forward_msg" in names

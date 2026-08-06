@@ -174,6 +174,8 @@ def plain_text_from_segments(segments: Iterable[dict[str, Any]]) -> str:
             parts.append(f"[{label}:{data.get('file') or data.get('url') or ''}]")
         elif segment_type in ("mface", "marketface"):
             parts.append(f"[表情包:{data.get('file') or data.get('url') or ''}]")
+        elif segment_type == "forward":
+            parts.append(f"[聊天记录:{data.get('id') or ''}]")
         else:
             parts.append(f"[{segment_type}:{data}]")
     return "".join(parts).strip()

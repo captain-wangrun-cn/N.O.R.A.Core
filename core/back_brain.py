@@ -493,6 +493,9 @@ class BackBrainMixin:
             # 合并重启时新 context 会把旧文本拼进本轮输入，因此旧文本对应的库行 id
             # 也要一起带过去，否则那一条会在历史里再出现一次。
             "persisted_user_message_ids": sorted(persisted_user_message_ids(context)),
+            # 旧那一轮的平台消息 ID 同理：合并后它的正文成了本轮输入的一部分，
+            # 不带过去的话模型就只看得到后到的那条文本的 ID，想引用那张图会引到别处。
+            "platform_message_ids": list(platform_msg_ids),
             # 轮询模式由前脑审查驱动自己的重启节奏，上层不能拿"折进同一轮"去 cancel 它
             "in_polling": bool(context.get("_in_polling_loop", False)),
             # 折进同一轮的判定依据：谁发的、什么时候开始的、有没有已经对用户说过话

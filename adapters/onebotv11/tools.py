@@ -7,6 +7,14 @@ from typing import Any
 
 from adapters.base import AdapterToolSpec
 
+from .forward import (
+    FULL_MAX_CHARS,
+    FULL_MAX_DEPTH,
+    FULL_MAX_NODES,
+    nested_forward_from_segments,
+)
+from .message import onebot_message_segments
+
 logger = logging.getLogger(__name__)
 
 
@@ -115,7 +123,14 @@ class OneBotV11ToolsMixin:
             AdapterToolSpec(
                 name="onebotv11_get_forward_msg",
                 callable=self.onebotv11_get_forward_msg,
-                intro="按合并转发 id 获取合并转发消息内容。",
+                intro="按合并转发 id 获取合并转发消息的原始 JSON。日常读聊天记录请优先用 onebotv11_get_chat_history。",
+                risk="low",
+                platform="onebotv11",
+            ),
+            AdapterToolSpec(
+                name="onebotv11_get_chat_history",
+                callable=self.onebotv11_get_chat_history,
+                intro="按聊天记录 id 或消息 id 获取完整聊天记录，返回逐条结构化文本（含嵌套记录，图片只标 [图片]）。",
                 risk="low",
                 platform="onebotv11",
             ),
@@ -467,6 +482,72 @@ class OneBotV11ToolsMixin:
         :param forward_id: Merged forward id from a forward message segment.
         """
         return await self._call_onebot_tool("get_forward_msg", {"id": str(forward_id or "")}, forward_id=str(forward_id or ""))
+
+    async def onebotv11_get_chat_history(self, record_id: str) -> str:
+        """
+        Get a full QQ merged-forward chat record as readable structured text.
+
+        Use this when a message contains a chat record ([聊天记录]) and you need the
+        complete content, e.g. the inbound one was truncated. Nested chat records are
+        expanded too; images and other media inside are shown as placeholders only.
+
+        :param record_id: The chat record id shown as `id=...`, or the OneBot message_id of a message that contains the chat record.
+        """
+        action = "get_chat_history"
+        raw_id = str(record_id or "").strip()
+        if not raw_id:
+            return _json_error(action, "record_id is required.")
+
+        try:
+            forward_id, inline_nodes = await self._resolve_chat_record_source(raw_id)
+        except Exception as exc:
+            logger.warning("[onebotv11-tools] resolve chat record failed id=%s: %s", raw_id, exc)
+            return _json_error(action, exc, record_id=raw_id)
+
+        if not forward_id and not inline_nodes:
+            return _json_error(
+                action,
+                "No chat record found for this id. It may be expired, or the id belongs to a normal message.",
+                record_id=raw_id,
+            )
+
+        try:
+            content = await self.render_forward_record(
+                forward_id=forward_id,
+                inline_nodes=inline_nodes,
+                max_depth=FULL_MAX_DEPTH,
+                max_nodes=FULL_MAX_NODES,
+                max_chars=FULL_MAX_CHARS,
+            )
+        except Exception as exc:
+            logger.warning("[onebotv11-tools] render chat record failed id=%s: %s", raw_id, exc)
+            return _json_error(action, exc, record_id=raw_id)
+
+        return _json_result(action, record_id=raw_id, forward_id=forward_id or raw_id, result=content)
+
+    async def _resolve_chat_record_source(self, raw_id: str) -> tuple[str, list[Any]]:
+        """把用户给的 id 解析成 (forward_id, inline_nodes)。
+
+        先当作 forward id 试；拿不到再当作 message_id 走 get_msg 找里面的 forward 段。
+        """
+        nodes = await self._fetch_forward_nodes(raw_id)
+        if nodes:
+            return raw_id, nodes
+
+        try:
+            response = await self.call_api("get_msg", {"message_id": int(raw_id)})
+        except (TypeError, ValueError):
+            return "", []
+        except Exception as exc:
+            logger.debug("[onebotv11-tools] get_msg failed for chat record id=%s: %s", raw_id, exc)
+            return "", []
+
+        data = response.get("data") or {}
+        segments = onebot_message_segments(data.get("message"), raw_message=str(data.get("raw_message") or ""))
+        nested = nested_forward_from_segments(segments)
+        if not nested:
+            return "", []
+        return nested["forward_id"], nested["inline_nodes"]
 
     async def onebotv11_send_private_msg(self, user_id: str, message: str, auto_escape: bool = False) -> str:
         """

@@ -17,6 +17,7 @@ from workspace_config import get_workspace_manager
 
 from .client import OneBotWebSocketClient
 from .constants import ONEBOT_MSG_MAX_LENGTH
+from .forward import OneBotForwardMixin
 from .media import OneBotMediaMixin
 from .message import (
     is_at_self,
@@ -58,6 +59,7 @@ HISTORICAL_REPLY_MEDIA_NOTE = (
 
 class OneBotV11Adapter(
     OneBotMediaMixin,
+    OneBotForwardMixin,
     OneBotSenderMixin,
     OneBotV11ToolsMixin,
     BaseAdapter,

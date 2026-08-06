@@ -496,6 +496,15 @@ class MessageHandlerMixin:
         # 批次里的每条 ONLINE 消息都已经各自入库；把它们的行 id 全部并入批次 context，
         # 这样下游按 id 去重时能整段剔除，而不必去匹配被重排过的批次文本。
         merge_persisted_user_messages(context, [event.context for event in events])
+        # 平台消息 ID 同理：context 是从 events[-1] 复制来的，只带最后一条的 ID。
+        # 批次正文里每条都带「本条消息 ID」，但批次级 context 残缺会让出站引用目标
+        # 和入库元数据都只认最后一条。按事件顺序合并全部 ID。
+        batch_platform_ids: List[str] = []
+        for event in events:
+            batch_platform_ids.extend(_context_platform_message_ids(event.context))
+        batch_platform_ids = list(dict.fromkeys(mid for mid in batch_platform_ids if mid))
+        if batch_platform_ids:
+            context["platform_message_ids"] = batch_platform_ids
         return context
 
     async def _promote_group_message_batch(
@@ -926,6 +935,16 @@ class MessageHandlerMixin:
                     merged_context,
                     [prior_input.get("persisted_user_message_ids") or []],
                 )
+                # 平台消息 ID 同样要并：旧那条（通常就是那张图/视频）的正文已经合进本轮，
+                # 只留新文本的 ID 会让模型引用不到真正想指的那条消息。旧的在前、新的在后。
+                merged_platform_ids = list(
+                    dict.fromkeys(
+                        [str(mid) for mid in (prior_input.get("platform_message_ids") or []) if mid]
+                        + _context_platform_message_ids(context)
+                    )
+                )
+                if merged_platform_ids:
+                    merged_context["platform_message_ids"] = merged_platform_ids
                 # 清理上一轮残留：旧 input_context 和 partial 我们已经吃掉了
                 self.back_brain_partial.pop(backend_runtime, None)
                 self.back_brain_input_context.pop(backend_runtime, None)

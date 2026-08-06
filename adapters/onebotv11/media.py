@@ -16,6 +16,8 @@ from adapters.media_path import (
     infer_scene,
 )
 
+from .forward import forward_id_from_segment, inline_nodes_from_segment
+
 logger = logging.getLogger(__name__)
 
 
@@ -132,8 +134,28 @@ class OneBotMediaMixin:
         if segment_type == "face":
             return f"[QQ表情:{data.get('id') or ''}]"
         if segment_type == "forward":
-            return f"[合并转发:{data.get('id') or ''}]"
+            return await self._render_inbound_forward(segment)
+        if segment_type == "node":
+            # 少数实现把节点直接平铺在消息里，等价于一条单节点聊天记录
+            return await self._render_inbound_forward(
+                {"type": "forward", "data": {"content": [segment]}}
+            )
         return f"[{segment_type}: {data}]"
+
+    async def _render_inbound_forward(self, segment: dict[str, Any]) -> str:
+        """入站聊天记录直接展开成结构化文本；失败时退回占位标记。"""
+        forward_id = forward_id_from_segment(segment)
+        inline_nodes = inline_nodes_from_segment(segment)
+        if not hasattr(self, "render_forward_record"):
+            return f"[合并转发:{forward_id}]"
+        try:
+            return await self.render_forward_record(
+                forward_id=forward_id,
+                inline_nodes=inline_nodes,
+            )
+        except Exception as exc:
+            logger.warning("[onebotv11] forward render failed id=%s err=%s", forward_id, exc)
+            return f"[聊天记录 id={forward_id}: 解析失败]" if forward_id else "[聊天记录: 解析失败]"
 
     async def segments_to_nora_text(self, segments: list[dict[str, Any]]) -> str:
         parts = [await self._segment_to_nora_text(segment) for segment in segments]

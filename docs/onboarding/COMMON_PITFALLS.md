@@ -108,6 +108,36 @@
 - 群聊默认只处理 @机器人或回复机器人消息；可通过 `group_message_policy` 调整。
 - 群管/撤回/全员禁言/改群名片等真实 QQ 操作必须先向主人确认，且实际成功取决于登录号权限和 OneBot 实现。
 
+### ⚠️ 聊天记录（合并转发）里的图片不要去解析
+
+`adapters/onebotv11/forward.py` 展开聊天记录时，内部媒体**只留 `[图片]` 占位**，
+不下载、不进 ImageStore、不调 `get_image`。这是有意的：一条记录可能嵌套几十张图，
+全量下载会拖垮入站链路并污染图库。改动时不要顺手"补上"媒体解析。
+
+- 入站预算 `INBOUND_MAX_*`（20 节点 / 1500 字 / 3 层），工具路径 `FULL_MAX_*` 更宽。
+  两套常量不要合并——入站要控上下文体积，工具是用户明确要全文。
+- 节点结构各实现不一致（`data.content` / `messages` / `message` 都有），
+  发送者名要按 `nickname → card → user_id` 回退，别只认一种。
+
+---
+
+## 5.1.1 AI 引用（reply）的消息不对
+
+三个各自独立的根因，都是"模型拿到的 ID 本身就错了"，不是模型判断力问题：
+
+- **被回复的历史消息 ID 混进了当前入站 ID。** OneBot 在 `main.py` 里把
+  `reply_to_message_id` 塞进 `platform_message_ids` 且**排第一位**（供媒体反查），
+  模型会把它当成当前消息去 reply。`core/scene_context.py` 的 `_own_inbound_message_ids()`
+  负责剔除——新增任何"往 platform_message_ids 里塞非本轮 ID"的路径时都要同步这里。
+- **聚合轮只给裸 ID 列表。** 正文被换行拼成一整段，`101, 102, 103` 无法对应到具体哪句。
+  现在 part 带 `text_preview`（`adapters/aggregator.py`），场景块逐条列出。
+- **合并/折叠分支丢 ID。** 媒体轮折叠、群聊提升批次都是从"某一条" context 复制出来的，
+  不显式合并就只剩那一条的 ID。`back_brain_input_context` 快照里要带 `platform_message_ids`，
+  `_group_batch_context` 要遍历所有 event 合并。**新增任何合并分支时都要检查这一项。**
+
+> 未修复：`[reply:ID]` 只校验格式不校验存在性（`adapters/message_controls.py:42`）。
+> 模型幻觉的 ID 会直达平台，表现为静默失败或引用到无关消息。
+
 ## 5.2 群监听 ONLINE 退不出去 / 没被 @ 的群也在监听
 
 这两个现象是同一条链：**ONLINE 一旦点亮，能关掉它的路径极少**；而只要某群挂着 ONLINE，

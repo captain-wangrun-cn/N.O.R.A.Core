@@ -125,3 +125,55 @@ def test_group_fold_requires_same_sender():
     controller, runtime_key = _busy_media_controller()
     assert _fold(controller, user_id="user-2", chat_type="group") is None
     assert _fold(controller, user_id="user-1", chat_type="group") == runtime_key
+
+
+# ---- 合并/折叠分支的平台消息 ID 传递 ----
+
+
+def test_back_brain_snapshot_shape_includes_platform_message_ids():
+    """折叠合并依赖快照里的 platform_message_ids；缺这一项旧那条消息的 ID 就永久丢失。
+
+    这里锁定 message_handler 合并逻辑读取的键名，避免 back_brain 侧改名后静默失配。
+    """
+    from core.message_handler import _context_platform_message_ids
+
+    prior_snapshot = {"platform_message_ids": ["889"]}
+    new_context = {"platform_message_id": "890"}
+
+    merged = list(
+        dict.fromkeys(
+            [str(mid) for mid in (prior_snapshot.get("platform_message_ids") or []) if mid]
+            + _context_platform_message_ids(new_context)
+        )
+    )
+
+    # 旧的（那张图）在前、新的（补充文本）在后
+    assert merged == ["889", "890"]
+
+
+def test_group_batch_context_merges_every_event_platform_id():
+    """批次 context 从 events[-1] 复制而来，必须把所有事件的 ID 并回去。"""
+    from core.group_listener import GroupMessageEvent
+    from core.message_handler import MessageHandlerMixin
+
+    def _event(seq, msg_id, user_id):
+        return GroupMessageEvent.from_context(
+            {
+                "platform": "onebotv11",
+                "chat_id": "10001",
+                "runtime_key": "onebotv11:10001",
+                "chat_type": "group",
+                "user_id": user_id,
+                "user_name": f"U{user_id}",
+                "text": f"第{seq}句",
+                "platform_message_id": msg_id,
+            },
+            seq,
+        )
+
+    events = [_event(1, "41", "30003"), _event(2, "42", "40004"), _event(3, "43", "30003")]
+    context = MessageHandlerMixin._group_batch_context(
+        MessageHandlerMixin, events, reason="mention"
+    )
+
+    assert context["platform_message_ids"] == ["41", "42", "43"]

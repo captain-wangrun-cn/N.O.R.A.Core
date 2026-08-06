@@ -81,6 +81,26 @@ def _platform_message_ids(context: Mapping[str, Any]) -> list[str]:
     return message_ids
 
 
+def _own_inbound_message_ids(context: Mapping[str, Any]) -> list[str]:
+    """只保留本轮用户真正发出的消息 ID，剔除被引用的历史消息 ID。
+
+    adapter 会把「被回复的历史消息」ID 也塞进 `platform_message_ids`，让媒体入库能按
+    那条历史消息反查（OneBot 侧甚至排在第一位）。但对模型来说它不是本轮入站消息，
+    混在「当前入站消息 IDs」里会被当成可以引用的当前消息 —— `[reply:]` 于是回到了
+    一条很旧的消息上。历史引用另有 `用户当前消息引用的历史消息 ID` 一行描述。
+    """
+    historical = {
+        _clean(context.get("reply_to_message_id")),
+        _clean(context.get("reply_to_bot_message_id")),
+    }
+    historical.discard("")
+    if not historical:
+        return _platform_message_ids(context)
+    own = [mid for mid in _platform_message_ids(context) if mid not in historical]
+    # 全部被判为历史时说明这一轮没有可靠的自身 ID，宁可不给也不要给错的
+    return own
+
+
 def _batch_participant_lines(context: Mapping[str, Any]) -> list[str]:
     """列出本批次每位说话人及其可靠 ID，供多人群聊 `[at:]` / `[reply:]` 取值。
 
@@ -138,6 +158,35 @@ def _batch_participant_lines(context: Mapping[str, Any]) -> list[str]:
         "也不能默认所有内容都出自最后一位说话人。表中没有的人不要 @，禁止从昵称或正文猜测 ID。"
     )
     return lines
+
+
+def _inbound_message_id_lines(context: Mapping[str, Any], message_ids: list[str]) -> list[str]:
+    """把本轮每条入站消息的 ID 和正文摘要一一对应地列出来。
+
+    聚合轮里正文被换行拼成一整段，只给模型一串裸 ID（`101, 102, 103`）它无法知道哪条
+    对应哪句，`[reply:]` 就只能靠猜——这是"引用的消息不对"的直接来源。
+    """
+    parts = context.get("native_reference_parts")
+    if not isinstance(parts, (list, tuple)) or len(parts) < 2:
+        return []
+
+    lines: list[str] = []
+    for part in parts:
+        if not isinstance(part, Mapping):
+            continue
+        part_ids = _own_inbound_message_ids(part)
+        if not part_ids:
+            continue
+        preview = _clean(part.get("text_preview"))
+        label = ", ".join(part_ids)
+        lines.append(f"  · ID {label}: {preview}" if preview else f"  · ID {label}: （无文字内容）")
+
+    if len(lines) < 2:
+        return []
+    return [
+        f"- 本轮入站消息逐条 ID（共 {len(lines)} 条，按输入顺序；引用必须用这里对应那句话的 ID）:",
+        *lines,
+    ]
 
 
 def build_current_scene_block(
@@ -199,11 +248,12 @@ def build_current_scene_block(
     else:
         lines.append("- 私聊边界: 这是当前私聊窗口；文件、结果和进度默认发回这里，除非用户明确要求转发到群聊或其它窗口。")
 
-    message_ids = _platform_message_ids(context)
+    message_ids = _own_inbound_message_ids(context)
     if len(message_ids) == 1:
         lines.append(f"- 当前入站消息 ID: {message_ids[0]}")
     elif message_ids:
         lines.append(f"- 当前聚合入站消息 IDs（按输入顺序）: {', '.join(message_ids)}")
+        lines.extend(_inbound_message_id_lines(context, message_ids))
 
     reply_to_message_id = _clean(context.get("reply_to_message_id"))
     if reply_to_message_id:

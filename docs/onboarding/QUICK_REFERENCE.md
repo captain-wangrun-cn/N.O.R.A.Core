@@ -200,7 +200,8 @@ python tui.py
 | `brain/prompts.py` | 提示词组装逻辑 + 身份上下文加载 |
 | `adapters/PROMPT.md` | 通用平台适配协议：跨平台人格连续性、媒体标记、`[SPLIT]` |
 | `adapters/telegram/PROMPT.md` | Telegram 平台特定提示（格式、长度等） |
-| `adapters/onebotv11/PROMPT.md` | OneBot v11 / QQ 平台特定提示（群聊、CQ/媒体、工具限制） |
+| `adapters/onebotv11/PROMPT.md` | OneBot v11 / QQ 平台特定提示（群聊、CQ/媒体、工具限制、聊天记录） |
+| `adapters/onebotv11/forward.py` | QQ 聊天记录（合并转发）展开：递归嵌套、媒体只留占位、按预算截断 |
 
 > ⚠️ 修改行为时，优先改 `system.jinja`；修改性格/人设时，改 `SOUL.md`（优先）或 `persona_nora.jinja`（回退）。
 
@@ -218,8 +219,11 @@ python tui.py
 - `[reply:MESSAGE_ID]`
   - 含义：让当前语义分段原生回复目标平台消息。
   - 模型可见性：标准场景提示会注入单条 `platform_message_id`，或按输入顺序去重后的聚合 `platform_message_ids`；主动消息等没有真实入站 ID 时不会虚构。
+  - 聚合轮里每条消息还会附一行 `ID xxx: 正文摘要`（`core/scene_context.py` 的 `_inbound_message_id_lines`），否则模型只看到一串裸 ID，无法知道哪个对应哪句话。
+  - 被回复的历史消息 ID **不算**当前入站 ID：OneBot 会把它塞进 `platform_message_ids` 供媒体反查（还排第一位），`_own_inbound_message_ids()` 会按 `reply_to_message_id` 剔除，否则 reply 会打到很旧的消息上。
   - 约束：ID 只能来自当前目标平台/场景的可靠上下文；不写标记就不自动引用，看到 ID 也不表示必须引用；跨平台/跨场景后不得复用来源 ID。
   - 区分：`platform_message_id(s)` 是当前输入自身；入站 `reply_to_message_id` 只描述用户回复了哪条历史消息；应用选择的 `reply_target_message_id` 才是代码层出站目标，三者不得自动互相推导。
+  - ⚠️ 出站只校验 ID 格式（`adapters/message_controls.py`），不校验是否真实存在——模型幻觉的 ID 会直达平台。
 
 - `[at:USER_ID]`
   - 含义：在明确群聊场景原生 @ 已知用户。

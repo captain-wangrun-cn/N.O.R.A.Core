@@ -1,3 +1,60 @@
+## 近期关键改动（截至 2026-08-07）
+
+### 💬 QQ 聊天记录（合并转发）入站直接解析 + 引用消息 ID 修正
+
+**1. 合并转发展开（`adapters/onebotv11/forward.py`，新增）**
+
+以前收到 QQ 聊天记录只给一个 `[合并转发:id]` 占位，模型要么忽略、要么得自己想起来调工具。
+现在入站就展开成结构化文本，模型直接读：
+
+```
+[聊天记录 id=xxx]
+Alice: 今天天气不错
+Bob: 确实[图片]
+  [聊天记录]
+  Carol: 嵌套记录按层缩进
+  [/聊天记录]
+[/聊天记录]
+```
+
+- **嵌套递归展开**，`INBOUND_MAX_DEPTH=3` 层封顶，超出写 `[嵌套聊天记录: 层级过深已省略]`。
+- **记录内的图片不解析**，只留 `[图片]`/`[视频]`/`[语音]`/`[文件]` 占位——不下载、不进 ImageStore、
+  不触发 `get_image`。模型只知道"那里有张图"，PROMPT.md 里明确要求不要编造内容。
+- **入站按预算截断**（20 节点 / 1500 字 / 单条 300 字），截断时尾部提示可用工具取全文。
+- 节点解析对实现差异做了兼容：`data.content` / `messages` / `message` 都认，发送者名按
+  `nickname → card → user_id` 逐级回退；部分实现把节点内联在 forward 段里，能省一次 API 调用。
+- 挂载点是 `media.py:_segment_to_nora_text` 的 `forward` 分支，同时兜住平铺的 `node` 段。
+  渲染失败退回占位标记，不让一条聊天记录打断整条消息处理。
+
+**2. 新工具 `onebotv11_get_chat_history(record_id)`（`adapters/onebotv11/tools.py`）**
+
+按记录 id 或"包含记录的那条消息 id"取完整内容（`FULL_MAX_*`：5 层 / 200 节点 / 20000 字）。
+先当 forward id 试，拿不到再走 `get_msg` 找里面的 forward 段。原来的
+`onebotv11_get_forward_msg` 保留但降级为"取原始 JSON"，PROMPT.md 引导优先用新工具。
+
+**3. 引用消息 ID 传错的三个根因（用户反馈"她引用的消息不对"）**
+
+都不是模型的问题，是它拿到的 ID 本身就是错的或不完整的：
+
+- **被回复的历史消息 ID 混进了"当前入站消息 ID"**（`core/scene_context.py`）。
+  OneBot 会把它塞进 `platform_message_ids` 且**排在第一位**（`main.py:506`，供媒体反查用），
+  模型据此 `[reply:]` 就回到了一条很旧的消息上。新增 `_own_inbound_message_ids()` 按
+  `reply_to_message_id` 剔除，历史引用仍由单独一行描述。
+- **聚合轮只给一串裸 ID，不说哪个对应哪句**。`101, 102, 103` 配上被换行拼成一整段的正文，
+  模型只能猜。现在 part 带 `text_preview`（`adapters/aggregator.py`），场景块逐条列出
+  `ID 101: 第一句话`。单条消息不展开，避免噪音。
+- **合并/折叠分支丢 ID**：媒体轮折叠只留后到文本的 ID（旧那条图的 ID 从未进快照，
+  已在 `core/back_brain.py:489` 的 `back_brain_input_context` 补上 `platform_message_ids`）；
+  群聊提升批次 `_group_batch_context` 从 `events[-1]` 复制，只带最后一条的 ID。两处都改为按顺序合并。
+- 附带修掉聚合器的不对称：`reply_target_message_id` 原本只看 `parts[0]`，而
+  `reply_to_message_id` 取最新一条，两者来源逻辑不一致。现在都取最新。
+
+> ⚠️ 仍未做：`[reply:ID]` 只校验格式（`adapters/message_controls.py:42`），
+> 不校验该 ID 是否真实存在于当前会话。模型幻觉出的 ID 仍会直达平台（静默失败或引错）。
+> 要根治需在发送前用 `platform_message_ids` 做交叉比对。
+
+---
+
 ## 近期关键改动（截至 2026-08-06）
 
 ### 🖼️ 形象系统 + 生图链路（APPEARANCE.md / 参考图 / `[DRAW:]`）

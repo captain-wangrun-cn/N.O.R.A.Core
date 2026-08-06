@@ -322,6 +322,7 @@ def test_aggregator_preserves_native_reference_metadata_per_part():
             {
                 "platform_message_id": "101",
                 "platform_message_ids": ["101"],
+                "text_preview": "[reply:201]第一句[at:301]",
                 "reply_to_message_id": "201",
                 "reply_to_user_id": "u2",
                 "reply_to_user_name": "Bob",
@@ -331,6 +332,7 @@ def test_aggregator_preserves_native_reference_metadata_per_part():
             {
                 "platform_message_id": "102",
                 "platform_message_ids": ["102"],
+                "text_preview": "[reply:202]第二句[at:302]",
                 "reply_to_message_id": "202",
                 "reply_to_user_id": "u3",
                 "reply_to_user_name": "Carol",
@@ -405,3 +407,62 @@ def test_group_message_content_does_not_double_prefix_multi_sender_aggregate():
     assert group_message_content(context, "Bob", text, "group") == text
     assert group_message_content({}, "Alice", "hello", "group") == "Alice: hello"
     assert group_message_content({}, "Alice", "hello", "private") == "hello"
+
+
+def test_aggregator_reply_target_takes_latest_part_like_reply_to():
+    """出站引用目标应与 reply_to_message_id 一样取最新一条，而不是只看第一条。
+
+    用户先随口说一句、再发带引用的一句时，旧实现让 reply_target 恒为空，
+    模型看到的引用语境和实际 quote 目标对不上。
+    """
+    async def run():
+        completed = []
+
+        async def on_complete(context):
+            completed.append(context)
+
+        agg = MessageAggregator(timeout=0.01, on_complete=on_complete)
+        base = {
+            "platform": "telegram",
+            "chat_id": "group-1",
+            "user_id": "u1",
+            "chat_type": "group",
+        }
+        await agg.add_message("group-1", "先随口说一句", {**base, "platform_message_id": "101"})
+        await agg.add_message(
+            "group-1",
+            "这句才是引用",
+            {**base, "platform_message_id": "102", "reply_target_message_id": "999"},
+        )
+
+        await asyncio.sleep(0.05)
+
+        assert completed[0]["reply_target_message_id"] == "999"
+
+    asyncio.run(run())
+
+
+def test_aggregator_parts_carry_text_preview_for_id_disambiguation():
+    """每条 part 要带正文摘要，模型才能把 ID 对上具体那句话。"""
+    async def run():
+        completed = []
+
+        async def on_complete(context):
+            completed.append(context)
+
+        agg = MessageAggregator(timeout=0.01, on_complete=on_complete)
+        base = {
+            "platform": "telegram",
+            "chat_id": "group-1",
+            "user_id": "u1",
+            "chat_type": "group",
+        }
+        await agg.add_message("group-1", "第一句话", {**base, "platform_message_id": "101"})
+        await agg.add_message("group-1", "第二句话", {**base, "platform_message_id": "102"})
+
+        await asyncio.sleep(0.05)
+
+        previews = [p["text_preview"] for p in completed[0]["native_reference_parts"]]
+        assert previews == ["第一句话", "第二句话"]
+
+    asyncio.run(run())

@@ -619,3 +619,86 @@ def test_backend_status_redacts_other_window_queue_items_in_group():
     assert "另有 1 个其它窗口的排队任务，内容已隐藏。" in block
     assert "下载私聊视频" not in block
     assert "下载私聊里的两个视频" not in block
+
+
+def _scene_identity(chat_type="group", **overrides):
+    from core.conversation_identity import ConversationIdentity
+
+    base = dict(
+        runtime_key="onebotv11:10001",
+        platform="onebotv11",
+        platform_chat_id="10001",
+        chat_type=chat_type,
+        memory_scope_id="relationship:owner:default",
+        place_scope_id="place:onebotv11:10001",
+        storage_id="10001",
+        actor_user_id="40004",
+        actor_display_name="WR",
+        is_owner=True,
+    )
+    base.update(overrides)
+    return ConversationIdentity(**base)
+
+
+def test_scene_block_excludes_replied_history_id_from_current_inbound_ids():
+    """被回复的历史消息 ID 不能混进「当前入站消息 ID」。
+
+    OneBot 会把它塞进 platform_message_ids（还排在第一位）供媒体反查，
+    但模型把它当成当前消息就会 [reply:] 到一条很旧的消息上。
+    """
+    from core.scene_context import build_current_scene_block
+
+    block = build_current_scene_block(
+        _scene_identity(),
+        {
+            "chat_type": "group",
+            "user_id": "40004",
+            # 777 是被回复的历史消息，889 才是用户这次发的
+            "platform_message_ids": ["777", "889"],
+            "reply_to_message_id": "777",
+        },
+    )
+
+    assert "- 当前入站消息 ID: 889" in block
+    assert "777, 889" not in block
+    # 历史引用仍单独告知，只是不算作当前消息
+    assert "用户当前消息引用的历史消息 ID: 777" in block
+
+
+def test_scene_block_lists_aggregated_ids_with_text_previews():
+    """聚合轮要逐条列出 ID 与正文摘要，否则模型无法知道哪个 ID 对应哪句。"""
+    from core.scene_context import build_current_scene_block
+
+    block = build_current_scene_block(
+        _scene_identity(),
+        {
+            "chat_type": "group",
+            "user_id": "40004",
+            "platform_message_ids": ["101", "102"],
+            "native_reference_parts": [
+                {"platform_message_ids": ["101"], "text_preview": "第一句话"},
+                {"platform_message_ids": ["102"], "text_preview": "第二句话"},
+            ],
+        },
+    )
+
+    assert "本轮入站消息逐条 ID" in block
+    assert "ID 101: 第一句话" in block
+    assert "ID 102: 第二句话" in block
+
+
+def test_scene_block_skips_per_part_lines_for_single_message():
+    """单条消息没有歧义，不必展开逐条列表。"""
+    from core.scene_context import build_current_scene_block
+
+    block = build_current_scene_block(
+        _scene_identity(),
+        {
+            "chat_type": "group",
+            "user_id": "40004",
+            "platform_message_id": "101",
+        },
+    )
+
+    assert "- 当前入站消息 ID: 101" in block
+    assert "本轮入站消息逐条 ID" not in block

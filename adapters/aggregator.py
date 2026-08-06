@@ -59,6 +59,14 @@ class MessageAggregator:
     def _reply_target_message_id(self, context: Dict[str, Any]) -> str:
         return str(context.get("reply_target_message_id") or "").strip()
 
+    @staticmethod
+    def _text_preview(text: str, limit: int = 60) -> str:
+        """把一条 part 的正文压成单行摘要，供模型把 ID 对上具体内容。"""
+        collapsed = " ".join(str(text or "").split())
+        if len(collapsed) <= limit:
+            return collapsed
+        return f"{collapsed[:limit].rstrip()}…"
+
     async def add_message(self, chat_id: str, text: str, context: Dict[str, Any]):
         """添加一条新消息到缓冲区。"""
         key = self._key_for(str(chat_id), context)
@@ -111,6 +119,7 @@ class MessageAggregator:
             {
                 "platform_message_id": part.get("platform_message_id"),
                 "platform_message_ids": list(part.get("platform_message_ids") or []),
+                "text_preview": self._text_preview(part.get("text") or ""),
                 "reply_to_message_id": part.get("reply_to_message_id") or "",
                 "reply_to_user_id": part.get("reply_to_user_id") or "",
                 "reply_to_user_name": part.get("reply_to_user_name") or "",
@@ -163,7 +172,17 @@ class MessageAggregator:
                 platform_ids.append(str(part_ids))
         if platform_ids:
             self._contexts[key]["platform_message_ids"] = list(dict.fromkeys(platform_ids))
-        reply_target = str(parts[0].get("reply_target_message_id") or "").strip()
+        # 出站引用目标取最后一条带值的 part，与上面 reply_to_message_id 的「取最新」保持一致。
+        # 原先只看 parts[0]：用户先随口说一句、再发带引用的一句时，模型看到的引用语境来自
+        # 第二条，实际 quote 目标却是空的，两者对不上。
+        reply_target = next(
+            (
+                str(part.get("reply_target_message_id") or "").strip()
+                for part in reversed(parts)
+                if str(part.get("reply_target_message_id") or "").strip()
+            ),
+            "",
+        )
         if reply_target:
             self._contexts[key]["reply_target_message_id"] = reply_target
         for field in (
