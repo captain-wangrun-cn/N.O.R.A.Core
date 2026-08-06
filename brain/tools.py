@@ -33,7 +33,7 @@ TOOL_INTROS = {
     "exec_command": "执行受限的系统命令，作为无法用高层工具时的兜底；默认工作目录为 workspace 根目录。",
     "view_media": "读取本地媒体文件或检索用户之前发送给 AI 的历史图片/视频；可用 question 参数指定希望多模态模型围绕媒体回答的问题，可用 type 参数筛选 image/video。",
     "crop_image_for_llm": "裁剪图片以便模型分析，用户要求仔细观察图片某个部分时可调用。",
-    "generate_appearance_reference": "按 APPEARANCE.md 生成自己的形象参考图并存入 appearance/refs/，锚定后续所有生图的视觉一致性；参考图只能用这个工具管理。",
+    "generate_appearance_reference": "【仅用于定/改基础样貌】按 APPEARANCE.md 生成形象参考图存入 appearance/refs/，锚定后续所有生图的一致性。只在没有该视角参考图、或外貌设定变了需要重做时调用；日常「拍张照给主人看」不要用它（那走前脑 [DRAW:] 标记）。",
     "report_progress": "向用户发送阶段性进度汇报，适合长任务中途更新。",
     "set_alarm": "设置提醒或倒计时闹钟，适合提醒/日程。",
     "list_alarms": "查看所有未触发的闹钟，适合确认已有提醒。",
@@ -1441,19 +1441,26 @@ class ToolManager:
         source_images: str = "",
     ) -> str:
         """
-        Generates an appearance reference image for yourself and saves it to the appearance refs folder.
+        Creates or replaces one of your APPEARANCE REFERENCE images (appearance/refs/).
 
-        Reference images anchor your visual identity — every later image generation uses them
-        to keep your appearance consistent. Generate one when you don't have a reference for
-        a needed view (face / front / side), or when your appearance setting has changed.
+        ⚠️ This is NOT the tool for taking a picture to show the user. It defines what you
+        LOOK LIKE — a neutral, reusable visual anchor that every later image generation is
+        built on. Everyday "send me a selfie" / "show me what you're doing" requests are
+        handled by the front brain's [DRAW:...] marker, which runs on its own and needs no
+        tool call from you.
+
+        Call this ONLY when:
+          - a needed view (face / front / side) has no reference image yet, or
+          - the appearance setting itself changed and the old reference no longer matches, or
+          - the user hands you a picture and says "look like this" (pass it via source_images).
+
+        If a reference for the view already exists and none of the above applies, do nothing —
+        overwriting it silently changes your identity across every future image.
 
         Requires appearance/APPEARANCE.md to describe how you look; it is the only basis for
         the image. Write it first, then call this.
 
-        When the user gives you a picture and says "look like this", pass its path via
-        source_images so the generated reference follows it instead of only the text description.
-
-        :param requirement: What to depict, e.g. "面部特写，正面，中性表情，白色背景". Keep it neutral and reusable, not a scene.
+        :param requirement: What to depict, e.g. "面部特写，正面，中性表情，白色背景". Keep it neutral and reusable — a plain background and even lighting, NOT a scene, pose or mood (those belong in [DRAW:]).
         :param view: Short view key used as the filename, e.g. "face" / "front" / "side".
         :param usage: When this reference should be used, written into manifest.json. E.g. "画脸/半身/自拍时优先用".
         :param replace: Set true to overwrite an existing reference for the same view. Ask the user first — overwriting changes how you look.
