@@ -1783,6 +1783,10 @@ class BackBrainMixin:
                         "图片输出异常，已自动重试失败，请稍后重试。",
                         reply_to_message_id=reply_to_message_id,
                     )
+                    # 这一轮 final_response_buffer 已被清空，4.5 段的入库分支不会执行。
+                    # 不补这一条，历史里就只剩用户那条图片消息、AI 一片空白：
+                    # followup 的 _detect_followup_intent 会据此判 END 静默收尾。
+                    final_response_buffer = "图片输出异常，已自动重试失败，请稍后重试。"
                 else:
                     logger.info(f"[{chat_id}] [轮询模式] 图片输出异常，已自动重试失败，前脑稍后重试。")
             elif final_response_buffer:

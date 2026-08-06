@@ -235,6 +235,56 @@
 
 ---
 
+## 5.7 发完图/表情包之后 AI 就再也不吭声了（followup 静默死亡）
+
+现象：发一张图或表情包，Nora 回一句（甚至只回一句报错），然后彻底 idle，
+不再有任何 follow-up。**根因不是 followup 没被 arm**——定时器起来了，
+是它醒来时读到的历史是残缺的。
+
+三个各自独立、但都通向"历史留白"的坑：
+
+- **媒体消息入库正文为空。** `[image:...]` / `[sticker:...]` / `[video:...]` 被
+  `extract_*_payloads` 剥光后，只发图不配文字的消息入库就只剩时间戳前缀。
+  `_detect_followup_intent`（`core/scheduler_mixin.py`）拼出的 `recent_conversation`
+  是「用户空消息 + AI 没吭声」，要么命中 `if not recent_conversation: return "END"`，
+  要么 fast 模型判 END；END 且 `count == 0` 就跳过 wrapup 静默进 SEMI_ONLINE。
+  现在由 `media_placeholder_text()`（`core/message_handler.py`）补 `[图片]` /
+  `[表情包]` / `[视频]` 占位，接在 `group_message_content()` 里，覆盖所有入库路径。
+- **IMAGE_TAGS 重试失败会清空 `final_response_buffer`。** 清空后 4.5 段的
+  `if final_response_buffer:` 不成立，那条硬编码的"图片输出异常"提示**发给了用户
+  但没入库**——用户看见了，模型的历史里却是空白。现在失败分支会把提示文本写回
+  buffer，让它照常落库。
+- **折叠路径注入不到表情包描述。** `core/back_brain.py` 的注入条件是
+  `not message_saved`，而媒体折叠/忙碌合并分支（`core/message_handler.py`）
+  写库时就把 `_message_saved` 置 True 了，注入永远不会发生。现在那条分支
+  自己调 `_describe_stickers()` 就地拼描述。
+
+排障顺序：先查库里那一轮的 user/assistant 两条消息内容是不是空的，
+再看日志有没有 `检测到对话已自然告别，followup_loop 静默退出`
+（那是另一条路径——`[TASK_DONE]` 在 `_GOODBYE_PATTERNS` 里，
+前脑轮会被 `core/routing.py` 剥掉，媒体快路径绕过前脑所以不会剥）。
+
+## 5.8 主动消息发给了最后一个私聊的陌生人
+
+`ProactiveScheduler._resolve_delivery_target()` 里 `default_chat_id` 早已被降级为
+**兜底 fallback**：先问 `resolve_delivery_runtime_key()`，它返回
+`load_last_active_runtime_key() or fallback`。而 `record_active_scene()` 过去对
+**任何**私聊都会刷新 `last_active_runtime_key`。于是陌生人私聊一次就抢走了投递端，
+当天的主动消息发给他。`docs/HANDOVER.md` 里"投最近活跃端"的设计假设是
+"只有主人会私聊"，有陌生人之后这个假设就破了。
+
+- 现在 `update_last_active_target()` / `record_active_scene()` 都过
+  `_may_own_delivery_endpoint()` 闸门，非主人的私聊只记活跃场景、不改投递键。
+  `default_chat_id` 的自动初始化（`core/message_handler.py`）同样只认主人私聊。
+- **闸门必须能降级。** `is_owner` 未注入 resolver 时恒为 `False`
+  （`core/conversation_identity.py`），直接 `if not identity.is_owner` 会把全部流量挡死——
+  包括 `core/controller.py` 里 "主人识别回调注入失败" 那个 except 触发之后。
+  所以判定要先查 `owner_resolution_available()`，解析器缺失时退回旧行为。
+  改这类"仅主人"闸门时都要照做，否则功能会静默锁死而不是报错。
+- 相关隐患（未改）：`core/owner_registry.py` 里**每平台第一个私聊者自动绑为主人**。
+  陌生人比你先私聊某个新平台，他就进了 `owner_bindings.json`。
+  要杜绝可在 `config.yml → owner.identities` 预声明。
+
 ## 6. 成本跟踪
 
 ### ⚠️ 无内置价格表

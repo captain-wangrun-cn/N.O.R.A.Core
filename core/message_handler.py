@@ -29,7 +29,11 @@ from core.message_dedup import (
 )
 from core.private_presence_store import PrivatePresenceStore
 from core.routing import has_image_input, sanitize_adapter_output_text, sanitize_user_visible_text
-from core.conversation_identity import conversation_target_dict, normalize_chat_type
+from core.conversation_identity import (
+    conversation_target_dict,
+    normalize_chat_type,
+    owner_resolution_available,
+)
 from core.scene_context import build_current_scene_block, should_redact_cross_place_details
 from core.default_chat_id_store import save_default_chat_target
 from core.delivery_target_store import record_active_scene
@@ -112,8 +116,31 @@ def _merge_media_payloads(
     return merged
 
 
+def media_placeholder_text(context: Dict[str, Any], text: str) -> str:
+    """媒体消息正文为空时补一个占位，避免入库只剩时间戳前缀。
+
+    `[image:...]` / `[sticker:...]` / `[video:...]` 标记在 extract_*_payloads 里被剥光，
+    用户只发一张图不配文字时入库内容就是空的。followup 的 _detect_followup_intent
+    读到「用户空消息 + AI 没吭声」会直接判 END 静默收尾（见 scheduler_mixin），
+    压缩摘要和 RAG 也同样拿不到任何线索。占位符让这一轮在历史里有迹可循。
+    """
+    if str(text or "").strip():
+        return text
+    images = context.get("multimodal_images") or []
+    videos = context.get("multimodal_videos") or []
+    if videos:
+        return "[视频]"
+    if images:
+        # sticker 走 fast-image 描述通路，描述稍后由 back_brain 拼在占位后面。
+        if all(img.get("is_sticker") for img in images if isinstance(img, dict)):
+            return "[表情包]"
+        return "[图片]"
+    return text
+
+
 def group_message_content(context: Dict[str, Any], user_name: str, text: str, chat_type: str) -> str:
     """Return persisted user content, avoiding duplicate names for aggregated group text."""
+    text = media_placeholder_text(context, text)
     if str(chat_type or "private").lower() == "private":
         return text
     contributors = context.get("contributors") or []
@@ -681,14 +708,25 @@ class MessageHandlerMixin:
             self.front_brain_tasks.pop(chat_id, None)
             # 注意：故意 *不* 清理 self.front_brain_partial[chat_id]，让下一次前脑能看到草稿。
 
+        # default_chat_id 是主动消息/触发器的兜底投递目标，只能由主人的私聊初始化。
+        # 访客（群聊成员、陌生私聊）不该成为兜底目标，否则主动消息会发给陌生人。
+        # 主人识别不可用时 is_owner 恒为 False，退回旧行为，避免兜底目标永远设不上。
+        can_seed_default_target = chat_type != "group" and (
+            identity.is_owner or not owner_resolution_available()
+        )
+
         if self.scheduler:
-            # 自动设置 default_chat_id（首次消息时）
-            if not self.scheduler.default_chat_id:
+            # 自动设置 default_chat_id（主人首次消息时）
+            if not self.scheduler.default_chat_id and can_seed_default_target:
                 self.scheduler.default_chat_id = chat_id
                 save_default_chat_target(conversation_target_dict(identity))
                 logger.info(f"Scheduler default_chat_id 已设置: {chat_id}")
 
-        if getattr(self, "trigger_manager", None) and not self.trigger_manager.default_chat_id:
+        if (
+            getattr(self, "trigger_manager", None)
+            and not self.trigger_manager.default_chat_id
+            and can_seed_default_target
+        ):
             self.trigger_manager.default_chat_id = chat_id
             self.trigger_manager.default_chat_target = conversation_target_dict(identity)
             save_default_chat_target(self.trigger_manager.default_chat_target)
@@ -796,6 +834,17 @@ class MessageHandlerMixin:
                     user_metadata["platform_message_ids"] = platform_msg_ids
 
                 if not context.get("_message_saved"):
+                    # 表情包描述在这条路径上必须就地生成：下游 back_brain 的注入条件是
+                    # `not message_saved`，而这里马上就要把它置 True，注入永远不会发生。
+                    if getattr(self, "fast_image_llm", None):
+                        try:
+                            sticker_desc = await self._describe_stickers(
+                                context.get("multimodal_images") or []
+                            )
+                            if sticker_desc:
+                                message_content = f"{message_content}\n[表情包: {sticker_desc}]"
+                        except Exception as e:
+                            logger.warning(f"[{chat_id}] 合并路径表情包描述生成失败: {e}")
                     saved_message_id = self.message_history.add_message(
                         platform=platform,
                         chat_id=storage_id,

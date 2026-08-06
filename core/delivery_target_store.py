@@ -46,6 +46,7 @@ from core.conversation_identity import (
     PRIVATE_CHAT_TYPE,
     build_identity_from_target,
     normalize_chat_type,
+    owner_resolution_available,
 )
 from workspace_config import get_workspace_manager
 
@@ -53,6 +54,18 @@ logger = logging.getLogger(__name__)
 
 _DELIVERY_TARGET_STATE_FILE = "delivery_target_state.json"
 _MAX_KNOWN_SCENES = 100
+
+
+def _may_own_delivery_endpoint(identity) -> bool:
+    """该私聊端是否有资格成为主动投递目标。
+
+    主人识别可用时只认主人（访客私聊不能抢走每日主动消息的目标）；
+    未注入 resolver 时 is_owner 恒为 False，此时退回旧行为「任意私聊端」，
+    否则投递端永远记录不上、主动消息彻底失效。
+    """
+    if not owner_resolution_available():
+        return True
+    return bool(identity.is_owner)
 
 
 def _get_state_file_path() -> str:
@@ -94,9 +107,9 @@ def _merge_state(updates: Dict[str, Any]) -> bool:
 # ---------------------------------------------------------------------------
 
 def update_last_active_target(target: Dict[str, Any]) -> bool:
-    """更新最近活跃投递端。**仅私聊端**会被记录；群聊一律忽略。
+    """更新最近活跃投递端。**仅主人的私聊端**会被记录；群聊与访客一律忽略。
 
-    返回是否实际写入（群聊或缺字段时返回 False，不改动私聊投递键）。
+    返回是否实际写入（群聊、访客或缺字段时返回 False，不改动私聊投递键）。
     """
     chat_type = normalize_chat_type(target.get("chat_type"))
     if chat_type != PRIVATE_CHAT_TYPE:
@@ -104,6 +117,9 @@ def update_last_active_target(target: Dict[str, Any]) -> bool:
         return False
 
     identity = build_identity_from_target(target)
+    if not _may_own_delivery_endpoint(identity):
+        # 访客私聊不能抢走主动投递端，否则每日主动消息会发给最后一个陌生人。
+        return False
     runtime_key = identity.runtime_key.strip()
     if not runtime_key:
         return False
@@ -140,8 +156,9 @@ def resolve_delivery_runtime_key(fallback: str = "") -> str:
 def record_active_scene(target: Dict[str, Any]) -> bool:
     """记录最新收到消息的平台/场景为活跃平台/活跃场景（私聊与群聊都记）。
 
-    同时：若为私聊，顺带更新主动投递端（语义一）。
-    群聊只更新活跃场景，不改动私聊投递键（绝不自动发进群）。
+    同时：若为**主人的**私聊，顺带更新主动投递端（语义一）。
+    群聊只更新活跃场景，不改动私聊投递键（绝不自动发进群）；
+    访客私聊也只记活跃场景，不能抢走主动投递端。
     """
     identity = build_identity_from_target(target)
     runtime_key = identity.runtime_key.strip()
@@ -173,8 +190,8 @@ def record_active_scene(target: Dict[str, Any]) -> bool:
         "platform_scenes": platform_scenes,
         "known_scenes": known_scenes,
     }
-    # 私聊：顺带刷新主动投递端。
-    if identity.chat_type == PRIVATE_CHAT_TYPE:
+    # 主人的私聊：顺带刷新主动投递端。访客私聊只记场景，不改投递键。
+    if identity.chat_type == PRIVATE_CHAT_TYPE and _may_own_delivery_endpoint(identity):
         updates.update({
             "last_active_runtime_key": runtime_key,
             "last_active_platform": identity.platform,

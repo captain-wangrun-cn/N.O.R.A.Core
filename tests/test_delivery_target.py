@@ -104,6 +104,52 @@ def test_load_empty_when_no_file(tmp_path, monkeypatch):
 
 
 # ----------------------------------------------------------------------
+# 主人闸门：访客私聊不得抢走主动投递端
+# ----------------------------------------------------------------------
+
+@pytest.fixture
+def owner_resolver(monkeypatch):
+    """注入一个「只认 u-owner」的主人解析器，退出时清除。"""
+    from core import conversation_identity
+
+    conversation_identity.set_owner_resolver(
+        lambda platform, user_id, chat_type: user_id == "u-owner"
+    )
+    yield
+    conversation_identity.set_owner_resolver(None)
+
+
+def test_guest_private_does_not_steal_delivery_endpoint(tmp_path, monkeypatch, owner_resolver):
+    _patch_workspace(monkeypatch, tmp_path)
+    delivery_target_store.record_active_scene(
+        _private_target(chat_id="owner-chat", user_id="u-owner")
+    )
+    # 陌生人私聊：活跃场景要记，但主动投递端必须仍指向主人
+    delivery_target_store.record_active_scene(
+        _private_target(chat_id="stranger-chat", user_id="u-stranger")
+    )
+    assert delivery_target_store.load_active_target()["platform_chat_id"] == "stranger-chat"
+    assert delivery_target_store.load_last_active_runtime_key() == "telegram:owner-chat"
+
+
+def test_guest_private_rejected_by_update_last_active(tmp_path, monkeypatch, owner_resolver):
+    _patch_workspace(monkeypatch, tmp_path)
+    assert delivery_target_store.update_last_active_target(
+        _private_target(chat_id="stranger-chat", user_id="u-stranger")
+    ) is False
+    assert delivery_target_store.load_last_active_runtime_key() == ""
+
+
+def test_delivery_endpoint_falls_back_when_owner_resolution_unavailable(tmp_path, monkeypatch):
+    """未注入 resolver 时 is_owner 恒 False，必须退回旧行为而非锁死投递端。"""
+    _patch_workspace(monkeypatch, tmp_path)
+    assert delivery_target_store.update_last_active_target(
+        _private_target(chat_id="123")
+    ) is True
+    assert delivery_target_store.load_last_active_runtime_key() == "telegram:123"
+
+
+# ----------------------------------------------------------------------
 # record_active_scene + resolve_route_target（活跃平台/场景 & 路由标记）
 # ----------------------------------------------------------------------
 

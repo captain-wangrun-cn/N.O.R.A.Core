@@ -24,6 +24,16 @@ def set_owner_resolver(resolver: Optional[OwnerResolver]) -> None:
     _owner_resolver = resolver
 
 
+def owner_resolution_available() -> bool:
+    """主人识别是否可用（已注入 resolver）。
+
+    未注入时 `is_owner` 恒为 False，此时任何"仅主人"的闸门都会挡掉全部流量。
+    需要按 is_owner 收紧行为的调用方应先查这个开关，缺失解析器时退回旧行为，
+    而不是把功能整体锁死（例如主动消息投递端）。
+    """
+    return _owner_resolver is not None
+
+
 def _resolve_is_owner(platform: str, actor_user_id: str, chat_type: str) -> bool:
     """调用已注入的解析器判断说话人是否主人；未注入时默认 False。"""
     resolver = _owner_resolver
