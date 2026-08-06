@@ -113,6 +113,7 @@ class AppearanceGenMixin:
     async def _resolve_draw_prompt(self, draw_key: str, draw_request: str, identity: Any):
         """调 draw_desc 出提示词并挑参考图。返回 (prompt, ref_filenames)。"""
         from brain.llm import get_llm_client
+        import config
 
         appearance_text = appearance_lib.read_appearance_text()
         if not appearance_text:
@@ -120,12 +121,16 @@ class AppearanceGenMixin:
                 "[%s] APPEARANCE.md 为空，生图将只依据要求与参考图（形象可能漂移）。", draw_key
             )
 
+        # 目标生图模型决定提示词写法：自然语言（nano-banana/Grok 系）还是标签串（SD 系）。
+        prompt_style = config.get_draw_prompt_style()
+
         system_prompt = render_template(
             "draw_desc.jinja",
             "draw_desc_system",
             appearance=appearance_text,
             soul=_read_file_safe(WORKSPACE_SOUL_FILE, max_chars=4000),
             ref_manifest=appearance_lib.describe_manifest_for_prompt(),
+            prompt_style=prompt_style,
         )
         user_prompt = render_template(
             "draw_desc.jinja",
@@ -134,6 +139,7 @@ class AppearanceGenMixin:
             current_time=appearance_lib.now_local().strftime("%Y-%m-%d %H:%M %A"),
             schedule=_read_file_safe(WORKSPACE_SCHEDULE_FILE, max_chars=3000),
             current_segment=self._build_draw_segment_hint(identity),
+            prompt_style=prompt_style,
         )
         if not system_prompt or not user_prompt:
             raise RuntimeError("draw_desc.jinja 渲染失败")

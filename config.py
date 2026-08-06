@@ -221,6 +221,26 @@ def get_draw_api():
     raw = str(cfg.get("llm", {}).get("draw_api", "") or "").strip().lower()
     return DRAW_API_CHAT if raw == DRAW_API_CHAT else DRAW_API_IMAGES
 
+
+# draw_desc 产出的提示词写法。两类生图模型吃的东西完全不同，跟接口形态无关：
+#   natural —— 自然语言句子（Gemini / nano-banana、Grok、GPT-Image 按语言理解画面）
+#   tags    —— 逗号分隔的关键词标签（Stable Diffusion / NovelAI 系按标签匹配）
+DRAW_PROMPT_STYLE_NATURAL = "natural"
+DRAW_PROMPT_STYLE_TAGS = "tags"
+
+
+def get_draw_prompt_style():
+    """
+    draw_desc 生成的提示词写法，默认 "natural"。
+
+    选错不会报错，只会让出图变差：给 nano-banana 喂标签串会丢掉空间关系
+    （谁在哪、手放哪、光从哪来），给 SD 喂长句则会被 CLIP 截断。
+    """
+    cfg = _safe_config()
+    raw = str(cfg.get("llm", {}).get("draw_prompt_style", "") or "").strip().lower()
+    return DRAW_PROMPT_STYLE_TAGS if raw == DRAW_PROMPT_STYLE_TAGS else DRAW_PROMPT_STYLE_NATURAL
+
+
 def get_llm_user_agent(provider=None):
     """Optional custom User-Agent for LLM HTTP requests."""
     provider = provider or get_llm_provider()

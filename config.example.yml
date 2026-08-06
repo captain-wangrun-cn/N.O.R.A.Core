@@ -105,6 +105,14 @@ llm:
   #         （多数中转站把 gemini image 模型挂成 openai 协议时只实现这条，走 images 会 404）
   # draw_api: "images"
 
+  # 生图提示词写法（与接口形态无关，取决于 draw 模型吃哪种提示词）
+  #   natural（默认）：完整英文句子，描述画面与空间关系
+  #                    —— Gemini / nano-banana、Grok、GPT-Image 等按语言理解画面的模型
+  #   tags：逗号分隔的英文关键词标签
+  #         —— Stable Diffusion / NovelAI 等按标签匹配的模型
+  #   选错不报错，只是出图变差：标签串喂 nano-banana 会丢空间关系，长句喂 SD 会被截断。
+  # draw_prompt_style: "natural"
+
   # 按 alias 单独设置输出 token 上限（优先级高于全局）
   # max_output_tokens_by_alias:
   #   smart: 768

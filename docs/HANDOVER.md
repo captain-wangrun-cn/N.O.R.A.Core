@@ -39,6 +39,15 @@
 - 新增两个模型别名 `draw`（文生图）/ `draw_desc`（文本），**成对可选**：CLI 向导、
   `/model` 菜单、`config.example.yml`、两份 locale 都加了；`draw_models_configured()`
   要求两者都有才算启用。
+- **提示词写法可选 `llm.draw_prompt_style`**（`natural` 默认 / `tags`），与 `draw_api` 正交：
+  `draw_api` 是协议（选错 404），`draw_prompt_style` 是写法（选错不报错、只是画不对）。
+  自然语言式面向 Gemini / nano-banana、Grok、GPT-Image，强调空间关系与整句描述，并显式禁用
+  `masterpiece, best quality` 这类对它们无效的画质咒语；标签式面向 SD / NovelAI，按
+  主体→外观→服装→表情动作→场景→光线→构图→画质的顺序排 30-50 个短标签。
+  `draw_desc.jinja` 的 **system 与 user 两个 block 都要传 `prompt_style`**（`render_template`
+  逐 block 渲染、不共享 context）；参考图工具不过 `draw_desc`，在 `brain/tools.py` 里自己判。
+  CLI 里 `draw_api` 只在 provider 为 openai 时问，`draw_prompt_style` 配了 `draw` 就问
+  ——同一个端点后面既可能挂 nano-banana 也可能挂 SD。
 
 **3. 后脑参考图工具 `generate_appearance_reference`（`brain/tools.py`）**
 

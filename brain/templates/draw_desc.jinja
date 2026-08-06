@@ -46,7 +46,7 @@
 
 ```
 [DRAW_PROMPT]
-（英文提示词，一段或多段，逗号分隔的描述性短语。包含：角色外观全部要点、场景、动作/姿态、表情、镜头与构图、光线、画风）
+{% if prompt_style == "tags" %}（英文提示词，逗号分隔的关键词标签）{% else %}（英文提示词，完整的描述性句子）{% endif %}
 [/DRAW_PROMPT]
 [DRAW_REFS]
 face.png,front.png
@@ -57,6 +57,30 @@ face.png,front.png
 - `[DRAW_REFS]` 只写文件名，英文逗号分隔，必须是上面清单里**确实存在**的文件；没有可用参考图时留空。
 - **不要**输出 `[IMAGE_TAGS]` / `[IMAGE_OCR]` / `[SPLIT]` / `[NEED_BACKEND]` / `[DRAW:...]` 等任何其他系统标记。
 - 提示词里不要写文字/水印/拼图/多人；单人、单帧。
+
+## 提示词写法（本次目标模型的要求，必须遵守）
+
+{% if prompt_style == "tags" %}
+**标签式（tag-style）**——目标是 Stable Diffusion / NovelAI 这类按标签匹配的模型。
+
+- 写成**逗号分隔的英文短语**，每个短语 1-4 个词，不要写完整句子、不要连词、不要句号。
+- 按这个顺序排：主体与画风 → 外观特征（发色/发型/瞳色/体征）→ 服装 → 表情与动作 → 场景与道具 → 光线氛围 → 镜头构图 → 画质词。
+- 越靠前的标签权重越高，把最不能丢的特征放最前面。
+- 总量控制在 30-50 个标签，不要堆砌同义词。
+- 示例形态：`1girl, solo, anime style, long silver hair, blue eyes, white blouse, gentle smile, sitting at desk, warm lamplight, upper body, looking at viewer, highly detailed`
+{% else %}
+**自然语言式（natural language）**——目标是 Gemini / nano-banana、Grok、GPT-Image 这类按语言理解画面的模型。
+
+- 写成**完整、连贯的英文句子**，像在向摄影师描述一张照片。不要写逗号堆砌的关键词串。
+- 用 2-5 句话，覆盖：这是什么样的一张图（照片/插画、什么镜头）→ 人物是谁、长什么样、穿什么 →
+  她在做什么、什么表情 → 在哪、周围有什么 → 光线和整体氛围。
+- **明确写出空间关系**（谁在画面哪个位置、手放在哪、看向哪、光从哪个方向来）——
+  这正是这类模型比标签式强的地方，不要浪费。
+- 允许用 "a photo of…" / "a soft-lit portrait of…" 这样的开头点明媒介与风格。
+- 不要用 `masterpiece, best quality, 8k` 这类标签式画质咒语，它们对这类模型无效甚至有害；
+  要画质就直接描述（"sharp focus on her face, softly blurred background"）。
+- 示例形态：`A candid selfie photo of a young woman with long silver hair and blue eyes, wearing a white blouse. She holds the phone slightly above eye level with her right hand and smiles softly at the camera, sitting at a wooden desk in her room. Warm lamplight falls from the left, and the bookshelf behind her is gently out of focus.`
+{% endif %}
 
 ## 提示词质量要求
 
@@ -95,4 +119,5 @@ face.png,front.png
 {% endif %}
 
 按系统提示的格式输出 `[DRAW_PROMPT]` 与 `[DRAW_REFS]` 两个区块，不要任何前言或结语。
+{% if prompt_style == "tags" %}`[DRAW_PROMPT]` 里必须是**逗号分隔的英文标签**，不要写成句子。{% else %}`[DRAW_PROMPT]` 里必须是**完整的英文句子**，不要写成逗号分隔的关键词串。{% endif %}
 {% endblock %}

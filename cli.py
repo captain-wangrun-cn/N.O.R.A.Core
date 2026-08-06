@@ -555,6 +555,10 @@ def show_config_summary() -> None:
                     if str(llm_cfg.get("draw_api", "")).lower() == "chat" \
                     else "images（/v1/images/generations·edits，默认）"
                 questionary.print(f"  - draw 生图接口: {api_label}", style="")
+            style_label = "tags（逗号分隔关键词，SD / NovelAI 系）" \
+                if str(llm_cfg.get("draw_prompt_style", "")).lower() == "tags" \
+                else "natural（自然语言句子，nano-banana / Grok 系，默认）"
+            questionary.print(f"  - draw 提示词写法: {style_label}", style="")
     else:
         questionary.print(f"{_status_emoji(False)} 模型角色: 未配置", style="bold red")
 
@@ -1461,9 +1465,9 @@ class StepModels(ConfigStep):
             # 生图接口形态：gemini 只有 :generateContent 一条路，无需询问；
             # openai 兼容端点有两种（原生 images API / chat + modalities），各家实现不一。
             if role_key == 'draw':
-                if provider_type == 'openai':
-                    import config as _cfg_mod
+                import config as _cfg_mod
 
+                if provider_type == 'openai':
                     draw_api = questionary.select(
                         "该生图模型走哪种接口？（选错会 404 或拿不到图）",
                         choices=[
@@ -1483,6 +1487,25 @@ class StepModels(ConfigStep):
                     self.state['draw_api'] = draw_api
                 else:
                     self.state.pop('draw_api', None)
+
+                # 提示词写法与接口形态无关：同一个端点后面可能挂 nano-banana，也可能挂 SD。
+                prompt_style = questionary.select(
+                    "该生图模型吃哪种提示词？（选错不报错，只是出图变差）",
+                    choices=[
+                        questionary.Choice(
+                            title="自然语言 —— 完整英文句子描述画面（Gemini / nano-banana、Grok、GPT-Image）",
+                            value=_cfg_mod.DRAW_PROMPT_STYLE_NATURAL,
+                        ),
+                        questionary.Choice(
+                            title="关键词标签 —— 逗号分隔的英文 tag 串（Stable Diffusion、NovelAI）",
+                            value=_cfg_mod.DRAW_PROMPT_STYLE_TAGS,
+                        ),
+                    ],
+                    default=self.state.get('draw_prompt_style') or _cfg_mod.DRAW_PROMPT_STYLE_NATURAL,
+                ).ask()
+                if prompt_style is None:
+                    return False
+                self.state['draw_prompt_style'] = prompt_style
 
         self.state['models'] = models
 
@@ -1671,6 +1694,11 @@ def _build_final_config(state: Dict[str, Any]) -> Dict[str, Any]:
     if draw_api and final_config['llm'].get('models', {}).get('draw'):
         final_config['llm']['draw_api'] = draw_api
 
+    # 提示词写法：配了 draw 就有意义，与 provider 类型无关
+    draw_prompt_style = state.get('draw_prompt_style')
+    if draw_prompt_style and final_config['llm'].get('models', {}).get('draw'):
+        final_config['llm']['draw_prompt_style'] = draw_prompt_style
+
     # 兼容旧配置结构：保留 api_keys/base_url/user_agent（取默认 provider 对应值）
     providers_cfg = final_config['llm'].get('providers', {}) or {}
     legacy_api_keys = {}
@@ -1782,6 +1810,8 @@ def _load_wizard_state() -> Dict[str, Any]:
     }
     if llm_cfg.get("draw_api"):
         state['draw_api'] = llm_cfg.get("draw_api")
+    if llm_cfg.get("draw_prompt_style"):
+        state['draw_prompt_style'] = llm_cfg.get("draw_prompt_style")
     return state
 
 

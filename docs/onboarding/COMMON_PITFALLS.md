@@ -235,6 +235,17 @@
   必须同步改提示词措辞**。
 - **`draw` 和 `draw_desc` 必须成对配置。** 只配一个等于没配：`draw_models_configured()` 要求两者
   都有，否则前脑提示不注入 `[DRAW:]` 说明、参考图工具也不注册（避免模型输出无法执行的标记）。
+- **`draw_api` 和 `draw_prompt_style` 是两件互相独立的事，别当成一个。** 前者是**协议**
+  （`/v1/images/*` 还是 `/v1/chat/completions`+modalities），选错直接 404 或拿不到图，只对 openai
+  类型 provider 有意义。后者是**提示词写法**（自然语言句子 / 逗号分隔标签），选错**不报错**——
+  照样出图，只是标签串喂 nano-banana 会丢掉空间关系、长句喂 SD 会被 CLIP 截断，表现为"图能出但总画不对"。
+  同一个 openai 端点后面既可能挂 nano-banana 也可能挂 SD，所以 CLI 里 `draw_api` 只在 provider 是
+  openai 时问，`draw_prompt_style` 配了 `draw` 就问。
+- **写法分支有两条路，改一条不够。** `[DRAW:]` 走 `draw_desc.jinja`（`prompt_style` 变量，
+  **system 和 user 两个 block 都要传**——`render_template` 每个 block 独立渲染，不共享 context）；
+  参考图工具 `generate_appearance_reference` 不过 `draw_desc`，提示词在 `brain/tools.py` 里硬拼，
+  自己判 `get_draw_prompt_style()`。漏掉后者的话，标签系模型会把 "Generate a character reference
+  image…" 这类整句指令当画面内容画进图里。
 - **生图失败不向用户追发任何文本**（用户的约定）。文字已经发出去了，图没来就是没来；
   排查看日志的 `生图失败` 行，`draw_prompt` 落在 Mongo `appearance_images` 里。
 - 生图是旁路任务，不在 `generation_tasks` 里。`/stop` 与 `shutdown()` 需要单独调

@@ -1530,17 +1530,32 @@ class ToolManager:
             anchor_images = appearance_lib.load_reference_images(anchor_files)[:remaining]
         reference_images = source_loaded + anchor_images
 
-        prompt_lines = [
-            "Generate a character reference image (reference sheet style) of the following character.",
-            "This image will be reused as a visual anchor for future generations, so keep it clean and neutral:",
-            "plain/simple background, even lighting, no text, no watermark, no collage, single character only.",
-            "",
-            "[Character appearance specification]",
-            appearance_text,
-            "",
-            "[This reference image should depict]",
-            requirement_text,
-        ]
+        # 参考图不过 draw_desc，提示词在这里直接拼。但 draw 模型吃哪种写法要跟着配置走：
+        # 标签系模型（SD/NovelAI）看不懂这些整句指令，会把它们当画面内容画进去。
+        tag_style = config.get_draw_prompt_style() == config.DRAW_PROMPT_STYLE_TAGS
+        if tag_style:
+            prompt_lines = [
+                "character reference sheet, single character, solo, plain simple background, "
+                "even lighting, full detail, no text, no watermark, no collage",
+                "",
+                "[Character appearance specification]",
+                appearance_text,
+                "",
+                "[This reference image should depict]",
+                requirement_text,
+            ]
+        else:
+            prompt_lines = [
+                "Generate a character reference image (reference sheet style) of the following character.",
+                "This image will be reused as a visual anchor for future generations, so keep it clean and neutral:",
+                "plain/simple background, even lighting, no text, no watermark, no collage, single character only.",
+                "",
+                "[Character appearance specification]",
+                appearance_text,
+                "",
+                "[This reference image should depict]",
+                requirement_text,
+            ]
         # 附图按 source → anchor 的顺序传入，说明里也按这个顺序点名，
         # 否则模型分不清哪张该照抄、哪张只是保持一致。
         if source_loaded:

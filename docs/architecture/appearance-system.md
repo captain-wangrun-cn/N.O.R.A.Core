@@ -20,6 +20,18 @@
 - `draw` — **文生图**模型，真正出图。
 - `draw_desc` — 普通文本模型，把"拍张自拍"这种要求翻译成完整英文提示词，并挑选本次要带哪些参考图。
 
+`draw` 模型另有两个互相独立的配置项：
+
+| 配置 | 值 | 管什么 | 选错的后果 |
+| --- | --- | --- | --- |
+| `llm.draw_api` | `images`(默认) / `chat` | HTTP **协议**，仅 openai 类型 provider | 404 或拿不到图，硬失败 |
+| `llm.draw_prompt_style` | `natural`(默认) / `tags` | 提示词**写法**，与 provider 无关 | 不报错，只是画不对 |
+
+`natural` 是完整英文句子（Gemini / nano-banana、Grok、GPT-Image 这类按语言理解画面的模型，
+能表达"手放哪、光从哪来"这种空间关系）；`tags` 是逗号分隔的关键词标签
+（Stable Diffusion / NovelAI 这类按标签匹配的模型，长句会被 CLIP 截断）。
+两者分开配是因为同一个 openai 兼容端点后面既可能挂 nano-banana 也可能挂 SD。
+
 ---
 
 ## 2. 两条生图路径
@@ -28,6 +40,7 @@
 | --- | --- | --- |
 | 触发者 | 前脑标记，用户对话中 | 后脑自己决定调工具 |
 | 提示词来源 | `draw_desc` 模型改写 | 工具的 `requirement` 参数直接用（**不过 draw_desc**） |
+| 提示词写法 | `draw_desc.jinja` 按 `prompt_style` 分支 | `brain/tools.py` 里自己判 `get_draw_prompt_style()` |
 | 参考图 | `draw_desc` 从 manifest 里挑 | `source_images`（用户给的来源图）优先，剩余配额补已有参考图作锚 |
 | 落盘位置 | `generated/<日期>/` | `refs/<view>.png` |
 | 是否入库 | 是（`appearance_images`） | 否（manifest 即索引） |

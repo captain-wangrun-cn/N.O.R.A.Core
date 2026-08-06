@@ -38,6 +38,8 @@ core/controller.py            NoraController.handle_message()
 | LLM Provider | `config.yml` → `llm.provider` | `gemini` 或 `openai` |
 | API Keys | `config.yml` → `llm.api_keys.*` | |
 | 模型别名 | `config.yml` → `llm.models.*` | `smart` / `fast` / `coder` / `image` / `video` / `fast-image`(可选) / `draw`+`draw_desc`(可选，成对) / `summary` |
+| 生图接口形态 | `config.yml` → `llm.draw_api` | `images`(默认) / `chat`；只对 openai 类型 provider 生效 |
+| 生图提示词写法 | `config.yml` → `llm.draw_prompt_style` | `natural`(默认，句子) / `tags`(标签串)；与接口形态无关，取决于 `draw` 模型 |
 | 消息历史 | `config.yml` → `memory.message_history.*` | `raw_window`, `compress_window` 等 |
 | 成本跟踪 | `config.yml` → `cost_tracking.*` | `enabled`, `custom_prices` |
 | 主动消息调度 | `config.yml` → `schedule.*` | `enabled` |
@@ -194,7 +196,7 @@ python tui.py
 | `brain/templates/system.jinja` | **主系统提示词** — 所有行为规则、协议、约定 |
 | `brain/templates/persona_nora.jinja` | 人设提示词回退（Nora 的性格，当 SOUL.md 不存在时使用） |
 | `brain/templates/media_analysis.jinja` | **回查媒体的分析轮专用**（`view_media` 返回图片/视频后的那一轮）：无人设的"媒体内容分析引擎"，输出是给上层推理模型看的内部观察数据 |
-| `brain/templates/draw_desc.jinja` | **`[DRAW:]` 生图提示词轮专用**：无人设的"生图提示词生成引擎"，输出直接进文生图模型（用户看不到）。SOUL 在这里是判断表情/姿态的**素材**，不是让它扮演 Nora |
+| `brain/templates/draw_desc.jinja` | **`[DRAW:]` 生图提示词轮专用**：无人设的"生图提示词生成引擎"，输出直接进文生图模型（用户看不到）。SOUL 在这里是判断表情/姿态的**素材**，不是让它扮演 Nora。提示词写法按 `llm.draw_prompt_style` 分支（natural 句子 / tags 标签串） |
 | `brain/prompts.py` | 提示词组装逻辑 + 身份上下文加载 |
 | `adapters/PROMPT.md` | 通用平台适配协议：跨平台人格连续性、媒体标记、`[SPLIT]` |
 | `adapters/telegram/PROMPT.md` | Telegram 平台特定提示（格式、长度等） |
