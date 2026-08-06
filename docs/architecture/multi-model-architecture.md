@@ -26,6 +26,16 @@
 - `image`：图片输入理解模型。
 - `summary`：压缩与总结模型（消息压缩、归档等场景）。
 
+可选 alias（不配置则对应功能整体关闭，不影响其余链路）：
+
+- `video`：视频输入理解模型。不配置则视频不入库。
+- `fast-image`：表情包快速描述模型。
+- `security`：工具调用安全审查模型。
+- `draw` / `draw_desc`：形象生图。**两个必须同时配置**——`draw` 是文生图模型（输出图片），
+  `draw_desc` 是普通文本模型（据形象/时间/日程写提示词并挑参考图）。只配一个视为未配置：
+  `[DRAW:]` 标记不生效、`generate_appearance_reference` 工具不注册。
+  `draw` 必须走 `gemini` 或 `openai` 类型的 provider（`generate_image` 只有这两个实现）。
+
 ---
 
 ## 3. 配置结构（`config.yml`）
@@ -69,6 +79,10 @@
 - `self.image_llm = get_llm_client(model_alias="image")`
 
 并在 `_reload_llm_clients()` 支持热重载配置后刷新。
+
+> `draw` / `draw_desc` **不在 `__init__` 里建客户端**，而是在每次生图时按需
+> `get_llm_client(model_alias=...)`（`core/appearance_gen.py`、`brain/tools.py`）。
+> 生图是低频旁路操作，没必要常驻两个客户端，也省掉一份热重载逻辑。
 
 ## 4.3 前后脑选模（当前实现）
 

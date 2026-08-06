@@ -44,7 +44,8 @@ N.O.R.A.Core/
 - `interrupt_handler.py`：忙碌时意图检测（stop/change/queue）。
 - `polling.py`：前后脑轮询协同。
 - `scheduler.py` / `scheduler_mixin.py`：主动消息调度与状态管理。
-- `routing.py`：信号解析与辅助路由逻辑。
+- `routing.py`：信号解析与辅助路由逻辑（注意有**两个**前脑解析器，新标记两处都要剥离）。
+- `appearance_gen.py`：前脑 `[DRAW:]` 旁路生图与异步追发（`draw_desc` 出提示词 → `draw` 出图 → 落盘/入库/追发）。
 - `worker_status.py`：后脑状态与队列结构。
 - `cost_tracker.py`：token 使用与成本记录。
 
@@ -53,9 +54,10 @@ N.O.R.A.Core/
 - `llm.py`：模型客户端工厂（按 alias/provider 获取）。
 - `providers/`：提供商实现（`gemini.py`、`openai.py`）。
 - `prompts.py`：系统提示词与身份上下文注入。
-- `templates/`：Jinja 模板（system/persona/schedule/front_brain 等）。
+- `templates/`：Jinja 模板（system/persona/schedule/front_brain/media_analysis/draw_desc 等）。
 - `tools.py`：内置工具注册、schema 生成与执行。
 - `multimodal.py`：图片输入解析与多模态辅助。
+- `appearance.py`：形象系统共享原语（读 `APPEARANCE.md`、加载/落盘参考图、维护 manifest），两条生图路径共用。
 - `logging_config.py`：日志配置。
 
 ### `adapters/`（平台适配）
@@ -72,6 +74,7 @@ N.O.R.A.Core/
 - `context_store.py`：消息镜像与段落压缩存储。
 - `rag.py` / `embed.py` / `vector.py`：检索增强与向量能力。
 - `image_store.py`：图片记忆（MongoDB + Qdrant 双写）。
+- `appearance_store.py`：形象生成图记录（仅 MongoDB `appearance_images`，只记 request / draw_prompt / 路径 / 时间）。
 
 ### `lexicon/`（轻量词库）
 

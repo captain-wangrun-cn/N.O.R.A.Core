@@ -72,6 +72,8 @@ llm:
     coder: "openai_main"
     image: "gemini_main"
     summary: "anthropic_main"
+    # draw: "gemini_main"        # 可选：文生图模型（形象图生成，不配置则 [DRAW:] 与参考图工具不可用）
+    # draw_desc: "openai_main"   # 可选：把要求写成生图提示词的文本模型
     # fast-image: "gemini_main"  # 可选：表情包快速描述模型（不配置则表情包不做内容解读）
 
   # 兼容旧版配置（可选，建议保留）
@@ -89,6 +91,9 @@ llm:
     image: "gemini-1.5-pro-latest" # 用于图片输入理解的模型
     video: "gemini-2.5-flash" # 用于视频输入理解的模型（可选，不配置则视频不入库）
     summary: "claude-3-5-haiku-latest" # 用于消息历史总结的模型
+    # 形象生图（可选，两个都配才启用）：
+    # draw: "gemini-2.5-flash-image"  # 文生图模型，需支持参考图输入以锚定形象一致性
+    # draw_desc: "gpt-4o-mini"        # 普通文本模型，负责把要求 + APPEARANCE.md 写成生图提示词
     # fast-image: "gemini-2.0-flash"  # 可选：表情包快速描述模型
 
   # 输出 token 上限（统一）

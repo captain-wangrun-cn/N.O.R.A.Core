@@ -31,12 +31,13 @@
 10. `exec_command`
 11. `view_media`
 12. `crop_image_for_llm`
-13. `report_progress`
-14. `set_alarm`
-15. `list_alarms`
-16. `cancel_alarm`
-17. `read_secret_vault`
-18. `write_secret_vault`
+13. `generate_appearance_reference`（仅在配置了 `draw` 模型时注册）
+14. `report_progress`
+15. `set_alarm`
+16. `list_alarms`
+17. `cancel_alarm`
+18. `read_secret_vault`
+19. `write_secret_vault`
 
 若当前平台 adapter 暴露了工具，还会追加平台工具。例如 Telegram adapter 会追加：
 

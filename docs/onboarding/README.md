@@ -69,6 +69,7 @@
 | 技能加载 | `skills/loader.py` |
 | 成本跟踪 | `core/cost_tracker.py`, `view_costs.py` |
 | 词库系统 | `lexicon/manager.py`, `lexicon/PROMPT.md` |
+| 形象系统/生图 | `brain/appearance.py`, `core/appearance_gen.py`, `brain/templates/draw_desc.jinja`, `memory/appearance_store.py` |
 | 配置 | `config.py`, `config.example.yml` |
 
 ---

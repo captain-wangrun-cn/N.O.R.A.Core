@@ -1250,6 +1250,21 @@ class MessageHandlerMixin:
             if len(session_history) > 20:
                 session["history"] = session_history[-20:]
 
+        # 3.9) 旁路生图：前脑 [DRAW:...] 与 [NEED_BACKEND] 完全独立，不进后脑工具循环。
+        #      必须放在 send_front_reply 块之后（要用它算出的 send_target，图得追发到
+        #      文字实际去的那个目标），又必须放在 _apply_presence_markers 之前
+        #      （presence_ended 会提前 return，放后面遇到进半在线的轮次就永远不触发）。
+        draw_request = str(front_result.get("draw_request", "") or "").strip()
+        if draw_request:
+            draw_key = (send_target or {}).get("runtime_key") or ""
+            if send_target is not None and not draw_key:
+                # 前脑请求的投递目标被拒绝（文字也没发出去），图更不该追到别处去。
+                logger.info(f"[{chat_id}] 投递目标被拒绝，跳过生图。")
+            else:
+                draw_key = draw_key or chat_id
+                draw_identity = (send_target or {}).get("identity") or identity
+                self.start_appearance_image_task(draw_key, draw_request, draw_identity)
+
         presence_ended = await self._apply_presence_markers(
             chat_id,
             chat_type,
@@ -1915,6 +1930,10 @@ class MessageHandlerMixin:
             if status:
                 status.finish()
             self._cancel_followup_timer(chat_id)
+            # 生图是旁路任务，不在 generation_tasks 里，得单独取消，
+            # 否则 /stop 之后图还会自己冒出来。
+            if hasattr(self, "cancel_appearance_image_task"):
+                self.cancel_appearance_image_task(chat_id)
             # 标记被前端打断，避免 finally 再次调度排队任务
             session = self.sessions.setdefault(chat_id, {"history": [], "interrupted_thought": "", "pending_text": ""})
             session["_interrupted_by_frontend"] = True

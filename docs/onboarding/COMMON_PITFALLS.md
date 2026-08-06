@@ -210,6 +210,29 @@
   cron job，executor 每次触发打两条 INFO 会把日志刷成流水账。要看调度信息请找
   `core/scheduler.py` 自己的打点。
 
+## 5.6 形象生图：标记泄漏 / 图追到别处 / 形象每次都变
+
+- **新增前脑标记必须改两个解析器。** `core/routing.py` 有 `parse_front_brain_response()`（主对话）
+  和 `parse_front_brain_review()`（轮询审查）两份近乎相同的实现。只改主解析器，审查轮就会把
+  `[DRAW:...]` 当字面文本发给用户。`sanitize_adapter_output_text()` 里还有一层兜底剥离，
+  覆盖后脑最终文本、主动消息等所有其它发送路径。
+- **生图触发点的位置不能挪。** 在 `core/message_handler.py` 里它必须夹在
+  send_front_reply 块**之后**（要用那里算出的 `send_target`，否则图追不到文字实际去的目标）、
+  `_apply_presence_markers()` **之前**（`presence_ended` 会提前 `return`，放后面遇到进半在线的
+  轮次就永远不触发）。投递目标被拒绝时（`send_target` 有值但 `runtime_key` 为空）也不要生图。
+- **没有参考图，每次生成的脸都不一样。** 参考图是形象一致性唯一的锚。链路本身不会报错，
+  只会在日志里 warning，然后画出一个陌生人。想稳定就先用 `generate_appearance_reference`
+  生成 `face` 等视角。
+- **`appearance/refs/` 是 `_is_path_safe` 里唯一的目录级规则**，而不是文件名黑名单。
+  规则用的是 `abs_path` 归一化后的 `/appearance/refs/` 子串匹配，所以不要把该目录改名或挪层级，
+  否则拦截会静默失效。`manifest.json` 也在拦截范围内。
+- **`draw` 和 `draw_desc` 必须成对配置。** 只配一个等于没配：`draw_models_configured()` 要求两者
+  都有，否则前脑提示不注入 `[DRAW:]` 说明、参考图工具也不注册（避免模型输出无法执行的标记）。
+- **生图失败不向用户追发任何文本**（用户的约定）。文字已经发出去了，图没来就是没来；
+  排查看日志的 `生图失败` 行，`draw_prompt` 落在 Mongo `appearance_images` 里。
+- 生图是旁路任务，不在 `generation_tasks` 里。`/stop` 与 `shutdown()` 需要单独调
+  `cancel_appearance_image_task()`，否则停完还会冒出一张图。
+
 ---
 
 ## 6. 成本跟踪

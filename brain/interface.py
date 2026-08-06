@@ -70,6 +70,27 @@ class BaseLLM(ABC):
         """获取最近一次调用的 token 使用量"""
         return self.last_usage
 
+    async def generate_image(
+        self,
+        prompt: str,
+        reference_images: Optional[List[Dict[str, Any]]] = None,
+    ) -> Dict[str, Any]:
+        """
+        文生图。默认不实现——只有具备 image-out 能力的 provider 覆盖它。
+
+        Args:
+            prompt: 生图提示词。
+            reference_images: (Optional) 参考图列表，格式复用 multimodal_images
+                （每项含 mime_type / bytes / base64），用于锚定形象一致性。
+
+        Returns:
+            {"bytes": bytes, "mime_type": str}
+
+        Raises:
+            NotImplementedError: provider 不支持文生图。
+        """
+        raise NotImplementedError(f"{type(self).__name__} 不支持文生图")
+
     @classmethod
     def strip_think_content(cls, text: str) -> str:
         """移除完整文本中的 think 标签及其内容。"""

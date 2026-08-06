@@ -1,4 +1,83 @@
-## 近期关键改动（截至 2026-08-05）
+## 近期关键改动（截至 2026-08-06）
+
+### 🖼️ 形象系统 + 生图链路（APPEARANCE.md / 参考图 / `[DRAW:]`）
+
+给 Nora 加了「她长什么样」这件事，并让她能按这个形象生图发给用户。核心设计是
+**文字在前、图在后**：`APPEARANCE.md` 是唯一形象依据 → 依据它生成参考图 → 参考图锚定日常生图。
+
+**1. 身份文件 `appearance/APPEARANCE.md`（`brain/prompts.py`）**
+
+- 新增四个路径常量 + `LEGACY_APPEARANCE_FILE`，纳入 `_ensure_workspace_identity_files()` 的
+  首启复制 mapping，并 `makedirs` 出 `appearance/refs/`。
+- `load_identity_context()` 用 `<appearance>` 包裹注入，位置在 `<soul>` 之后、`<user_profile>` 之前
+  ——形象是"她自己"的一部分，紧跟 SOUL 语义最连贯。
+- 仓库根 `APPEARANCE.md` 是默认模板（分基本体征/头部/常穿/固定特征/画风偏好），
+  末尾写清维护约定：改了要告知主人、参考图只能用工具管、先写文字再生成图。
+- `system.jinja` §5 加两行表格 + 一节「`appearance/`：你的形象」，说明文字与图的先后关系、
+  覆盖参考图会改变形象需先征得同意。
+
+**2. provider 文生图能力（`brain/interface.py` + 两个 provider）**
+
+- `BaseLLM.generate_image(prompt, reference_images) -> {"bytes", "mime_type"}`，
+  **非抽象**、默认 `raise NotImplementedError`——现有 provider（含 anthropic）不受影响。
+- Gemini：走 REST `:generateContent` + `responseModalities: ["TEXT","IMAGE"]`
+  （和 `_video_stream_via_rest` 同一个理由：SDK + 自定义 endpoint + inline_data 组合不可靠）。
+  部分端点不认 `responseModalities`，400 时去掉该字段重试一次。
+- OpenAI：**不走 chat 端点**。无参考图 → `images.generate`；有参考图 → `images.edit`
+  （file-like 的 `.name` 后缀决定端点判 mime，必须带）。多图签名在部分 SDK/兼容端点不被接受，
+  失败退回单图；`dall-e-*` 需要 `response_format="b64_json"` 而 `gpt-image-1` 不认该参数，
+  也做了降级重试。返回 url 而非 b64 时自行下载。
+- 新增两个模型别名 `draw`（文生图）/ `draw_desc`（文本），**成对可选**：CLI 向导、
+  `/model` 菜单、`config.example.yml`、两份 locale 都加了；`draw_models_configured()`
+  要求两者都有才算启用。
+
+**3. 后脑参考图工具 `generate_appearance_reference`（`brain/tools.py`）**
+
+- 参数 `requirement / view / usage / replace`。依据 `APPEARANCE.md` 生成，存
+  `refs/{view}.png` 并更新 `manifest.json`（file / view / usage / updated_at）。
+- **生成新视角时自动带上已有参考图作锚**，否则"正面"和"侧面"会是两个不同的人。
+- 同名 view 已存在时**不覆盖**，返回提示要求先征得主人同意再用 `replace=true`。
+- 不经 `draw_desc`：`requirement` 已是后脑显式撰写的描述，`APPEARANCE.md` 也是结构化文本，
+  再套一层提示词改写只会引入形象漂移。
+- 仅在配置了 `draw` 时注册（别让模型看到调不动的工具）。
+- `_is_path_safe()` 新增**唯一一条目录级规则**拦 `appearance/refs/`（此前全是文件名黑名单）：
+  参考图是形象一致性的锚，被通用文件工具改掉会让形象突变，而且是二进制文件本就不该走文本工具。
+
+**4. `[DRAW:要求]` 旁路生图（`core/routing.py` + `core/appearance_gen.py`）**
+
+- `core/routing.py` 加 `_DRAW_PATTERN`，**两个前脑解析器都改**：主解析器提取
+  `draw_request` 并剥离；审查解析器只剥离不触发（否则会作为字面文本泄漏给用户）。
+  `sanitize_adapter_output_text()` 再加一层兜底剥离，覆盖后脑最终文本/主动消息等所有其它路径。
+- 新增 `AppearanceGenMixin`：`draw_desc` 读 APPEARANCE.md + 要求 + 当前消息段 + 当前时间 +
+  SCHEDULE.md + SOUL.md（`brain/templates/draw_desc.jinja`，**无人设**、空历史，仿
+  `media_analysis.jinja`），输出 `[DRAW_PROMPT]`（英文）与 `[DRAW_REFS]`（**由它自己挑**参考图）
+  两个区块 → 加载参考图 → `draw` 出图 → 落 `appearance/generated/YYYY-MM-DD/` →
+  入 Mongo `appearance_images` → `_send_platform_message(key, "[image: path]")` 追发。
+- 触发点在 `core/message_handler.py`，**位置有两侧约束**：必须在 send_front_reply 块之后
+  （要用那里算出的 `send_target`，图得追到文字实际去的目标）、`_apply_presence_markers()`
+  之前（`presence_ended` 会提前 return）。投递目标被拒绝时不生图。
+- 与 `[NEED_BACKEND]` 完全独立，可共存；单轮只一张；per-runtime_key 只保留最新一张
+  （新请求 cancel 旧的）；**失败只记日志，不追发任何安慰或报错文本**（用户明确要求）。
+- 生图是旁路任务不在 `generation_tasks` 里，`/stop` 与 `shutdown()` 单独调
+  `cancel_appearance_image_task()`。
+- 主动消息轮（`scheduler_mixin.py`）不触发生图，只记一行日志。
+
+**5. 独立记录库（`memory/appearance_store.py`）**
+
+不复用 `ImageStore`：那套 schema 围绕"用户发的媒体 + LLM 打标签"设计（`tag_status`/`tags`/
+Qdrant 向量/20+ scope 字段），而这里按用户要求只记 request（前脑原文）、draw_prompt、
+路径、时间四项。不写 Qdrant、不建文本索引，Mongo 不可用时整体降级为只落盘不入库。
+
+**6. 前脑提示词（`front_brain.jinja`）**
+
+`[DRAW:]` 说明与两个示例都用 `{% if draw_enabled %}` 包住，未配置模型时完全不注入。
+说明里明确区分两件事：用户要**看照片** → `[DRAW:]`；用户要**改形象设定** → 
+`[TASK_INSTRUCTION]`+`[NEED_BACKEND]` 让后脑改 md + 调参考图工具。
+
+**测试**：`tests/test_routing.py` 加 5 个（正常解析 / 标记缺失 / 审查轮剥离 / 与 backend 共存 /
+sanitizer 兜底）。`tests/test_cli_first_run_config.py` 的确认序列因新增可选模型从 3 项补到 4 项。
+
+---
 
 ### 🔍 view_media 检索/分析链路整修 + 日志时区 + 跨轮重复调用误报
 

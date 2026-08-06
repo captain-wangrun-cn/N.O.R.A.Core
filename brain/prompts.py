@@ -74,6 +74,12 @@ WORKSPACE_MEMORY_FILE = os.path.join(WORKSPACE_MEMORY_DIR, "MEMORY.md")
 WORKSPACE_SCHEDULE_FILE = os.path.join(WORKSPACE_ROOT, "SCHEDULE.md")
 WORKSPACE_CUSTOM_FILE = os.path.join(WORKSPACE_ROOT, "CUSTOM.md")
 WORKSPACE_SECRET_FILE = os.path.join(WORKSPACE_ROOT, "SECRET.md")
+# 形象系统：文字描述 + 参考图。参考图只能通过 generate_appearance_reference 工具管理。
+WORKSPACE_APPEARANCE_DIR = os.path.join(WORKSPACE_ROOT, "appearance")
+WORKSPACE_APPEARANCE_FILE = os.path.join(WORKSPACE_APPEARANCE_DIR, "APPEARANCE.md")
+WORKSPACE_APPEARANCE_REFS_DIR = os.path.join(WORKSPACE_APPEARANCE_DIR, "refs")
+WORKSPACE_APPEARANCE_MANIFEST = os.path.join(WORKSPACE_APPEARANCE_REFS_DIR, "manifest.json")
+WORKSPACE_APPEARANCE_GENERATED_DIR = os.path.join(WORKSPACE_APPEARANCE_DIR, "generated")
 LEXICON_GLOBAL_PROMPT_FILE = os.path.join(PROJECT_ROOT, "lexicon", "PROMPT.md")
 ADAPTER_GLOBAL_PROMPT_FILE = os.path.join(PROJECT_ROOT, "adapters", "PROMPT.md")
 LEGACY_SOUL_FILE = os.path.join(PROJECT_ROOT, "SOUL.md")
@@ -82,6 +88,7 @@ LEGACY_MEMORY_FILE = os.path.join(PROJECT_ROOT, "MEMORY.md")
 LEGACY_SCHEDULE_FILE = os.path.join(PROJECT_ROOT, "SCHEDULE.md")
 LEGACY_CUSTOM_FILE = os.path.join(PROJECT_ROOT, "CUSTOM.md")
 LEGACY_SECRET_FILE = os.path.join(PROJECT_ROOT, "SECRET.md")
+LEGACY_APPEARANCE_FILE = os.path.join(PROJECT_ROOT, "APPEARANCE.md")
 
 # 注入到 system prompt 的最大字符数（防止 token 爆炸）
 BOOTSTRAP_MAX_CHARS = 20000
@@ -112,6 +119,7 @@ def _ensure_workspace_identity_files():
         (WORKSPACE_MEMORY_FILE, LEGACY_MEMORY_FILE),
         (WORKSPACE_SCHEDULE_FILE, LEGACY_SCHEDULE_FILE),
         (WORKSPACE_CUSTOM_FILE, LEGACY_CUSTOM_FILE),
+        (WORKSPACE_APPEARANCE_FILE, LEGACY_APPEARANCE_FILE),
     ]
     for dst, src in mapping:
         if os.path.exists(dst):
@@ -129,6 +137,12 @@ def _ensure_workspace_identity_files():
         os.makedirs(WORKSPACE_PEOPLE_DIR, exist_ok=True)
     except Exception as e:
         logger.warning(f"创建人物记忆目录失败 {WORKSPACE_PEOPLE_DIR}: {e}")
+
+    # 形象参考图目录：由 generate_appearance_reference 工具写入，通用文件工具被拦截。
+    try:
+        os.makedirs(WORKSPACE_APPEARANCE_REFS_DIR, exist_ok=True)
+    except Exception as e:
+        logger.warning(f"创建形象参考图目录失败 {WORKSPACE_APPEARANCE_REFS_DIR}: {e}")
 
 
 def _resolve_memory_file(filename: str) -> str:
@@ -222,6 +236,11 @@ def load_identity_context(
     else:
         logger.warning(f"SOUL.md 未找到或为空: {WORKSPACE_SOUL_FILE}")
 
+    # 形象（外貌）紧跟 SOUL：都是"她自己"的一部分。
+    appearance = _read_file_safe(WORKSPACE_APPEARANCE_FILE)
+    if appearance:
+        sections.append(f"<appearance>\n{appearance}\n</appearance>")
+
     user = _read_file_safe(WORKSPACE_USER_FILE)
     if user:
         sections.append(f"<user_profile>\n{user}\n</user_profile>")
@@ -265,7 +284,7 @@ def load_identity_context(
         "以下文件在每次会话开始时自动加载。如果 SOUL.md 存在，请体现其人设和语气。\n"
         "请使用通用文件工具 `read_file`、`write_file`、`edit_file` 来更新这些文件。\n"
         "⚠️ USER.md 描述的是你的**主人**，不一定是当前跟你说话的人（见 <current_speaker>）。\n"
-        "⚠️ 严格遵守各文件边界：SOUL=AI人设 | USER=主人信息 | SCHEDULE=作息日程 | MEMORY=长期记忆\n\n"
+        "⚠️ 严格遵守各文件边界：SOUL=AI人设 | APPEARANCE=你的外貌形象 | USER=主人信息 | SCHEDULE=作息日程 | MEMORY=长期记忆\n\n"
         + "\n\n".join(sections)
     )
 

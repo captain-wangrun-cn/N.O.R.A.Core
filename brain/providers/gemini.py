@@ -276,6 +276,108 @@ class GeminiProvider(BaseLLM):
             parts.append({"text": user_prompt})
         return parts
 
+    async def generate_image(
+        self,
+        prompt: str,
+        reference_images: Optional[List[Dict[str, Any]]] = None,
+    ) -> Dict[str, Any]:
+        """
+        文生图（Gemini image-out 模型，如 gemini-2.5-flash-image）。
+
+        走 REST `:generateContent`——与 _video_stream_via_rest 同样的理由：
+        SDK + 自定义 endpoint + inline_data 组合不可靠。
+
+        参考图格式与 multimodal_images 一致（mime_type / bytes / base64），
+        请求结构与普通多模态输入同构：图片作为 inline_data part 与文本并列。
+        """
+        if not prompt or not prompt.strip():
+            raise ValueError("generate_image 需要非空 prompt")
+
+        model_encoded = urllib.parse.quote(self.model_name)
+        url = f"{self.base_url}/v1beta/models/{model_encoded}:generateContent"
+        headers = {
+            "Content-Type": "application/json",
+            "x-goog-api-key": self.api_key,
+        }
+
+        parts: List[Dict[str, Any]] = [{"text": prompt}]
+        for ref in (reference_images or []):
+            mime_type = ref.get("mime_type") or "image/png"
+            b64 = ref.get("base64")
+            if not b64:
+                raw = ref.get("bytes")
+                if not raw:
+                    continue
+                b64 = base64.b64encode(raw).decode("utf-8") if isinstance(raw, bytes) else raw
+            parts.append({"inlineData": {"mimeType": mime_type, "data": b64}})
+
+        body: Dict[str, Any] = {
+            "contents": [{"role": "user", "parts": parts}],
+            "safetySettings": [
+                {"category": "HARM_CATEGORY_HARASSMENT", "threshold": "BLOCK_NONE"},
+                {"category": "HARM_CATEGORY_HATE_SPEECH", "threshold": "BLOCK_NONE"},
+                {"category": "HARM_CATEGORY_SEXUALLY_EXPLICIT", "threshold": "BLOCK_NONE"},
+                {"category": "HARM_CATEGORY_DANGEROUS_CONTENT", "threshold": "BLOCK_NONE"},
+            ],
+            "generationConfig": {"responseModalities": ["TEXT", "IMAGE"]},
+        }
+
+        timeout = aiohttp.ClientTimeout(total=180)
+        payload: Optional[Dict[str, Any]] = None
+
+        # 部分端点/模型不接受 responseModalities，400 时去掉该字段重试一次。
+        for attempt in range(2):
+            async with aiohttp.ClientSession(timeout=timeout) as session:
+                async with session.post(url, headers=headers, json=body) as resp:
+                    text = await resp.text()
+                    if resp.status == 200:
+                        payload = json.loads(text)
+                        break
+                    if resp.status == 400 and attempt == 0 and "generationConfig" in body:
+                        logger.warning(
+                            f"Gemini 生图 400，去掉 responseModalities 重试。响应: {text[:300]}"
+                        )
+                        body.pop("generationConfig", None)
+                        continue
+                    raise RuntimeError(
+                        f"Gemini 生图失败 HTTP {resp.status}: {text[:500]}"
+                    )
+
+        if payload is None:
+            raise RuntimeError("Gemini 生图未返回响应")
+
+        usage_meta = payload.get("usageMetadata") or {}
+        if usage_meta:
+            self.last_usage = {
+                "input_tokens": usage_meta.get("promptTokenCount", 0) or 0,
+                "output_tokens": (
+                    usage_meta.get("candidatesTokenCount", 0)
+                    or usage_meta.get("totalTokenCount", 0)
+                    or 0
+                ),
+            }
+
+        candidates = payload.get("candidates") or []
+        for candidate in candidates:
+            for part in ((candidate.get("content") or {}).get("parts") or []):
+                inline = part.get("inlineData") or part.get("inline_data")
+                if not inline:
+                    continue
+                data = inline.get("data")
+                if not data:
+                    continue
+                return {
+                    "bytes": base64.b64decode(data),
+                    "mime_type": inline.get("mimeType") or inline.get("mime_type") or "image/png",
+                }
+
+        # 没有图片：大概率是被安全策略拦了，或者模型只回了文本。
+        finish_reason = (candidates[0].get("finishReason") if candidates else "") or ""
+        feedback = payload.get("promptFeedback") or {}
+        raise RuntimeError(
+            f"Gemini 生图未返回图片数据 (finishReason={finish_reason}, promptFeedback={feedback})"
+        )
+
     def _convert_history_to_rest(self, history: List[Dict[str, str]]) -> List[Dict]:
         """将 temp_history 转换为 REST API 格式的 contents 列表。"""
         contents = []

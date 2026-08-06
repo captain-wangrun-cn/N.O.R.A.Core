@@ -21,6 +21,7 @@ from brain.prompts import (
     load_adapter_prompt,
 )
 from skills.loader import SkillLoader
+from brain.appearance import draw_models_configured
 from core.message_handler import group_message_content
 from core.message_dedup import drop_current_user_message
 from core.routing import (
@@ -438,6 +439,8 @@ class FrontBrainMixin:
             tool_intro_block=tool_intro_block,
             skill_intro_block=skill_intro_block,
             proactive_context=proactive_context,
+            # 未配置 draw / draw_desc 时不注入 [DRAW:] 说明，避免前脑输出无法执行的标记
+            draw_enabled=draw_models_configured(),
         )
         if yesterday_memory_block:
             system_prompt = system_prompt + "\n\n---\n" + yesterday_memory_block
@@ -695,7 +698,7 @@ class FrontBrainMixin:
                 logger.warning(f"[{chat_id}] 前脑 API 异常补救重试失败，保持原流程。", exc_info=True)
         logger.info(
             "[%s] 前脑结果: needs_backend=%s should_reply=%s need_follow=%s "
-            "force_online=%s force_semi_online=%s keep_segment_open=%s reply_length=%d",
+            "force_online=%s force_semi_online=%s keep_segment_open=%s draw=%s reply_length=%d",
             chat_id,
             parsed["needs_backend"],
             parsed.get("should_reply"),
@@ -703,6 +706,7 @@ class FrontBrainMixin:
             parsed.get("force_online", False),
             parsed.get("force_semi_online", False),
             parsed.get("keep_segment_open", False),
+            bool(parsed.get("draw_request")),
             len(str(parsed.get("user_reply", ""))),
         )
         await self._send_debug(
@@ -713,6 +717,7 @@ class FrontBrainMixin:
             f"need_follow={parsed.get('need_follow')}\n"
             f"keep_segment_open={parsed.get('keep_segment_open')}\n"
             f"retract_message_target={parsed.get('retract_message_target', '')}\n"
+            f"生图要求: {str(parsed.get('draw_request', ''))[:120]}\n"
             f"回复: {parsed['user_reply'][:200]}"
         )
 
@@ -727,6 +732,7 @@ class FrontBrainMixin:
             "force_online": parsed.get("force_online", False),
             "keep_segment_open": parsed.get("keep_segment_open", False),
             "retract_message_target": parsed.get("retract_message_target", ""),
+            "draw_request": parsed.get("draw_request", ""),
             "route": parsed.get("route"),
             "raw_response": response_text,
         }

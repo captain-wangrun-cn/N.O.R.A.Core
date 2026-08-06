@@ -33,6 +33,7 @@ TOOL_INTROS = {
     "exec_command": "执行受限的系统命令，作为无法用高层工具时的兜底；默认工作目录为 workspace 根目录。",
     "view_media": "读取本地媒体文件或检索用户之前发送给 AI 的历史图片/视频；可用 question 参数指定希望多模态模型围绕媒体回答的问题，可用 type 参数筛选 image/video。",
     "crop_image_for_llm": "裁剪图片以便模型分析，用户要求仔细观察图片某个部分时可调用。",
+    "generate_appearance_reference": "按 APPEARANCE.md 生成自己的形象参考图并存入 appearance/refs/，锚定后续所有生图的视觉一致性；参考图只能用这个工具管理。",
     "report_progress": "向用户发送阶段性进度汇报，适合长任务中途更新。",
     "set_alarm": "设置提醒或倒计时闹钟，适合提醒/日程。",
     "list_alarms": "查看所有未触发的闹钟，适合确认已有提醒。",
@@ -166,6 +167,13 @@ class ToolManager:
         self.register(self.exec_command)
         self.register(self.view_media)
         self.register(self.crop_image_for_llm)
+        # 形象参考图工具（仅在配置了 draw 模型时注册）
+        try:
+            from config import get_model_name as _get_model_name
+            if _get_model_name("draw"):
+                self.register(self.generate_appearance_reference)
+        except Exception as e:
+            logger.debug(f"形象参考图工具注册跳过: {e}")
         self.register(self.report_progress)
         self.register(self.read_secret_vault)
         self.register(self.write_secret_vault)
@@ -643,6 +651,14 @@ class ToolManager:
             return False, "Access denied: CUSTOM.md 由用户管理，禁止通过文件工具读取/修改。"
         if basename in SENSITIVE_FILES:
             return False, f"Access denied: '{basename}' contains sensitive data (API keys, tokens). You should not read this file."
+        # 目录级规则：形象参考图是视觉一致性的锚，被通用文件工具改掉会让形象突变，
+        # 而且它们是二进制图片，本来也不该走文本工具。
+        normalized = abs_path.replace("\\", "/")
+        if "/appearance/refs/" in normalized or normalized.endswith("/appearance/refs"):
+            return False, (
+                "Access denied: 形象参考图请用 generate_appearance_reference 工具管理，"
+                "不要用文件工具直接读写 appearance/refs/。"
+            )
         return True, ""
 
     def _resolve_workspace_path(self, path: str) -> str:
@@ -1411,6 +1427,136 @@ class ToolManager:
                 return "\n".join(lines)
         except Exception as e:
             return f"Error cropping image: {e}"
+
+    # ------------------------------------------------------------------
+    # 形象参考图工具 (Appearance Reference)
+    # ------------------------------------------------------------------
+
+    async def generate_appearance_reference(
+        self,
+        requirement: str,
+        view: str,
+        usage: str = "",
+        replace: bool = False,
+    ) -> str:
+        """
+        Generates an appearance reference image for yourself and saves it to the appearance refs folder.
+
+        Reference images anchor your visual identity — every later image generation uses them
+        to keep your appearance consistent. Generate one when you don't have a reference for
+        a needed view (face / front / side), or when your appearance setting has changed.
+
+        Requires appearance/APPEARANCE.md to describe how you look; it is the only basis for
+        the image. Write it first, then call this.
+
+        :param requirement: What to depict, e.g. "面部特写，正面，中性表情，白色背景". Keep it neutral and reusable, not a scene.
+        :param view: Short view key used as the filename, e.g. "face" / "front" / "side".
+        :param usage: When this reference should be used, written into manifest.json. E.g. "画脸/半身/自拍时优先用".
+        :param replace: Set true to overwrite an existing reference for the same view. Ask the user first — overwriting changes how you look.
+        """
+        from brain import appearance as appearance_lib
+        import config
+
+        view_key = "".join(c for c in str(view or "").strip() if c.isalnum() or c in "-_")
+        if not view_key:
+            return "Error: `view` 不能为空，且只能包含字母/数字/-/_（它会作为文件名，如 face / front / side）。"
+
+        requirement_text = str(requirement or "").strip()
+        if not requirement_text:
+            return "Error: `requirement` 不能为空——要说清这张参考图画什么（视角、表情、背景）。"
+
+        if not config.get_model_name("draw"):
+            return "Error: 未配置 draw 模型（文生图），无法生成参考图。这是配置问题，告诉主人即可，不要重试。"
+
+        appearance_text = appearance_lib.read_appearance_text()
+        if not appearance_text:
+            return (
+                "Error: appearance/APPEARANCE.md 不存在或为空。参考图完全依据它生成，"
+                "请先把你的外貌描述写进这个文件（发色、发型、瞳色、体型、常穿等），再生成参考图。"
+            )
+
+        existing_path = appearance_lib.find_reference_path(view_key)
+        if existing_path and not replace:
+            return (
+                f"参考图 `{view_key}` 已存在：{existing_path}\n"
+                "没有覆盖。参考图是你形象的锚，覆盖会改变你的样子——"
+                "确认要重画时先征得主人同意，再用 replace=true 调用；"
+                "或者换一个 view（如 front / side / back）生成新视角。"
+            )
+
+        # 已有的其他视角作为锚：否则"正面"和"侧面"会是两个不同的人。
+        anchor_files = [
+            name for name in appearance_lib.list_reference_files()
+            if os.path.splitext(name)[0] != view_key
+        ]
+        reference_images = appearance_lib.load_reference_images(anchor_files)
+
+        prompt_lines = [
+            "Generate a character reference image (reference sheet style) of the following character.",
+            "This image will be reused as a visual anchor for future generations, so keep it clean and neutral:",
+            "plain/simple background, even lighting, no text, no watermark, no collage, single character only.",
+            "",
+            "[Character appearance specification]",
+            appearance_text,
+            "",
+            "[This reference image should depict]",
+            requirement_text,
+        ]
+        if reference_images:
+            prompt_lines += [
+                "",
+                "[Existing reference images]",
+                "The attached images are existing reference images of the SAME character. "
+                "Keep the face, hair, body proportions and distinguishing features identical to them; "
+                "only change the view/pose as requested above.",
+            ]
+        prompt = "\n".join(prompt_lines)
+
+        try:
+            from brain.llm import get_llm_client
+
+            draw_client = get_llm_client(model_alias="draw")
+            result = await draw_client.generate_image(prompt, reference_images=reference_images or None)
+        except NotImplementedError as e:
+            logger.error(f"draw provider 不支持文生图: {e}")
+            return f"Error: 当前 draw 模型所在 provider 不支持文生图（{e}）。这是配置问题，告诉主人，不要重试。"
+        except Exception as e:
+            logger.error(f"生成参考图失败 view={view_key}: {e}", exc_info=True)
+            return f"Error: 生图失败：{e}"
+
+        image_bytes = (result or {}).get("bytes")
+        if not image_bytes:
+            return "Error: 生图返回空数据，未保存参考图。"
+
+        try:
+            saved_path = appearance_lib.save_reference_image(
+                view=view_key,
+                image_bytes=image_bytes,
+                mime_type=(result or {}).get("mime_type") or "image/png",
+                usage=usage,
+            )
+        except Exception as e:
+            logger.error(f"保存参考图失败 view={view_key}: {e}", exc_info=True)
+            return f"Error: 生图成功但保存失败：{e}"
+
+        lines = [
+            f"参考图已保存: {saved_path}",
+            f"view={view_key}" + (f"，用途标注：{usage.strip()}" if usage and usage.strip() else "，未标注用途"),
+        ]
+        if existing_path:
+            lines.append("（已覆盖同名旧参考图，你的形象锚已更新。）")
+        if reference_images:
+            lines.append(f"生成时带了 {len(reference_images)} 张已有参考图作为锚，保持是同一个人。")
+        else:
+            lines.append("这是第一张参考图，之后生成新视角时会以它为锚。")
+        lines.append(
+            f"要让主人看到这张图，请在你的回复里带上这一行：[image: {saved_path}]"
+        )
+        lines.append(
+            "注意你自己并没有看到图的内容，不要描述它长什么样；让主人确认像不像，"
+            "不满意再用 replace=true 重画。"
+        )
+        return "\n".join(lines)
 
     # ------------------------------------------------------------------
     # 动态闹钟工具 (Alarm Tools)

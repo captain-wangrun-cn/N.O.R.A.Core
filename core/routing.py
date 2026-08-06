@@ -73,6 +73,9 @@ _RETRACT_INT_PATTERN = re.compile(r"^-?\d+$")
 _USE_IMAGE_MODEL_PATTERN = re.compile(r"\[USE_IMAGE_MODEL\]|use_image_model\s*[:=]\s*(true|1|yes)", re.IGNORECASE)
 # 可选：任务指示块
 _TASK_INSTRUCTION_PATTERN = re.compile(r"\[TASK_INSTRUCTION\](.*?)\[/TASK_INSTRUCTION\]", re.IGNORECASE | re.DOTALL)
+# 可选：生成形象图（旁路生图，独立于 NEED_BACKEND）。要求文本里不能带 `]`，
+# front_brain.jinja 已明确禁止，这里非贪婪匹配到第一个 `]` 为止。
+_DRAW_PATTERN = re.compile(r"\[DRAW\s*:\s*([^\]]*)\]", re.IGNORECASE)
 
 # ── 路由重定向标记（多平台/多场景）──
 # [platform:X]  指定目标平台（telegram / onebotv11 / qq...）
@@ -178,6 +181,9 @@ def sanitize_adapter_output_text(text: str) -> str:
     cleaned = _ROUTE_SCENE_PATTERN.sub("", cleaned)
     cleaned = cleaned.replace(_SEMI_ONLINE_SIGNAL, "")
     cleaned = cleaned.replace(_ONLINE_SIGNAL, "")
+    # 兜底剥离生图标记：它只在前脑主对话轮被消费，其它任何发送路径（后脑最终文本、
+    # 主动消息、轮询审查）出现都只是泄漏，绝不能作为字面文本发给用户。
+    cleaned = _DRAW_PATTERN.sub("", cleaned)
     cleaned = re.sub(r"\n{3,}", "\n\n", cleaned)
     return cleaned.strip()
 
@@ -212,6 +218,7 @@ def parse_front_brain_response(response_text: str) -> dict:
             "force_online": False,
             "keep_segment_open": False,
             "retract_message_target": "",
+            "draw_request": "",
             "route": _empty_route(),
         }
 
@@ -243,6 +250,15 @@ def parse_front_brain_response(response_text: str) -> dict:
     if task_match:
         task_instruction = task_match.group(1).strip()
 
+    # 提取生图要求（旁路生图；与 needs_backend 互不影响）。
+    # 只取第一个：单轮只画一张，多余的标记会被清理掉但不触发第二次生图。
+    draw_request = ""
+    draw_match = _DRAW_PATTERN.search(response_text)
+    if draw_match:
+        draw_request = draw_match.group(1).strip()
+        if not draw_request:
+            logger.warning("前脑输出了空的 [DRAW:] 标记，已忽略")
+
     # 仅有后脑标记、却没有明确任务指示时，默认视为普通聊天，避免把
     # “嗯嗯/好的/收到/晚安” 这类轻量回复误升级为后脑任务。
     if needs_backend and not task_instruction:
@@ -270,6 +286,7 @@ def parse_front_brain_response(response_text: str) -> dict:
     user_reply = _RETRACT_MESSAGE_PATTERN.sub("", user_reply)
     user_reply = _USE_IMAGE_MODEL_PATTERN.sub("", user_reply)
     user_reply = _TASK_INSTRUCTION_PATTERN.sub("", user_reply)
+    user_reply = _DRAW_PATTERN.sub("", user_reply)
     user_reply = sanitize_adapter_output_text(user_reply)
 
     if not should_reply:
@@ -286,6 +303,7 @@ def parse_front_brain_response(response_text: str) -> dict:
         "force_online": force_online,
         "keep_segment_open": keep_segment_open,
         "retract_message_target": retract_target,
+        "draw_request": draw_request,
         "route": route,
     }
 
@@ -373,6 +391,11 @@ def parse_front_brain_review(response_text: str) -> dict:
     # 清理 continue 标记文本，避免泄漏给用户
     user_reply = _CONTINUE_PATTERN.sub("", user_reply)
     user_reply = _TASK_INSTRUCTION_PATTERN.sub("", user_reply)
+    # 轮询审查轮**不触发**生图（生图只从主对话轮进入），但标记必须剥掉，
+    # 否则模型在审查轮输出 [DRAW:...] 会作为字面文本泄漏给用户。
+    if _DRAW_PATTERN.search(user_reply):
+        logger.info("前脑审查轮出现 [DRAW:] 标记，已剥离（审查轮不触发生图）")
+    user_reply = _DRAW_PATTERN.sub("", user_reply)
     user_reply = sanitize_adapter_output_text(user_reply)
 
     if not should_reply:

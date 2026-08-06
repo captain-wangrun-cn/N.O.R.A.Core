@@ -46,6 +46,8 @@ roles:
   video: "视频模型 (用于视频输入理解)"
   summary: "总结模型 (用于消息历史压缩)"
   fast-image: "表情包描述模型 (用于表情包/sticker 内容理解)"
+  draw: "文生图模型 (用于生成形象图，需支持参考图输入)"
+  draw_desc: "生图提示词模型 (把要求写成生图提示词的普通文本模型)"
 
 roles_usage:
   smart: "默认主对话、复杂推理、工具规划、多轮决策"
@@ -55,3 +57,5 @@ roles_usage:
   video: "当消息含视频时用于视频内容理解与标签生成"
   summary: "消息历史压缩、摘要归档、上下文精炼"
   fast-image: "快速描述表情包/sticker 的情绪或含义，注入上下文供 followup 使用"
+  draw: "根据提示词和形象参考图生成图片（[DRAW:] 标记与参考图工具）"
+  draw_desc: "读取 APPEARANCE.md 与场景上下文，产出生图提示词并挑选参考图"

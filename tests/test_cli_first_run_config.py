@@ -55,7 +55,8 @@ def test_step_models_enables_security_when_security_model_configured(monkeypatch
     monkeypatch.setattr(cli.StepModels, "select_model", lambda self, models, role, provider: f"{role}-model")
     monkeypatch.setattr(cli.StepModels, "_prompt_price", lambda self, model_name: None)
 
-    confirmations = iter([False, True, False])
+    # 可选模型的确认顺序：video / security / fast-image / draw
+    confirmations = iter([False, True, False, False])
     monkeypatch.setattr(cli.questionary, "confirm", lambda *args, **kwargs: _Confirm(next(confirmations)))
 
     step = cli.StepModels(state)
@@ -64,6 +65,8 @@ def test_step_models_enables_security_when_security_model_configured(monkeypatch
     assert state["security"]["enabled"] is True
     assert state["models"]["security"] == "security-model"
     assert state["model_providers"]["security"] == "gemini"
+    assert "draw" not in state["models"]
+    assert "draw_desc" not in state["models"]
     assert not (tmp_path / "config.yml").exists()
 
 

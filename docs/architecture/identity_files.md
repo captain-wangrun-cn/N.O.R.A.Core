@@ -7,6 +7,9 @@
 | 文件 | 作用 | 写入/读取规则 | 备注 |
 | --- | --- | --- | --- |
 | `SOUL.md` | AI 的人设、语气、边界 | 仅当用户明确要求调整人设/语气时更新，并告知用户；前脑发现变更需求需 `[NEED_BACKEND]` 交后脑写入 | 禁止写入用户信息 |
+| `appearance/APPEARANCE.md` | AI 的**外貌形象**（体征、发型、常穿、固定特征） | 形象设定变化时更新并告知用户；前脑标记 `[NEED_BACKEND]` 交后脑写入 | 只写外貌；性格语气仍归 `SOUL.md`。它是所有生图的文字锚 |
+| `appearance/refs/` | 形象参考图 + `manifest.json` | **只能**用 `generate_appearance_reference` 工具生成/覆盖 | 通用文件工具读写被 `_is_path_safe` 目录级拦截；覆盖会改变形象，须先征得用户同意 |
+| `appearance/generated/YYYY-MM-DD/` | `[DRAW:]` 日常生图产物 | 由生图链路自动落盘，元数据入 Mongo `appearance_images` | 只记 request / draw_prompt / 路径 / 时间；不入 Qdrant |
 | `USER.md` | **主人**画像：偏好、背景、联系方式、习惯 | 任何对话中听到的**主人**信息可主动更新（无需用户说“记一下”）；前脑标记 `[NEED_BACKEND]` 后脑写入 | 禁止写 AI 人设/日程；**只写主人，不写访客** |
 | `SCHEDULE.md` | 作息与日程安排，驱动主动消息调度 | 用户提到作息/日程变化或与记录不符时提醒并更新；前脑标记 `[NEED_BACKEND]` | 仅写作息/日程，禁止其他内容 |
 | `data/memory/MEMORY.md` | 长期记忆：决策、约定、持久事实、经验 | 重要信息随时记录；前脑标记 `[NEED_BACKEND]` | 保持精炼，定期整理 |
@@ -29,10 +32,22 @@
 - 访客笔记写 `data/memory/people/<昵称>.md`，不写进 USER.md。详见
   [跨平台接力与五层身份模型](./cross-platform-relay.md)。
 
+## 形象系统（APPEARANCE + 生图）
+
+文字在前、图在后：`APPEARANCE.md` 是唯一的形象依据，参考图依据它生成，日常生图再以参考图锚定一致性。
+
+两条生图路径，共用 `brain/appearance.py` 的原语（读 md / 载参考图 / 落盘 / 维护 manifest）：
+
+- **参考图（后脑工具）**：`generate_appearance_reference(requirement, view, usage, replace)` → 直接用 `APPEARANCE.md` + 已有参考图作锚生成，存 `refs/{view}.png`。不经 `draw_desc`——requirement 已是显式描述，再套一层改写只会引入漂移。
+- **日常生图（前脑标记）**：`[DRAW:要求]` → `draw_desc` 读 APPEARANCE.md + 要求 + 当前消息段 + 当前时间 + SCHEDULE.md + SOUL.md，产出英文提示词并**自己挑**参考图 → `draw` 出图 → 落盘 + 入库 + 追发。文字先发、图后到；单轮只一张；失败只记日志不追发安慰文本。
+
+两个模型别名 `draw`（文生图）/ `draw_desc`（文本）都配上才启用；否则 `[DRAW:]` 说明不注入前脑提示、参考图工具不注册。OpenAI 与 Gemini 端点都支持（`BaseLLM.generate_image`）。
+
 ## 关联实现
-- Prompt 注入：`brain/prompts.py` 加载 SOUL/USER/MEMORY/SCHEDULE 和 CUSTOM（只读）；前脑模板支持 SCHEDULE/CUSTOM 块；路由规则在 `brain/templates/front_brain.jinja`。
-- 专用工具：`read_secret_vault` / `write_secret_vault`（`brain/tools.py`），加密存储与密钥管理。
-- 敏感防护：`brain/tools.py` 在 `_is_path_safe` / `write_file` / `exec_command` 层阻断对敏感文件的通用访问。
+- Prompt 注入：`brain/prompts.py` 加载 SOUL/APPEARANCE/USER/MEMORY/SCHEDULE 和 CUSTOM（只读）；`<appearance>` 紧跟 `<soul>` 注入；前脑模板支持 SCHEDULE/CUSTOM 块；路由规则在 `brain/templates/front_brain.jinja`。
+- 专用工具：`read_secret_vault` / `write_secret_vault`、`generate_appearance_reference`（`brain/tools.py`）。
+- 生图链路：`core/appearance_gen.py`（AppearanceGenMixin）、`brain/appearance.py`、`brain/templates/draw_desc.jinja`、`memory/appearance_store.py`；标记解析在 `core/routing.py` 的**两个**前脑解析器里。
+- 敏感防护：`brain/tools.py` 在 `_is_path_safe` / `write_file` / `exec_command` 层阻断对敏感文件的通用访问；`_is_path_safe` 还有唯一一条目录级规则，拦 `appearance/refs/`。
 
 ## 借鉴
 - 部分文件的设计思路受到 openclaw 启发，并结合本项目的双脑架构与安全隔离需求进行调整。

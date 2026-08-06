@@ -37,7 +37,7 @@ core/controller.py            NoraController.handle_message()
 | OneBot v11 连接 | `adapters/onebotv11/config.json` | `websocket_url` / `access_token` / `enable_napcat_api` |
 | LLM Provider | `config.yml` → `llm.provider` | `gemini` 或 `openai` |
 | API Keys | `config.yml` → `llm.api_keys.*` | |
-| 模型别名 | `config.yml` → `llm.models.*` | `smart` / `fast` / `coder` / `image` / `video` / `fast-image`(可选) / `summary` |
+| 模型别名 | `config.yml` → `llm.models.*` | `smart` / `fast` / `coder` / `image` / `video` / `fast-image`(可选) / `draw`+`draw_desc`(可选，成对) / `summary` |
 | 消息历史 | `config.yml` → `memory.message_history.*` | `raw_window`, `compress_window` 等 |
 | 成本跟踪 | `config.yml` → `cost_tracking.*` | `enabled`, `custom_prices` |
 | 主动消息调度 | `config.yml` → `schedule.*` | `enabled` |
@@ -68,11 +68,12 @@ core/controller.py            NoraController.handle_message()
 
 ### `brain/tools.py`
 - `ToolManager` — 工具注册、schema 生成、执行
-  - 内置工具：`create_new_skill`, `execute_skill`, `execute_tool_plan`, `read_file`, `search`, `write_file`, `edit_file`, `list_dir`, `get_available_skills`, `exec_command`, `view_media`, `crop_image_for_llm`, `set_alarm`, `list_alarms`, `cancel_alarm`
+  - 内置工具：`create_new_skill`, `execute_skill`, `execute_tool_plan`, `read_file`, `search`, `write_file`, `edit_file`, `list_dir`, `get_available_skills`, `exec_command`, `view_media`, `crop_image_for_llm`, `generate_appearance_reference`(仅配置 `draw` 时注册), `set_alarm`, `list_alarms`, `cancel_alarm`
   - `view_media`: 默认 `return_image=true`，输出 `[image: abs_path]` 或 `[video: abs_path]` MediaTag，后脑下一轮会读取真实图片/视频并临时使用 image/video 模型；可用 `question` 参数指定对媒体要问的问题，且 `question` 非空时会自动强制 `return_image=true`。可用 `type` 参数筛选（`image`/`video`，不设则全部）。只查元数据/标签/OCR 时可设 `return_image=false`。
   - `view_media` 的 `keyword`：走**词法检索 + 语义检索 RRF 融合**（`memory/image_store.py`）。词法路 `search_by_lexical()` 分词 + CJK bigram 扩展 + 字段加权打分（tags 3.0 / description 2.0 / ocr_text 1.5），语义路走 Qdrant；两路各取 `limit+offset` 条、都不自己跳 offset，融合排序后统一切片。两路皆空才回退 MongoDB `$text`。
   - 工具回灌媒体有**单轮数量上限**：图片 4 个（带 `question` 时 3 个）、视频 1 个（`core/back_brain.py` 的 `MAX_TOOL_IMAGES_PER_TURN` 等）。被截断时 `tool_result` 会附带提示，引导收窄查询或用 `page` 翻页。
   - 回查媒体的**分析轮不用人设**：走 `brain/templates/media_analysis.jinja`，且该轮清空对话历史、不给工具、流式输出不发用户（详见 §6）。
+  - `generate_appearance_reference(requirement, view, usage, replace)`: 按 `appearance/APPEARANCE.md` 生成形象参考图存进 `appearance/refs/{view}.png` 并更新 `manifest.json`。已有同名 view 必须显式 `replace=true` 才覆盖（覆盖会改变形象，须先问用户）；生成新视角时自动带上已有参考图作锚。不经 `draw_desc`。`appearance/refs/` 被 `_is_path_safe` 目录级拦截，通用文件工具读写会被拒。
   - IMAGE_TAGS / IMAGE_OCR / IMAGE_DESC 质量兜底：缺失标签或标签未使用英文逗号分隔时，会触发一次仅请求 `IMAGE_TAGS` 的补齐重试。
   - 详细说明：`docs/architecture/tools.md`
 
@@ -192,6 +193,7 @@ python tui.py
 | `brain/templates/system.jinja` | **主系统提示词** — 所有行为规则、协议、约定 |
 | `brain/templates/persona_nora.jinja` | 人设提示词回退（Nora 的性格，当 SOUL.md 不存在时使用） |
 | `brain/templates/media_analysis.jinja` | **回查媒体的分析轮专用**（`view_media` 返回图片/视频后的那一轮）：无人设的"媒体内容分析引擎"，输出是给上层推理模型看的内部观察数据 |
+| `brain/templates/draw_desc.jinja` | **`[DRAW:]` 生图提示词轮专用**：无人设的"生图提示词生成引擎"，输出直接进文生图模型（用户看不到）。SOUL 在这里是判断表情/姿态的**素材**，不是让它扮演 Nora |
 | `brain/prompts.py` | 提示词组装逻辑 + 身份上下文加载 |
 | `adapters/PROMPT.md` | 通用平台适配协议：跨平台人格连续性、媒体标记、`[SPLIT]` |
 | `adapters/telegram/PROMPT.md` | Telegram 平台特定提示（格式、长度等） |
@@ -245,6 +247,17 @@ python tui.py
   - 延时语法：`[SPLIT:1.5]` 表示下一段前停顿 1.5 秒。
   - 说明：`[SPLIT]` 为默认短停顿，`[SPLIT:秒数]` 为显式延时控制。
 
+- `[DRAW:要求]`
+  - 含义：生成形象图（自拍/穿搭等）。要求里写场景、动作、表情、构图，**不能带方括号**。
+  - 行为：旁路通路，与 `[NEED_BACKEND]` 互不影响、不进后脑工具循环。文字先发，图后台生成完追发。
+    单轮只取第一个；per-runtime_key 只保留最新一张。
+  - 前置：`draw` + `draw_desc` 都配置；否则前脑提示里不注入该说明。
+  - 触发范围：只在**主对话轮**。轮询审查轮、主动消息轮只剥离不生图。
+  - 落盘：`appearance/generated/YYYY-MM-DD/draw_xxxxxxxx.png`，元数据进 Mongo `appearance_images`。
+  - 失败：只记日志，不向用户追发安慰或报错文本。
+  - 改形象设定（不是拍照）→ 走 `[TASK_INSTRUCTION]`+`[NEED_BACKEND]`，让后脑改 `APPEARANCE.md` +
+    调 `generate_appearance_reference`。
+
 ---
 
 ## 7. 身份与记忆文件（Identity & Memory）
@@ -252,11 +265,16 @@ python tui.py
 | 文件 | 作用 | 修改方式 |
 |------|------|-----------|
 | `SOUL.md` | AI 的灵魂：人设、语气、边界、性格 | ✅ 通用文件工具 `read_file`/`write_file`/`edit_file` |
+| `appearance/APPEARANCE.md` | AI 的外貌形象：体征、发型、常穿、固定特征 | ✅ 通用文件工具 |
+| `appearance/refs/` | 形象参考图（视觉一致性的锚）+ `manifest.json` | ❌ 通用文件工具被目录级拦截；只能用 `generate_appearance_reference` |
 | `USER.md` | 用户档案：名字、偏好、背景 | ✅ 通用文件工具 |
 | `data/memory/MEMORY.md` | 长期记忆：决策、偏好、事实 | ✅ 通用文件工具 |
 | `data/memory/YYYY-MM-DD.md` | 每日记忆日志 | ✅ 通用文件工具（按需读取） |
 
 > 注意：
 > - N.O.R.A Core 不是“每次会话全新实例”，这些文件主要作为可变 prompt 块。
-> - 当前默认仅自动注入 SOUL/USER/MEMORY，`daily memory` 不自动注入（按需读取）。
-> - 首次运行时若 workspace 缺少 SOUL/USER/MEMORY，会自动从仓库根默认文件复制过去。
+> - 当前默认仅自动注入 SOUL/APPEARANCE/USER/MEMORY，`daily memory` 不自动注入（按需读取）。
+>   `<appearance>` 紧跟 `<soul>` 注入——形象是"她自己"的一部分。
+> - 首次运行时若 workspace 缺少 SOUL/APPEARANCE/USER/MEMORY，会自动从仓库根默认文件复制过去。
+> - 形象系统是**文字在前、图在后**：`APPEARANCE.md` 写清楚了才生成参考图；改了描述则已有参考图
+>   与文字不符，需要 `replace=true` 重新生成。详见 `docs/architecture/identity_files.md`。

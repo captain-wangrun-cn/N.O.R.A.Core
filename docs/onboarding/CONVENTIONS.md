@@ -65,6 +65,17 @@
 1. 在 `brain/tools.py` 中注册函数
 2. 确保 docstring 完整（用于自动生成 schema）
 3. 参数类型标注正确（`Optional[int]`、`float` 等均已支持）
+4. 在 `TOOL_INTROS` 里加一句简介（会注入前脑/后脑提示词）
+5. 依赖可选配置的工具（如 `generate_appearance_reference` 依赖 `draw` 模型）在
+   `_register_tools()` 里条件注册，别让模型看到调用不了的工具
+
+### 添加新前脑标记
+1. 在 `core/routing.py` 定义常量/正则
+2. **两个解析器都要改**：`parse_front_brain_response()` 与 `parse_front_brain_review()`。
+   审查轮就算不消费该标记，也必须剥离，否则会作为字面文本发给用户
+3. 需要时在 `sanitize_adapter_output_text()` 里加兜底剥离（覆盖后脑/主动消息等其它发送路径）
+4. 在 `brain/templates/front_brain.jinja` 写用法说明（可选能力用 `{% if %}` 包住）
+5. 在 `tests/test_routing.py` 补测试：正常解析 + 标记缺失 + 审查轮剥离 + 与既有标记共存
 
 ### 添加新技能
 1. 使用 `create_new_skill` 工具生成标准目录

@@ -537,13 +537,13 @@ def show_config_summary() -> None:
     model_providers = llm_cfg.get("model_providers", {}) or {}
     if models:
         questionary.print("模型角色:", style="bold")
-        for role in ["smart", "fast", "coder", "image", "video", "security", "fast-image", "summary"]:
+        for role in ["smart", "fast", "coder", "image", "video", "security", "fast-image", "draw", "draw_desc", "summary"]:
             model_name = models.get(role)
             if model_name:
                 bound = model_providers.get(role)
                 bound_str = f" → {bound}" if bound else ""
                 questionary.print(f"  - {role}: {model_name}{bound_str}", style="")
-            elif role in ("video", "security", "fast-image"):
+            elif role in ("video", "security", "fast-image", "draw", "draw_desc"):
                 questionary.print(f"  - {role}: （可选，未配置）", style="italic")
             else:
                 questionary.print(f"  - {role}: {_status_emoji(False)} 未配置", style="bold red")
@@ -1372,7 +1372,7 @@ class StepModels(ConfigStep):
         model_providers = self.state.setdefault('model_providers', {})
         security_cfg = dict(self.state.get('security', {}) or {})
 
-        for role_key in ['smart', 'fast', 'coder', 'image', 'video', 'security', 'fast-image', 'summary']:
+        for role_key in ['smart', 'fast', 'coder', 'image', 'video', 'security', 'fast-image', 'draw', 'draw_desc', 'summary']:
             # video 模型为可选配置
             if role_key == 'video':
                 configure_video = questionary.confirm(
@@ -1414,6 +1414,21 @@ class StepModels(ConfigStep):
                 if not configure_fast_image:
                     models.pop('fast-image', None)
                     model_providers.pop('fast-image', None)
+                    continue
+
+            # draw / draw_desc 为可选配置（形象生图；两个都配上才启用，只配一个没有意义）
+            if role_key in ('draw', 'draw_desc'):
+                if role_key == 'draw':
+                    configure_draw = questionary.confirm(
+                        "是否配置形象生图模型？（可选，需文生图模型 + 提示词模型各一个；不配置则 [DRAW:] 标记与参考图工具不可用）",
+                        default=bool(models.get('draw') and models.get('draw_desc'))
+                    ).ask()
+                    if configure_draw is None:
+                        return False
+                    self._configure_draw_models = bool(configure_draw)
+                if not getattr(self, '_configure_draw_models', False):
+                    models.pop(role_key, None)
+                    model_providers.pop(role_key, None)
                     continue
 
             provider_name = self._select_provider_for_role(role_key, provider_entries)

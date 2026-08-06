@@ -280,3 +280,46 @@ def test_user_visible_sanitizer_strips_native_message_controls():
     cleaned = sanitize_user_visible_text("[reply:22][at:33]正文[reply:bad id][at]")
 
     assert cleaned == "正文"
+
+
+def test_front_brain_draw_marker_is_parsed_and_hidden():
+    result = parse_front_brain_response("等我拍一张！[DRAW:自拍,书桌前,微笑]")
+
+    assert result["draw_request"] == "自拍,书桌前,微笑"
+    assert result["user_reply"] == "等我拍一张！"
+    assert "[DRAW:" not in result["user_reply"]
+    assert result["needs_backend"] is False
+
+
+def test_front_brain_draw_marker_absent():
+    result = parse_front_brain_response("今天天气不错呀")
+
+    assert result["draw_request"] == ""
+
+
+def test_front_brain_review_draw_marker_is_stripped():
+    """轮询审查轮不触发生图，但标记必须剥掉，否则会作为字面文本泄漏给用户。"""
+    from core.routing import parse_front_brain_review
+
+    result = parse_front_brain_review("弄好啦[DRAW:自拍] [TASK_DONE]")
+
+    assert result["action"] == "done"
+    assert result["user_reply"] == "弄好啦"
+    assert "[DRAW:" not in result["user_reply"]
+
+
+def test_front_brain_draw_coexists_with_backend():
+    result = parse_front_brain_response(
+        "好我看看[DRAW:自拍,微笑][TASK_INSTRUCTION]\n查一下今天天气\n[/TASK_INSTRUCTION] [NEED_BACKEND]"
+    )
+
+    assert result["draw_request"] == "自拍,微笑"
+    assert result["needs_backend"] is True
+    assert result["task_instruction"] == "查一下今天天气"
+    assert result["user_reply"] == "好我看看"
+
+
+def test_adapter_output_sanitizer_strips_draw_marker_as_safety_net():
+    """生图标记只在前脑主对话轮被消费；任何其它发送路径出现都只是泄漏。"""
+    assert sanitize_adapter_output_text("拍好了[DRAW:自拍]") == "拍好了"
+    assert sanitize_user_visible_text("拍好了[DRAW:自拍]") == "拍好了"

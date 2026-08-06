@@ -1,4 +1,6 @@
 import asyncio
+import base64
+import io
 import openai
 import json
 import inspect
@@ -302,6 +304,108 @@ class OpenAIProvider(BaseLLM):
         if not parts:
             return user_prompt
         return parts
+
+    _IMAGE_EXT_BY_MIME = {
+        "image/png": ".png",
+        "image/jpeg": ".jpg",
+        "image/jpg": ".jpg",
+        "image/webp": ".webp",
+    }
+
+    async def _images_edit(self, prompt: str, files: List[Any]):
+        """
+        调 images.edit。多图签名（image=[f1, f2]）在部分 SDK 版本/兼容端点不被接受，
+        失败时退回单图（image=f1）——参考图丢一部分也比整个生图失败好。
+        """
+        try:
+            return await self.client.images.edit(model=self.model, image=files, prompt=prompt, n=1)
+        except Exception as e:
+            if len(files) == 1:
+                raise
+            logger.warning(
+                f"images.edit 多图签名失败（{type(e).__name__}: {e}），退回单张参考图重试。",
+                exc_info=True,
+            )
+            for f in files:
+                try:
+                    f.seek(0)
+                except Exception:
+                    pass
+            return await self.client.images.edit(model=self.model, image=files[0], prompt=prompt, n=1)
+
+    async def _images_generate(self, prompt: str):
+        """调 images.generate。dall-e-* 需要显式 response_format 才回 b64；gpt-image-1 不认这个参数。"""
+        try:
+            return await self.client.images.generate(
+                model=self.model, prompt=prompt, n=1, response_format="b64_json"
+            )
+        except Exception as e:
+            logger.warning(
+                f"images.generate 带 response_format 失败（{type(e).__name__}: {e}），去掉该参数重试。"
+            )
+            return await self.client.images.generate(model=self.model, prompt=prompt, n=1)
+
+    async def generate_image(
+        self,
+        prompt: str,
+        reference_images: Optional[List[Dict[str, Any]]] = None,
+    ) -> Dict[str, Any]:
+        """
+        文生图（OpenAI images API，如 gpt-image-1 / dall-e-3）。
+
+        不走 chat 端点：无参考图 → images.generate；有参考图 → images.edit。
+        参考图以 file-like 传入，`.name` 的后缀决定端点怎么判 mime，必须带上。
+        """
+        if not prompt or not prompt.strip():
+            raise ValueError("generate_image 需要非空 prompt")
+
+        files: List[Any] = []
+        for idx, ref in enumerate(reference_images or []):
+            raw = ref.get("bytes")
+            if not raw and ref.get("base64"):
+                raw = base64.b64decode(ref["base64"])
+            if not raw:
+                continue
+            mime = (ref.get("mime_type") or "image/png").lower()
+            buf = io.BytesIO(raw)
+            buf.name = f"ref_{idx}{self._IMAGE_EXT_BY_MIME.get(mime, '.png')}"
+            files.append(buf)
+
+        resp = await (self._images_edit(prompt, files) if files else self._images_generate(prompt))
+
+        usage = getattr(resp, "usage", None)
+        if usage is not None:
+            self.last_usage = {
+                "input_tokens": getattr(usage, "input_tokens", 0) or 0,
+                "output_tokens": getattr(usage, "output_tokens", 0) or 0,
+            }
+
+        data = getattr(resp, "data", None) or []
+        if not data:
+            raise RuntimeError(f"OpenAI 生图未返回 data: {resp}")
+
+        item = data[0]
+        b64 = getattr(item, "b64_json", None)
+        if b64:
+            return {"bytes": base64.b64decode(b64), "mime_type": "image/png"}
+
+        url = getattr(item, "url", None)
+        if url:
+            import aiohttp
+
+            timeout = aiohttp.ClientTimeout(total=120)
+            async with aiohttp.ClientSession(timeout=timeout) as session:
+                async with session.get(url) as r:
+                    if r.status != 200:
+                        raise RuntimeError(f"下载生成图失败 HTTP {r.status}: {url}")
+                    raw = await r.read()
+            mime = "image/png"
+            if url.split("?")[0].lower().endswith((".jpg", ".jpeg")):
+                mime = "image/jpeg"
+            return {"bytes": raw, "mime_type": mime}
+
+        raise RuntimeError("OpenAI 生图返回项既无 b64_json 也无 url")
+
     async def chat(
         self,
         system_prompt: str,

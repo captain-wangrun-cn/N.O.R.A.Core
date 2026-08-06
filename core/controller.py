@@ -37,6 +37,7 @@ from brain.prompts import get_lexicon_global_system_prompt_block
 from brain.tools import ToolManager
 from memory.rag import RAGEngine
 from memory.image_store import ImageStore
+from memory.appearance_store import AppearanceStore
 from memory.message_history import MessageHistory
 from skills.loader import SkillLoader
 from core.cost_tracker import get_cost_tracker
@@ -69,6 +70,7 @@ from core.front_brain import FrontBrainMixin
 from core.back_brain import BackBrainMixin
 from core.polling import PollingMixin
 from core.scheduler_mixin import SchedulerMixin
+from core.appearance_gen import AppearanceGenMixin
 
 logger = logging.getLogger(__name__)
 
@@ -80,6 +82,7 @@ class NoraController(
     BackBrainMixin,
     PollingMixin,
     SchedulerMixin,
+    AppearanceGenMixin,
 ):
     """处理机器人的核心业务逻辑。"""
 
@@ -143,6 +146,8 @@ class NoraController(
         self.llm = llm_client
         self.rag = RAGEngine()
         self.image_store = ImageStore()
+        # 形象生成图记录库（只记 request / draw_prompt / 路径 / 时间；Mongo 不可用时降级为不入库）
+        self.appearance_store = AppearanceStore()
         self.skill_loader = SkillLoader()
         self.sessions: Dict[str, Any] = {}
         self.generation_tasks: Dict[str, asyncio.Task] = {}
@@ -163,6 +168,8 @@ class NoraController(
         self._followup_suspended_until_idle: Dict[str, bool] = {}
         # 前脑生成任务：per-chat asyncio.Task；新消息到来时可被打断
         self.front_brain_tasks: Dict[str, asyncio.Task] = {}
+        # 形象生图任务：per-runtime_key asyncio.Task；同一窗口只保留最新一张请求
+        self.image_gen_tasks: Dict[str, asyncio.Task] = {}
         # 前脑流式生成的"实时缓冲"：per-chat 字符串，被打断时作为草稿带入下轮
         self.front_brain_partial: Dict[str, str] = {}
         # 后脑流式生成的"实时缓冲"：per-chat 字符串，被新图片打断时作为草稿带入合并重启
@@ -830,6 +837,8 @@ class NoraController(
 
     async def shutdown(self) -> None:
         """停止控制器持有的监听、Trigger 与调度服务。"""
+        for key in list(self.image_gen_tasks.keys()):
+            self.cancel_appearance_image_task(key)
         await self.group_listener.shutdown()
         await self.stop_triggers()
         self.stop_scheduler()
