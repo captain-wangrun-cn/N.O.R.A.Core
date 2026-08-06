@@ -413,11 +413,22 @@ class OpenAIProvider(BaseLLM):
 
         choices = getattr(response, "choices", None) or []
         if not choices:
-            raise RuntimeError(f"chat 生图未返回 choices: {response}")
+            raise RuntimeError(f"chat 生图未返回 choices: {response!r:.800}")
 
         message = getattr(choices[0], "message", None)
         if message is None:
-            raise RuntimeError(f"chat 生图返回项缺少 message: {choices[0]}")
+            raise RuntimeError(f"chat 生图返回项缺少 message: {choices[0]!r:.800}")
+
+        # 生图被安全策略拦时同样是 content=None + 异常 finish_reason，
+        # 不查的话只会报"没找到 base64 图片"，指向不了真实原因。
+        err = self.check_finish_reason_and_log(
+            getattr(choices[0], "finish_reason", None),
+            response,
+            getattr(message, "content", None),
+            context=f"OpenAI chat生图/{self.model_alias}",
+        )
+        if err:
+            raise RuntimeError(err)
 
         # 优先按结构化字段找；找不到再把整个 message 序列化后正则兜底
         # ——各家中转站塞图片的字段名不统一，硬编码字段列表会漏。
@@ -592,11 +603,32 @@ class OpenAIProvider(BaseLLM):
             # 防御：choices 可能为空、message 可能缺失（部分 provider 返回空体或被内容过滤拦截）
             choices = getattr(response, "choices", None) or []
             if not choices:
-                logger.error(f"OpenAI chat() empty choices: {response}")
+                logger.error(f"OpenAI chat() empty choices，原始响应: {repr(response)[:800]}")
                 return "Sorry, I encountered an issue processing your request with the OpenAI API."
             message = getattr(choices[0], "message", None)
             content = getattr(message, "content", None) if message else None
-            return self.strip_think_content(content or "")
+
+            # finish_reason 异常（内容安全拦截 / 非正常终止）时，日志打原始响应并直接返回错误说明。
+            # 否则这类失败会退化成"返回空字符串"，上层只能看到"空结果"而不知道真实原因。
+            err = self.check_finish_reason_and_log(
+                getattr(choices[0], "finish_reason", None),
+                response,
+                content,
+                context=f"OpenAI chat/{self.model_alias}",
+            )
+            if err:
+                return err
+
+            cleaned = self.strip_think_content(content or "")
+            if not cleaned.strip():
+                # 没有异常 finish_reason 却拿不到内容：推理模型把额度耗在 reasoning 上、
+                # 或兼容端点把正文塞进了非标字段，都会走到这里。原始响应是唯一线索。
+                logger.error(
+                    f"[OpenAI chat/{self.model_alias}] 返回内容为空（finish_reason="
+                    f"{getattr(choices[0], 'finish_reason', None)}，usage={self.last_usage}），"
+                    f"原始 message: {repr(message)[:800]}"
+                )
+            return cleaned
         except Exception as e:
             logger.error(f"OpenAI API Error: {e}", exc_info=True)
             return "Sorry, I encountered an issue processing your request with the OpenAI API."
@@ -742,22 +774,29 @@ class OpenAIProvider(BaseLLM):
             # key: tool_call index, value: {"id": str, "name": str, "arguments": str}
             pending_tool_calls: Dict[int, Dict[str, str]] = {}
             in_think_block = False
-            
+            stream_finish_reason: Any = None
+            emitted_text_len = 0
+
             async for chunk in stream:
                 # 收集 usage（最后一个 chunk 通常包含）
                 if hasattr(chunk, 'usage') and chunk.usage:
                     input_tokens = chunk.usage.prompt_tokens or 0
                     output_tokens = chunk.usage.completion_tokens or 0
-                
+
                 if not chunk.choices:
                     continue
-                
+
+                # finish_reason 只在末尾的 chunk 上出现，流结束后才能判断是否被拦。
+                if getattr(chunk.choices[0], "finish_reason", None):
+                    stream_finish_reason = chunk.choices[0].finish_reason
+
                 delta = chunk.choices[0].delta
-                
+
                 # === 处理文本内容 ===
                 if delta.content:
                     visible_text, in_think_block = self.strip_stream_think_segment(delta.content, in_think_block)
                     if visible_text:
+                        emitted_text_len += len(visible_text)
                         yield {"type": "text", "content": visible_text}
                 
                 # === 处理 tool_calls 分片 ===
@@ -786,6 +825,19 @@ class OpenAIProvider(BaseLLM):
                 logger.info(f"OpenAI stream finished: {len(pending_tool_calls)} tool_call(s) accumulated")
             else:
                 logger.debug("OpenAI stream finished: no tool_calls received from API")
+
+            # 流结束后才有完整 finish_reason，迟查总比不查强——至少异常时留下线索。
+            err = self.check_finish_reason_and_log(
+                stream_finish_reason,
+                {"finish_reason": stream_finish_reason, "emitted_text_len": emitted_text_len},
+                f"(streamed {emitted_text_len} chars text)",
+                context=f"OpenAI stream/{self.model_alias}",
+            )
+            if err and not emitted_text_len and not pending_tool_calls:
+                # 没产出过任何 text 或 tool 就异常终止——相当于空回，得告诉上层。
+                # 但如果已经有过正常产出，再抛异常会打断流，不如只记日志。
+                logger.error(f"[OpenAI stream/{self.model_alias}] 流未产出任何内容且异常终止：{err}")
+                yield {"type": "text", "content": err}
             
             for idx in sorted(pending_tool_calls.keys()):
                 tc = pending_tool_calls[idx]

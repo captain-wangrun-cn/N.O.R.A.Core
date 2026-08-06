@@ -223,9 +223,29 @@ class GeminiProvider(BaseLLM):
                 fc = response.parts[0].function_call
                 # Return a special string or JSON indicating function call?
                 # Or simply return the text representation if any.
-                return f"[TOOL_CALL: {fc.name}({fc.args})]" 
-            
-            return self.strip_think_content(response.text)
+                return f"[TOOL_CALL: {fc.name}({fc.args})]"
+
+            # SDK 的 response.text 在被安全策略拦截时会抛异常或返回空，
+            # 而 finishReason 才说得清是 SAFETY / RECITATION 还是别的。先查它。
+            candidate = (getattr(response, "candidates", None) or [None])[0]
+            err = self.check_finish_reason_and_log(
+                getattr(candidate, "finish_reason", None) if candidate else None,
+                getattr(response, "prompt_feedback", None) or response,
+                getattr(response, "text", None),
+                context=f"Gemini chat/{self.model_alias}",
+            )
+            if err:
+                return err
+
+            cleaned = self.strip_think_content(response.text)
+            if not cleaned.strip():
+                logger.error(
+                    f"[Gemini chat/{self.model_alias}] 返回内容为空"
+                    f"（finish_reason={getattr(candidate, 'finish_reason', None) if candidate else None}），"
+                    f"promptFeedback={getattr(response, 'prompt_feedback', None)}，"
+                    f"candidates={repr(getattr(response, 'candidates', None))[:600]}"
+                )
+            return cleaned
         except Exception as e:
             # Handle potential content filtering and other API errors
             error_msg = str(e)

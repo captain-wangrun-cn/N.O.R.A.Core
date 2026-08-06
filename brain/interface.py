@@ -1,16 +1,87 @@
 from abc import ABC, abstractmethod
 from typing import Any, List, Dict, AsyncGenerator, Optional
 import re
+import logging
+
+logger = logging.getLogger(__name__)
+
 
 class BaseLLM(ABC):
     """Abstract Base Class for all LLM providers."""
 
     _THINK_BLOCK_PATTERN = re.compile(r"<think>[\s\S]*?</think>", re.IGNORECASE)
     _THINK_INLINE_PATTERN = re.compile(r"</?think>", re.IGNORECASE)
-    
+
     def __init__(self):
         """初始化 LLM，设置 usage 跟踪"""
         self.last_usage: Optional[Dict[str, int]] = None  # {"input_tokens": int, "output_tokens": int}
+
+    # 已知的"异常终止"原因。故意采用黑名单而非白名单：各家 SDK 的正常值互不相同
+    # （OpenAI stop/tool_calls、Anthropic end_turn/tool_use/stop_sequence、
+    # Gemini STOP），白名单漏一个就会把正常回复误判成失败。
+    _BLOCKED_FINISH_KEYWORDS = (
+        "prohibited",       # Gemini PROHIBITED_CONTENT
+        "content_filter",   # OpenAI 内容过滤
+        "safety",           # Gemini SAFETY
+        "recitation",       # Gemini RECITATION（复述受版权保护内容）
+        "blocklist",        # Gemini BLOCKLIST
+        "spii",             # Gemini SPII（敏感个人信息）
+        "refusal",          # Anthropic refusal
+    )
+    _TRUNCATED_FINISH_KEYWORDS = ("length", "max_tokens")
+
+    @classmethod
+    def check_finish_reason_and_log(
+        cls,
+        finish_reason: Any,
+        response_obj: Any,
+        content: Optional[str],
+        context: str = "",
+    ) -> Optional[str]:
+        """
+        检查 finish_reason 是否异常；异常时把原始响应打进日志并给出可读的错误文本。
+
+        存在的理由：内容被安全策略拦截时，各家返回的都是 `content=None` + 非正常
+        finish_reason，上层只会看到"返回空结果"，完全指向不了真实原因（实测
+        draw_desc 被 Gemini 判 prohibited_content 时就是这样）。
+
+        Args:
+            finish_reason: 模型返回的终止原因。可能是 str、proto 枚举或 int。
+            response_obj: 原始响应对象，异常时整体记进日志——这是唯一的排查线索。
+            content: 已提取出的正文，用于在日志里对照。
+            context: 调用来源标记（如 "OpenAI chat/draw_desc"），便于定位。
+
+        Returns:
+            None 表示正常；非 None 表示异常，返回的文本可直接作为本次调用结果。
+        """
+        if finish_reason is None or finish_reason == "":
+            return None
+
+        # proto 枚举取 .name（str() 会得到 "FinishReason.STOP" 这种带前缀的形式），
+        # 再统一去掉可能残留的 "xxx." 前缀。
+        raw_name = getattr(finish_reason, "name", None) or str(finish_reason)
+        reason_lower = raw_name.rsplit(".", 1)[-1].strip().lower()
+
+        if any(kw in reason_lower for kw in cls._BLOCKED_FINISH_KEYWORDS):
+            logger.error(
+                f"[{context}] 内容被安全策略拦截 finish_reason={raw_name}。"
+                f"content={content!r}；原始响应: {response_obj!r:.1000}"
+            )
+            return (
+                f"Error: 模型因内容安全策略拒绝生成（finish_reason={raw_name}）。"
+                "检查输入里是否有触发未成年人保护、暴力、色情等策略的内容，"
+                "或换一个审查更宽松的端点/模型。"
+            )
+
+        if any(kw in reason_lower for kw in cls._TRUNCATED_FINISH_KEYWORDS):
+            # 截断不算失败：正文通常可用，只是不完整。记 warning 便于回溯。
+            logger.warning(
+                f"[{context}] 输出被长度上限截断 finish_reason={raw_name}，"
+                f"content 长度={len(content or '')}。考虑调大 max_output_tokens。"
+            )
+            return None
+
+        return None
 
     @abstractmethod
     async def chat(

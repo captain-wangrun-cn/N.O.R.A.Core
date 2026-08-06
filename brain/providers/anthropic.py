@@ -140,7 +140,25 @@ class AnthropicProvider(BaseLLM):
             for block in getattr(response, "content", []) or []:
                 if getattr(block, "type", "") == "text":
                     texts.append(getattr(block, "text", ""))
-            return self.strip_think_content("".join(texts))
+
+            # Anthropic 用 stop_reason 而非 finish_reason，语义对齐后走同一套检查。
+            err = self.check_finish_reason_and_log(
+                getattr(response, "stop_reason", None),
+                response,
+                "".join(texts),
+                context=f"Anthropic chat/{self.model_alias}",
+            )
+            if err:
+                return err
+
+            cleaned = self.strip_think_content("".join(texts))
+            if not cleaned.strip():
+                logger.error(
+                    f"[Anthropic chat/{self.model_alias}] 返回内容为空"
+                    f"（stop_reason={getattr(response, 'stop_reason', None)}，usage={self.last_usage}），"
+                    f"原始 content: {repr(getattr(response, 'content', None))[:800]}"
+                )
+            return cleaned
         except Exception as e:
             logger.error(f"Anthropic API Error: {e}", exc_info=True)
             return "Sorry, I encountered an issue processing your request with the Anthropic API."
