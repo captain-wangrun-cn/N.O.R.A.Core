@@ -547,6 +547,14 @@ def show_config_summary() -> None:
                 questionary.print(f"  - {role}: （可选，未配置）", style="italic")
             else:
                 questionary.print(f"  - {role}: {_status_emoji(False)} 未配置", style="bold red")
+        if models.get("draw"):
+            draw_provider = model_providers.get("draw")
+            draw_type = (providers.get(draw_provider, {}) or {}).get("type") if isinstance(providers, dict) else None
+            if draw_type == "openai":
+                api_label = "chat（/v1/chat/completions + modalities）" \
+                    if str(llm_cfg.get("draw_api", "")).lower() == "chat" \
+                    else "images（/v1/images/generations·edits，默认）"
+                questionary.print(f"  - draw 生图接口: {api_label}", style="")
     else:
         questionary.print(f"{_status_emoji(False)} 模型角色: 未配置", style="bold red")
 
@@ -1450,6 +1458,32 @@ class StepModels(ConfigStep):
             models[role_key] = selected_model
             model_providers[role_key] = provider_name
 
+            # 生图接口形态：gemini 只有 :generateContent 一条路，无需询问；
+            # openai 兼容端点有两种（原生 images API / chat + modalities），各家实现不一。
+            if role_key == 'draw':
+                if provider_type == 'openai':
+                    import config as _cfg_mod
+
+                    draw_api = questionary.select(
+                        "该生图模型走哪种接口？（选错会 404 或拿不到图）",
+                        choices=[
+                            questionary.Choice(
+                                title="images API —— /v1/images/generations + /v1/images/edits（OpenAI 官方、gpt-image-1 / dall-e-*）",
+                                value=_cfg_mod.DRAW_API_IMAGES,
+                            ),
+                            questionary.Choice(
+                                title="chat API —— /v1/chat/completions + modalities，图片以 base64 内嵌返回（多数中转站的 gemini image 模型）",
+                                value=_cfg_mod.DRAW_API_CHAT,
+                            ),
+                        ],
+                        default=self.state.get('draw_api') or _cfg_mod.DRAW_API_IMAGES,
+                    ).ask()
+                    if draw_api is None:
+                        return False
+                    self.state['draw_api'] = draw_api
+                else:
+                    self.state.pop('draw_api', None)
+
         self.state['models'] = models
 
         # 记录选定模型的价格用于后续配置写入
@@ -1632,6 +1666,11 @@ def _build_final_config(state: Dict[str, Any]) -> Dict[str, Any]:
         if llm_state.get('max_output_tokens') is not None:
             final_config['llm']['max_output_tokens'] = llm_state.get('max_output_tokens')
 
+    # 生图接口形态：只有配了 draw 且它绑的是 openai 类型 provider 时才有意义
+    draw_api = state.get('draw_api')
+    if draw_api and final_config['llm'].get('models', {}).get('draw'):
+        final_config['llm']['draw_api'] = draw_api
+
     # 兼容旧配置结构：保留 api_keys/base_url/user_agent（取默认 provider 对应值）
     providers_cfg = final_config['llm'].get('providers', {}) or {}
     legacy_api_keys = {}
@@ -1741,6 +1780,8 @@ def _load_wizard_state() -> Dict[str, Any]:
         'cost_tracking': cfg.get("cost_tracking", {'enabled': True}),
         'security': cfg.get("security", {}) or {},
     }
+    if llm_cfg.get("draw_api"):
+        state['draw_api'] = llm_cfg.get("draw_api")
     return state
 
 

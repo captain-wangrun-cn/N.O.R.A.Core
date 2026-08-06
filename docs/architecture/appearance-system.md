@@ -132,7 +132,7 @@
 | `brain/prompts.py` | 路径常量、workspace 初始化、`<appearance>` 注入（紧跟 `<soul>`） |
 | `brain/templates/draw_desc.jinja` | `draw_desc` 的 system / user prompt（无人设） |
 | `brain/interface.py` | `BaseLLM.generate_image()`，默认 `NotImplementedError` |
-| `brain/providers/gemini.py` / `openai.py` | 各自实现 `generate_image`（Gemini inline_data / OpenAI images.generate·edit） |
+| `brain/providers/gemini.py` / `openai.py` | 各自实现 `generate_image`（Gemini inline_data / OpenAI images.generate·edit 或 chat+modalities，见 `llm.draw_api`） |
 | `brain/tools.py` | `generate_appearance_reference` + `_is_path_safe` 目录规则 |
 | `core/routing.py` | `_DRAW_PATTERN`、双解析器、sanitize 兜底 |
 | `core/appearance_gen.py` | `AppearanceGenMixin`：任务管理 + `draw_desc` 调用 + 生图追发 |

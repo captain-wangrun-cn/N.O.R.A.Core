@@ -23,10 +23,19 @@
 - Gemini：走 REST `:generateContent` + `responseModalities: ["TEXT","IMAGE"]`
   （和 `_video_stream_via_rest` 同一个理由：SDK + 自定义 endpoint + inline_data 组合不可靠）。
   部分端点不认 `responseModalities`，400 时去掉该字段重试一次。
-- OpenAI：**不走 chat 端点**。无参考图 → `images.generate`；有参考图 → `images.edit`
-  （file-like 的 `.name` 后缀决定端点判 mime，必须带）。多图签名在部分 SDK/兼容端点不被接受，
-  失败退回单图；`dall-e-*` 需要 `response_format="b64_json"` 而 `gpt-image-1` 不认该参数，
-  也做了降级重试。返回 url 而非 b64 时自行下载。
+- OpenAI：**两种接口形态**，由 `llm.draw_api` 决定（默认 `images`；只对 openai 类型 provider
+  有意义，gemini 只有 `:generateContent` 一条路，所以 CLI 只在 draw 绑 openai 时才问）：
+  - `images`（默认）：无参考图 → `images.generate`；有参考图 → `images.edit`
+    （file-like 的 `.name` 后缀决定端点判 mime，必须带）。多图签名在部分 SDK/兼容端点不被接受，
+    失败退回单图；`dall-e-*` 需要 `response_format="b64_json"` 而 `gpt-image-1` 不认该参数，
+    也做了降级重试。返回 url 而非 b64 时自行下载。
+  - `chat`：`/v1/chat/completions` + `modalities: ["text","image"]`，图片以 data URI 内嵌在
+    `message.content` 的 markdown 里（`![image](data:image/jpeg;base64,...)`）。**多数中转站
+    把 gemini image 模型挂成 openai 协议时只实现这条**，走 images 会 404。参考图复用普通多模态
+    输入的 image_url data URI。老 SDK 不认 `modalities` 关键字（TypeError）时退 `extra_body` 透传。
+    取图不硬编码字段名——先看 `content`（str / parts 列表），再把整个 message `model_dump()`
+    序列化后正则兜底，容忍厂商自定义字段（`multi_mod_content` 之类）与被换行折断的 base64。
+    只回文本时明确报错并带上文本前 300 字，便于判断是被拒还是端点不支持。
 - 新增两个模型别名 `draw`（文生图）/ `draw_desc`（文本），**成对可选**：CLI 向导、
   `/model` 菜单、`config.example.yml`、两份 locale 都加了；`draw_models_configured()`
   要求两者都有才算启用。

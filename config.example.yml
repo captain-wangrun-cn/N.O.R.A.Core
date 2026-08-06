@@ -99,6 +99,12 @@ llm:
   # 输出 token 上限（统一）
   max_output_tokens: 768
 
+  # 生图接口形态（只对 openai 类型 provider 生效；gemini 只有一条 :generateContent 路径）
+  #   images（默认）：/v1/images/generations + /v1/images/edits（OpenAI 官方、gpt-image-1 / dall-e-*）
+  #   chat：/v1/chat/completions + modalities: ["text","image"]，图片以 data URI 内嵌在回复里
+  #         （多数中转站把 gemini image 模型挂成 openai 协议时只实现这条，走 images 会 404）
+  # draw_api: "images"
+
   # 按 alias 单独设置输出 token 上限（优先级高于全局）
   # max_output_tokens_by_alias:
   #   smart: 768

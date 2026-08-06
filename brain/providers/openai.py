@@ -4,6 +4,7 @@ import io
 import openai
 import json
 import inspect
+import re
 from typing import Any, List, Dict, Optional
 from openai import APIConnectionError, APITimeoutError, RateLimitError, APIStatusError
 import logging
@@ -345,19 +346,124 @@ class OpenAIProvider(BaseLLM):
             )
             return await self.client.images.generate(model=self.model, prompt=prompt, n=1)
 
+    # chat 生图返回的图片以 data URI 内嵌在文本里，markdown 图片语法或裸 data URI 都见过。
+    _DATA_URI_PATTERN = re.compile(
+        r"data:(image/[a-zA-Z0-9.+-]+);base64,([A-Za-z0-9+/=\s]+)"
+    )
+
+    @classmethod
+    def _extract_data_uri_image(cls, text: str) -> Optional[Dict[str, Any]]:
+        """从一段文本里抠出第一个 base64 data URI 图片。抠不到返回 None。"""
+        if not text:
+            return None
+        match = cls._DATA_URI_PATTERN.search(text)
+        if not match:
+            return None
+        mime = match.group(1).lower()
+        # markdown 里的 base64 可能被换行折过，且尾部常黏着 `)` 之类的收尾字符。
+        b64 = re.sub(r"[^A-Za-z0-9+/=]", "", match.group(2))
+        if not b64:
+            return None
+        try:
+            raw = base64.b64decode(b64)
+        except Exception as e:
+            logger.warning(f"chat 生图 data URI 解码失败: {type(e).__name__}: {e}")
+            return None
+        if not raw:
+            return None
+        return {"bytes": raw, "mime_type": mime}
+
+    async def _chat_generate_image(
+        self,
+        prompt: str,
+        reference_images: Optional[List[Dict[str, Any]]] = None,
+    ) -> Dict[str, Any]:
+        """
+        走 /v1/chat/completions + modalities=["text","image"] 生图。
+
+        部分 OpenAI 兼容中转站（把 gemini image 模型挂成 openai 协议）只实现这条路径，
+        没有 /v1/images/*。图片以 data URI 内嵌在 message.content 的 markdown 里
+        （`![image](data:image/jpeg;base64,...)`），也可能出现在 multi_mod_content /
+        images 等厂商自定义字段里，所以解析要把整个 message 兜进来找。
+
+        参考图复用普通多模态输入的 image_url data URI 形式。
+        """
+        content = self._build_user_content(prompt, multimodal_images=reference_images or None)
+        params: Dict[str, Any] = {
+            "model": self.model,
+            "messages": [{"role": "user", "content": content}],
+            "modalities": ["text", "image"],
+        }
+
+        try:
+            response = await self.client.chat.completions.create(**params)
+        except TypeError as e:
+            # 老 SDK 不认 modalities 关键字，退回 extra_body 透传。
+            logger.warning(f"chat 生图 modalities 关键字不被 SDK 接受（{e}），改用 extra_body 透传。")
+            params.pop("modalities", None)
+            params["extra_body"] = {"modalities": ["text", "image"]}
+            response = await self.client.chat.completions.create(**params)
+
+        usage = getattr(response, "usage", None)
+        if usage is not None:
+            self.last_usage = {
+                "input_tokens": getattr(usage, "prompt_tokens", 0) or 0,
+                "output_tokens": getattr(usage, "completion_tokens", 0) or 0,
+            }
+
+        choices = getattr(response, "choices", None) or []
+        if not choices:
+            raise RuntimeError(f"chat 生图未返回 choices: {response}")
+
+        message = getattr(choices[0], "message", None)
+        if message is None:
+            raise RuntimeError(f"chat 生图返回项缺少 message: {choices[0]}")
+
+        # 优先按结构化字段找；找不到再把整个 message 序列化后正则兜底
+        # ——各家中转站塞图片的字段名不统一，硬编码字段列表会漏。
+        raw_content = getattr(message, "content", None)
+        candidates: List[str] = []
+        if isinstance(raw_content, str):
+            candidates.append(raw_content)
+        elif isinstance(raw_content, list):
+            for part in raw_content:
+                part_dict = part if isinstance(part, dict) else getattr(part, "__dict__", {})
+                candidates.append(json.dumps(part_dict, ensure_ascii=False, default=str))
+
+        try:
+            candidates.append(json.dumps(message.model_dump(), ensure_ascii=False, default=str))
+        except Exception:
+            candidates.append(str(message))
+
+        for text in candidates:
+            found = self._extract_data_uri_image(text)
+            if found:
+                return found
+
+        text_preview = (raw_content if isinstance(raw_content, str) else str(raw_content))[:300]
+        raise RuntimeError(
+            f"chat 生图未在响应里找到 base64 图片（模型可能只回了文本）: {text_preview}"
+        )
+
     async def generate_image(
         self,
         prompt: str,
         reference_images: Optional[List[Dict[str, Any]]] = None,
     ) -> Dict[str, Any]:
         """
-        文生图（OpenAI images API，如 gpt-image-1 / dall-e-3）。
+        文生图。两种接口形态由 `llm.draw_api` 配置决定：
 
-        不走 chat 端点：无参考图 → images.generate；有参考图 → images.edit。
-        参考图以 file-like 传入，`.name` 的后缀决定端点怎么判 mime，必须带上。
+        - `images`（默认）：OpenAI 原生 images API。无参考图 → images.generate；
+          有参考图 → images.edit。参考图以 file-like 传入，`.name` 的后缀决定端点
+          怎么判 mime，必须带上。
+        - `chat`：/v1/chat/completions + modalities=["text","image"]，图片以 data URI
+          内嵌返回。给只实现了 chat 端点的兼容中转站用。
         """
         if not prompt or not prompt.strip():
             raise ValueError("generate_image 需要非空 prompt")
+
+        if config.get_draw_api() == config.DRAW_API_CHAT:
+            return await self._chat_generate_image(prompt, reference_images)
 
         files: List[Any] = []
         for idx, ref in enumerate(reference_images or []):

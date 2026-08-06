@@ -201,6 +201,26 @@ def get_model_name(model_alias="smart"):
     cfg = _safe_config()
     return cfg.get("llm", {}).get("models", {}).get(model_alias)
 
+
+# 生图接口形态（仅 openai 类型 provider 需要区分；gemini 只有一条 :generateContent 路径）
+DRAW_API_IMAGES = "images"
+DRAW_API_CHAT = "chat"
+
+
+def get_draw_api():
+    """
+    openai 类型 provider 的生图接口形态。
+
+    - "images"（默认）：走 /v1/images/generations 与 /v1/images/edits
+    - "chat"：走 /v1/chat/completions + modalities=["text","image"]，
+      图片以 data URI 内嵌在 message 里（部分中转站只实现这条）
+
+    gemini 类型 provider 忽略此项。
+    """
+    cfg = _safe_config()
+    raw = str(cfg.get("llm", {}).get("draw_api", "") or "").strip().lower()
+    return DRAW_API_CHAT if raw == DRAW_API_CHAT else DRAW_API_IMAGES
+
 def get_llm_user_agent(provider=None):
     """Optional custom User-Agent for LLM HTTP requests."""
     provider = provider or get_llm_provider()
