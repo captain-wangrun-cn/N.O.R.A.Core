@@ -50,9 +50,8 @@
   （"及肩"还是"过肩"、"琥珀色"还是"浅棕"），模型就会在两者之间折中，
   画出一个既不像参考图、也不像描述的人。**图像输入的优先级远高于文字**，
   让文字闭嘴是让脸稳定的关键。
-- **唯一例外是风格偏好里的人种/属性倾向**（如"东亚长相""cos 照片"这类）。
-  那不是区分某个人的细节，而是纠正生图模型的默认偏向（不写就会画成欧美长相），
-  和参考图是互相加强而不是冲突的关系——**带参考图也要照写**。
+- **唯一例外是风格偏好里的日系真人 coser 属性**（如 `Japanese-coser-like real-person cosplay`、`cosplay photo`、假发和美瞳这类）。
+  这不是区分某个人的面部细节，而是整体造型与摄影审美——带参考图也要照写，不能退化成普通路人照片。
 - 人物部分只用一个**中性指代**带过：`the woman in the reference image(s)` /
   `the same person as in the reference images`（标签写法用 `same person as reference`）。
 - 提示词的笔墨全部花在**这次要变的东西**上：视角与构图、场景、动作与姿势、表情、
@@ -73,8 +72,10 @@
 {{ style }}
 ```
 
-这份偏好决定**画成什么样**：媒介（写实照片/插画）、皮肤与头发质感、镜头与拍摄方式、
-光线类型、画面比例、以及明确排除的东西。**每一条都要落进提示词**，包括：
+- **日常手机拍摄是硬约束，不是可选风格。** 无论自拍、半身还是全身，最终提示词都必须明确写出普通手机相机拍摄、随手快照和正确比例：`phone camera` / `smartphone photo` / `casual smartphone snapshot`，以及 `3:4 vertical` 或 `4:3 horizontal`。
+- 只有本次要求明确是自拍时，才写手持前置摄像头、举手机、手臂长度等自拍机制；非自拍要写朋友或旁人用手机拍摄，不能自动变成自拍。
+- 禁止把画面升级为单反/无反、影棚、商业写真、杂志封面、广告大片或专业肖像摄影；不要使用会把模型带向这些方向的 `portrait photography`、`editorial`、`studio lighting` 等表达。
+- 这份偏好决定**画成什么样**：媒介（写实照片/插画）、皮肤与头发质感、手机拍摄方式、现场光线、画面比例、以及明确排除的东西。**每一条都要落进提示词**，包括：
 
 - 媒介与质感（是"拍下来的照片"还是"画出来的图"）
 - 拍摄方式（手机随手拍 / 影棚 / 自拍的手持视角）
@@ -134,34 +135,28 @@ face.png,front.png
 - 总量控制在 30-50 个标签，不要堆砌同义词。
 - **带参考图时跳过「外观特征」那一段**（发色/发型/瞳色/体征全部不写），用
   `same person as reference` 一个标签代替，把标签预算让给场景、动作、光线、构图。
-  但风格偏好里的人种/属性标签（`east asian` 等）照写。
-- 示例形态（**带**参考图）：`same person as reference, east asian, cosplay photo, solo,
-  photorealistic, real photo, white blouse, gentle smile, sitting at desk, warm lamplight,
-  upper body, looking at viewer, 4:3`
-- 示例形态（**无**参考图，需自己撑起长相）：`1girl, solo, photorealistic, east asian,
-  long silver hair, blue eyes, white blouse, gentle smile, sitting at desk, warm lamplight,
-  upper body, 4:3`
+  但风格偏好里的日系真人 coser 属性（`Japanese-coser-like aesthetic`、`real-person cosplay` 等）照写。
+- 示例形态（**带**参考图）：`same person as reference, Japanese-coser-like aesthetic, real-person cosplay,
+  phone camera photo, casual smartphone snapshot, white blouse, gentle smile, sitting at desk,
+  warm ambient light, upper body, 3:4 vertical`
+- 示例形态（**无**参考图，需自己撑起长相）：`real-person cosplay, photorealistic, phone camera photo,
+  casual smartphone snapshot, long silver wig, colored circle lenses, white blouse, gentle smile,
+  sitting at desk, warm ambient light, upper body, 3:4 vertical`
 {% else %}
 **自然语言式（natural language）**——目标是 Gemini / nano-banana、Grok、GPT-Image 这类按语言理解画面的模型。
 
-- 写成**完整、连贯的英文句子**，像在向摄影师描述一张照片。不要写逗号堆砌的关键词串。
-- 用 2-5 句话，覆盖：这是什么样的一张图（照片/插画、什么镜头）→ 人物是谁、穿什么 →
+- 写成**完整、连贯的英文句子**，像在向摄影师描述一张手机照片。不要写逗号堆砌的关键词串。
+- 用 2-5 句话，覆盖：这是什么样的一张手机照片（手机镜头与比例）→ 人物是谁、穿什么 →
   她在做什么、什么表情 → 在哪、周围有什么 → 光线和整体氛围。
   「人物是谁」这一环**带参考图时**就是一句 `the woman in the reference image`，
   **不带**参考图时才展开写长相。
 - **明确写出空间关系**（谁在画面哪个位置、手放在哪、看向哪、光从哪个方向来）——
   这正是这类模型比标签式强的地方，不要浪费。
-- 允许用 "a photo of…" / "a soft-lit portrait of…" 这样的开头点明媒介与风格。
+- 允许用 "a casual smartphone photo of…" / "a candid phone-camera snapshot of…" 这样的开头点明媒介与风格；不要用 `portrait photography`、`editorial` 或 `studio`。
 - 不要用 `masterpiece, best quality, 8k` 这类标签式画质咒语，它们对这类模型无效甚至有害；
   要画质就直接描述（"sharp focus on her face, softly blurred background"）。
-- 示例形态（**带**参考图，注意只指代不描述长相，但人种倾向照写）：`A candid selfie photo,
-  3:4 vertical, of the East Asian woman in the reference images, wearing a white blouse.
-  She holds the phone slightly above eye level with her right hand and smiles softly at the
-  camera, sitting at a wooden desk in her room. Warm lamplight falls from the left, and the
-  bookshelf behind her is gently out of focus.`
-- 示例形态（**无**参考图，此时长相必须写全）：`A candid selfie photo, 3:4 vertical, of a young
-  East Asian woman with long silver hair and blue eyes, wearing a white blouse. She holds the phone
-  slightly above eye level and smiles softly at the camera, sitting at a wooden desk in her room.`
+- 示例形态（**带**参考图，注意只指代不描述长相，但日系 coser 风格照写）：`A casual smartphone selfie photo taken on an ordinary phone camera, 3:4 vertical, of the woman in the reference images, wearing a white blouse. She holds the phone slightly above eye level with her right hand and smiles softly at the camera, sitting at a wooden desk in her room. Warm lamplight falls from the left, and the bookshelf behind her is gently out of focus. The result is a candid Japanese-coser-like real-person cosplay snapshot, not studio or editorial photography.`
+- 示例形态（**无**参考图，此时长相必须写全）：`A casual smartphone selfie photo taken on an ordinary phone camera, 3:4 vertical, of a real-person cosplay woman with long silver wig and colored circle lenses, wearing a white blouse. She holds the phone slightly above eye level and smiles softly at the camera, sitting at a wooden desk in her room.`
 {% endif %}
 
 ## 提示词质量要求
@@ -205,5 +200,5 @@ face.png,front.png
 {% if prompt_style == "tags" %}`[DRAW_PROMPT]` 里必须是**逗号分隔的英文标签**，不要写成句子。{% else %}`[DRAW_PROMPT]` 里必须是**完整的英文句子**，不要写成逗号分隔的关键词串。{% endif %}
 
 再确认一遍：如果 `[DRAW_REFS]` 非空，`[DRAW_PROMPT]` 里**不许出现**发色、发型、瞳色、
-脸型、五官、肤色、体型这类长相描述——用 `the woman in the reference image(s)`{% if prompt_style == "tags" %} / `same person as reference`{% endif %} 指代即可。
+脸型、五官、肤色、体型这类长相描述——用 `the woman in the reference image(s)`{% if prompt_style == "tags" %} / `same person as reference`{% endif %} 指代即可；但日系真人 coser 风格、手机相机、随手快照和画面比例仍必须写入。
 {% endblock %}

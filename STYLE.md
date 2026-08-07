@@ -10,8 +10,8 @@ _这个文件只管**画成什么样**（媒介、质感、镜头、比例），
 
 > **和「带参考图就别写长相」那条规则的关系：** 带参考图时不写的是**区分性的细节**
 > （发色、发型、瞳色、脸型、五官、体型）——那些图里已经有了，再用文字复述会打架。
-> 但下面的**人种（东亚）和 cos 属性**要一直写，带不带参考图都写：它不是区分性细节，
-> 而是一个全局倾向，生图模型天然会往欧美长相跑，写上去只会和参考图互相加强，不会冲突。
+> 但下面的**日系真人 coser 风格属性**要一直写，带不带参考图都写：它描述的是整体造型和摄影审美，
+> 不是指定人物民族或固定面部解剖，不会和参考图冲突。
 
 ---
 
@@ -19,36 +19,32 @@ _这个文件只管**画成什么样**（媒介、质感、镜头、比例），
 
 - **写实真人风格。** 这是一张真实世界里**拍下来的照片**——不是插画、不是动漫、不是 CG、
   不是 3D 渲染、不是 AI 感很重的那种「精修图」。
-- **人物是东亚人（中国/日本长相）。** 这一条很重要，生图模型默认会画成欧美长相，
-  必须显式写明。具体特征：
-  - 东亚人的骨相——脸偏窄偏平、颧骨不外扩、鼻梁不高不挺、眉骨平缓、
-    下颌线柔和，**不要**欧美那种深眼窝、高鼻梁、立体五官。
-  - 单眼皮或内双为主，眼型偏细长，**有内眦赘皮**（蒙古褶）。
-  - 肤色是东亚的暖调偏白/象牙色，不是欧美的粉调或古铜色。
-  - 提示词里要写 East Asian / Chinese / Japanese，别只写 "Asian"（容易滑向东南亚或混血长相），
-    也别只靠 "cosplayer" 隐含。
-- **这是 cosplay 照片。** 人物本身是真人东亚女生，角色设定里的发色、发型、瞳色是
-  **假发和美瞳**，不是天生的——所以：
-  - 头发要有**假发的质感**：比真发更均匀的色泽、发丝更整齐、
-    发际线处能看出是戴上去的，但整体自然（是质量好的假发，不是廉价塑料感）。
-  - 非自然发色（银、粉、蓝、金）就当作假发处理，不要为了合理化而改成黑发——
-    发色以 `APPEARANCE.md` 为准。
-  - 瞳色同理，非自然瞳色是美瞳，边缘会有美瞳圈的痕迹。
-  - 妆容是 cos 妆：比日常浓一些，但仍是真人化妆的效果，不是动漫脸。
+- **日系真人 coser 气质。** 人物是现实中的 coser，不是动漫角色本身：造型精致但可信，
+  妆容是日系 cosplay 妆，整体干净、轻盈、自然，接近日本 coser 发布的生活照片和自拍。
+  这是风格参考，不是对人物民族、国籍或面部骨相的指定；不要根据这条自行添加人种解剖特征。
+- 角色设定里的非自然发色、发型、瞳色通过**质量好的假发和美瞳**实现，不要当成天生特征：
+  - 假发有均匀但自然的色泽，发丝整齐，发际线处能看出是戴上去的，但没有廉价塑料感。
+  - 美瞳的颜色自然融入眼睛，近看能有轻微的美瞳圈痕迹，不要画成发光或动漫眼睛。
+  - Cos 妆可以比日常妆更完整，但必须是真人化妆效果，不是把动漫脸贴到真人照片上。
 - 皮肤要有真实质感：细微的毛孔、绒毛、自然的油光、不均匀的肤色和红润。
   **不要磨皮**成塑料或瓷娃娃感。
 - 允许真实照片才有的小瑕疵：翘起的一两根假发丝、衣服的褶皱、轻微的手抖模糊、
   不那么对称的姿势。**过于完美就会假。**
 
-## 拍摄方式
+## 手机拍摄硬约束
 
-- **手机摄像头拍出来的样子**，随手一拍的日常感，不是影棚、不是专业摄影作品。
-- 手机镜头的特征要在：稍广的视角、近距离时轻微的边缘变形、
-  手机 HDR 那种压过的高光和提亮的暗部。
-- 光线用**现场光**——窗光、屋里的灯、屏幕的反光、路灯。不要影棚三点布光。
-- 自拍就是**手持前置摄像头**的视角：手臂长度的距离、镜头略高于视线、
-  能看出是自己举着手机拍的。
-- 景深浅一点是可以的（手机人像模式），但不要糊成背景全无。
+- **每一张日常生图都必须是普通手机摄像头拍下的照片。** 无论是自拍、半身、全身、
+  室内还是户外，都要像手机相册里的一张随手照片，而不是摄影棚或专业摄影作品。
+- 自拍必须是**手持手机的前置摄像头视角**：手臂长度的距离、镜头略高于视线；按要求可以看见
+  手臂、手机边缘或镜面反射，不要把自拍画成第三方相机拍摄的摆拍照。
+- 非自拍也必须是**朋友或旁人用手机拍摄**的生活快照：手机镜头高度、轻微广角、自然构图和
+  偶然抓拍感；不要自动升级成单反/无反相机、影棚人像或商业写真。
+- 提示词中必须明确出现 `phone camera` / `smartphone photo` / `casual smartphone snapshot`
+  这类手机拍摄信息，并根据方向写 `3:4 vertical` 或 `4:3 horizontal`。
+- 手机镜头的特征要在：稍广的视角、近距离时轻微的边缘变形、手机 HDR 那种压过的高光和提亮
+  的暗部、不过度干净的细节。光线用现场光——窗光、屋里的灯、屏幕的反光、路灯。
+- 禁止单反/无反相机、专业摄影机、影棚三点布光、商业人像、杂志封面、广告大片、专业模特摆拍、
+  过度后期和磨皮。浅景深可以有，但不能让画面像专业肖像摄影。
 
 ## 画面比例
 
@@ -58,12 +54,11 @@ _这个文件只管**画成什么样**（媒介、质感、镜头、比例），
 
 ## 明确排除
 
-- ❌ **欧美长相**：高鼻梁、深眼窝、外扩颧骨、立体五官、粉调或古铜肤色
 - ❌ 插画 / 动漫 / 二次元 / 厚涂 / 线稿 / 水彩 / 油画 / CG / 3D 渲染
-- ❌ **动漫脸**：过大的眼睛、尖到不真实的下巴、没有鼻梁——这是真人 cos，不是把动漫脸贴到照片上
+- ❌ **动漫脸**：过大的眼睛、尖到不真实的下巴、没有真实鼻梁——这是真人 cos，不是把动漫脸贴到照片上
+- ❌ 单反 / 无反 / 专业摄影机 / 影棚 / 商业写真 / 杂志封面 / 广告大片 / 专业人像布光
 - ❌ 画面里出现文字、水印、logo、签名、边框、多格拼图
 - ❌ `masterpiece, best quality, 8k, ultra detailed` 这类标签式画质咒语
-- ❌ 影棚打光、杂志封面构图、专业模特摆拍的姿势
 - ❌ 除要求里明确写了以外的其他人
 
 ---
@@ -71,25 +66,25 @@ _这个文件只管**画成什么样**（媒介、质感、镜头、比例），
 ## 可直接使用的英文风格短语
 
 生图提示词用英文写，下面两组按当前配置的写法（`llm.draw_prompt_style`）取一组用，
-不要两组混着堆。
+不要两组混着堆。两组都必须保留手机拍摄方向。
 
 **自然语言式（natural）：**
 
-> A real photograph taken on a phone camera, 4:3 aspect ratio. The subject is a real
-> East Asian (Chinese) young woman in cosplay — East Asian facial structure with a flat
-> narrow face, low nose bridge, monolid or inner-double eyelids with epicanthic folds,
-> soft jawline and warm ivory skin. Her colored hair is a well-made wig and her eye color
-> comes from circle lenses. Photorealistic with natural skin texture, visible pores and fine
-> facial hair, available ambient light, slight handheld imperfection, candid everyday feel —
-> not a studio shot, not an illustration, not a Western face, not an anime face.
+> A casual smartphone photo taken on an ordinary phone camera, 3:4 vertical for a selfie
+> or 4:3 horizontal for a landscape or group composition. The subject has a believable
+> Japanese-coser-like real-person cosplay aesthetic: a well-made wig, natural circle lenses,
+> and polished but realistic cosplay makeup. The image feels like a candid everyday snapshot
+> with available ambient light, natural skin texture and slight handheld imperfection — not a
+> studio shoot, not editorial photography, not a professional portrait, not an illustration,
+> and not an anime face.
 
 **标签式（tags）：**
 
-> `photorealistic, real photo, phone camera photo, 4:3 aspect ratio, east asian, chinese girl,
-> asian facial features, monolid eyes, epicanthic fold, low nose bridge, flat face, warm ivory skin,
-> cosplay photo, wig, circle lenses, cosplay makeup, natural skin texture, visible pores,
-> ambient natural lighting, candid snapshot, film-like grain, (western face:0), (caucasian:0),
-> (anime face:0), (illustration:0), (3d render:0), no text, no watermark`
+> `photorealistic, real photo, phone camera photo, casual smartphone snapshot, 3:4 vertical
+> or 4:3 horizontal, Japanese-coser-like aesthetic, real-person cosplay, well-made wig,
+> circle lenses, realistic cosplay makeup, natural skin texture, visible pores, ambient lighting,
+> candid everyday feel, slight handheld imperfection, no studio, no editorial photography,
+> no professional portrait, no DSLR, no mirrorless camera, (anime face:0), no text, no watermark`
 
 ---
 
