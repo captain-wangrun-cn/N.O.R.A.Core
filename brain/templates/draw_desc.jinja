@@ -73,6 +73,8 @@
 ```
 
 - **日常手机拍摄是硬约束，不是可选风格。** 无论自拍、半身还是全身，最终提示词都必须明确写出普通手机相机拍摄、随手快照和正确比例：`phone camera` / `smartphone photo` / `casual smartphone snapshot`，以及 `3:4 vertical` 或 `4:3 horizontal`。
+- **普通自拍必须写清楚前置摄像头的物理关系。** 要明确这是人物自己把手机举在手臂长度处拍摄，镜头位于手机屏幕一侧，手机屏幕朝向人物；画面只允许出现手机的屏幕侧或边缘，手机背面和后置摄像头模组必须完全不可见。不要只写 `front-facing phone camera`，还要写 `front-camera selfie held at arm's length`、`phone back and rear camera module not visible` 等可执行约束。
+- **只有本次要求明确是镜子自拍或镜面自拍时，才允许写手机背面、后置摄像头或镜面反射。** 普通自拍不得出现镜子、镜面反射、手机背面和后置摄像头；不要把“人物手里拿手机”自动解释成镜子自拍。
 - 只有本次要求明确是自拍时，才写手持前置摄像头、举手机、手臂长度等自拍机制；非自拍要写朋友或旁人用手机拍摄，不能自动变成自拍。
 - 禁止把画面升级为单反/无反、影棚、商业写真、杂志封面、广告大片或专业肖像摄影；不要使用会把模型带向这些方向的 `portrait photography`、`editorial`、`studio lighting` 等表达。
 - 这份偏好决定**画成什么样**：媒介（写实照片/插画）、皮肤与头发质感、手机拍摄方式、现场光线、画面比例、以及明确排除的东西。**每一条都要落进提示词**，包括：
@@ -155,8 +157,8 @@ face.png,front.png
 - 允许用 "a casual smartphone photo of…" / "a candid phone-camera snapshot of…" 这样的开头点明媒介与风格；不要用 `portrait photography`、`editorial` 或 `studio`。
 - 不要用 `masterpiece, best quality, 8k` 这类标签式画质咒语，它们对这类模型无效甚至有害；
   要画质就直接描述（"sharp focus on her face, softly blurred background"）。
-- 示例形态（**带**参考图，注意只指代不描述长相，但日系 coser 风格照写）：`A casual smartphone selfie photo taken on an ordinary phone camera, 3:4 vertical, of the woman in the reference images, wearing a white blouse. She holds the phone slightly above eye level with her right hand and smiles softly at the camera, sitting at a wooden desk in her room. Warm lamplight falls from the left, and the bookshelf behind her is gently out of focus. The result is a candid Japanese-coser-like real-person cosplay snapshot, not studio or editorial photography.`
-- 示例形态（**无**参考图，此时长相必须写全）：`A casual smartphone selfie photo taken on an ordinary phone camera, 3:4 vertical, of a real-person cosplay woman with long silver wig and colored circle lenses, wearing a white blouse. She holds the phone slightly above eye level and smiles softly at the camera, sitting at a wooden desk in her room.`
+- 示例形态（**带**参考图，注意只指代不描述长相，但日系 coser 风格照写）：`A casual front-camera smartphone selfie taken by the woman in the reference images, 3:4 vertical. She holds the phone at arm's length with the screen facing her and looks into the front camera; only the screen side or a thin edge of the phone may appear, while the phone back and rear camera module are completely out of frame. She smiles softly at the camera in her room, with warm lamplight from the left and a bookshelf gently out of focus. The result is a candid Japanese-coser-like real-person cosplay snapshot, not a mirror selfie, not studio or editorial photography.`
+- 示例形态（**无**参考图，此时长相必须写全）：`A casual front-camera smartphone selfie taken by a real-person cosplay woman with long silver wig and colored circle lenses, 3:4 vertical. She holds the phone at arm's length with the screen facing her and looks into the front camera; only the screen side or a thin edge of the phone may appear, while the phone back and rear camera module are completely out of frame. She smiles softly at the camera, sitting at a wooden desk in her room.`
 {% endif %}
 
 ## 提示词质量要求
