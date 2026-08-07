@@ -19,13 +19,15 @@ _这个文件只管**画成什么样**（媒介、质感、镜头、比例），
 
 - **写实真人风格。** 这是一张真实世界里**拍下来的照片**——不是插画、不是动漫、不是 CG、
   不是 3D 渲染、不是 AI 感很重的那种「精修图」。
-- **日系真人 coser 气质。** 人物是现实中的 coser，不是动漫角色本身：造型精致但可信，
-  妆容是日系 cosplay 妆，整体干净、轻盈、自然，接近日本 coser 发布的生活照片和自拍。
+- **日系真人 coser 气质。** 人物是现实中的 coser，不是动漫角色本身：妆发完成度高但仍像真人，
+  眼妆清晰、睫毛和眼线精致、腮红与唇妆自然，整体是日本 coser 常见的干净、轻盈、可爱又有角色感的造型。
   这是风格参考，不是对人物民族、国籍或面部骨相的指定；不要根据这条自行添加人种解剖特征。
 - 角色设定里的非自然发色、发型、瞳色通过**质量好的假发和美瞳**实现，不要当成天生特征：
   - 假发有均匀但自然的色泽，发丝整齐，发际线处能看出是戴上去的，但没有廉价塑料感。
   - 美瞳的颜色自然融入眼睛，近看能有轻微的美瞳圈痕迹，不要画成发光或动漫眼睛。
   - Cos 妆可以比日常妆更完整，但必须是真人化妆效果，不是把动漫脸贴到真人照片上。
+- 如果 `APPEARANCE.md` 有角色化固定特征（例如悬浮光环、特殊发饰），在头部或上半身构图中必须让它真实可见；
+  不要因为画面是自拍就擅自删除本体特征。光环应呈现为后期合成或真实特效般的清晰发光弧线，不能画成动漫贴纸。
 - 皮肤要有真实质感：细微的毛孔、绒毛、自然的油光、不均匀的肤色和红润。
   **不要磨皮**成塑料或瓷娃娃感。
 - 允许真实照片才有的小瑕疵：翘起的一两根假发丝、衣服的褶皱、轻微的手抖模糊、
@@ -35,8 +37,13 @@ _这个文件只管**画成什么样**（媒介、质感、镜头、比例），
 
 - **每一张日常生图都必须是普通手机摄像头拍下的照片。** 无论是自拍、半身、全身、
   室内还是户外，都要像手机相册里的一张随手照片，而不是摄影棚或专业摄影作品。
-- 自拍必须是**手持手机的前置摄像头视角**：手臂长度的距离、镜头略高于视线；按要求可以看见
-  手臂、手机边缘或镜面反射，不要把自拍画成第三方相机拍摄的摆拍照。
+- **自拍只能选择一种物理成立的模式，不得混用：**
+  - **前置摄像头自拍：** 手机在手中但只拍到屏幕一侧或手机边缘，人物面对前置镜头；
+    不要同时展示手机背面、后置摄像头模组和自拍构图。
+  - **镜子自拍：** 通过镜面成立，画面可以清楚看到手机背面和后置摄像头，但必须同时出现镜子反射，
+    人物看向手机屏幕或镜中画面，不能把无镜子的普通自拍写成后置镜头自拍。
+  - **他人用手机拍摄：** 手机不在人物手中，人物是被朋友或旁人拍摄，不能同时让人物举手机自拍。
+- 普通自拍默认使用**前置摄像头**；只有本次要求明确提到“镜子/镜面”时，才使用镜子自拍并展示手机背面。
 - 非自拍也必须是**朋友或旁人用手机拍摄**的生活快照：手机镜头高度、轻微广角、自然构图和
   偶然抓拍感；不要自动升级成单反/无反相机、影棚人像或商业写真。
 - 提示词中必须明确出现 `phone camera` / `smartphone photo` / `casual smartphone snapshot`
@@ -73,17 +80,22 @@ _这个文件只管**画成什么样**（媒介、质感、镜头、比例），
 > A casual smartphone photo taken on an ordinary phone camera, 3:4 vertical for a selfie
 > or 4:3 horizontal for a landscape or group composition. The subject has a believable
 > Japanese-coser-like real-person cosplay aesthetic: a well-made wig, natural circle lenses,
-> and polished but realistic cosplay makeup. The image feels like a candid everyday snapshot
-> with available ambient light, natural skin texture and slight handheld imperfection — not a
-> studio shoot, not editorial photography, not a professional portrait, not an illustration,
-> and not an anime face.
+> refined eyeliner, defined lashes, natural blush and polished but realistic cosplay makeup.
+> The image feels like a candid everyday snapshot with available ambient light, natural skin
+> texture and slight handheld imperfection. For a normal selfie, use the front camera and show
+> only the screen side or edge of the phone; show the back and rear camera module only in a
+> clearly visible mirror selfie. Keep any fixed halo or special head accessory visible when it
+> belongs in the framing — not a studio shoot, not editorial photography, not a professional
+> portrait, not an illustration, and not an anime face.
 
 **标签式（tags）：**
 
 > `photorealistic, real photo, phone camera photo, casual smartphone snapshot, 3:4 vertical
 > or 4:3 horizontal, Japanese-coser-like aesthetic, real-person cosplay, well-made wig,
-> circle lenses, realistic cosplay makeup, natural skin texture, visible pores, ambient lighting,
-> candid everyday feel, slight handheld imperfection, no studio, no editorial photography,
+> circle lenses, refined eyeliner, defined lashes, natural blush, realistic cosplay makeup,
+> natural skin texture, visible pores, ambient lighting, candid everyday feel, slight handheld
+> imperfection, front camera selfie, phone screen side or edge only, mirror selfie required for
+> visible phone back, fixed halo visible when in frame, no studio, no editorial photography,
 > no professional portrait, no DSLR, no mirrorless camera, (anime face:0), no text, no watermark`
 
 ---
