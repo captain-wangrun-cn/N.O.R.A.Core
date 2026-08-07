@@ -286,6 +286,8 @@ python tui.py
 > - N.O.R.A Core 不是“每次会话全新实例”，这些文件主要作为可变 prompt 块。
 > - 当前默认仅自动注入 SOUL/APPEARANCE/USER/MEMORY，`daily memory` 不自动注入（按需读取）。
 >   `<appearance>` 紧跟 `<soul>` 注入——形象是"她自己"的一部分。
-> - 首次运行时若 workspace 缺少 SOUL/APPEARANCE/USER/MEMORY，会自动从仓库根默认文件复制过去。
+> - 首次运行时若 workspace 缺少 SOUL/APPEARANCE/STYLE/USER/MEMORY，会自动从仓库根默认文件复制过去。
+>   复制发生在 **`brain/prompts.py` 模块 import 时**（模块级调用 `_ensure_workspace_identity_files()`），
+>   所以启动进程就能看到文件，不必先发一条消息把它们「引」出来。各 prompt 加载函数里的同名调用保留作兜底。
 > - 形象系统是**文字在前、图在后**：`APPEARANCE.md` 写清楚了才生成参考图；改了描述则已有参考图
 >   与文字不符，需要 `replace=true` 重新生成。详见 `docs/architecture/identity_files.md`。

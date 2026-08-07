@@ -1567,7 +1567,10 @@ class ToolManager:
                 style_text,
                 "",
                 "Apply ONLY the medium/texture/rendering style from the preference above "
-                "(e.g. photorealistic vs illustrated, skin and hair texture, level of detail). "
+                "(e.g. photorealistic vs illustrated, skin and hair texture, level of detail) "
+                "AND any ethnicity / subject-type direction it states (e.g. East Asian features, "
+                "cosplay with wig and circle lenses) — those must be followed here too, since this "
+                "reference anchors every later image. "
                 "IGNORE its camera/shooting instructions, lighting setup and aspect ratio — "
                 "this is a neutral reference image, not a casual snapshot: keep the plain background, "
                 "even lighting and clear framing described earlier.",

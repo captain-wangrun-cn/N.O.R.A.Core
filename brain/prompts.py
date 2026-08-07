@@ -150,6 +150,19 @@ def _ensure_workspace_identity_files():
         logger.warning(f"创建形象参考图目录失败 {WORKSPACE_APPEARANCE_REFS_DIR}: {e}")
 
 
+# 启动即落盘：这一行让 workspace 在进程起来时就长齐，而不是等第一条消息触发
+# 某个 prompt 加载函数。下面那些函数里的调用保留作兜底（都是 os.path.exists 短路，
+# 几乎零成本），但正常路径由这里完成——用户第一次启动后就能直接去改 STYLE.md /
+# APPEARANCE.md，不必先跟 Nora 说句话把文件"引"出来。
+# 同 68 行的 makedirs：本模块已有模块级初始化的先例。
+# 包 try 是因为这是模块级代码：workspace 不可写时应该是"少了默认文件"，
+# 而不是 import brain.prompts 直接炸掉、整个进程起不来。
+try:
+    _ensure_workspace_identity_files()
+except Exception:  # pragma: no cover - 仅在 workspace 不可写等异常环境触发
+    logger.warning("启动时初始化 workspace 身份文件失败，将在首次使用时重试。", exc_info=True)
+
+
 def _resolve_memory_file(filename: str) -> str:
     """
     优先返回 workspace 下的记忆文件路径；若不存在则回退到仓库根目录对应路径（兼容旧数据）。
