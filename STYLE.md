@@ -38,12 +38,10 @@ _这个文件只管**画成什么样**（媒介、质感、镜头、比例），
 - **每一张日常生图都必须是普通手机摄像头拍下的照片。** 无论是自拍、半身、全身、
   室内还是户外，都要像手机相册里的一张随手照片，而不是摄影棚或专业摄影作品。
 - **自拍只能选择一种物理成立的模式，不得混用：**
-  - **前置摄像头自拍：** 手机在手中但只拍到屏幕一侧或手机边缘，人物面对前置镜头；
-    不要同时展示手机背面、后置摄像头模组和自拍构图。
-  - **镜子自拍：** 通过镜面成立，画面可以清楚看到手机背面和后置摄像头，但必须同时出现镜子反射，
-    人物看向手机屏幕或镜中画面，不能把无镜子的普通自拍写成后置镜头自拍。
-  - **他人用手机拍摄：** 手机不在人物手中，人物是被朋友或旁人拍摄，不能同时让人物举手机自拍。
-- 普通自拍默认使用**前置摄像头**；只有本次要求明确提到“镜子/镜面”时，才使用镜子自拍并展示手机背面。
+  - **前置摄像头自拍：** 人物面对前置镜头，手臂延伸（暗示手持相机），但**手持的手机机身与后置摄像头完全不可见、不在画面中**。禁止画出人物手里举着一个露出背面的手机。
+  - **镜子自拍：** 必须明确出现镜子反射和镜框。画面中才能允许看到手机背面和后置摄像头，人物目光看着镜中画面或手机屏幕。
+  - **他人用手机拍摄：** 手机不在人物手中，人物是被朋友或旁人拍摄，画面中没有自拍动作。
+- 普通自拍默认使用**前置摄像头**；自拍提示词中**绝对不要**写“人物在手里拿着手机/手持手机”等暗示，直接写“前置摄像头自拍（front-camera selfie）”和“手臂伸出（arm extended）”，并强调“手机本身在画面外（phone itself is out of frame）”。只有本次要求明确提到“镜子/镜面”时，才使用镜子自拍并展示手机背面。
 - 非自拍也必须是**朋友或旁人用手机拍摄**的生活快照：手机镜头高度、轻微广角、自然构图和
   偶然抓拍感；不要自动升级成单反/无反相机、影棚人像或商业写真。
 - 提示词中必须明确出现 `phone camera` / `smartphone photo` / `casual smartphone snapshot`
@@ -82,9 +80,10 @@ _这个文件只管**画成什么样**（媒介、质感、镜头、比例），
 > Japanese-coser-like real-person cosplay aesthetic: a well-made wig, natural circle lenses,
 > refined eyeliner, defined lashes, natural blush and polished but realistic cosplay makeup.
 > The image feels like a candid everyday snapshot with available ambient light, natural skin
-> texture and slight handheld imperfection. For a normal selfie, use the front camera and show
-> only the screen side or edge of the phone; show the back and rear camera module only in a
-> clearly visible mirror selfie. Keep any fixed halo or special head accessory visible when it
+> texture and slight handheld imperfection. For a normal selfie, use the front camera with her
+> arm extended, and the phone itself must be completely out of frame to ensure a true first-person
+> perspective; show the phone back and rear camera module only in a clearly visible mirror selfie
+> with mirror reflections. Keep any fixed halo or special head accessory visible when it
 > belongs in the framing — not a studio shoot, not editorial photography, not a professional
 > portrait, not an illustration, and not an anime face.
 
@@ -94,9 +93,10 @@ _这个文件只管**画成什么样**（媒介、质感、镜头、比例），
 > or 4:3 horizontal, Japanese-coser-like aesthetic, real-person cosplay, well-made wig,
 > circle lenses, refined eyeliner, defined lashes, natural blush, realistic cosplay makeup,
 > natural skin texture, visible pores, ambient lighting, candid everyday feel, slight handheld
-> imperfection, front camera selfie, phone screen side or edge only, mirror selfie required for
-> visible phone back, fixed halo visible when in frame, no studio, no editorial photography,
-> no professional portrait, no DSLR, no mirrorless camera, (anime face:0), no text, no watermark`
+> imperfection, front-camera selfie, arm extended, phone itself out of frame, (holding phone:0),
+> mirror selfie required for visible phone back, fixed halo visible when in frame, no studio,
+> no editorial photography, no professional portrait, no DSLR, no mirrorless camera,
+> (anime face:0), no text, no watermark`
 
 ---
 
