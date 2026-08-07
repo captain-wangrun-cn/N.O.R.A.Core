@@ -77,6 +77,9 @@ WORKSPACE_SECRET_FILE = os.path.join(WORKSPACE_ROOT, "SECRET.md")
 # 形象系统：文字描述 + 参考图。参考图只能通过 generate_appearance_reference 工具管理。
 WORKSPACE_APPEARANCE_DIR = os.path.join(WORKSPACE_ROOT, "appearance")
 WORKSPACE_APPEARANCE_FILE = os.path.join(WORKSPACE_APPEARANCE_DIR, "APPEARANCE.md")
+# 出图风格偏好（写实/动漫、镜头、比例）。不自动注入 system prompt——
+# 只在生图那两条链路里读，前脑不需要知道风格。
+WORKSPACE_APPEARANCE_STYLE_FILE = os.path.join(WORKSPACE_APPEARANCE_DIR, "STYLE.md")
 WORKSPACE_APPEARANCE_REFS_DIR = os.path.join(WORKSPACE_APPEARANCE_DIR, "refs")
 WORKSPACE_APPEARANCE_MANIFEST = os.path.join(WORKSPACE_APPEARANCE_REFS_DIR, "manifest.json")
 WORKSPACE_APPEARANCE_GENERATED_DIR = os.path.join(WORKSPACE_APPEARANCE_DIR, "generated")
@@ -89,6 +92,7 @@ LEGACY_SCHEDULE_FILE = os.path.join(PROJECT_ROOT, "SCHEDULE.md")
 LEGACY_CUSTOM_FILE = os.path.join(PROJECT_ROOT, "CUSTOM.md")
 LEGACY_SECRET_FILE = os.path.join(PROJECT_ROOT, "SECRET.md")
 LEGACY_APPEARANCE_FILE = os.path.join(PROJECT_ROOT, "APPEARANCE.md")
+LEGACY_APPEARANCE_STYLE_FILE = os.path.join(PROJECT_ROOT, "STYLE.md")
 
 # 注入到 system prompt 的最大字符数（防止 token 爆炸）
 BOOTSTRAP_MAX_CHARS = 20000
@@ -120,6 +124,7 @@ def _ensure_workspace_identity_files():
         (WORKSPACE_SCHEDULE_FILE, LEGACY_SCHEDULE_FILE),
         (WORKSPACE_CUSTOM_FILE, LEGACY_CUSTOM_FILE),
         (WORKSPACE_APPEARANCE_FILE, LEGACY_APPEARANCE_FILE),
+        (WORKSPACE_APPEARANCE_STYLE_FILE, LEGACY_APPEARANCE_STYLE_FILE),
     ]
     for dst, src in mapping:
         if os.path.exists(dst):

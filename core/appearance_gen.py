@@ -131,6 +131,7 @@ class AppearanceGenMixin:
             soul=_read_file_safe(WORKSPACE_SOUL_FILE, max_chars=4000),
             ref_manifest=appearance_lib.describe_manifest_for_prompt(),
             prompt_style=prompt_style,
+            style=appearance_lib.read_style_text(),
         )
         user_prompt = render_template(
             "draw_desc.jinja",

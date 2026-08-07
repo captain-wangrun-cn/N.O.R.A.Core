@@ -7,7 +7,8 @@
 | 文件 | 作用 | 写入/读取规则 | 备注 |
 | --- | --- | --- | --- |
 | `SOUL.md` | AI 的人设、语气、边界 | 仅当用户明确要求调整人设/语气时更新，并告知用户；前脑发现变更需求需 `[NEED_BACKEND]` 交后脑写入 | 禁止写入用户信息 |
-| `appearance/APPEARANCE.md` | AI 的**外貌形象**（体征、发型、常穿、固定特征） | 形象设定变化时更新并告知用户；前脑标记 `[NEED_BACKEND]` 交后脑写入 | 只写外貌；性格语气仍归 `SOUL.md`。它是所有生图的文字锚 |
+| `appearance/APPEARANCE.md` | AI 的**外貌形象**（体征、发型、常穿、固定特征） | 形象设定变化时更新并告知用户；前脑标记 `[NEED_BACKEND]` 交后脑写入 | 只写外貌；性格语气仍归 `SOUL.md`，画风归 `STYLE.md`。它是所有生图的文字锚 |
+| `appearance/STYLE.md` | **出图风格偏好**（写实/动漫、质感、镜头、光线、比例、排除项） | 仅用户明确要改画风时；AI 不自主改 | **不注入 system prompt**，只在两条生图链路里读（`read_style_text()`）。管"画成什么样"，不管"长什么样" |
 | `appearance/refs/` | 形象参考图 + `manifest.json` | **只能**用 `generate_appearance_reference` 工具生成/覆盖 | 通用文件工具读写被 `_is_path_safe` 目录级拦截；覆盖会改变形象，须先征得用户同意 |
 | `appearance/generated/YYYY-MM-DD/` | `[DRAW:]` 日常生图产物 | 由生图链路自动落盘，元数据入 Mongo `appearance_images` | 只记 request / draw_prompt / 路径 / 时间；不入 Qdrant |
 | `USER.md` | **主人**画像：偏好、背景、联系方式、习惯 | 任何对话中听到的**主人**信息可主动更新（无需用户说“记一下”）；前脑标记 `[NEED_BACKEND]` 后脑写入 | 禁止写 AI 人设/日程；**只写主人，不写访客** |
@@ -38,8 +39,10 @@
 
 两条生图路径，共用 `brain/appearance.py` 的原语（读 md / 载参考图 / 落盘 / 维护 manifest）：
 
-- **参考图（后脑工具）**：`generate_appearance_reference(requirement, view, usage, replace, source_images)` → 直接用 `APPEARANCE.md` + 已有参考图作锚生成，存 `refs/{view}.png`。不经 `draw_desc`——requirement 已是显式描述，再套一层改写只会引入漂移。用户发图说"你就长这样"时，把图的本地路径传 `source_images`：来源图优先占配额、排在附图最前，提示词写"与文字描述冲突以图为准"。
-- **日常生图（前脑标记）**：`[DRAW:要求]` → `draw_desc` 读 APPEARANCE.md + 要求 + 当前消息段 + 当前时间 + SCHEDULE.md + SOUL.md，产出英文提示词并**自己挑**参考图 → `draw` 出图 → 落盘 + 入库 + 追发。文字先发、图后到；单轮只一张；失败只记日志不追发安慰文本。
+- **参考图（后脑工具）**：`generate_appearance_reference(requirement, view, usage, replace, source_images)` → 直接用 `APPEARANCE.md` + 已有参考图作锚生成，存 `refs/{view}.png`。不经 `draw_desc`——requirement 已是显式描述，再套一层改写只会引入漂移。`STYLE.md` 在这条路上**只取渲染风格那一层**（写实/插画、质感），明确忽略拍摄方式与比例——参考图要中性。用户发图说"你就长这样"时，把图的本地路径传 `source_images`：来源图优先占配额、排在附图最前，提示词写"与文字描述冲突以图为准"。
+- **日常生图（前脑标记）**：`[DRAW:要求]` → `draw_desc` 读 APPEARANCE.md + STYLE.md + 要求 + 当前消息段 + 当前时间 + SCHEDULE.md + SOUL.md，产出英文提示词并**自己挑**参考图 → `draw` 出图 → 落盘 + 入库 + 追发。文字先发、图后到；单轮只一张；失败只记日志不追发安慰文本。
+
+三份输入职责不重叠：`APPEARANCE.md` 管长什么样，`STYLE.md` 管画成什么样，`[DRAW:要求]` 只管画什么（视角/场景/动作/表情）。前脑被明确禁止把外貌和画风写进要求——重复写会与权威文件打架，也让 `draw_desc` 分不清谁服从谁。
 
 两个模型别名 `draw`（文生图）/ `draw_desc`（文本）都配上才启用；否则 `[DRAW:]` 说明不注入前脑提示、参考图工具不注册。OpenAI 与 Gemini 端点都支持（`BaseLLM.generate_image`）。
 

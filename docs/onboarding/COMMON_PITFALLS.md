@@ -276,6 +276,19 @@
   参考图工具 `generate_appearance_reference` 不过 `draw_desc`，提示词在 `brain/tools.py` 里硬拼，
   自己判 `get_draw_prompt_style()`。漏掉后者的话，标签系模型会把 "Generate a character reference
   image…" 这类整句指令当画面内容画进图里。
+- **三份输入的边界一破，图就画不对。** `APPEARANCE.md`（长什么样）/ `STYLE.md`（画成什么样）/
+  `[DRAW:要求]`（画什么）各有唯一权威。历史上前脑自己往要求里写"棕色长发、白色针织衫、写实风格"，
+  两个后果：它凭记忆写的外貌和 `APPEARANCE.md` 打架；三类信息混在一句里，`draw_desc` 分不清
+  谁该服从谁。现在 `front_brain.jinja` 明确禁止在要求里写外貌和画风，`draw_desc.jinja` 顶部有
+  同样的三列表并写明"要求里若顺带出现外观或风格，以另两份为准"。**改这三处提示词时要同步**，
+  只改一处会让约束和实际行为错位。只有"这一次特意不一样"的东西（临时换的衣服、头发湿的）才进要求。
+- **`STYLE.md` 在两条生图路径上取的层次不同，别统一。** `[DRAW:]` 日常拍照要整份（含拍摄方式、
+  光线、`4:3` 比例）；`generate_appearance_reference` **只取渲染风格那一层**，明确 IGNORE 拍摄方式、
+  布光和比例（`brain/tools.py` 里那段 `Apply ONLY … IGNORE …`）。参考图必须是中性形象锚——
+  平背景、均匀光照、正对镜头。让参考图也吃"手机随手拍"，那次的场景味道会顺着锚污染之后所有生图。
+- **`STYLE.md` 不注入 system prompt。** 它只在两条生图链路里读（`read_style_text()`）。
+  前脑不需要知道画风——它只负责写"画什么"。顺手把它加进 `load_identity_context()`
+  等于又给了前脑一份可以往要求里抄的画风描述，正好是上面那条要避免的。
 - **生图失败不向用户追发任何文本**（用户的约定）。文字已经发出去了，图没来就是没来；
   排查看日志的 `生图失败` 行，`draw_prompt` 落在 Mongo `appearance_images` 里。
 - 生图是旁路任务，不在 `generation_tasks` 里。`/stop` 与 `shutdown()` 需要单独调

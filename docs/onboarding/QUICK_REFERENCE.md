@@ -196,7 +196,7 @@ python tui.py
 | `brain/templates/system.jinja` | **主系统提示词** — 所有行为规则、协议、约定 |
 | `brain/templates/persona_nora.jinja` | 人设提示词回退（Nora 的性格，当 SOUL.md 不存在时使用） |
 | `brain/templates/media_analysis.jinja` | **回查媒体的分析轮专用**（`view_media` 返回图片/视频后的那一轮）：无人设的"媒体内容分析引擎"，输出是给上层推理模型看的内部观察数据 |
-| `brain/templates/draw_desc.jinja` | **`[DRAW:]` 生图提示词轮专用**：无人设的"生图提示词生成引擎"，输出直接进文生图模型（用户看不到）。SOUL 在这里是判断表情/姿态的**素材**，不是让它扮演 Nora。提示词写法按 `llm.draw_prompt_style` 分支（natural 句子 / tags 标签串） |
+| `brain/templates/draw_desc.jinja` | **`[DRAW:]` 生图提示词轮专用**：无人设的"生图提示词生成引擎"，输出直接进文生图模型（用户看不到）。SOUL 在这里是判断表情/姿态的**素材**，不是让它扮演 Nora。顶部有「外观 / 风格 / 本次要求」三份输入的职责边界表。提示词写法按 `llm.draw_prompt_style` 分支（natural 句子 / tags 标签串） |
 | `brain/prompts.py` | 提示词组装逻辑 + 身份上下文加载 |
 | `adapters/PROMPT.md` | 通用平台适配协议：跨平台人格连续性、媒体标记、`[SPLIT]` |
 | `adapters/telegram/PROMPT.md` | Telegram 平台特定提示（格式、长度等） |
@@ -255,7 +255,10 @@ python tui.py
   - 说明：`[SPLIT]` 为默认短停顿，`[SPLIT:秒数]` 为显式延时控制。
 
 - `[DRAW:要求]`
-  - 含义：生成形象图（自拍/穿搭等）。要求里写场景、动作、表情、构图，**不能带方括号**。
+  - 含义：生成形象图（自拍/穿搭等）。要求里**只写**视角、角度、场景、动作、表情、构图，**不能带方括号**。
+  - ⚠️ 要求里**不写外貌也不写画风**：外貌读 `APPEARANCE.md` + 参考图，画风读 `appearance/STYLE.md`。
+    三份输入各有唯一权威，前脑重复写会打架。只有"这一次特意不一样"的东西（临时换的衣服、
+    头发湿的、临时配饰）才写进要求。`draw_desc.jinja` 顶部有同样的三列表，并写明冲突时以另两份为准。
   - 行为：旁路通路，与 `[NEED_BACKEND]` 互不影响、不进后脑工具循环。文字先发，图后台生成完追发。
     单轮只取第一个；per-runtime_key 只保留最新一张。
   - 前置：`draw` + `draw_desc` 都配置；否则前脑提示里不注入该说明。
@@ -273,6 +276,7 @@ python tui.py
 |------|------|-----------|
 | `SOUL.md` | AI 的灵魂：人设、语气、边界、性格 | ✅ 通用文件工具 `read_file`/`write_file`/`edit_file` |
 | `appearance/APPEARANCE.md` | AI 的外貌形象：体征、发型、常穿、固定特征 | ✅ 通用文件工具 |
+| `appearance/STYLE.md` | 出图风格偏好：写实/动漫、质感、镜头、比例。**不注入 system prompt**，只在生图链路读 | ✅ 通用文件工具（主人的偏好，AI 不自主改） |
 | `appearance/refs/` | 形象参考图（视觉一致性的锚）+ `manifest.json` | ❌ 通用文件工具被目录级拦截；只能用 `generate_appearance_reference` |
 | `USER.md` | 用户档案：名字、偏好、背景 | ✅ 通用文件工具 |
 | `data/memory/MEMORY.md` | 长期记忆：决策、偏好、事实 | ✅ 通用文件工具 |

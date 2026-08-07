@@ -10,6 +10,7 @@
 | 部分 | 位置 | 说明 |
 | --- | --- | --- |
 | 文字设定 | `workspace/appearance/APPEARANCE.md` | 身份文件之一，自动注入系统提示的 `<appearance>` 块。Nora 自主维护 |
+| 风格偏好 | `workspace/appearance/STYLE.md` | 出图风格（写实/动漫、质感、镜头、比例）。**不注入 system prompt**，只在两条生图链路里读。属于主人的偏好，Nora 不自主改 |
 | 参考图 | `workspace/appearance/refs/<view>.png` | 视觉锚点。**只能**通过 `generate_appearance_reference` 工具管理 |
 | 参考图索引 | `workspace/appearance/refs/manifest.json` | 每张参考图的 `view` / `usage` / `updated_at` |
 | 生成图 | `workspace/appearance/generated/YYYY-MM-DD/draw_xxxxxxxx.png` | 按日期分目录落盘 |
@@ -48,6 +49,33 @@
 
 参考图工具**刻意不走 `draw_desc`**：`requirement` 已经是后脑自己写的明确描述，`APPEARANCE.md`
 也是结构化文本，再插一层提示词改写只会引入漂移。
+
+### 三份输入的职责边界
+
+生图的输入被刻意切成三份，各有唯一权威，谁也不许越界：
+
+| 输入 | 管什么 | 谁写 |
+| --- | --- | --- |
+| `APPEARANCE.md` + `refs/` | **长什么样**（发色、发型、瞳色、体型、常穿、固定特征） | Nora 自主维护 |
+| `STYLE.md` | **画成什么样**（媒介、质感、镜头、光线、比例、排除项） | 主人的偏好，Nora 不自主改 |
+| `[DRAW:要求]` / 工具 `requirement` | **画什么**（视角、角度、场景、动作、表情、构图） | 前脑/后脑当场写 |
+
+所以**前脑写 `[DRAW:]` 时不该重复外貌和画风**——`front_brain.jinja` 里明确禁止了。
+以前让前脑自己写"棕色长发、白色针织衫、写实风格"有两个问题：它凭记忆写会和
+`APPEARANCE.md` 打架，而且同一句话里外貌、风格、内容混在一起，`draw_desc` 分不清哪个该服从哪个。
+现在 `draw_desc.jinja` 顶部有一张同样的三列表，并写明"要求里若顺带出现外观或风格，以另两份为准"。
+
+只有**这一次特意不一样**的东西才写进要求：临时换的衣服、当下状态（"头发湿的"）、临时配饰。
+这些是"此刻的样子"，不是固定设定。
+
+### `STYLE.md` 在两条路径上取的层次不同
+
+- `[DRAW:]` 日常拍照：**整份都要**——媒介、质感、拍摄方式、光线、比例、排除项，
+  其中画面比例要显式写进提示词（`4:3 aspect ratio` / `3:4 vertical`）。
+- `generate_appearance_reference` 参考图：**只取渲染风格那一层**（写实还是插画、皮肤头发质感、
+  细节程度），明确忽略拍摄方式、布光和比例。理由是参考图必须是中性的形象锚——
+  平背景、均匀光照、正对镜头，不能是一张随手拍的生活照，否则后续所有生图都会带上那次的场景味道。
+  `brain/tools.py` 里那段 `[Rendering style preference]` 附了显式的 `Apply ONLY … IGNORE …` 说明。
 
 ### 鸡生蛋问题
 
@@ -110,7 +138,7 @@
   ↓ core/message_handler.py 发送文字回复（拿到 send_target）
   ↓ start_appearance_image_task(draw_key, request, identity)   ← 不 await
   ↓ [后台] _resolve_draw_prompt()
-  │    draw_desc(system=APPEARANCE.md + SOUL + manifest,
+  │    draw_desc(system=APPEARANCE.md + STYLE.md + SOUL + manifest,
   │              user=要求 + 当前时间 + SCHEDULE + 当前消息段)
   │    → [DRAW_PROMPT]英文提示词[/DRAW_PROMPT] + [DRAW_REFS]face.png[/DRAW_REFS]
   ↓ [后台] load_reference_images() → draw.generate_image(prompt, refs)
@@ -141,7 +169,7 @@
 
 | 文件 | 职责 |
 | --- | --- |
-| `brain/appearance.py` | 共享原语：读 `APPEARANCE.md`、manifest 读写、参考图加载/落盘、任意本地图加载（`load_image_file`）、生成图落盘、时区 |
+| `brain/appearance.py` | 共享原语：读 `APPEARANCE.md`（`read_appearance_text`）与 `STYLE.md`（`read_style_text`）、manifest 读写、参考图加载/落盘、任意本地图加载（`load_image_file`）、生成图落盘、时区 |
 | `brain/prompts.py` | 路径常量、workspace 初始化、`<appearance>` 注入（紧跟 `<soul>`） |
 | `brain/templates/draw_desc.jinja` | `draw_desc` 的 system / user prompt（无人设） |
 | `brain/interface.py` | `BaseLLM.generate_image()`，默认 `NotImplementedError` |

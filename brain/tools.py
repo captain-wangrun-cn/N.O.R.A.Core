@@ -1556,6 +1556,22 @@ class ToolManager:
                 "[This reference image should depict]",
                 requirement_text,
             ]
+
+        # 风格偏好只取「渲染风格」那一层：参考图必须是中性形象锚，
+        # 所以不吃拍摄方式和画面比例（那些是日常拍照才要的）。
+        style_text = appearance_lib.read_style_text()
+        if style_text:
+            prompt_lines += [
+                "",
+                "[Rendering style preference]",
+                style_text,
+                "",
+                "Apply ONLY the medium/texture/rendering style from the preference above "
+                "(e.g. photorealistic vs illustrated, skin and hair texture, level of detail). "
+                "IGNORE its camera/shooting instructions, lighting setup and aspect ratio — "
+                "this is a neutral reference image, not a casual snapshot: keep the plain background, "
+                "even lighting and clear framing described earlier.",
+            ]
         # 附图按 source → anchor 的顺序传入，说明里也按这个顺序点名，
         # 否则模型分不清哪张该照抄、哪张只是保持一致。
         if source_loaded:

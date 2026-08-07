@@ -19,6 +19,7 @@ from brain.prompts import (
     WORKSPACE_APPEARANCE_GENERATED_DIR,
     WORKSPACE_APPEARANCE_MANIFEST,
     WORKSPACE_APPEARANCE_REFS_DIR,
+    WORKSPACE_APPEARANCE_STYLE_FILE,
 )
 
 logger = logging.getLogger(__name__)
@@ -60,6 +61,22 @@ def read_appearance_text() -> str:
             return f.read().strip()
     except Exception as e:
         logger.warning(f"读取 APPEARANCE.md 失败 {WORKSPACE_APPEARANCE_FILE}: {e}")
+        return ""
+
+
+def read_style_text() -> str:
+    """读 appearance/STYLE.md 全文；不存在或为空返回 ""。
+
+    风格（画成什么样）与外观（长什么样）是两件事，分文件存：主人改画风时
+    不该动 APPEARANCE.md，Nora 改外观时也不该动风格。
+    """
+    try:
+        if not os.path.exists(WORKSPACE_APPEARANCE_STYLE_FILE):
+            return ""
+        with open(WORKSPACE_APPEARANCE_STYLE_FILE, "r", encoding="utf-8") as f:
+            return f.read().strip()
+    except Exception as e:
+        logger.warning(f"读取 STYLE.md 失败 {WORKSPACE_APPEARANCE_STYLE_FILE}: {e}")
         return ""
 
 

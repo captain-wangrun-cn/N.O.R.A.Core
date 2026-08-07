@@ -68,8 +68,13 @@ Bob: 确实[图片]
   首启复制 mapping，并 `makedirs` 出 `appearance/refs/`。
 - `load_identity_context()` 用 `<appearance>` 包裹注入，位置在 `<soul>` 之后、`<user_profile>` 之前
   ——形象是"她自己"的一部分，紧跟 SOUL 语义最连贯。
-- 仓库根 `APPEARANCE.md` 是默认模板（分基本体征/头部/常穿/固定特征/画风偏好），
+- 仓库根 `APPEARANCE.md` 是默认模板（分基本体征/头部/常穿/固定特征），
   末尾写清维护约定：改了要告知主人、参考图只能用工具管、先写文字再生成图。
+- 仓库根新增 `STYLE.md`：出图风格偏好（写实真人、手机摄像头视角、4:3 比例），与
+  `APPEARANCE.md` 并列纳入 `_ensure_workspace_identity_files()` 首启复制。
+  三份输入各管一件事——`APPEARANCE.md` 管长什么样，`STYLE.md` 管画成什么样，
+  每次 `[DRAW:要求]` 管画什么（只写视角/场景/表情）。前脑被禁写外貌与画风进要求。
+  `STYLE.md` **不注入 system prompt**——只在两条生图链路里读，前脑不需要它。
 - `system.jinja` §5 加两行表格 + 一节「`appearance/`：你的形象」，说明文字与图的先后关系、
   覆盖参考图会改变形象需先征得同意。
 
