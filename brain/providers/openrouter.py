@@ -11,7 +11,8 @@ OpenRouter 的 /api/v1/images 端点（2025+，如 x-ai/grok-imagine 系）：
     {"model": "x-ai/grok-imagine-image-quality", "prompt": "..."}
 
 响应结构与 OpenAI images API 相同：{"data": [{"b64_json": ...}]}。
-该端点目前不收参考图/编辑图，reference_images 非空时降级为纯文本生图。
+参考图经 `input_references`（type=image_url）传入，本地参考图以
+data URI 内嵌（data:{mime};base64,{b64}），与图片 URL 等价。
 """
 
 import base64
@@ -56,28 +57,39 @@ class OpenRouterProvider(OpenAIProvider):
         """
         文生图：POST {base_url}/images（与 OpenAI images API 同构的响应结构）。
 
-        OpenRouter 该端点暂不收参考图；reference_images 非空时只记 warning
-        降级为纯文本生图（上游 appearance_gen 已容忍无参考图——本来就没带图时
-        只是形象一致性下降，不会报错）。
+        OpenRouter 该端点经 `input_references`（type=image_url）收参考图。
+        本地参考图没有公网 URL，以 data URI 内嵌（data:{mime};base64,...），
+        与图片 URL 等价。参考图格式复用 multimodal_images 同构结构
+        （mime_type / bytes / base64）。
         """
         if not prompt or not prompt.strip():
             raise ValueError("generate_image 需要非空 prompt")
-
-        if reference_images:
-            logger.warning(
-                "[OpenRouter generate_image] 该端点不收参考图，本次降级为纯文本生图"
-                "（形象一致性可能下降，建议先用 generate_appearance_reference 生成参考图）"
-            )
 
         url = f"{self.base_url}/images"
         headers = {
             "Authorization": f"Bearer {self.api_key}",
             "Content-Type": "application/json",
         }
-        body = {
+        body: Dict[str, Any] = {
             "model": self.model,
             "prompt": prompt,
         }
+
+        refs: List[Dict[str, Any]] = []
+        for ref in (reference_images or []):
+            mime = ref.get("mime_type") or "image/png"
+            b64 = ref.get("base64")
+            if not b64:
+                raw = ref.get("bytes")
+                if not raw:
+                    continue
+                b64 = base64.b64encode(raw).decode("utf-8") if isinstance(raw, bytes) else str(raw)
+            refs.append({
+                "type": "image_url",
+                "image_url": {"url": f"data:{mime};base64,{b64}"},
+            })
+        if refs:
+            body["input_references"] = refs
 
         timeout = aiohttp.ClientTimeout(total=180)
         payload: Optional[Dict[str, Any]] = None
