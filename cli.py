@@ -887,7 +887,7 @@ class StepProvider(ConfigStep):
         providers = self.state.setdefault("providers", {})
 
         provider_type = preset_type or (existing or {}).get("type", "gemini")
-        if provider_type not in ["gemini", "openai", "anthropic"]:
+        if provider_type not in ["gemini", "openai", "anthropic", "openrouter"]:
             provider_type = "openai"
 
         default_name = (existing or {}).get("name") or self._default_provider_name(provider_type, providers)
@@ -952,6 +952,23 @@ class StepProvider(ConfigStep):
             if base_url.strip():
                 provider_cfg["base_url"] = base_url.strip()
 
+        elif provider_type == "openrouter":
+            base_url = questionary.text(
+                "API Base URL（默认 OpenRouter 官方地址）:",
+                default=(existing or {}).get("base_url") or "https://openrouter.ai/api/v1"
+            ).ask()
+            if base_url is None:
+                return None
+            provider_cfg["base_url"] = base_url
+
+            use_fake_ua = questionary.confirm(
+                t('wizard.openai_user_agent_prompt'),
+                default=bool((existing or {}).get("user_agent"))
+            ).ask()
+            if use_fake_ua is None:
+                return None
+            provider_cfg["user_agent"] = DEFAULT_FAKE_UA if use_fake_ua else ""
+
         providers[provider_name] = provider_cfg
         # 保证至少有一个默认 provider
         if not self.state.get("provider"):
@@ -973,6 +990,7 @@ class StepProvider(ConfigStep):
                 questionary.Choice("➕ 添加 Gemini 提供商", value="add_gemini"),
                 questionary.Choice("➕ 添加 OpenAI 兼容提供商", value="add_openai"),
                 questionary.Choice("➕ 添加 Anthropic 提供商", value="add_anthropic"),
+                questionary.Choice("➕ 添加 OpenRouter 提供商", value="add_openrouter"),
             ]
             if providers:
                 choices.extend([
@@ -992,6 +1010,8 @@ class StepProvider(ConfigStep):
                 self._configure_provider(preset_type="openai")
             elif action == "add_anthropic":
                 self._configure_provider(preset_type="anthropic")
+            elif action == "add_openrouter":
+                self._configure_provider(preset_type="openrouter")
             elif action == "edit":
                 name = questionary.select("选择要编辑的提供商:", choices=list(providers.keys())).ask()
                 if name is None:
@@ -1334,6 +1354,8 @@ class StepModels(ConfigStep):
             return get_openai_models(api_key, provider_cfg.get("base_url"))
         if provider_type == "anthropic":
             return get_anthropic_models(api_key)
+        if provider_type == "openrouter":
+            return None  # OpenRouter 模型列表在配置向导里不自动拉取，走手动输入
 
         questionary.print(f"不支持的提供商类型: {provider_type}", style="bold red")
         return None

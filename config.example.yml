@@ -48,7 +48,7 @@ llm:
   provider: "gemini_main"
 
   # 多提供商配置
-  # type: "gemini" | "openai" | "anthropic"
+  # type: "gemini" | "openai" | "anthropic" | "openrouter"
   providers:
     gemini_main:
       type: "gemini"
@@ -64,6 +64,10 @@ llm:
     anthropic_main:
       type: "anthropic"
       api_key: "YOUR_ANTHROPIC_API_KEY"
+    # openrouter_main:
+    #   type: "openrouter"
+    #   api_key: "YOUR_OPENROUTER_API_KEY"
+    #   base_url: "https://openrouter.ai/api/v1"
 
   # 为每个模型别名绑定提供商（值为 providers 的键）
   model_providers:
@@ -99,7 +103,7 @@ llm:
   # 输出 token 上限（统一）
   max_output_tokens: 768
 
-  # 生图接口形态（只对 openai 类型 provider 生效；gemini 只有一条 :generateContent 路径）
+  # 生图接口形态（只对 openai 类型 provider 生效；gemini / openrouter 各有自己的固定端点）
   #   images（默认）：/v1/images/generations + /v1/images/edits（OpenAI 官方、gpt-image-1 / dall-e-*）
   #   chat：/v1/chat/completions + modalities: ["text","image"]，图片以 data URI 内嵌在回复里
   #         （多数中转站把 gemini image 模型挂成 openai 协议时只实现这条，走 images 会 404）

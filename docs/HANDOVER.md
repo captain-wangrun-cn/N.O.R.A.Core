@@ -1,3 +1,27 @@
+## 近期关键改动（截至 2026-08-08）
+
+### 🌐 OpenRouter 生图 provider（`draw` 模型绑 openrouter 类型时）
+
+OpenRouter 的生图端点（POST `/api/v1/images`，body `{model, prompt}`）与
+OpenAI 原生 images API、Gemini `:generateContent` 都不一样，新写了一个 provider：
+
+- **新增 `brain/providers/openrouter.py`**：`OpenRouterProvider(OpenAIProvider)`——
+  `chat` / `chat_stream` 直接继承 OpenAI 兼容实现；`generate_image` 用 aiohttp
+  POST `{base_url}/images`（`Authorization: Bearer`，180s 超时），解析
+  `data[0].b64_json` base64 解码，mime 按魔数推断（PNG/JPEG/GIF/BMP/WEBP，兜底 PNG）。
+  该端点不收参考图，`reference_images` 非空时只记 warning 降级为纯文本生图（不阻断）。
+- **`brain/llm.py`** 工厂加 `provider_type == "openrouter"` 分支。
+- **`cli.py`** 向导：提供商菜单加「➕ 添加 OpenRouter 提供商」，base_url 默认
+  `https://openrouter.ai/api/v1`；`_fetch_models_for_provider` 对 openrouter 返回
+  None 走手动输入。`draw_api` 询问只对 openai 类型生效，openrouter 天然跳过。
+- **`config.example.yml`**：type 注释加 `openrouter`，附 openrouter_main 样例。
+- 配置写法：`providers: { openrouter_main: { type: "openrouter", api_key: "sk-or-...", base_url: "https://openrouter.ai/api/v1" } }`，
+  `model_providers.draw = "openrouter_main"`。无需改 `config.py`（`get_provider_type`
+  无 type 时本就回退 provider 名）。
+- 参考图不可用时只影响形象一致性（日志 warning），链路本身不报错——与既有行为一致。
+
+---
+
 ## 近期关键改动（截至 2026-08-07）
 
 ### 💬 QQ 聊天记录（合并转发）入站直接解析 + 引用消息 ID 修正
