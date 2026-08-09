@@ -43,7 +43,7 @@
 
 参考图是**直接送进生图模型的图像输入**，模型看得到那张脸。所以：
 
-**A. 你在 `[DRAW_REFS]` 里挑了参考图 —— 提示词里不要再描述人物特征。**
+**A. 你在 `[DRAW_REFS]` 里挑了参考图 —— 提示词里不要再描述人物特征，并把参考图作为唯一身份与身形依据。**
 
 - **不要写**发色、发型、瞳色、脸型、五官、肤色、体型、年龄感这些长相信息。
   这些参考图已经交代了，再用文字复述一遍只会和图像打架：文字和图哪怕差一点
@@ -58,6 +58,28 @@
   光线氛围、以及本次特意提到的临时穿着/状态。
 - 外观规格里只有**参考图看不出来**的部分才写：本次要换的衣服（参考图是中性锚，
   通常穿着不同）、要求里点名的临时配饰或状态。
+
+## 参考图是身份与身形锚，必须严格服从
+
+只要带上了参考图（`[DRAW_REFS]` 非空），**参考图就是画这个人的唯一依据**：
+脸、五官、肤色、**身形与体态**（身高、骨架、肩宽、身材比例、姿态习惯）都要以参考图为准，
+不得自由发挥、不得"优化"成另一个模特。参考图与本次要求冲突时，**参考图优先**——
+尤其不能因为要求里写了动作/服装，就把整个人画成完全不同的人。
+
+- 在 `[DRAW_PROMPT]` 里必须写入一条**服从参考图的英文指令**（放在提示词前部，权重最高）：
+  - 自然语言式：`Stay faithful to the person in the reference image(s) — exact same face, body shape, body proportions and posture; only change the pose, setting and outfit described here.`
+  - 标签式：`exact same person as reference, same face, same body build and proportions, keep body shape and posture, follow reference identity strictly`
+- 带参考图时**不许出现** `a girl` / `a woman` / 以及任何独立外貌词汇来另起人物——一律用 `the woman in the reference image(s)` 指代，让画面主体与参考图是同一个存在。
+- 参考图若被生图模型"画偏"（脸不像、身形不对），优先怀疑是提示词里混入了文字描述在打架——保持"参考图优先、文字闭嘴"。
+
+### 换装 / cos / 特殊造型时，参考图更要作为体态依据
+
+- 用户要求换装（换 cos 服、别的衣服、别的发型状态）时，**参考图负责"还是同一个人"**，
+  文字只描述"换上的新东西"：衣服款式、假发/美瞳颜色与造型。不要因为换了装就把身材、
+  脸型、五官、肤色一起重画。
+- 换装/换造型时在 `[DRAW_PROMPT]` 里把「同一身份」写得更硬，例如加 `same identity and body as the reference image` /
+  `same face and figure as reference, wearing <new outfit>`。
+- cos 服装搭配时，尽量挑**当前造型展示最全的参考图**（穿上那套衣服的、或至少能看出身形的那张）。
 
 **B. `[DRAW_REFS]` 为空（没有可用参考图）—— 外观规格必须完整落进提示词。**
 
@@ -103,7 +125,7 @@
 
 {{ ref_manifest }}
 
-参考图会连同提示词一起送进生图模型，用来锚定脸和体型。按**构图需求**挑：画脸/半身/自拍优先带面部特写；画全身/穿搭带全身；画侧面带侧面。最多挑 3 张，宁少勿滥——不相关的参考图会干扰构图。没有参考图时输出空列表。
+参考图会连同提示词一起送进生图模型，用来锚定脸和体型。按**构图需求 + 本次内容需求**挑：画脸/半身/自拍优先带面部特写；画全身/穿搭带全身；画侧面带侧面；用户要换 cos 服/特定造型时，优先挑**展示那套造型最全**的参考图（穿上该服装或能看出整体身形的那张）。最多挑 3 张，宁少勿滥——不相关的参考图会干扰构图。没有参考图时输出空列表。
 
 **只要清单里有能用的图就一定要挑**——带图的一致性远好过纯文字描述。挑了之后记得按上面
 「外观该不该写进提示词」的 A 条写提示词（不复述长相）。
@@ -138,8 +160,9 @@ face.png,front.png
 - **带参考图时跳过「外观特征」那一段**（发色/发型/瞳色/体征全部不写），用
   `same person as reference` 一个标签代替，把标签预算让给场景、动作、光线、构图。
   但风格偏好里的日系真人 coser 属性（`Japanese-coser-like aesthetic`、`real-person cosplay` 等）照写。
-- 示例形态（**带**参考图）：`same person as reference, Japanese-coser-like aesthetic, real-person cosplay,
-  phone camera photo, casual smartphone snapshot, white blouse, gentle smile, sitting at desk,
+- **带参考图时把「严格服从参考图」标签放最前面**：`same face, same body build and proportions, exact same person as reference`。
+- 示例形态（**带**参考图）：`exact same person as reference, same face and body build, Japanese-coser-like aesthetic,
+  real-person cosplay, phone camera photo, casual smartphone snapshot, white blouse, gentle smile, sitting at desk,
   warm ambient light, upper body, 3:4 vertical`
 - 示例形态（**无**参考图，需自己撑起长相）：`real-person cosplay, photorealistic, phone camera photo,
   casual smartphone snapshot, long silver wig, colored circle lenses, white blouse, gentle smile,
@@ -157,7 +180,7 @@ face.png,front.png
 - 允许用 "a casual smartphone photo of…" / "a candid phone-camera snapshot of…" 这样的开头点明媒介与风格；不要用 `portrait photography`、`editorial` 或 `studio`。
 - 不要用 `masterpiece, best quality, 8k` 这类标签式画质咒语，它们对这类模型无效甚至有害；
   要画质就直接描述（"sharp focus on her face, softly blurred background"）。
-- 示例形态（**带**参考图，注意只指代不描述长相，但日系 coser 风格照写）：`A casual front-camera smartphone selfie taken by the woman in the reference images, 3:4 vertical. She has her arm extended to hold the camera, looking directly into the lens. The phone itself is completely out of frame, showing no part of the device or rear camera module. She smiles softly in her room, with warm lamplight from the left and a bookshelf gently out of focus. The result is a candid Japanese-coser-like real-person cosplay snapshot, not a mirror selfie, and not studio or editorial photography.`
+- 示例形态（**带**参考图，注意只指代不描述长相，且开头写明"忠于参考图"，日系 coser 风格照写）：`A casual front-camera smartphone selfie taken by the woman in the reference images, staying faithful to her face, body shape and posture, 3:4 vertical. She has her arm extended to hold the camera, looking directly into the lens. The phone itself is completely out of frame, showing no part of the device or rear camera module. She smiles softly in her room, with warm lamplight from the left and a bookshelf gently out of focus. The result is a candid Japanese-coser-like real-person cosplay snapshot of the same person, not a mirror selfie, and not studio or editorial photography.`
 - 示例形态（**无**参考图，此时长相必须写全）：`A casual front-camera smartphone selfie taken by a real-person cosplay woman with long silver wig and colored circle lenses, 3:4 vertical. She has her arm extended to hold the camera, looking directly into the lens. The phone itself is completely out of frame, showing no part of the device or rear camera module. She smiles softly, sitting at a wooden desk in her room.`
 {% endif %}
 
@@ -165,7 +188,10 @@ face.png,front.png
 
 - 场景、动作、光线、构图要**具体落地**，不要笼统敷衍。带参考图时长相交给图，
   这部分省下的笔墨全部补到这里；不带参考图时外观规格也要逐项写清楚，不要只写 "a girl"。
-- 场景、光线要和给定的时间/日程自洽（深夜就不要写正午阳光）。
+- 只要带了参考图，**参考图是身份与身形的唯一依据**（见上文「参考图是身份与身形锚，必须严格服从」），
+  提示词里必须有那条服从参考图的指令；出现任何"换了一张脸/换了一个身材"的苗头都要写负面约束压回去。
+- 场景、光线要和给定的时间/日程自洽（深夜就不要写正午阳光），**并把时间翻译成具体的现场光线**：
+  深夜 → 台灯/房间灯等暖黄人工光、或月光；清晨/上午 → 窗边透进来的柔和晨光；中午/下午 → 明亮的窗光或自然光；傍晚 → 暖橙色黄昏光。光线方向（从哪个方向来）也要写清楚。
 - 要求里的指代（"再来一张""换个角度""还是刚才那身衣服"）要结合当前对话片段理解，把实际内容写进提示词，不要把指代词本身翻译进去。
 - 如果要求含糊（只说"拍张照"），按当前时间与日程推断一个合理的日常场景，不要留空泛提示词。
 {% endblock %}
@@ -202,5 +228,6 @@ face.png,front.png
 {% if prompt_style == "tags" %}`[DRAW_PROMPT]` 里必须是**逗号分隔的英文标签**，不要写成句子。{% else %}`[DRAW_PROMPT]` 里必须是**完整的英文句子**，不要写成逗号分隔的关键词串。{% endif %}
 
 再确认一遍：如果 `[DRAW_REFS]` 非空，`[DRAW_PROMPT]` 里**不许出现**发色、发型、瞳色、
-脸型、五官、肤色、体型这类长相描述——用 `the woman in the reference image(s)`{% if prompt_style == "tags" %} / `same person as reference`{% endif %} 指代即可；但日系真人 coser 风格、手机相机、随手快照和画面比例仍必须写入。
+脸型、五官、肤色、体型这类长相描述——用 `the woman in the reference image(s)`{% if prompt_style == "tags" %} / `same person as reference`{% endif %} 指代即可；日系真人 coser 风格、手机相机、随手快照和画面比例仍必须写入，并**必须加一条"严格服从参考图"的指令**（身份、身形、体态都以参考图为准）。
+时间记得按「质量要求」翻译成具体的现场光线与方向。
 {% endblock %}
