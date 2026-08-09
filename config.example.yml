@@ -48,7 +48,7 @@ llm:
   provider: "gemini_main"
 
   # 多提供商配置
-  # type: "gemini" | "openai" | "anthropic" | "openrouter"
+  # type: "gemini" | "openai" | "anthropic" | "openrouter" | "civitai"
   providers:
     gemini_main:
       type: "gemini"
@@ -68,6 +68,14 @@ llm:
     #   type: "openrouter"
     #   api_key: "YOUR_OPENROUTER_API_KEY"
     #   base_url: "https://openrouter.ai/api/v1"
+    # Civitai：只能绑给 draw，且只做图生图（必须有参考图，没有就报错不出图）。
+    # 模型别名填 AIR 标识或托管模型名，见下方 llm.models.draw 注释。
+    # civitai_main:
+    #   type: "civitai"
+    #   api_key: "YOUR_CIVITAI_API_TOKEN"
+    #   base_url: "https://orchestration.civitai.com"
+    #   # engine 留空自动推断：AIR 模型走 sdcpp，托管模型用模型名本身
+    #   # engine: "sdcpp"
 
   # 为每个模型别名绑定提供商（值为 providers 的键）
   model_providers:
@@ -98,6 +106,11 @@ llm:
     # 形象生图（可选，两个都配才启用）：
     # draw: "gemini-2.5-flash-image"  # 文生图模型，需支持参考图输入以锚定形象一致性
     # draw_desc: "gpt-4o-mini"        # 普通文本模型，负责把要求 + APPEARANCE.md 写成生图提示词
+    # 绑 civitai 类型 provider 时，draw 填 AIR 标识或托管模型名：
+    # draw: "urn:air:sdxl:checkpoint:civitai:101055@128078"   # Civitai 模型页 → 模型id@版本id
+    # draw: "grok"                                            # 或托管模型（grok / klein 等）
+    # ⚠️ Civitai 只做图生图：必须先有 appearance/refs/ 下的参考图，否则直接报错不出图。
+    #    SD 系模型建议同时把 llm.draw_prompt_style 设成 "tags"。
     # fast-image: "gemini-2.0-flash"  # 可选：表情包快速描述模型
 
   # 输出 token 上限（统一）

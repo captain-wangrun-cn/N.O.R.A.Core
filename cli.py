@@ -887,7 +887,7 @@ class StepProvider(ConfigStep):
         providers = self.state.setdefault("providers", {})
 
         provider_type = preset_type or (existing or {}).get("type", "gemini")
-        if provider_type not in ["gemini", "openai", "anthropic", "openrouter"]:
+        if provider_type not in ["gemini", "openai", "anthropic", "openrouter", "civitai"]:
             provider_type = "openai"
 
         default_name = (existing or {}).get("name") or self._default_provider_name(provider_type, providers)
@@ -969,6 +969,30 @@ class StepProvider(ConfigStep):
                 return None
             provider_cfg["user_agent"] = DEFAULT_FAKE_UA if use_fake_ua else ""
 
+        elif provider_type == "civitai":
+            questionary.print(
+                "  ⓘ Civitai 只能用于生图（draw），且只做图生图——必须有参考图才能出图。\n"
+                "    模型填 AIR 标识（urn:air:sdxl:checkpoint:civitai:{模型id}@{版本id}），\n"
+                "    或托管模型名（grok / klein 等）。",
+                style="bold",
+            )
+            base_url = questionary.text(
+                "API Base URL（默认 Civitai orchestration 官方地址）:",
+                default=(existing or {}).get("base_url") or "https://orchestration.civitai.com"
+            ).ask()
+            if base_url is None:
+                return None
+            provider_cfg["base_url"] = base_url
+
+            engine = questionary.text(
+                "engine（留空自动推断：AIR 模型走 sdcpp，托管模型用模型名本身）:",
+                default=(existing or {}).get("engine") or ""
+            ).ask()
+            if engine is None:
+                return None
+            if engine.strip():
+                provider_cfg["engine"] = engine.strip()
+
         providers[provider_name] = provider_cfg
         # 保证至少有一个默认 provider
         if not self.state.get("provider"):
@@ -991,6 +1015,7 @@ class StepProvider(ConfigStep):
                 questionary.Choice("➕ 添加 OpenAI 兼容提供商", value="add_openai"),
                 questionary.Choice("➕ 添加 Anthropic 提供商", value="add_anthropic"),
                 questionary.Choice("➕ 添加 OpenRouter 提供商", value="add_openrouter"),
+                questionary.Choice("➕ 添加 Civitai 提供商（仅生图）", value="add_civitai"),
             ]
             if providers:
                 choices.extend([
@@ -1012,6 +1037,8 @@ class StepProvider(ConfigStep):
                 self._configure_provider(preset_type="anthropic")
             elif action == "add_openrouter":
                 self._configure_provider(preset_type="openrouter")
+            elif action == "add_civitai":
+                self._configure_provider(preset_type="civitai")
             elif action == "edit":
                 name = questionary.select("选择要编辑的提供商:", choices=list(providers.keys())).ask()
                 if name is None:
@@ -1356,6 +1383,8 @@ class StepModels(ConfigStep):
             return get_anthropic_models(api_key)
         if provider_type == "openrouter":
             return None  # OpenRouter 模型列表在配置向导里不自动拉取，走手动输入
+        if provider_type == "civitai":
+            return None  # Civitai 模型是 AIR 标识，没有可枚举的列表，走手动输入
 
         questionary.print(f"不支持的提供商类型: {provider_type}", style="bold red")
         return None

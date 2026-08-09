@@ -26,6 +26,9 @@ def get_llm_client(provider_name: Optional[str] = None, model_alias: str = "smar
     elif provider_type == "openrouter":
         from brain.providers.openrouter import OpenRouterProvider
         return OpenRouterProvider(model_alias=model_alias, provider_name=provider_name)
+    elif provider_type == "civitai":
+        from brain.providers.civitai import CivitaiProvider
+        return CivitaiProvider(model_alias=model_alias, provider_name=provider_name)
     else:
         raise ValueError(f"Unsupported LLM provider specified in config: '{provider_name}' ({provider_type})")
 
