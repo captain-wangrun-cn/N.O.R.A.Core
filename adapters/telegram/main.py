@@ -171,6 +171,8 @@ class TelegramAdapter(
         self.application.add_handler(CommandHandler('set_stream', self._set_stream_command))
         self.application.add_handler(CommandHandler('nonstream', self._set_stream_command))
         self.application.add_handler(CommandHandler('context', self._context_command))
+        self.application.add_handler(CommandHandler('undo', self._undo_command))
+        self.application.add_handler(CommandHandler('override', self._override_command))
         self.application.add_handler(CommandHandler('debug_cleanup', self._debug_cleanup_command))
         self.application.add_handler(CommandHandler('model', self._model_command))
         self.application.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), self._handle_incoming_message))

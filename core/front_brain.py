@@ -24,6 +24,7 @@ from skills.loader import SkillLoader
 from brain.appearance import draw_models_configured
 from core.message_handler import group_message_content
 from core.message_dedup import drop_current_user_message
+from core.override_gate import build_override_block, override_active
 from core.routing import (
     parse_front_brain_response,
     parse_front_brain_review,
@@ -478,6 +479,14 @@ class FrontBrainMixin:
         lazy_lexicon_block = get_lazy_lexicon_user_prompt_block(text)
         if lazy_lexicon_block:
             user_prompt = f"{user_prompt}\n\n{lazy_lexicon_block}"
+
+        # 一次性放行（/override）：主人特批本次重新生成。声明挂在 user prompt 上，
+        # 不入库；后脑侧有对应的同款注入，两边都要盖——前脑放行了但后脑没见过声明，
+        # system.jinja §1 的授权/确认条款照样会拦。
+        # sessions 用 getattr 兜底：前脑可被不带该属性的轻量探针/测试夹具驱动。
+        _sessions = getattr(self, "sessions", None) or {}
+        if override_active(_sessions.get(chat_id), chat_id):
+            user_prompt = f"{user_prompt}\n\n{build_override_block()}"
 
         # --- 前脑也接入 RAG 记忆检索 ---
         if self.rag.enabled:

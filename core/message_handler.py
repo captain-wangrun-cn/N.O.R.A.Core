@@ -24,8 +24,15 @@ from brain.prompts import (
 from core.group_listener import AppendAction, GroupMessageEvent, PassiveAction
 from core.group_presence_store import GroupPresence
 from core.message_dedup import (
+    clear_persisted_user_messages,
     merge_persisted_user_messages,
     record_persisted_user_message,
+)
+from core.override_gate import (
+    OVERRIDE_PLACEHOLDER_TEXT,
+    check_owner_permission,
+    clear_override,
+    grant_override,
 )
 from core.private_presence_store import PrivatePresenceStore
 from core.routing import has_image_input, sanitize_adapter_output_text, sanitize_user_visible_text
@@ -797,6 +804,12 @@ class MessageHandlerMixin:
 
         if re.search(r"(?m)^\s*/undo\b", stripped):
             await self._cmd_undo(chat_id, chat_type, user_id)
+            return
+
+        # 走中断链而不是非中断快速路径：它要撤掉上一条回复并重新生成，
+        # 必须先让正在跑的前脑任务停下（上面已统一 cancel），且需要 context 合成新一轮。
+        if re.search(r"(?m)^\s*/override\b", stripped):
+            await self._cmd_override(context, chat_id, chat_type, user_id)
             return
 
         if re.search(r"(?m)^\s*/set_stream\b", stripped) or re.search(r"(?m)^\s*/nonstream\b", stripped):
@@ -2292,48 +2305,59 @@ class MessageHandlerMixin:
             logger.error(f"[{chat_id}] /custom_scope 执行失败: {e}", exc_info=True)
             await self._send_platform_message(chat_id, f"❌ 设置失败: {e}")
 
+    async def _undo_last_assistant(self, chat_id: str) -> Optional[Dict[str, Any]]:
+        """删除上一条 assistant 消息：DB + 内存 history + 平台消息。
+
+        `/undo` 与 `/override` 共用。返回 None 表示没有可删的消息；否则返回
+        `{"delete_attempted": bool, "delete_ok": bool}`——平台删除是 best-effort，
+        不支持或权限不足时只删存档，聊天界面会留着旧消息。
+        """
+        identity = self._identity_for_runtime_key(chat_id)
+        removed = self.message_history.delete_last_assistant_message(
+            platform=identity.platform,
+            chat_id=identity.storage_id,
+            source=None,
+        )
+        if removed is None:
+            return None
+
+        # 内存会话历史同步删除最近一条 assistant（不连带用户）
+        session = self.sessions.get(chat_id)
+        if session and session.get("history"):
+            hist = session["history"]
+            for idx in range(len(hist) - 1, -1, -1):
+                if hist[idx].get("role") == "assistant":
+                    hist.pop(idx)
+                    break
+
+        # 尝试删除平台消息
+        md = removed.get("metadata") or {}
+        platform_ids = md.get("platform_message_ids") or []
+        delete_ok = False
+        delete_attempted = False
+        if platform_ids and getattr(self.adapter, "platform_features", None):
+            feats = self.adapter.platform_features
+            if getattr(feats, "supports_delete_message", False):
+                delete_attempted = True
+                for pid in platform_ids:
+                    try:
+                        ok = await self._delete_platform_message(chat_id, pid)
+                        delete_ok = delete_ok or ok
+                    except Exception:
+                        logger.warning(f"[{chat_id}] 平台删除消息 {pid} 失败", exc_info=True)
+
+        return {"delete_attempted": delete_attempted, "delete_ok": delete_ok}
+
     async def _cmd_undo(self, chat_id: str, chat_type: str, user_id: str):
         """撤销上一条已发送的 assistant 消息。"""
-        identity = self._identity_for_runtime_key(chat_id)
-        platform = identity.platform
-        storage_id = identity.storage_id
         try:
-            removed = self.message_history.delete_last_assistant_message(
-                platform=platform,
-                chat_id=storage_id,
-                source=None,
-            )
-            if removed is None:
+            result = await self._undo_last_assistant(chat_id)
+            if result is None:
                 await self._send_platform_message(chat_id, "❌ 没有可撤销的消息。")
                 return
 
-            # 内存会话历史同步删除最近一条 assistant（不连带用户）
-            session = self.sessions.get(chat_id)
-            if session and session.get("history"):
-                hist = session["history"]
-                for idx in range(len(hist) - 1, -1, -1):
-                    if hist[idx].get("role") == "assistant":
-                        hist.pop(idx)
-                        break
-
-            # 尝试删除平台消息
-            md = removed.get("metadata") or {}
-            platform_ids = md.get("platform_message_ids") or []
-            delete_ok = False
-            delete_attempted = False
-            if platform_ids and getattr(self.adapter, "platform_features", None):
-                feats = self.adapter.platform_features
-                if getattr(feats, "supports_delete_message", False):
-                    delete_attempted = True
-                    for pid in platform_ids:
-                        try:
-                            ok = await self._delete_platform_message(chat_id, pid)
-                            delete_ok = delete_ok or ok
-                        except Exception:
-                            logger.warning(f"[{chat_id}] 平台删除消息 {pid} 失败", exc_info=True)
-
-            if delete_attempted:
-                if delete_ok:
+            if result["delete_attempted"]:
+                if result["delete_ok"]:
                     await self._send_platform_message(chat_id, "✅ 已撤销上一条 AI 消息（聊天界面已删除）。")
                 else:
                     await self._send_platform_message(chat_id, "✅ 已撤销存档；⚠️ 平台消息删除失败或权限不足。")
@@ -2342,6 +2366,55 @@ class MessageHandlerMixin:
         except Exception as e:
             logger.error(f"[{chat_id}] /undo 执行失败: {e}", exc_info=True)
             await self._send_platform_message(chat_id, f"❌ 撤销失败: {e}")
+
+    async def _cmd_override(
+        self, context: Dict[str, Any], chat_id: str, chat_type: str, user_id: str
+    ) -> None:
+        """一次性放行：撤掉上一条 AI 回复，带放行声明重新生成一次。
+
+        仅主人可用。放行声明由 `core/override_gate.py` 注入前脑/后脑的 user prompt，
+        不入库；入库的只有占位正文，让下一轮读历史时知道那句回复是系统特批的产物。
+        """
+        identity = self._identity_for_runtime_key(chat_id)
+        allowed, deny_reason = check_owner_permission(identity)
+        if not allowed:
+            logger.warning(f"[{chat_id}] /override 被拒: {deny_reason}")
+            await self._send_platform_message(chat_id, f"❌ {deny_reason}")
+            return
+
+        # 先把上一条 AI 回复删干净再重新生成：平台删除是逐个 await 的，
+        # 顺序反过来用户会看到新回复先出现、旧的后消失，或者两条并存。
+        undone = await self._undo_last_assistant(chat_id)
+        if undone is None:
+            await self._send_platform_message(chat_id, "❌ 没有可重新生成的回复。")
+            return
+        if undone["delete_attempted"] and not undone["delete_ok"]:
+            await self._send_platform_message(
+                chat_id, "⚠️ 平台消息删除失败或权限不足，旧回复会留在聊天界面。"
+            )
+
+        session = self.sessions.setdefault(
+            chat_id, {"history": [], "interrupted_thought": "", "pending_text": ""}
+        )
+        grant_override(session, chat_id)
+
+        # 合成新一轮：正文用占位（入库，留下"系统要求"的归因），媒体/平台 ID 一概不带——
+        # 上一条用户请求本来就还在历史里，重新生成时它就是上文，不需要重放输入。
+        replay = dict(context)
+        replay["text"] = OVERRIDE_PLACEHOLDER_TEXT
+        replay.pop("multimodal_images", None)
+        replay.pop("multimodal_videos", None)
+        replay.pop("image_load_failed", None)
+        clear_persisted_user_messages(replay)
+        replay["_override_replay"] = True
+
+        logger.info(f"[{chat_id}] /override: 已撤销上一条回复，带放行声明重新生成")
+        try:
+            await self.handle_new_message(replay)
+        except Exception as e:
+            clear_override(session, chat_id)
+            logger.error(f"[{chat_id}] /override 重新生成失败: {e}", exc_info=True)
+            await self._send_platform_message(chat_id, f"❌ 重新生成失败: {e}")
 
     async def _cmd_set_stream(self, chat_id: str, chat_type: str, user_id: str, text: str):
         """切换 per-chat 非流式输出模式。/set_stream on|off（on=一次性输出，off=流式），空参=查询当前状态。"""

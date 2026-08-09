@@ -148,6 +148,30 @@ class TelegramCommandsMixin:
         event_context = await self._command_context(update, self._command_text(update, "/context"))
         await self._message_handler(event_context)
 
+    async def _undo_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """撤销上一条 AI 消息，透传给 controller。"""
+        if not self._command_should_process(update):
+            return
+        if not self._message_handler:
+            if update.message:
+                await update.message.reply_text("❌ 指令处理器未就绪。")
+            return
+
+        event_context = await self._command_context(update, self._command_text(update, "/undo"))
+        await self._message_handler(event_context)
+
+    async def _override_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """一次性放行：撤掉上一条回复并带放行声明重新生成，透传给 controller。"""
+        if not self._command_should_process(update):
+            return
+        if not self._message_handler:
+            if update.message:
+                await update.message.reply_text("❌ 指令处理器未就绪。")
+            return
+
+        event_context = await self._command_context(update, self._command_text(update, "/override"))
+        await self._message_handler(event_context)
+
     async def _debug_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """切换 debug 模式，透传给 controller。"""
         if not self._command_should_process(update):

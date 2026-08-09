@@ -29,6 +29,7 @@ from core.message_dedup import (
     record_persisted_user_message,
 )
 from core.routing import strip_timestamp_markers
+from core.override_gate import build_override_block, clear_override, override_active
 from core.scene_context import build_current_scene_block
 from core.worker_status import WorkerStatus
 import config
@@ -756,6 +757,12 @@ class BackBrainMixin:
             lazy_lexicon_block = get_lazy_lexicon_user_prompt_block(text)
             if lazy_lexicon_block:
                 full_user_prompt = f"{full_user_prompt}\n\n{lazy_lexicon_block}"
+
+            # 一次性放行（/override）：与前脑侧同款注入，两边都要盖。
+            # 位置必须在上面 preemption_resume 分支之后——那个分支会整体重写
+            # full_user_prompt，放在它之前会被直接丢掉。
+            if override_active(session, chat_id):
+                full_user_prompt = f"{full_user_prompt}\n\n{build_override_block()}"
 
             # 聚合器语义：上一次后脑被新图片打断时留下的草稿（合并重启时由上层注入到 context）
             prior_back_partial = (context.get("_back_brain_prior_partial", "") or "").strip()
@@ -2136,6 +2143,9 @@ class BackBrainMixin:
             
         finally:
             status.finish()
+            # 一次性放行只覆盖这一轮。正常/异常/cancel 三路都走这个 finally，
+            # 是唯一可靠的兜底清理点；漏掉它，标志位会滞留到下一轮（同 5.3 的计数器泄漏）。
+            clear_override(session, chat_id)
             followup_delay = context.get("_followup_initial_delay")
             self.generation_tasks.pop(chat_id, None)
             self._mark_scheduler_idle(chat_id, initial_delay=followup_delay)
