@@ -71,6 +71,10 @@ class CivitaiProvider(BaseLLM):
         # （grok / flux2 这类托管模型的 model 就是 "grok" / "klein"）。
         self.engine = config.get_provider_option(provider_name, "engine") or None
 
+        # 单独给这个 provider 指的代理。留空则靠 trust_env 继承全局
+        # network.proxy 写进环境变量的 HTTP_PROXY / HTTPS_PROXY。
+        self.proxy = config.get_provider_option(provider_name, "proxy") or None
+
     # --- Civitai 不是对话端点，这两个只为满足 BaseLLM 抽象接口 ---
 
     async def chat(
@@ -153,9 +157,11 @@ class CivitaiProvider(BaseLLM):
         }
 
         timeout = aiohttp.ClientTimeout(total=_TOTAL_TIMEOUT_SECONDS)
-        async with aiohttp.ClientSession(timeout=timeout) as session:
+        # trust_env=True 才会读 HTTP_PROXY / HTTPS_PROXY —— 全局 network.proxy
+        # 只写环境变量，aiohttp 默认不认，不开这个开关代理等于没配。
+        async with aiohttp.ClientSession(timeout=timeout, trust_env=True) as session:
             url = f"{self.base_url}/v2/consumer/workflows?wait={_WAIT_SECONDS}"
-            async with session.post(url, headers=headers, json=body) as resp:
+            async with session.post(url, headers=headers, json=body, **self._proxy_kwargs()) as resp:
                 text = await resp.text()
                 if resp.status not in (200, 202):
                     raise RuntimeError(
@@ -165,7 +171,11 @@ class CivitaiProvider(BaseLLM):
 
             payload = await self._await_completion(session, headers, payload)
             image_url = self._extract_image_url(payload)
-            return await self._download(session, image_url)
+            return await self._download(session, image_url, **self._proxy_kwargs())
+
+    def _proxy_kwargs(self) -> Dict[str, Any]:
+        """按需给单次请求带上 proxy=，没配就交给 trust_env。"""
+        return {"proxy": self.proxy} if self.proxy else {}
 
     @staticmethod
     def _encode_reference_images(
@@ -204,7 +214,7 @@ class CivitaiProvider(BaseLLM):
             if not workflow_id:
                 raise RuntimeError(f"Civitai 生图未返回 workflow id，无法轮询: {payload}")
             url = f"{self.base_url}/v2/consumer/workflows/{workflow_id}?wait={_WAIT_SECONDS}"
-            async with session.get(url, headers=headers) as resp:
+            async with session.get(url, headers=headers, **self._proxy_kwargs()) as resp:
                 text = await resp.text()
                 if resp.status not in (200, 202):
                     raise RuntimeError(
@@ -227,9 +237,9 @@ class CivitaiProvider(BaseLLM):
         raise RuntimeError(f"Civitai 生图结果里没有图片 URL: {str(payload)[:500]}")
 
     @staticmethod
-    async def _download(session: aiohttp.ClientSession, url: str) -> Dict[str, Any]:
+    async def _download(session: aiohttp.ClientSession, url: str, **kwargs) -> Dict[str, Any]:
         """签名 URL 会过期，拿到就立刻下载成 bytes。"""
-        async with session.get(url) as resp:
+        async with session.get(url, **kwargs) as resp:
             if resp.status != 200:
                 raise RuntimeError(f"Civitai 图片下载失败 HTTP {resp.status}")
             raw = await resp.read()

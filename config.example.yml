@@ -74,7 +74,9 @@ llm:
     #   type: "civitai"
     #   api_key: "YOUR_CIVITAI_API_TOKEN"
     #   base_url: "https://orchestration.civitai.com"
-    #   # engine 留空自动推断：AIR 模型走 sdcpp，托管模型用模型名本身
+    #   # 该 provider 专用代理；留空则继承全局 network.proxy（环境变量）
+    #   # proxy: "http://127.0.0.1:7890"
+    #   # engine 一般不用填：AIR 模型自动走 sdcpp，托管模型用模型名本身
     #   # engine: "sdcpp"
 
   # 为每个模型别名绑定提供商（值为 providers 的键）

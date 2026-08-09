@@ -972,8 +972,7 @@ class StepProvider(ConfigStep):
         elif provider_type == "civitai":
             questionary.print(
                 "  ⓘ Civitai 只能用于生图（draw），且只做图生图——必须有参考图才能出图。\n"
-                "    模型填 AIR 标识（urn:air:sdxl:checkpoint:civitai:{模型id}@{版本id}），\n"
-                "    或托管模型名（grok / klein 等）。",
+                "    具体模型在后面「形象生图」环节选，这里不用填。",
                 style="bold",
             )
             base_url = questionary.text(
@@ -984,14 +983,19 @@ class StepProvider(ConfigStep):
                 return None
             provider_cfg["base_url"] = base_url
 
-            engine = questionary.text(
-                "engine（留空自动推断：AIR 模型走 sdcpp，托管模型用模型名本身）:",
-                default=(existing or {}).get("engine") or ""
+            proxy = questionary.text(
+                "该提供商专用代理（可留空走全局 network.proxy；示例: http://127.0.0.1:7890）:",
+                default=(existing or {}).get("proxy") or ""
             ).ask()
-            if engine is None:
+            if proxy is None:
                 return None
-            if engine.strip():
-                provider_cfg["engine"] = engine.strip()
+            if proxy.strip():
+                provider_cfg["proxy"] = proxy.strip()
+
+            # engine 不在向导里问：AIR 模型固定 sdcpp，托管模型就是模型串本身，
+            # 问了只会和后面的模型名重复。手写在 config.yml 里的值保留不动。
+            if (existing or {}).get("engine"):
+                provider_cfg["engine"] = (existing or {}).get("engine")
 
         providers[provider_name] = provider_cfg
         # 保证至少有一个默认 provider
@@ -1501,6 +1505,14 @@ class StepModels(ConfigStep):
             provider_cfg = provider_entries.get(provider_name, {})
             provider_type = provider_cfg.get("type", provider_name)
             provider_type_cache[provider_name] = provider_type
+
+            # Civitai 没有可枚举的模型列表，只能手输，先把两种写法说清楚
+            if provider_type == "civitai":
+                questionary.print(
+                    "  ⓘ Civitai 模型填 AIR 标识（urn:air:sdxl:checkpoint:civitai:{模型id}@{版本id}，\n"
+                    "    在模型页 URL 里取 模型id 和 版本id），或托管模型名（grok / klein 等）。",
+                    style="bold",
+                )
 
             if provider_name not in provider_model_cache:
                 model_list = self._fetch_models_for_provider(provider_name, provider_cfg)

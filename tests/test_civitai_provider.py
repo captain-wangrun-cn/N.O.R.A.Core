@@ -24,8 +24,10 @@ def asyncio_test(fn):
     return wrapper
 
 
-def _install_fake_config(monkeypatch, model: str, engine=None):
+def _install_fake_config(monkeypatch, model: str, engine=None, proxy=None):
     import config
+
+    options = {"engine": engine, "proxy": proxy}
 
     monkeypatch.setattr(config, "get_model_provider", lambda alias="draw": "civitai_main")
     monkeypatch.setattr(config, "get_api_key", lambda provider=None: "test-token")
@@ -33,7 +35,7 @@ def _install_fake_config(monkeypatch, model: str, engine=None):
     monkeypatch.setattr(config, "get_model_name", lambda alias="draw": model)
     monkeypatch.setattr(
         config, "get_provider_option",
-        lambda provider=None, key="": engine if key == "engine" else None,
+        lambda provider=None, key="": options.get(key),
     )
 
 
@@ -75,6 +77,9 @@ class _FakeSession:
         self._responses = list(responses)
         self.posts: List[Dict[str, Any]] = []
         self.gets: List[str] = []
+        self.get_kwargs: List[Dict[str, Any]] = []
+        # aiohttp.ClientSession(...) 的构造参数，用来校验 trust_env
+        self.init_kwargs: Dict[str, Any] = {}
 
     async def __aenter__(self):
         return self
@@ -82,21 +87,24 @@ class _FakeSession:
     async def __aexit__(self, *exc):
         return False
 
-    def post(self, url, headers=None, json=None):
-        self.posts.append({"url": url, "headers": headers, "json": json})
+    def post(self, url, headers=None, json=None, **kwargs):
+        self.posts.append({"url": url, "headers": headers, "json": json, **kwargs})
         return self._responses.pop(0)
 
-    def get(self, url, headers=None):
+    def get(self, url, headers=None, **kwargs):
         self.gets.append(url)
+        self.get_kwargs.append(kwargs)
         return self._responses.pop(0)
 
 
 def _patch_session(monkeypatch, session: _FakeSession):
     from brain.providers import civitai
 
-    monkeypatch.setattr(
-        civitai.aiohttp, "ClientSession", lambda *a, **kw: session
-    )
+    def _factory(*a, **kw):
+        session.init_kwargs = kw
+        return session
+
+    monkeypatch.setattr(civitai.aiohttp, "ClientSession", _factory)
 
 
 def _succeeded(url="https://img.civitai.com/signed.jpeg"):
@@ -251,4 +259,49 @@ async def test_chat_not_supported(monkeypatch):
     provider = CivitaiProvider(model_alias="draw")
     with pytest.raises(NotImplementedError):
         await provider.chat("s", "u", [])
+
+
+@asyncio_test
+async def test_trust_env_enabled_without_explicit_proxy(monkeypatch):
+    """没配 provider 级代理时，靠 trust_env 继承全局 network.proxy 的环境变量。
+
+    aiohttp 默认**不读** HTTP_PROXY，漏了 trust_env 全局代理等于没配。
+    """
+    _install_fake_config(monkeypatch, "grok")
+    from brain.providers.civitai import CivitaiProvider
+
+    session = _FakeSession([
+        _FakeResponse(200, _succeeded()),
+        _FakeResponse(200, body=b"X", headers={"Content-Type": "image/png"}),
+    ])
+    _patch_session(monkeypatch, session)
+
+    provider = CivitaiProvider(model_alias="draw")
+    await provider.generate_image("x", reference_images=[_ref()])
+
+    assert session.init_kwargs.get("trust_env") is True
+    # 没配就不该塞 proxy=，否则会盖掉环境变量
+    assert "proxy" not in session.posts[0]
+    assert all("proxy" not in kw for kw in session.get_kwargs)
+
+
+@asyncio_test
+async def test_explicit_proxy_applied_to_every_request(monkeypatch):
+    """provider 级代理要覆盖提交、轮询、下图三条请求——漏一条就直连泄漏。"""
+    _install_fake_config(monkeypatch, "grok", proxy="http://127.0.0.1:7890")
+    from brain.providers.civitai import CivitaiProvider
+
+    session = _FakeSession([
+        _FakeResponse(202, {"id": "wf_p", "status": "processing"}),
+        _FakeResponse(200, _succeeded()),
+        _FakeResponse(200, body=b"X", headers={"Content-Type": "image/png"}),
+    ])
+    _patch_session(monkeypatch, session)
+
+    provider = CivitaiProvider(model_alias="draw")
+    await provider.generate_image("x", reference_images=[_ref()])
+
+    assert session.posts[0]["proxy"] == "http://127.0.0.1:7890"
+    assert len(session.get_kwargs) == 2  # 一次轮询 + 一次下图
+    assert all(kw.get("proxy") == "http://127.0.0.1:7890" for kw in session.get_kwargs)
 
