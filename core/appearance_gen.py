@@ -209,7 +209,7 @@ class AppearanceGenMixin:
                 "[%s] 生图开始: refs=%s prompt=%s",
                 runtime_key,
                 ref_names or "无",
-                prompt[:160].replace("\n", " "),
+                prompt.replace("\n", " "),
             )
 
             draw_client = get_llm_client(model_alias="draw")
