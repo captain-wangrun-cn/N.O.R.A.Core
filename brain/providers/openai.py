@@ -37,8 +37,40 @@ class OpenAIProvider(BaseLLM):
         self.use_responses_api = bool(config.get_provider_option(provider_name, "use_responses_api"))
         self.model = config.get_model_name(model_alias)
         self.max_output_tokens = config.get_llm_max_output_tokens(model_alias)
+        self.effort = config.get_llm_effort(model_alias)
         if not self.model:
             raise ValueError(f"Model for alias '{model_alias}' not found in config.")
+
+    def _apply_effort(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+        """把推理强度写进请求体（就地修改并返回，便于串在 payload 构造后）。
+
+        OpenAI 协议用 `reasoning_effort` 字符串。"none" 也是合法值（关闭思考），
+        所以判据是 `is None` 而不是真值——`if not self.effort` 会把 none 档吞掉。
+
+        不支持推理的模型收到这个字段可能报 400；chat() / chat_stream() 的异常分支
+        会用 `_is_effort_rejection()` 识别并去掉该字段重试一次。
+
+        用 getattr 取值：effort 是纯可选调优字段，绕过 __init__ 构造的实例
+        （测试里的 `object.__new__(OpenAIProvider)`）不该因为少这一个属性就整个请求崩掉。
+        """
+        effort = getattr(self, "effort", None)
+        if effort is not None:
+            payload["reasoning_effort"] = effort
+        return payload
+
+    @staticmethod
+    def _is_effort_rejection(error: Exception) -> bool:
+        """判断异常是否由 reasoning_effort 字段本身引起（用于去掉它重试一次）。
+
+        各家兼容端点的报错措辞差别很大（unknown / unsupported / unrecognized /
+        invalid parameter），所以只要错误里同时出现"推理"和"不认识这个参数"的意思
+        就算命中。宁可多重试一次，也不要让一个可选调优字段废掉整个别名。
+        """
+        msg = str(error).lower()
+        if "reasoning_effort" in msg:
+            return True
+        rejection_words = ("unsupported", "unknown", "unrecognized", "invalid", "not supported")
+        return "reasoning" in msg and any(word in msg for word in rejection_words)
 
     @staticmethod
     def _convert_history_for_responses(history: List[Dict[str, str]]) -> List[Dict[str, Any]]:
@@ -534,10 +566,11 @@ class OpenAIProvider(BaseLLM):
     ) -> str:
         """
         非流式调用 OpenAI API（含 function calling 支持）。
-        
+
         注意：chat() 用于 fast_llm 等不需要工具调用的场景，
         大部分工具调用走 chat_stream()。但仍完整实现以备需要。
         """
+        self._begin_call()
         if self.use_responses_api:
             payload: Dict[str, Any] = {
                 "model": self.model,
@@ -549,6 +582,7 @@ class OpenAIProvider(BaseLLM):
             }
             if self.max_output_tokens:
                 payload["max_output_tokens"] = int(self.max_output_tokens)
+            self._apply_effort(payload)
             if tools:
                 payload["tools"] = self._convert_tools_schema_for_responses(tools)
             try:
@@ -562,7 +596,10 @@ class OpenAIProvider(BaseLLM):
                 return self._extract_response_text(response)
             except Exception as e:
                 logger.error(f"OpenAI Responses API Error: {e}", exc_info=True)
-                return "Sorry, I encountered an issue processing your request with the OpenAI API."
+                return self._fail(
+                    "Sorry, I encountered an issue processing your request with the OpenAI API.",
+                    reason=f"responses_api_exception:{e}",
+                )
 
         filtered_history = self._convert_history(history)
         user_content = self._build_user_content(user_prompt, multimodal_images, multimodal_videos)
@@ -579,20 +616,36 @@ class OpenAIProvider(BaseLLM):
         }
         if self.max_output_tokens:
             kwargs["max_tokens"] = int(self.max_output_tokens)
-        
+        self._apply_effort(kwargs)
+
         # 如果有 tools，转换格式并传入
         if tools:
             converted_tools = self._convert_tools_schema(tools)
             if converted_tools:
                 kwargs["tools"] = converted_tools
-        
+
         try:
-            response = await self._with_retry(lambda: self.client.chat.completions.create(**kwargs))
+            try:
+                response = await self._with_retry(lambda: self.client.chat.completions.create(**kwargs))
+            except Exception as first_error:
+                # 不支持推理的模型会因 reasoning_effort 直接 400。去掉它重试一次，
+                # 否则一个可选的调优字段会让整个别名不可用。
+                if "reasoning_effort" not in kwargs or not self._is_effort_rejection(first_error):
+                    raise
+                logger.warning(
+                    f"[OpenAI chat/{self.model_alias}] 端点不接受 reasoning_effort"
+                    f"={kwargs.get('reasoning_effort')!r}，去掉该字段重试: {first_error}"
+                )
+                kwargs.pop("reasoning_effort", None)
+                response = await self._with_retry(lambda: self.client.chat.completions.create(**kwargs))
 
             # 防御：兼容异常返回类型（例如 str）
             if not hasattr(response, "choices"):
                 logger.error(f"OpenAI chat() unexpected response type: {type(response)} -> {response}")
-                return "Sorry, I encountered an issue processing your request with the OpenAI API."
+                return self._fail(
+                    "Sorry, I encountered an issue processing your request with the OpenAI API.",
+                    reason=f"unexpected_response_type:{type(response)}",
+                )
 
             # 保存 usage 信息
             if hasattr(response, "usage") and response.usage:
@@ -604,7 +657,10 @@ class OpenAIProvider(BaseLLM):
             choices = getattr(response, "choices", None) or []
             if not choices:
                 logger.error(f"OpenAI chat() empty choices，原始响应: {repr(response)[:800]}")
-                return "Sorry, I encountered an issue processing your request with the OpenAI API."
+                return self._fail(
+                    "Sorry, I encountered an issue processing your request with the OpenAI API.",
+                    reason="empty_choices",
+                )
             message = getattr(choices[0], "message", None)
             content = getattr(message, "content", None) if message else None
 
@@ -628,10 +684,14 @@ class OpenAIProvider(BaseLLM):
                     f"{getattr(choices[0], 'finish_reason', None)}，usage={self.last_usage}），"
                     f"原始 message: {repr(message)[:800]}"
                 )
+                self.last_error = "empty_content"
             return cleaned
         except Exception as e:
             logger.error(f"OpenAI API Error: {e}", exc_info=True)
-            return "Sorry, I encountered an issue processing your request with the OpenAI API."
+            return self._fail(
+                "Sorry, I encountered an issue processing your request with the OpenAI API.",
+                reason=f"exception:{e}",
+            )
 
     async def chat_stream(
         self,
@@ -655,6 +715,7 @@ class OpenAIProvider(BaseLLM):
         - {"type": "tool_call", "name": "...", "args": {...}}
         - {"type": "usage", "input_tokens": N, "output_tokens": N}
         """
+        self._begin_call()
         if self.use_responses_api:
             payload: Dict[str, Any] = {
                 "model": self.model,
@@ -667,6 +728,7 @@ class OpenAIProvider(BaseLLM):
             }
             if self.max_output_tokens:
                 payload["max_output_tokens"] = int(self.max_output_tokens)
+            self._apply_effort(payload)
             if tools:
                 payload["tools"] = self._convert_tools_schema_for_responses(tools)
             try:
@@ -733,7 +795,8 @@ class OpenAIProvider(BaseLLM):
         }
         if self.max_output_tokens:
             kwargs["max_tokens"] = int(self.max_output_tokens)
-        
+        self._apply_effort(kwargs)
+
         # 如果有 tools，转换格式并传入
         if tools:
             converted_tools = self._convert_tools_schema(tools)
@@ -744,27 +807,48 @@ class OpenAIProvider(BaseLLM):
                 logger.warning("OpenAI chat_stream: tools provided but conversion resulted in empty list")
         else:
             logger.debug("OpenAI chat_stream: no tools provided")
-        
+
         # stream_options 不是所有 OpenAI 兼容 API 都支持，尝试传入
         kwargs["stream_options"] = {"include_usage": True}
-        
-        try:
-            stream = await self._with_retry(lambda: self.client.chat.completions.create(**kwargs))
-        except Exception as e:
-            # 如果 stream_options 导致错误，去掉后重试
-            if "stream_options" in str(e).lower() or "unrecognized" in str(e).lower():
-                logger.warning(f"stream_options not supported, retrying without it: {e}")
-                kwargs.pop("stream_options", None)
-                try:
-                    stream = await self._with_retry(lambda: self.client.chat.completions.create(**kwargs))
-                except Exception as e2:
-                    logger.error(f"OpenAI API Stream Error (retry): {e2}", exc_info=True)
-                    yield {"type": "text", "content": "Sorry, an error occurred during streaming."}
-                    return
-            else:
-                logger.error(f"OpenAI API Stream Error: {e}", exc_info=True)
-                yield {"type": "text", "content": "Sorry, an error occurred during streaming."}
-                return
+
+        # 两个可选字段都可能被兼容端点拒掉，且报错措辞高度重叠（都可能只说
+        # "unrecognized parameter"）。所以不按错误文本二选一——那样会先摘错字段、
+        # 重试再失败一次——而是按"最可能是谁"的顺序逐个摘掉再试。
+        stream = None
+        last_stream_error: Optional[Exception] = None
+        for attempt_desc, strip_key in (
+            ("原始请求", None),
+            ("去掉 stream_options", "stream_options"),
+            ("去掉 reasoning_effort", "reasoning_effort"),
+        ):
+            if strip_key is not None:
+                if strip_key not in kwargs:
+                    continue
+                # 只在错误确实指向这个字段时才摘；否则摘了也没用，白发一次请求。
+                implicated = (
+                    strip_key in str(last_stream_error).lower()
+                    or "unrecognized" in str(last_stream_error).lower()
+                    or "unsupported" in str(last_stream_error).lower()
+                    or (strip_key == "reasoning_effort" and self._is_effort_rejection(last_stream_error))
+                )
+                if not implicated:
+                    break
+                logger.warning(
+                    f"[OpenAI chat_stream/{self.model_alias}] 端点不接受 {strip_key}"
+                    f"={kwargs.get(strip_key)!r}，{attempt_desc} 后重试: {last_stream_error}"
+                )
+                kwargs.pop(strip_key, None)
+            try:
+                stream = await self._with_retry(lambda: self.client.chat.completions.create(**kwargs))
+                break
+            except Exception as e:
+                last_stream_error = e
+
+        if stream is None:
+            logger.error(f"OpenAI API Stream Error: {last_stream_error}", exc_info=True)
+            self.last_error = f"stream_exception:{last_stream_error}"
+            yield {"type": "text", "content": "Sorry, an error occurred during streaming."}
+            return
         
         try:
             input_tokens = 0

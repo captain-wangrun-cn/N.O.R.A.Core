@@ -94,6 +94,16 @@ class TelegramCallbacksMixin:
             await self._handle_model_provider_callback(query, callback_data)
             return
 
+        # effort_set 必须排在 effort_pick 之前吗？不必——两个前缀互不包含。
+        # 但顺序仍要保持「更具体的前缀在前」的习惯，避免以后加 effort_pick_xxx 时踩坑。
+        if callback_data and callback_data.startswith("effort_set:"):
+            await self._handle_effort_set_callback(query, callback_data)
+            return
+
+        if callback_data and callback_data.startswith("effort_pick:"):
+            await self._handle_effort_pick_callback(query, callback_data)
+            return
+
         if callback_data and callback_data.startswith("debug_cleanup:"):
             await self._handle_debug_cleanup_callback(query, callback_data)
             return
@@ -404,6 +414,134 @@ class TelegramCallbacksMixin:
             [InlineKeyboardButton("关闭", callback_data="nora_prefs:close")],
         ]
         return InlineKeyboardMarkup(rows)
+
+    # ------------------------------------------------------------------
+    # 推理强度（/effort）
+    # ------------------------------------------------------------------
+
+    # 档位顺序与 config.EFFORT_LEVELS 一致，外加"跟随全局"（清除该别名的覆盖）。
+    _EFFORT_CHOICES = ("none", "minimal", "low", "medium", "high")
+
+    def _build_effort_alias_menu(self):
+        """构造 /effort 顶层 alias 选择菜单，标出每个别名的当前档位。"""
+        from .commands import MODEL_ALIASES
+
+        cfg = config.get_config() or {}
+        llm_cfg = cfg.get("llm", {}) or {}
+        models_cfg = llm_cfg.get("models", {}) or {}
+        global_effort = config.normalize_effort(llm_cfg.get("effort"))
+        per_alias = llm_cfg.get("effort_by_alias", {}) or {}
+
+        buttons = []
+        for alias in MODEL_ALIASES:
+            # 未配置模型的别名不显示：给它设 effort 没有意义。
+            if not models_cfg.get(alias):
+                continue
+            own = config.normalize_effort(per_alias.get(alias))
+            if own is not None:
+                shown = own
+            elif global_effort is not None:
+                shown = f"{global_effort}(全局)"
+            else:
+                shown = "默认"
+            buttons.append([
+                InlineKeyboardButton(f"{alias}: {shown}", callback_data=f"effort_pick:{alias}")
+            ])
+
+        if not buttons:
+            buttons.append([InlineKeyboardButton("（没有已配置的模型）", callback_data="effort_pick:cancel")])
+        buttons.append([InlineKeyboardButton("关闭", callback_data="effort_pick:cancel")])
+
+        global_desc = global_effort or "未设置"
+        text = (
+            "🧩 <b>推理强度 (reasoning effort)</b>\n"
+            f"全局默认: <code>{global_desc}</code>\n"
+            "点击别名为它单独设置档位，立即保存到 config.yml。\n"
+            "<b>默认</b>=不传该字段（用端点自己的行为），<b>none</b>=显式关闭思考。\n"
+            "⚠️ 改动在下次创建该模型客户端时生效；不支持推理的模型会自动回退。"
+        )
+        return text, InlineKeyboardMarkup(buttons)
+
+    def _build_effort_level_menu(self, alias: str):
+        """构造某个 alias 的档位选择菜单。"""
+        cfg = config.get_config() or {}
+        llm_cfg = cfg.get("llm", {}) or {}
+        per_alias = llm_cfg.get("effort_by_alias", {}) or {}
+        current = config.normalize_effort(per_alias.get(alias))
+        global_effort = config.normalize_effort(llm_cfg.get("effort"))
+
+        rows = []
+        row = []
+        for level in self._EFFORT_CHOICES:
+            mark = "✅ " if current == level else "☑ "
+            row.append(InlineKeyboardButton(f"{mark}{level}", callback_data=f"effort_set:{alias}:{level}"))
+            if len(row) == 2:
+                rows.append(row)
+                row = []
+        if row:
+            rows.append(row)
+
+        follow_mark = "✅ " if current is None else "☑ "
+        rows.append([InlineKeyboardButton(
+            f"{follow_mark}跟随全局({global_effort or '默认'})",
+            callback_data=f"effort_set:{alias}:inherit",
+        )])
+        rows.append([
+            InlineKeyboardButton("⬅ 返回", callback_data="effort_pick:back"),
+            InlineKeyboardButton("取消", callback_data="effort_pick:cancel"),
+        ])
+
+        text = (
+            f"🧩 <b>{alias}</b> 的推理强度\n"
+            f"当前: <code>{current or ('跟随全局: ' + (global_effort or '默认'))}</code>\n"
+            "档位越高，模型思考越久、越贵，首字延迟也越长。"
+        )
+        return text, InlineKeyboardMarkup(rows)
+
+    async def _handle_effort_pick_callback(self, query, callback_data: str):
+        """处理 /effort 顶层菜单回调（选别名 / 返回 / 取消）。"""
+        if not query or not query.message:
+            return
+        alias = callback_data.split(":", 1)[1]
+
+        if alias == "cancel":
+            await query.edit_message_text("已关闭推理强度设置。")
+            return
+
+        if alias == "back":
+            text, markup = self._build_effort_alias_menu()
+            await query.edit_message_text(text, reply_markup=markup, parse_mode=ParseMode.HTML)
+            return
+
+        text, markup = self._build_effort_level_menu(alias)
+        await query.edit_message_text(text, reply_markup=markup, parse_mode=ParseMode.HTML)
+
+    async def _handle_effort_set_callback(self, query, callback_data: str):
+        """写入某个 alias 的推理强度档位。"""
+        if not query or not query.message:
+            return
+        chat_id = str(query.message.chat.id)
+
+        parts = callback_data.split(":", 2)
+        if len(parts) != 3:
+            await query.edit_message_text("❌ 无效的档位数据。")
+            return
+        _, alias, level = parts
+
+        # "inherit" 表示清除该别名的覆盖，回落全局 llm.effort。
+        value = None if level == "inherit" else level
+        if value is not None and value not in self._EFFORT_CHOICES:
+            await query.edit_message_text("❌ 无效档位。")
+            return
+
+        try:
+            config.set_llm_effort_by_alias(alias, value)
+            logger.info(f"[{chat_id}] /effort 已设置 {alias} -> {value or 'inherit'}")
+            text, markup = self._build_effort_level_menu(alias)
+            await query.edit_message_text(text, reply_markup=markup, parse_mode=ParseMode.HTML)
+        except Exception as e:
+            logger.error(f"[{chat_id}] effort_set 回调失败: {e}", exc_info=True)
+            await query.edit_message_text(f"❌ 失败: {e}")
 
     async def _handle_model_pick_callback(self, query, callback_data: str):
         if not query or not query.message:

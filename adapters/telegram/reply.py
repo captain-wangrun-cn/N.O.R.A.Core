@@ -42,6 +42,21 @@ class TelegramReplyMixin:
         reply_chat_id = str(reply_msg.chat.id)
         reply_msg_id = str(reply_msg.message_id)
 
+        # 表情包优先重下文件并重建 [sticker: path] 标记，不要走下面的历史查找。
+        # 原因：表情包**故意不进 ImageStore**（见 QUICK_REFERENCE §3），入库正文又被
+        # media_placeholder_text 收敛成裸 "[表情包]"（core/message_handler.py），
+        # 所以历史里根本没有路径可还原。只有 [sticker: path] 这个标记能让
+        # extract_image_payloads → _describe_stickers 的 fast-image 链路跑起来；
+        # 少了它，引用表情包就只剩一个没有内容的占位符。
+        #
+        # 用 getattr 而非 reply_msg.sticker：这条链路会收到各种精简过的消息对象
+        # （测试里的 SimpleNamespace、其它 adapter 的伪造消息），少一个属性不该
+        # 让整条入站解析崩掉。
+        if getattr(reply_msg, "sticker", None):
+            sticker_input = await self._redownload_replied_sticker_as_input(reply_msg)
+            if sticker_input:
+                return sticker_input
+
         # 从历史记录中获取回复内容
         history = self.message_history.get_context_messages("telegram", reply_chat_id)
         if not history:
@@ -277,6 +292,54 @@ class TelegramReplyMixin:
         if not rel_path:
             return None
         return f"[image: {rel_path}]"
+
+    async def _redownload_replied_sticker_as_input(self, reply_msg: Message) -> Optional[str]:
+        """重新下载 reply 引用的表情包，返回与新发表情包完全一致的内部标记。
+
+        格式必须和 `_handle_sticker`（adapters/telegram/incoming.py）逐字对齐：
+        emoji/贴纸包那行给模型看语义，路径那行才是 `extract_image_payloads`
+        识别的载荷。两行都在时，引用表情包和直接发表情包走的是同一条 fast-image 链路。
+        """
+        rel_path = await self._redownload_replied_sticker(reply_msg)
+        if not rel_path:
+            return None
+        sticker = reply_msg.sticker
+        emoji = (getattr(sticker, "emoji", None) or "🎨") if sticker else "🎨"
+        set_name = (getattr(sticker, "set_name", None) or "未知贴纸包") if sticker else "未知贴纸包"
+        return f"[sticker: {emoji} from {set_name}]\n[sticker: {rel_path}]"
+
+    async def _redownload_replied_sticker(self, reply_msg: Message) -> Optional[str]:
+        """
+        重新下载用户 reply 引用的那个表情包到本地，返回相对路径（相对 workspace_root）。
+
+        - 复用 `_handle_sticker` 的命名规则（`sticker_<file_id>.<ext>`），同 file_id 不重复占空间。
+        - 出错返回 None，由调用方退回原有的历史查找/文本兜底。
+        """
+        sticker = getattr(reply_msg, "sticker", None)
+        if not sticker:
+            return None
+        try:
+            chat = getattr(reply_msg, "chat", None)
+            chat_type = chat.type if chat else ""
+            chat_id = str((chat.id if chat else None) or self.current_chat_id or "")
+            scene = infer_scene(chat_type=chat_type, chat_id=chat_id)
+            target_dir = build_media_subdir(
+                data_dir=self.data_dir,
+                platform="telegram",
+                scene=scene,
+                chat_id=chat_id,
+                media_type="sticker",
+            )
+            ext = "webm" if getattr(sticker, "is_video", False) else "webp"
+            abs_file_path = os.path.join(target_dir, f"sticker_{sticker.file_id}.{ext}")
+            # 已存在就直接复用，不重复下载
+            if not os.path.isfile(abs_file_path):
+                file = await sticker.get_file()
+                await file.download_to_drive(abs_file_path)
+            return os.path.relpath(abs_file_path, self.workspace_root).replace('\\', '/')
+        except Exception as e:
+            logger.warning(f"[telegram] 重新下载引用的表情包失败: {e}")
+            return None
 
     async def _redownload_replied_photo(self, reply_msg: Message) -> Optional[str]:
         """

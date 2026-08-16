@@ -535,6 +535,8 @@ def show_config_summary() -> None:
 
     models = llm_cfg.get("models", {}) or {}
     model_providers = llm_cfg.get("model_providers", {}) or {}
+    effort_global = llm_cfg.get("effort")
+    effort_by_alias = llm_cfg.get("effort_by_alias", {}) or {}
     if models:
         questionary.print("模型角色:", style="bold")
         for role in ["smart", "fast", "coder", "image", "video", "security", "fast-image", "draw", "draw_desc", "summary"]:
@@ -542,11 +544,20 @@ def show_config_summary() -> None:
             if model_name:
                 bound = model_providers.get(role)
                 bound_str = f" → {bound}" if bound else ""
-                questionary.print(f"  - {role}: {model_name}{bound_str}", style="")
+                # 只显示别名级覆盖；跟随全局的不逐行重复（下面单独列一行全局值）
+                own_effort = effort_by_alias.get(role)
+                effort_str = f"  [effort={own_effort}]" if own_effort else ""
+                questionary.print(f"  - {role}: {model_name}{bound_str}{effort_str}", style="")
             elif role in ("video", "security", "fast-image", "draw", "draw_desc"):
                 questionary.print(f"  - {role}: （可选，未配置）", style="italic")
             else:
                 questionary.print(f"  - {role}: {_status_emoji(False)} 未配置", style="bold red")
+        if effort_global or effort_by_alias:
+            questionary.print(
+                f"  - 推理强度: 全局 {effort_global or '未设置'}"
+                f"（可用 Telegram /effort 按别名调整）",
+                style="",
+            )
         if models.get("draw"):
             draw_provider = model_providers.get("draw")
             draw_type = (providers.get(draw_provider, {}) or {}).get("type") if isinstance(providers, dict) else None

@@ -1,3 +1,72 @@
+## 近期关键改动（截至 2026-08-16）
+
+### 🧩 推理强度（effort）按模型别名配置 + `/effort` 按钮
+
+新增 `llm.effort`（全局）与 `llm.effort_by_alias`（按别名覆盖），档位
+`none / minimal / low / medium / high`；**不配置 = 完全不传该字段**，保持端点默认行为。
+
+- **`config.py`**：`get_llm_effort(alias)` / `get_llm_effort_budget_tokens(alias)` /
+  `set_llm_effort_by_alias(alias, effort)` / `normalize_effort(value)`，
+  两级回退仿 `get_llm_max_output_tokens`。`EFFORT_LEVELS` + `EFFORT_BUDGET_TOKENS`
+  是档位与 token 预算的唯一映射表。
+- **各 provider 自己翻译同一个档位**（三家 API 字段完全不通用）：
+  - `brain/providers/openai.py`：`_apply_effort()` 写 `reasoning_effort` 字符串，
+    覆盖 chat / chat_stream 的 Chat Completions 与 Responses 四个 payload 点。
+    端点不认该字段时（`_is_effort_rejection`）**去掉它重试一次**，避免一个可选调优
+    字段让整个别名不可用。OpenRouter 通过继承自动获得。
+  - `brain/providers/anthropic.py`：`_apply_effort()` 映射
+    `thinking={type:enabled, budget_tokens:N}`；按 `max_tokens` 夹预算并留 512 token
+    给正文（Anthropic 要求 `budget_tokens < max_tokens`），塞不下就不开思考。
+  - `brain/providers/gemini.py`：`_effort_generation_config(camel_case)` ——
+    SDK 路径 `thinking_config.thinking_budget`（snake_case），
+    `_video_stream_via_rest` 的 REST body `thinkingConfig.thinkingBudget`（camelCase）。
+    **两套命名不能合并**，写错的一侧不报错、只会被 API 静默忽略。
+- **`adapters/telegram/`**：`/effort` 两级 inline keyboard（选别名 → 选档位，
+  含"跟随全局"清除覆盖），仿 `/model` + `/custom_scope`。
+  回调前缀 `effort_pick:` / `effort_set:`。只列出**已配置模型**的别名。
+  别名列表提取为 `commands.py` 的 `MODEL_ALIASES`，`/model` 与 `/effort` 共用。
+- ⚠️ effort 在 provider `__init__` 里读进实例字段，改动**在下次创建该模型客户端时生效**。
+- 测试：`tests/test_llm_effort.py`（19）、`tests/test_effort_telegram.py`（12）。
+
+### 🖼️ 引用表情包不触发 fast-image 识别（修复）
+
+`[sticker: path]` 是驱动整条 fast-image 链路的唯一载体，但引用路径上它无从还原：
+表情包**故意不进 ImageStore**（没有 `image_id` 可反查），入库正文又被
+`media_placeholder_text` 收敛成裸 `[表情包]`（路径没落库）。
+`_extract_reply_info` 从历史取回的就是那个裸占位符，于是
+`extract_image_payloads` → `_describe_stickers` 整条链路空转。
+
+- **`adapters/telegram/reply.py`**：新增 `_redownload_replied_sticker()` +
+  `_redownload_replied_sticker_as_input()`，照 `_redownload_replied_photo` 的模式
+  重下文件并重建标记，格式与 `_handle_sticker` 逐字一致（emoji 行 + 路径行）。
+  命名沿用 `sticker_<file_id>.<ext>`，同 file_id 不重复下载。
+- **sticker 分支必须排在历史查找之前**——否则历史查找先命中并返回裸 `[表情包]`，
+  把 sticker 分支彻底挡掉。`tests/test_telegram_reply_sticker.py` 有测试锁这个顺序。
+- 未改：OneBot v11 的 `_enrich_reply_text` 产出 `[表情包:{file}]`，
+  与 `extract_image_payloads` 只认的 `[sticker:...]` 对不上，**QQ 侧引用表情包仍未识别**。
+- 测试：`tests/test_telegram_reply_sticker.py`（9）。
+
+### 🎨 draw_desc 被拦截时把错误提示当成生图提示词（修复）
+
+实测日志里 `生图开始: prompt=Error: 模型因内容安全策略拒绝生成（finish_reason=...）`。
+根因在 provider 的失败约定：**失败返回一段错误文本而不是抛异常**，
+`_resolve_draw_prompt` 的「没包 `[DRAW_PROMPT]` 就整段当提示词」兜底分支于是把
+那句错误说明原样喂进了文生图模型。
+
+- **`brain/interface.py`**：`BaseLLM` 新增 `last_error` 字段 + `_begin_call()` /
+  `_fail()` / `is_error_result()`。`check_finish_reason_and_log` 从 classmethod 改为
+  **实例方法**，返回错误文本的同时记上 `last_error` —— 调用方不必再靠匹配文本判断。
+  失败文本统一带 `ERROR_RESULT_PREFIX`（`"Error: "`）作为第二道闸门。
+- **`core/appearance_gen.py`**：`_resolve_draw_prompt` 在 `[DRAW_PROMPT]` 兜底**之前**
+  检查 `desc_client.last_error` / `is_error_result(raw)`，命中直接 raise。
+- **三个 provider 的 chat/chat_stream** 入口调 `_begin_call()`、失败分支走 `_fail()`
+  或置 `last_error`（含"返回内容为空"这类无异常 finish_reason 的情况）。
+- 凡是把 `chat()` 结果当**产物**而非"给用户看的话"的调用方，都应检查这个信号。
+  截断（`finish_reason=length`）不算失败。
+- 测试：`tests/test_draw_desc_error_guard.py`（10）。
+
+---
+
 ## 近期关键改动（截至 2026-08-08）
 
 ### 🌐 OpenRouter 生图 provider（`draw` 模型绑 openrouter 类型时）

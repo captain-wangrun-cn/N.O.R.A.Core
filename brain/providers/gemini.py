@@ -60,6 +60,8 @@ class GeminiProvider(BaseLLM):
         self.model_alias = model_alias
         self.provider_name = provider_name
         self.max_output_tokens = config.get_llm_max_output_tokens(model_alias)
+        self.effort = config.get_llm_effort(model_alias)
+        self.effort_budget_tokens = config.get_llm_effort_budget_tokens(model_alias)
         model_name = config.get_model_name(model_alias)
         if not model_name:
             raise ValueError(f"Model for alias '{model_alias}' not found in config.")
@@ -91,6 +93,27 @@ class GeminiProvider(BaseLLM):
         }
 
         self.model = genai.GenerativeModel(model_name, safety_settings=safety_settings)
+
+    def _effort_generation_config(self, camel_case: bool = False) -> Dict[str, Any]:
+        """把推理强度翻译成 Gemini 的 thinking 配置片段。
+
+        Gemini 不吃 `reasoning_effort` 字符串，要的是 token 预算（thinkingBudget）：
+        0 = 关闭思考，正数 = 预算上限。
+
+        两套命名不能合并：Python SDK 的 generation_config 走 snake_case
+        (`thinking_config` / `thinking_budget`)，而 `_video_stream_via_rest` 直接拼
+        REST body，必须是 camelCase (`thinkingConfig` / `thinkingBudget`)。
+        写错的一侧不会报错，只会被 API 静默忽略——档位看起来配了却没生效。
+
+        用 getattr 取值：effort 是纯可选调优字段，绕过 __init__ 构造的实例
+        （测试里的 `object.__new__`）不该因为少这一个属性就整个请求崩掉。
+        """
+        budget = getattr(self, "effort_budget_tokens", None)
+        if budget is None:
+            return {}
+        if camel_case:
+            return {"thinkingConfig": {"thinkingBudget": int(budget)}}
+        return {"thinking_config": {"thinking_budget": int(budget)}}
 
     def _convert_history(self, history: List[Dict[str, str]]) -> list:
         """
@@ -160,6 +183,7 @@ class GeminiProvider(BaseLLM):
         multimodal_videos: Optional[List[Dict]] = None,
     ) -> str:
         # Convert history to Gemini's format, handling tool_call/tool_response
+        self._begin_call()
         gemini_history = self._convert_history(history)
         
         try:
@@ -204,7 +228,15 @@ class GeminiProvider(BaseLLM):
             # If we use native tools, system prompt should be in system_instruction (which we did above).
             
             chat_session = current_model.start_chat(history=gemini_history)
-            response = await chat_session.send_message_async(full_prompt)
+            # chat() 没有 max_output_tokens 逻辑（历史如此），但 effort 要生效
+            # 就必须走 generation_config；为空时不传，保持原行为。
+            effort_config = self._effort_generation_config()
+            if effort_config:
+                response = await chat_session.send_message_async(
+                    full_prompt, generation_config=effort_config
+                )
+            else:
+                response = await chat_session.send_message_async(full_prompt)
             
             # Check for function calls
             # Gemini SDK (automatic function calling) might execute it automatically if configured?
@@ -245,18 +277,27 @@ class GeminiProvider(BaseLLM):
                     f"promptFeedback={getattr(response, 'prompt_feedback', None)}，"
                     f"candidates={repr(getattr(response, 'candidates', None))[:600]}"
                 )
+                self.last_error = "empty_content"
             return cleaned
         except Exception as e:
             # Handle potential content filtering and other API errors
             error_msg = str(e)
             logger.error(f"Gemini API Error: {e}", exc_info=True)
-            
+
             # 检查是否是内容过滤错误
             if "block_reason" in error_msg or "PROHIBITED_CONTENT" in error_msg or "SAFETY" in error_msg:
-                return "抱歉，由于内容安全限制，我无法直接回复该消息。我理解您的问题，但系统检测到可能包含敏感内容（如链接）。您可以尝试重新表述问题，或者我可以用其他方式帮助您。"
-            
+                return self._fail(
+                    "抱歉，由于内容安全限制，我无法直接回复该消息。我理解您的问题，"
+                    "但系统检测到可能包含敏感内容（如链接）。您可以尝试重新表述问题，"
+                    "或者我可以用其他方式帮助您。",
+                    reason=f"blocked_exception:{error_msg}",
+                )
+
             # 对于其他所有错误，返回一个包含具体错误信息的前缀消息
-            return f"抱歉，处理您的请求时遇到了问题：{error_msg}"
+            return self._fail(
+                f"抱歉，处理您的请求时遇到了问题：{error_msg}",
+                reason=f"exception:{error_msg}",
+            )
 
     @staticmethod
     def _build_user_parts(user_prompt: str, multimodal_images: Optional[List[Dict]] = None, multimodal_videos: Optional[List[Dict]] = None) -> List[Dict]:
@@ -577,16 +618,21 @@ class GeminiProvider(BaseLLM):
         multimodal_videos: Optional[List[Dict]] = None,
     ):
         # 视频请求绕过 SDK，直接走 REST API（SDK + 自定义 endpoint + 视频 inline_data 会卡死）
+        self._begin_call()
         if multimodal_videos:
             full_prompt = f"{system_prompt}\n\n---\n\n{user_prompt}" if not tools else user_prompt
-            gen_config = {"maxOutputTokens": int(self.max_output_tokens)} if self.max_output_tokens else None
+            # REST body 用 camelCase，和下面 SDK 分支的 snake_case 不是一回事。
+            gen_config: Dict[str, Any] = {}
+            if self.max_output_tokens:
+                gen_config["maxOutputTokens"] = int(self.max_output_tokens)
+            gen_config.update(self._effort_generation_config(camel_case=True))
             async for chunk in self._video_stream_via_rest(
                 system_prompt=system_prompt if tools else "",
                 user_prompt=full_prompt,
                 history=history,
                 multimodal_images=multimodal_images,
                 multimodal_videos=multimodal_videos,
-                generation_config=gen_config,
+                generation_config=gen_config or None,
             ):
                 yield chunk
             return
@@ -617,9 +663,11 @@ class GeminiProvider(BaseLLM):
         else:
             full_prompt = f"{system_prompt}\n\n---\n\n{user_prompt}"
 
-        generation_config: Optional[Any] = None
+        generation_config: Dict[str, Any] = {}
         if self.max_output_tokens:
-            generation_config = {"max_output_tokens": int(self.max_output_tokens)}
+            generation_config["max_output_tokens"] = int(self.max_output_tokens)
+        # SDK 分支用 snake_case；REST 视频分支在上面用 camelCase。
+        generation_config.update(self._effort_generation_config())
 
         user_parts = self._build_user_parts(full_prompt, multimodal_images, multimodal_videos)
         chat_session = current_model.start_chat(history=gemini_history)

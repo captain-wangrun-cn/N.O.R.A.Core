@@ -17,6 +17,7 @@ import re
 from typing import Any, Dict, List, Optional
 
 from brain import appearance as appearance_lib
+from brain.interface import BaseLLM
 from brain.prompts import (
     WORKSPACE_SCHEDULE_FILE,
     WORKSPACE_SOUL_FILE,
@@ -155,6 +156,15 @@ class AppearanceGenMixin:
         raw = str(raw or "").strip()
         if not raw:
             raise RuntimeError("draw_desc 返回空结果")
+
+        # provider 失败时返回的是「一段错误文本」而不是抛异常，落到下面的
+        # [DRAW_PROMPT] 缺失兜底分支就会被整段当成提示词，把 "Error: 模型因内容
+        # 安全策略拒绝生成…" 喂进文生图模型。必须在兜底之前拦掉。
+        last_error = getattr(desc_client, "last_error", None)
+        if last_error or BaseLLM.is_error_result(raw):
+            raise RuntimeError(
+                f"draw_desc 调用失败（{last_error or 'error_result'}），不拿错误文本当提示词：{raw[:200]}"
+            )
 
         prompt_match = _DRAW_PROMPT_PATTERN.search(raw)
         if prompt_match:

@@ -40,6 +40,7 @@ core/controller.py            NoraController.handle_message()
 | 模型别名 | `config.yml` → `llm.models.*` | `smart` / `fast` / `coder` / `image` / `video` / `fast-image`(可选) / `draw`+`draw_desc`(可选，成对) / `summary` |
 | 生图接口形态 | `config.yml` → `llm.draw_api` | `images`(默认) / `chat`；只对 openai 类型 provider 生效 |
 | 生图提示词写法 | `config.yml` → `llm.draw_prompt_style` | `natural`(默认，句子) / `tags`(标签串)；与接口形态无关，取决于 `draw` 模型 |
+| 推理强度 | `config.yml` → `llm.effort` / `llm.effort_by_alias.*` | `none`/`minimal`/`low`/`medium`/`high`；按别名覆盖全局。不配置=不传该字段。可用 `/effort` 按钮改 |
 | 消息历史 | `config.yml` → `memory.message_history.*` | `raw_window`, `compress_window` 等 |
 | 成本跟踪 | `config.yml` → `cost_tracking.*` | `enabled`, `custom_prices` |
 | 主动消息调度 | `config.yml` → `schedule.*` | `enabled` |
@@ -145,6 +146,7 @@ python main.py --no-tui --adapter onebotv11
 # /regenerate_proactive [replace|append]
 # /schedule_today
 # /custom_scope （按钮勾选 fast/smart/image/coder，含 none/关闭）
+# /effort （按钮为每个已配置的模型别名单独设推理强度：none/minimal/low/medium/high，或"跟随全局"；写回 config.yml）
 # /debug_cleanup （按钮选择清理范围：Qdrant 记忆、Qdrant 图片、Mongo 图片库、消息镜像库、上下文压缩库、聊天记录，含“全部清空”与取消；二次确认防误触）
 # /undo （撤销上一条前脑发送的消息；删除消息历史与镜像库，若记录了平台 message_id 且平台支持，会尝试删除聊天界面消息）
 

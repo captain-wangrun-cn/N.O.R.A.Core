@@ -175,6 +175,7 @@ class TelegramAdapter(
         self.application.add_handler(CommandHandler('override', self._override_command))
         self.application.add_handler(CommandHandler('debug_cleanup', self._debug_cleanup_command))
         self.application.add_handler(CommandHandler('model', self._model_command))
+        self.application.add_handler(CommandHandler('effort', self._effort_command))
         self.application.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), self._handle_incoming_message))
         self.application.add_handler(MessageHandler(filters.PHOTO, self._handle_photo))
         self.application.add_handler(MessageHandler(filters.VIDEO | filters.VIDEO_NOTE, self._handle_video))

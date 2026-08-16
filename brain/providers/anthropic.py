@@ -24,6 +24,8 @@ class AnthropicProvider(BaseLLM):
         self.provider_name = provider_name
         self.model = config.get_model_name(model_alias)
         self.max_output_tokens = config.get_llm_max_output_tokens(model_alias) or 1024
+        self.effort = config.get_llm_effort(model_alias)
+        self.effort_budget_tokens = config.get_llm_effort_budget_tokens(model_alias)
         if not self.model:
             raise ValueError(f"Model for alias '{model_alias}' not found in config.")
 
@@ -32,6 +34,38 @@ class AnthropicProvider(BaseLLM):
         if base_url:
             client_kwargs["base_url"] = base_url
         self.client = AsyncAnthropic(**client_kwargs)
+
+    def _apply_effort(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+        """把推理强度翻译成 Anthropic 的 extended thinking 配置。
+
+        Anthropic 不吃 `reasoning_effort` 字符串，要的是 token 预算。
+        约束：`budget_tokens` 必须**小于** `max_tokens`，否则 API 直接报错——
+        所以这里按 max_tokens 夹一下，而不是照抄档位表的数值。
+        `none` 档（预算 0）显式关闭思考。
+
+        用 getattr 取值：effort 是纯可选调优字段，绕过 __init__ 构造的实例
+        （测试里的 `object.__new__`）不该因为少这一个属性就整个请求崩掉。
+        """
+        budget = getattr(self, "effort_budget_tokens", None)
+        if budget is None:
+            return payload
+
+        max_tokens = int(payload.get("max_tokens") or self.max_output_tokens or 1024)
+        if budget <= 0:
+            payload["thinking"] = {"type": "disabled"}
+            return payload
+
+        # 留出至少 512 token 给正文，否则思考吃满预算后没有余量输出答案。
+        usable = max(1024, min(int(budget), max_tokens - 512))
+        if usable >= max_tokens:
+            # max_tokens 太小，塞不进任何合法预算，直接不开思考。
+            logger.warning(
+                f"[Anthropic/{self.model_alias}] max_tokens={max_tokens} 太小，"
+                f"无法容纳 effort={getattr(self, 'effort', None)} 的思考预算，本次不启用 thinking。"
+            )
+            return payload
+        payload["thinking"] = {"type": "enabled", "budget_tokens": usable}
+        return payload
 
     @staticmethod
     def _convert_tools_schema(tools: List[Dict]) -> List[Dict[str, Any]]:
@@ -116,6 +150,7 @@ class AnthropicProvider(BaseLLM):
         multimodal_images: Optional[List[Dict[str, Any]]] = None,
         multimodal_videos: Optional[List[Dict[str, Any]]] = None,
     ) -> str:
+        self._begin_call()
         messages = [
             *self._convert_history(history),
             {"role": "user", "content": user_prompt},
@@ -126,6 +161,7 @@ class AnthropicProvider(BaseLLM):
             "messages": messages,
             "max_tokens": int(self.max_output_tokens),
         }
+        self._apply_effort(payload)
         if tools:
             payload["tools"] = self._convert_tools_schema(tools)
         try:
@@ -158,10 +194,14 @@ class AnthropicProvider(BaseLLM):
                     f"（stop_reason={getattr(response, 'stop_reason', None)}，usage={self.last_usage}），"
                     f"原始 content: {repr(getattr(response, 'content', None))[:800]}"
                 )
+                self.last_error = "empty_content"
             return cleaned
         except Exception as e:
             logger.error(f"Anthropic API Error: {e}", exc_info=True)
-            return "Sorry, I encountered an issue processing your request with the Anthropic API."
+            return self._fail(
+                "Sorry, I encountered an issue processing your request with the Anthropic API.",
+                reason=f"exception:{e}",
+            )
 
     async def chat_stream(
         self,
@@ -172,6 +212,7 @@ class AnthropicProvider(BaseLLM):
         multimodal_images: Optional[List[Dict[str, Any]]] = None,
         multimodal_videos: Optional[List[Dict[str, Any]]] = None,
     ):
+        self._begin_call()
         messages = [
             *self._convert_history(history),
             {"role": "user", "content": user_prompt},
@@ -182,6 +223,7 @@ class AnthropicProvider(BaseLLM):
             "messages": messages,
             "max_tokens": int(self.max_output_tokens),
         }
+        self._apply_effort(payload)
         if tools:
             payload["tools"] = self._convert_tools_schema(tools)
 

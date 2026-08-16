@@ -260,6 +260,88 @@ def get_llm_max_output_tokens(model_alias: str = "smart"):
         return per_alias.get(model_alias)
     return llm_cfg.get("max_output_tokens")
 
+
+# 推理强度（reasoning effort）。三家 API 的字段完全不通用，所以这里只存一个
+# 统一档位，由各 provider 自己翻译：
+#   openai / openrouter → reasoning_effort="high"（字符串直传）
+#   anthropic           → thinking={"type":"enabled","budget_tokens":N}
+#   gemini(原生 SDK)     → thinking_config={"thinking_budget":N}
+# "none" 表示显式关闭思考；未配置（None）表示完全不传该字段，用端点自己的默认值。
+EFFORT_NONE = "none"
+EFFORT_LEVELS = (EFFORT_NONE, "minimal", "low", "medium", "high")
+
+# 档位 → thinking token 预算。给 anthropic / gemini 这类要整数预算的 API 用。
+# 数值是经验取值，够区分档位即可；none=0 就是关闭思考。
+EFFORT_BUDGET_TOKENS = {
+    EFFORT_NONE: 0,
+    "minimal": 1024,
+    "low": 2048,
+    "medium": 8192,
+    "high": 24576,
+}
+
+
+def normalize_effort(value):
+    """把任意输入规整成合法档位；无法识别时返回 None（= 不传该字段）。"""
+    raw = str(value if value is not None else "").strip().lower()
+    if not raw:
+        return None
+    if raw in ("off", "disable", "disabled", "false"):
+        return EFFORT_NONE
+    return raw if raw in EFFORT_LEVELS else None
+
+
+def get_llm_effort(model_alias: str = "smart"):
+    """
+    获取某个模型别名的推理强度档位。
+
+    优先级：llm.effort_by_alias[alias] → llm.effort → None（不传字段）。
+    返回值是 EFFORT_LEVELS 里的档位字符串，或 None 表示"不设置、用端点默认"。
+    """
+    cfg = _safe_config()
+    llm_cfg = cfg.get("llm", {}) or {}
+    per_alias = (llm_cfg.get("effort_by_alias") or {})
+    if model_alias in per_alias:
+        return normalize_effort(per_alias.get(model_alias))
+    return normalize_effort(llm_cfg.get("effort"))
+
+
+def get_llm_effort_budget_tokens(model_alias: str = "smart"):
+    """
+    推理强度对应的 thinking token 预算（anthropic / gemini 用）。
+
+    返回 None 表示不设置；返回 0 表示显式关闭思考。
+    """
+    effort = get_llm_effort(model_alias)
+    if effort is None:
+        return None
+    return EFFORT_BUDGET_TOKENS.get(effort)
+
+
+def set_llm_effort_by_alias(model_alias: str, effort) -> dict:
+    """
+    持久化单个别名的推理强度。传 None / 空值表示清除该别名的设置（回落全局）。
+
+    返回写入后的完整 effort_by_alias 映射。
+    """
+    cfg = dict(_safe_config())
+    llm_cfg = dict(cfg.get("llm", {}) or {})
+    per_alias = dict(llm_cfg.get("effort_by_alias") or {})
+
+    normalized = normalize_effort(effort)
+    if normalized is None:
+        per_alias.pop(model_alias, None)
+    else:
+        per_alias[model_alias] = normalized
+
+    if per_alias:
+        llm_cfg["effort_by_alias"] = per_alias
+    else:
+        llm_cfg.pop("effort_by_alias", None)
+    cfg["llm"] = llm_cfg
+    save_config(cfg)
+    return per_alias
+
 def get_message_history_config():
     """Gets the message history configuration."""
     cfg = _safe_config()

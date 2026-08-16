@@ -16,6 +16,13 @@ from .message import context_from_update, has_bot_mention, strip_bot_mention
 
 logger = logging.getLogger(__name__)
 
+# 所有可配置的模型别名。/model 与 /effort 共用，新增别名只改这一处，
+# 否则两个菜单会长期不一致。
+MODEL_ALIASES = [
+    "smart", "fast", "coder", "image", "video", "security",
+    "fast-image", "draw", "draw_desc", "summary",
+]
+
 
 class TelegramCommandsMixin:
     def _command_should_process(self, update: Update) -> bool:
@@ -222,7 +229,7 @@ class TelegramCommandsMixin:
         models_cfg = llm_cfg.get("models", {}) or {}
 
         buttons = []
-        for alias in ["smart", "fast", "coder", "image", "video", "security", "fast-image", "draw", "draw_desc", "summary"]:
+        for alias in MODEL_ALIASES:
             current = models_cfg.get(alias, "")
             label = f"{alias}: {current or '未设置'}"
             buttons.append([InlineKeyboardButton(label, callback_data=f"model_pick:{alias}")])
@@ -234,6 +241,19 @@ class TelegramCommandsMixin:
             "将立即保存到 config.yml。"
         )
         return text, InlineKeyboardMarkup(buttons)
+
+    async def _effort_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """展示每个模型别名的推理强度按钮。"""
+        if not self._command_should_process(update) or not update.message:
+            return
+
+        try:
+            text, markup = self._build_effort_alias_menu()
+            await update.message.reply_text(text, reply_markup=markup, parse_mode=ParseMode.HTML)
+        except Exception:
+            chat_id = str(update.effective_chat.id) if update.effective_chat else ""
+            logger.error(f"[{chat_id}] /effort 按钮初始化失败", exc_info=True)
+            await update.message.reply_text("❌ 无法加载推理强度设置。")
 
     def _get_provider_for_alias(self, cfg: Dict[str, Any], alias: str) -> str:
         llm_cfg = cfg.get("llm", {}) or {}

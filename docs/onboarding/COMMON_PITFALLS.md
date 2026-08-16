@@ -346,6 +346,98 @@
   陌生人比你先私聊某个新平台，他就进了 `owner_bindings.json`。
   要杜绝可在 `config.yml → owner.identities` 预声明。
 
+---
+
+## 5.9 引用表情包不触发 fast-image 识别
+
+现象：直接发表情包时 Nora 能读懂它的情绪；**引用/回复**一条表情包消息时，
+她只看到一个没有内容的占位符。
+
+`[sticker: path]` 是驱动整条 fast-image 链路的**唯一载体**：
+`extract_image_payloads` 只认这个标记，`_describe_stickers`（`core/back_brain.py`）
+只处理它产出的 `is_sticker=True` 负载。
+
+引用路径上这个标记原本无从还原，因为两层信息都被有意丢弃了：
+
+- 表情包**故意不进 ImageStore**（`QUICK_REFERENCE` §3），所以没有 `image_id`
+  可以反查——`_pick_image_id_from_metadata` 这条线对表情包天然是空的。
+- 入库正文被 `media_placeholder_text`（`core/message_handler.py`）收敛成裸
+  `[表情包]`，路径没有落库。`_extract_reply_info` 从历史里取回来的就是这个裸占位符。
+
+所以修复只能是**重下文件**：`adapters/telegram/reply.py` 的
+`_redownload_replied_sticker_as_input()` 照 `_redownload_replied_photo` 的模式
+重新下载并重建标记。**这个分支必须排在历史查找之前**——历史查找会先命中并返回
+裸 `[表情包]`，把 sticker 分支彻底挡掉（`tests/test_telegram_reply_sticker.py`
+有一条测试专门锁这个顺序）。
+
+- 重建的格式必须和 `_handle_sticker`（`adapters/telegram/incoming.py`）**逐字一致**：
+  emoji/贴纸包那行给模型看语义，路径那行才是载荷。少了后者，标记等于没重建。
+- 命名沿用 `sticker_<file_id>.<ext>`，同 file_id 不重复下载。
+- OneBot v11 是**另一条独立的路**：它的 `_enrich_reply_text` 产出的是
+  `[表情包:{file}]`，而 `extract_image_payloads` 只匹配 `[sticker:...]`，两者对不上。
+  QQ 侧的引用表情包**目前仍未识别**，要修需要单独处理该格式。
+
+---
+
+## 5.10 draw_desc 被安全策略拦截后，错误提示被当成生图提示词
+
+现象（实测日志）：
+
+```
+[OpenAI chat/draw_desc] 内容被安全策略拦截 finish_reason=prohibited_content
+draw_desc 未输出 [DRAW_PROMPT] 区块，整段文本作为提示词。
+生图开始: prompt=Error: 模型因内容安全策略拒绝生成（finish_reason=...）
+```
+
+根因不在生图链路，而在 provider 的失败约定：**失败时返回一段错误文本，而不是抛异常**
+（历史设计，好让对话链路能把原因说给用户）。于是 `_resolve_draw_prompt`
+（`core/appearance_gen.py`）的「没包 `[DRAW_PROMPT]` 就整段当提示词」兜底分支
+把那句错误说明原样喂进了文生图模型。
+
+- 判据是 `client.last_error`（`brain/interface.py` 的 `_begin_call()` / `_fail()`），
+  `BaseLLM.is_error_result()` 的 `Error: ` 前缀只是第二道闸门。
+  **不要靠匹配返回文本判断**——各 provider 的失败文案互不相同、也会改。
+- `check_finish_reason_and_log` 已从 classmethod 改成实例方法，就是为了在返回错误
+  文本的同时记上 `last_error`。新增 provider 时记得在入口调 `_begin_call()`，
+  失败分支走 `_fail()`，否则该 provider 的失败对调用方不可见。
+- **凡是把 `chat()` 结果当"产物"而不是"给用户看的话"的调用方，都要检查这个信号。**
+  除了 draw_desc，参考图挑选、各类判定轮都属于这一类。截断（`finish_reason=length`）
+  不算失败：正文仍可用，只是不完整。
+
+---
+
+## 5.11 推理强度（effort）配了没生效
+
+`llm.effort` / `llm.effort_by_alias` 存的是**统一档位字符串**，三家 API 的字段完全
+不通用，由各 provider 自己翻译（`config.get_llm_effort()` / `get_llm_effort_budget_tokens()`）：
+
+| provider | 字段 | 取值 |
+|---|---|---|
+| openai / openrouter | `reasoning_effort` | 档位字符串直传 |
+| anthropic | `thinking.budget_tokens` | 整数预算，且**必须小于** `max_tokens` |
+| gemini（原生 SDK） | `thinking_config.thinking_budget` | 整数预算 |
+| gemini（REST 视频路径） | `thinkingConfig.thinkingBudget` | 同上，但**camelCase** |
+
+坑都集中在"配了但静默无效"：
+
+- **Gemini 有两套命名，不能合并。** SDK 的 `generation_config` 走 snake_case，
+  而 `_video_stream_via_rest` 直接拼 REST body，必须 camelCase。
+  写错的一侧**不报错**，只会被 API 忽略——看起来配了却没生效。
+- **`none` 是合法档位，不是"未配置"。** 判据必须是 `is None`；写
+  `if not self.effort` 会把 `none` 档（显式关闭思考）一起吞掉。
+  配置层同理：`get_llm_effort()` 返回 `None` 表示不传字段，返回 `"none"` 表示传关闭。
+  预算侧则是 `None` vs `0`。
+- **Anthropic 的 `budget_tokens` 必须小于 `max_tokens`**，否则直接报错。
+  `_apply_effort` 会按 `max_tokens` 夹一下并留 512 token 给正文；
+  `max_tokens` 太小时宁可不开思考，也不能发非法请求。
+- **不支持推理的模型收到 `reasoning_effort` 会 400。** OpenAI 侧
+  `chat()` / `chat_stream()` 都有"去掉该字段重试一次"的分支
+  （`_is_effort_rejection`），别把它删掉——否则一个可选调优字段会让整个别名不可用。
+- **改动在下次创建该模型客户端时才生效。** effort 在 `__init__` 里读进实例字段，
+  `/effort` 写完 config.yml 后，已存在的 client 实例仍用旧值。
+- 新增模型别名时改 `adapters/telegram/commands.py` 的 `MODEL_ALIASES`
+  一处即可，`/model` 和 `/effort` 共用它。
+
 ## 6. 成本跟踪
 
 ### ⚠️ 无内置价格表
