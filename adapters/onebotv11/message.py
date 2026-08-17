@@ -10,6 +10,34 @@ from adapters.message_controls import format_mention_marker, format_reply_marker
 
 _CQ_PATTERN = re.compile(r"\[CQ:(?P<type>[a-zA-Z0-9_.-]+)(?P<params>(?:,[^\]]*)?)\]")
 
+# 表情包段：QQ 商城表情（mface/marketface），以及 subType/sub_type/type 为 1 的 image。
+# 三个字段名都要试——不同实现（NapCat / go-cqhttp / Lagrange）用的键不一样。
+_STICKER_SEGMENT_TYPES = {"mface", "marketface"}
+
+
+def is_sticker_segment(segment: dict[str, Any]) -> bool:
+    """该消息段是否是表情包（含 QQ 商城表情）。"""
+    segment_type = str(segment.get("type") or "")
+    if segment_type in _STICKER_SEGMENT_TYPES:
+        return True
+    if segment_type != "image":
+        return False
+    data = segment.get("data") or {}
+    sticker_type = data.get("subType", data.get("sub_type", data.get("type", "")))
+    return str(sticker_type) == "1"
+
+
+def is_media_segment(segment: dict[str, Any]) -> bool:
+    """该消息段是否是**需要模型真正去看**的媒体（图片/视频/语音/文件）。
+
+    表情包不算：它的真图按设计不进模型（`back_brain.py` 按 is_sticker 过滤）、
+    也不进 ImageStore，只走 fast-image 出一句 desc。把它当媒体会让上层给模型
+    附上"上方媒体就是被回复的真实内容"的提示，而模型其实拿不到那张图。
+    """
+    if is_sticker_segment(segment):
+        return False
+    return str(segment.get("type") or "") in {"image", "video", "record", "file"}
+
 
 def cq_escape(value: str) -> str:
     return (
@@ -160,9 +188,7 @@ def plain_text_from_segments(segments: Iterable[dict[str, Any]]) -> str:
         elif segment_type == "reply":
             parts.append(f"[回复:{data.get('id') or ''}]")
         elif segment_type in {"image", "record", "video", "file"}:
-            # image 的 subType / sub_type / type 为 1 时表示表情包
-            sticker_type = data.get("subType", data.get("sub_type", data.get("type", "")))
-            if segment_type == "image" and str(sticker_type) == "1":
+            if segment_type == "image" and is_sticker_segment(segment):
                 label = "表情包"
             else:
                 label = {

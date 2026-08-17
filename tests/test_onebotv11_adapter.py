@@ -606,6 +606,88 @@ def test_plain_text_from_segments_labels_sticker_variants():
     ]) == "[表情包:a.webp][表情包:b.webp]"
 
 
+# --- 表情包不算"需要模型去看的媒体" --------------------------------------
+# 表情包会被下载并产出 [sticker: path]，但真图按设计不进模型（back_brain 按
+# is_sticker 过滤）、也不进 ImageStore。所以引用表情包时不能附
+# HISTORICAL_REPLY_MEDIA_NOTE ——那句话告诉模型"上方媒体就是被回复的真实内容"，
+# 而模型其实拿不到那张图，等于邀请它幻觉。
+
+def test_marketface_is_sticker_not_media():
+    from adapters.onebotv11.message import is_media_segment, is_sticker_segment
+
+    for segment_type in ("mface", "marketface"):
+        segment = {"type": segment_type, "data": {"file": "market.webp"}}
+        assert is_sticker_segment(segment) is True, segment_type
+        assert is_media_segment(segment) is False, segment_type
+
+
+def test_image_subtype_1_is_sticker_not_media():
+    """三个字段名都要认——不同实现（NapCat / go-cqhttp / Lagrange）用的键不一样。"""
+    from adapters.onebotv11.message import is_media_segment, is_sticker_segment
+
+    for field in ("subType", "sub_type", "type"):
+        segment = {"type": "image", "data": {"file": "s.webp", field: 1}}
+        assert is_sticker_segment(segment) is True, field
+        assert is_media_segment(segment) is False, field
+
+
+def test_normal_image_is_media():
+    from adapters.onebotv11.message import is_media_segment, is_sticker_segment
+
+    segment = {"type": "image", "data": {"file": "photo.jpg", "type": 0}}
+    assert is_sticker_segment(segment) is False
+    assert is_media_segment(segment) is True
+
+
+def test_real_media_segments_are_media():
+    from adapters.onebotv11.message import is_media_segment
+
+    for segment_type in ("video", "record", "file"):
+        assert is_media_segment({"type": segment_type, "data": {"file": "x"}}) is True, segment_type
+
+
+def test_non_media_segments_are_not_media():
+    from adapters.onebotv11.message import is_media_segment
+
+    for segment_type in ("text", "at", "face", "reply"):
+        assert is_media_segment({"type": segment_type, "data": {}}) is False, segment_type
+
+
+def test_reply_to_marketface_does_not_flag_media():
+    """引用商城表情：不置 reply_to_contains_media、不附媒体备注。
+
+    置了的话被引用消息 ID 会被补进 platform_message_ids，但表情包没入 ImageStore，
+    view_media 查不到——补了也是空，还多给模型一句会诱发幻觉的提示。
+    """
+    async def run():
+        adapter = IncomingOnlyOneBot()
+        event = {
+            "_reply_message_data": {
+                "message": [{"type": "marketface", "data": {"file": "market.webp"}}],
+            }
+        }
+        await adapter._enrich_reply_text(event)
+        assert "[sticker:" in event["reply_to_text"]
+        assert not event.get("reply_to_contains_media")
+
+    asyncio.run(run())
+
+
+def test_reply_to_real_image_still_flags_media():
+    """真图必须仍然置位——这条是上面那条的对照，防止一刀切改过头。"""
+    async def run():
+        adapter = IncomingOnlyOneBot()
+        event = {
+            "_reply_message_data": {
+                "message": [{"type": "image", "data": {"file": "photo.jpg", "type": 0}}],
+            }
+        }
+        await adapter._enrich_reply_text(event)
+        assert event.get("reply_to_contains_media") is True
+
+    asyncio.run(run())
+
+
 def test_onebot_group_mention_only_still_reaches_aggregator():
     async def run():
         adapter = IncomingOnlyOneBot()

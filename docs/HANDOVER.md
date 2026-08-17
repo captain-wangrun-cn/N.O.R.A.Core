@@ -19,12 +19,18 @@
   前脑路径新增就地生成 desc（后脑那套注入条件是 `not message_saved`，而前脑马上
   就置 True，不在这里生成就永远没有），且**同时回填 `context["text"]`**——
   只改 `message_content` 的话入库有 desc、当轮前脑看不到。
-- **`adapters/onebotv11/main.py`**：`_enrich_reply_text` 判断媒体段的集合补上
-  `mface`/`marketface`，否则引用商城表情时 `reply_to_contains_media` 不置位，
-  被引用消息 ID 补不进 `platform_message_ids`，后脑 `view_media` 回查找不到那张图。
+- **`adapters/onebotv11/`**：新增 `message.is_sticker_segment()` /
+  `message.is_media_segment()`，`media.py` / `message.py` / `forward.py` 里三份重复的
+  「`subType`/`sub_type`/`type` 任一为 1」判断统一到前者。
+  `_enrich_reply_text` 判断"媒体"改用 `is_media_segment()`——**表情包不算媒体**：
+  置位 `reply_to_contains_media` 会把被引用消息 ID 补进 `platform_message_ids`
+  （但表情包没入 ImageStore，`view_media` 查不到、补了是空），更糟的是附上
+  `HISTORICAL_REPLY_MEDIA_NOTE`「上方媒体就是被回复的真实内容」，而模型拿不到那张图。
+  引用商城表情本来就会下载并产出 `[sticker: path]`，和直发走同一条路，不需要特殊处理。
 - ⚠️ `_describe_stickers` 的 prompt 只要求描述"情绪或含义"、不描述画面，
   所以"这是哪个系列的梗图"这类视觉问题 desc 天然答不上来——设计取舍，非 bug。
-- 测试：`tests/test_sticker_routing.py`（6，源码级断言）。
+- 测试：`tests/test_sticker_routing.py`（6，源码级断言）、
+  `tests/test_onebotv11_adapter.py` 新增 7 条（表情包 vs 媒体的判定与引用行为）。
 - 详见 `docs/onboarding/COMMON_PITFALLS.md` §5.12。
 
 ## 更早改动（截至 2026-08-16）

@@ -21,6 +21,7 @@ from .forward import OneBotForwardMixin
 from .media import OneBotMediaMixin
 from .message import (
     is_at_self,
+    is_media_segment,
     native_reference_markers,
     onebot_event_to_adapter_event,
     onebot_message_segments,
@@ -572,11 +573,14 @@ class OneBotV11Adapter(
         reply_text = await self.segments_to_nora_text(reply_segments)
         if not reply_text:
             return
-        # mface / marketface 是 QQ 商城表情，也是媒体段——漏了它们的话引用商城表情时
-        # reply_to_contains_media 不置位，被引用消息的 ID 补不进 platform_message_ids，
-        # 后脑想用 view_media 回查那张图就找不到。
-        media_segment_types = {"image", "video", "record", "file", "mface", "marketface"}
-        if any(str(segment.get("type") or "") in media_segment_types for segment in reply_segments):
+        # 表情包**不算**这里的"媒体"，`mface`/`marketface` 和 `subType==1` 的 image 都要排除。
+        # 它们确实会被下载并产出 [sticker: path]（`media.py`），但表情包的真图按设计
+        # 不进模型（`back_brain.py` 按 is_sticker 过滤）、也不进 ImageStore。所以：
+        #   - 补进 platform_message_ids 没意义：没入库，view_media 查不到；
+        #   - 更糟的是 HISTORICAL_REPLY_MEDIA_NOTE 会告诉模型"上方媒体就是被回复的真实内容"，
+        #     而模型其实拿不到那张图 —— 给了它一个幻觉的邀请。
+        # 引用表情包应该和直发表情包完全一样：下载 → [sticker:] → fast-image 出 desc → 前脑。
+        if any(is_media_segment(segment) for segment in reply_segments):
             reply_text = f"{reply_text}\n{HISTORICAL_REPLY_MEDIA_NOTE}"
             event["reply_to_contains_media"] = True
         event["reply_to_text"] = reply_text

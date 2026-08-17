@@ -411,9 +411,18 @@
 - `_describe_stickers` 的 prompt（`back_brain.py`）只要求描述"情绪或含义"，不描述画面。
   所以用户问"这是哪个系列的梗图"这类**视觉**问题，desc 天然答不上来——
   这是设计取舍不是 bug，真要支持得放行真图进 image 模型。
-- OneBot 的 `_enrich_reply_text` 判断媒体段的集合要含 `mface`/`marketface`，
-  漏了的话引用商城表情时 `reply_to_contains_media` 不置位，被引用消息 ID 补不进
-  `platform_message_ids`，后脑用 `view_media` 回查那张图会找不到。
+- OneBot 的 `_enrich_reply_text` 判断"媒体"时**必须排除表情包**（用
+  `message.py` 的 `is_media_segment()`，它内部调 `is_sticker_segment()`）。
+  置位 `reply_to_contains_media` 会带来两个坏处：被引用消息 ID 补进
+  `platform_message_ids` 但表情包没入 ImageStore，`view_media` 查不到、补了是空；
+  更糟的是附上 `HISTORICAL_REPLY_MEDIA_NOTE`「上方媒体就是被回复消息里的真实内容」，
+  而模型其实拿不到那张图——等于邀请它幻觉。
+  引用表情包应该和直发完全一样：下载 → `[sticker: path]` → fast-image 出 desc → 前脑。
+
+**判断表情包段只用 `is_sticker_segment()`，别再手写那三个字段的 fallback。**
+QQ 的表情包段有两种形态：`mface`/`marketface`，以及 `subType`/`sub_type`/`type`
+任一为 `1` 的 `image`。这三个键名在不同实现（NapCat / go-cqhttp / Lagrange）里不一样，
+必须全试。这段逻辑曾在 `media.py`、`message.py`、`forward.py` 各抄一份，已统一。
 
 `tests/test_sticker_routing.py` 用源码级断言锁住上面每一条（这个 bug 的本质就是
 一个布尔量的取值来源，跑完整 `handle_new_message` 要拉起 DB/LLM/presence 一大套依赖）。

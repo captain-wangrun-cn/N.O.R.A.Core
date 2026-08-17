@@ -12,6 +12,8 @@ from __future__ import annotations
 import logging
 from typing import Any
 
+from .message import is_sticker_segment
+
 logger = logging.getLogger(__name__)
 
 
@@ -128,8 +130,7 @@ def render_plain_segments(segments: list[Any]) -> str:
         if segment_type == "text":
             parts.append(str(data.get("text") or ""))
         elif segment_type == "image":
-            sticker_type = data.get("subType", data.get("sub_type", data.get("type", "")))
-            parts.append("[表情包]" if str(sticker_type) == "1" else "[图片]")
+            parts.append("[表情包]" if is_sticker_segment(segment) else "[图片]")
         elif segment_type in _MEDIA_PLACEHOLDERS:
             parts.append(_MEDIA_PLACEHOLDERS[segment_type])
         elif segment_type == "face":
