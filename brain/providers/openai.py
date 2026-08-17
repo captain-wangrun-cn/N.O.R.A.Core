@@ -41,11 +41,21 @@ class OpenAIProvider(BaseLLM):
         if not self.model:
             raise ValueError(f"Model for alias '{model_alias}' not found in config.")
 
-    def _apply_effort(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+    def _apply_effort(self, payload: Dict[str, Any], responses_api: bool = False) -> Dict[str, Any]:
         """把推理强度写进请求体（就地修改并返回，便于串在 payload 构造后）。
 
-        OpenAI 协议用 `reasoning_effort` 字符串。"none" 也是合法值（关闭思考），
-        所以判据是 `is None` 而不是真值——`if not self.effort` 会把 none 档吞掉。
+        ⚠️ 两套 API 的字段形态不一样，写错的一侧是 400 而不是静默忽略：
+          Chat Completions → 平铺 `reasoning_effort="high"`
+          Responses        → 嵌套 `reasoning={"effort":"high"}`
+        平铺字段传给 Responses 会 `400 unsupported_parameter`，反之同理。
+        `_filter_supported_kwargs` 只按 SDK 签名过滤顶层参数名，救不了这个——
+        `reasoning` 本身是合法顶层参数，它不知道里面该放什么。
+
+        `none` 也是合法值（关闭思考），所以判据是 `is None` 而不是真值——
+        `if not self.effort` 会把 none 档吞掉。
+
+        `auto` 是本项目自己的档位，OpenAI 没有这个字符串。它的语义就是"用端点默认"，
+        所以翻译成**不传该字段**，直接返回。
 
         不支持推理的模型收到这个字段可能报 400；chat() / chat_stream() 的异常分支
         会用 `_is_effort_rejection()` 识别并去掉该字段重试一次。
@@ -54,23 +64,37 @@ class OpenAIProvider(BaseLLM):
         （测试里的 `object.__new__(OpenAIProvider)`）不该因为少这一个属性就整个请求崩掉。
         """
         effort = getattr(self, "effort", None)
-        if effort is not None:
+        if effort is None or effort == config.EFFORT_AUTO:
+            return payload
+        if responses_api:
+            payload["reasoning"] = {"effort": effort}
+        else:
             payload["reasoning_effort"] = effort
         return payload
 
     @staticmethod
     def _is_effort_rejection(error: Exception) -> bool:
-        """判断异常是否由 reasoning_effort 字段本身引起（用于去掉它重试一次）。
+        """判断异常是否由推理强度字段本身引起（用于去掉它重试一次）。
 
         各家兼容端点的报错措辞差别很大（unknown / unsupported / unrecognized /
         invalid parameter），所以只要错误里同时出现"推理"和"不认识这个参数"的意思
         就算命中。宁可多重试一次，也不要让一个可选调优字段废掉整个别名。
+
+        也要认「值不被支持」这一类：OpenAI 的档位是 model-dependent 的，老模型收到
+        xhigh/max 会回 `Unsupported value: 'xhigh' is not supported ... Supported
+        values are: 'low', 'medium', and 'high'`——字段名对、值不对，同样得摘掉重试。
         """
         msg = str(error).lower()
-        if "reasoning_effort" in msg:
+        if "reasoning_effort" in msg or "reasoning.effort" in msg:
             return True
         rejection_words = ("unsupported", "unknown", "unrecognized", "invalid", "not supported")
-        return "reasoning" in msg and any(word in msg for word in rejection_words)
+        if "reasoning" in msg and any(word in msg for word in rejection_words):
+            return True
+        # 报错里可能只提值不提字段名，兜一层：出现我们发出去的档位名 + 拒绝措辞。
+        effort_words = ("xhigh", "max", "minimal", "none")
+        return any(word in msg for word in effort_words) and any(
+            word in msg for word in rejection_words
+        )
 
     @staticmethod
     def _convert_history_for_responses(history: List[Dict[str, str]]) -> List[Dict[str, Any]]:
@@ -582,7 +606,7 @@ class OpenAIProvider(BaseLLM):
             }
             if self.max_output_tokens:
                 payload["max_output_tokens"] = int(self.max_output_tokens)
-            self._apply_effort(payload)
+            self._apply_effort(payload, responses_api=True)
             if tools:
                 payload["tools"] = self._convert_tools_schema_for_responses(tools)
             try:
@@ -728,7 +752,7 @@ class OpenAIProvider(BaseLLM):
             }
             if self.max_output_tokens:
                 payload["max_output_tokens"] = int(self.max_output_tokens)
-            self._apply_effort(payload)
+            self._apply_effort(payload, responses_api=True)
             if tools:
                 payload["tools"] = self._convert_tools_schema_for_responses(tools)
             try:

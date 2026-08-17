@@ -419,8 +419,10 @@ class TelegramCallbacksMixin:
     # 推理强度（/effort）
     # ------------------------------------------------------------------
 
-    # 档位顺序与 config.EFFORT_LEVELS 一致，外加"跟随全局"（清除该别名的覆盖）。
-    _EFFORT_CHOICES = ("none", "minimal", "low", "medium", "high")
+    # 直接取 config.EFFORT_LEVELS，不在这里另抄一份——抄了就会和 config 漂移，
+    # 表现是按钮上能点的档位写进 config.yml 后被 normalize_effort 判为非法丢掉。
+    # 另有"跟随全局"（清除该别名的覆盖），在 _build_effort_level_menu 里单独加。
+    _EFFORT_CHOICES = config.EFFORT_LEVELS
 
     def _build_effort_alias_menu(self):
         """构造 /effort 顶层 alias 选择菜单，标出每个别名的当前档位。"""
@@ -475,7 +477,7 @@ class TelegramCallbacksMixin:
         for level in self._EFFORT_CHOICES:
             mark = "✅ " if current == level else "☑ "
             row.append(InlineKeyboardButton(f"{mark}{level}", callback_data=f"effort_set:{alias}:{level}"))
-            if len(row) == 2:
+            if len(row) == 3:
                 rows.append(row)
                 row = []
         if row:
@@ -494,7 +496,10 @@ class TelegramCallbacksMixin:
         text = (
             f"🧩 <b>{alias}</b> 的推理强度\n"
             f"当前: <code>{current or ('跟随全局: ' + (global_effort or '默认'))}</code>\n"
-            "档位越高，模型思考越久、越贵，首字延迟也越长。"
+            "档位越高，模型思考越久、越贵，首字延迟也越长。\n"
+            "<b>none</b>=关闭思考，<b>auto</b>=让模型自己决定思考多少。\n"
+            "⚠️ 档位是<b>按模型</b>支持的：xhigh/max 只有少数新模型认，"
+            "老模型收到会自动回退到不传该字段。"
         )
         return text, InlineKeyboardMarkup(rows)
 

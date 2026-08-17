@@ -94,11 +94,29 @@ class GeminiProvider(BaseLLM):
 
         self.model = genai.GenerativeModel(model_name, safety_settings=safety_settings)
 
+    def _uses_thinking_level(self) -> bool:
+        """该模型是否走 thinkingLevel 枚举（3.x）而不是 thinkingBudget（2.5）。
+
+        两套系统互斥且不通用：对 3.x 传 thinkingBudget 报错，对 2.5 传 thinkingLevel
+        也报错。用"是不是 2.x/1.x"反向判断，而不是枚举 3.x 型号——新模型只会往上出
+        （3.7、4.0…），枚举必然过期，而过期的后果是新模型直接 400。
+        """
+        model = str(getattr(self, "model_name", "") or "").lower()
+        legacy_markers = ("gemini-1.", "gemini-1_", "gemini-2.", "gemini-2_")
+        return not any(marker in model for marker in legacy_markers)
+
     def _effort_generation_config(self, camel_case: bool = False) -> Dict[str, Any]:
         """把推理强度翻译成 Gemini 的 thinking 配置片段。
 
-        Gemini 不吃 `reasoning_effort` 字符串，要的是 token 预算（thinkingBudget）：
-        0 = 关闭思考，正数 = 预算上限。
+        Gemini 不吃 `reasoning_effort` 字符串，而且**两个代次要的东西不一样**：
+          3.x → thinkingLevel 枚举字符串（MINIMAL/LOW/MEDIUM/HIGH）
+          2.5 → thinkingBudget 整数（0=关闭，-1=dynamic，正数=预算上限）
+        给 3.x 发 budget、给 2.5 发 level，两个方向都是报错。生产上 draw_desc 用的
+        gemini-3.6-flash 就属于前者。
+
+        3.x 关不掉思考，所以 none 档只降到 MINIMAL（见 config.EFFORT_THINKING_LEVELS）；
+        Gemini 只有 4 档，xhigh/max 一起降到 HIGH。
+        auto 档 → 3.x 不传该字段（用模型默认），2.5 用 thinkingBudget=-1（dynamic）。
 
         两套命名不能合并：Python SDK 的 generation_config 走 snake_case
         (`thinking_config` / `thinking_budget`)，而 `_video_stream_via_rest` 直接拼
@@ -108,6 +126,19 @@ class GeminiProvider(BaseLLM):
         用 getattr 取值：effort 是纯可选调优字段，绕过 __init__ 构造的实例
         （测试里的 `object.__new__`）不该因为少这一个属性就整个请求崩掉。
         """
+        effort = getattr(self, "effort", None)
+        if effort is None:
+            return {}
+
+        if self._uses_thinking_level():
+            level = config.get_effort_thinking_level(effort)
+            if not level:
+                # auto：3.x 没有"动态预算"这个旋钮，不传就是用模型自己的默认档。
+                return {}
+            if camel_case:
+                return {"thinkingConfig": {"thinkingLevel": level}}
+            return {"thinking_config": {"thinking_level": level}}
+
         budget = getattr(self, "effort_budget_tokens", None)
         if budget is None:
             return {}

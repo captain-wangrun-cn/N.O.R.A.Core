@@ -406,19 +406,48 @@ draw_desc 未输出 [DRAW_PROMPT] 区块，整段文本作为提示词。
 
 ---
 
-## 5.11 推理强度（effort）配了没生效
+## 5.11 推理强度（effort）配了没生效 / 直接 400
 
-`llm.effort` / `llm.effort_by_alias` 存的是**统一档位字符串**，三家 API 的字段完全
-不通用，由各 provider 自己翻译（`config.get_llm_effort()` / `get_llm_effort_budget_tokens()`）：
+`llm.effort` / `llm.effort_by_alias` 存的是**统一档位字符串**
+（`none`/`minimal`/`low`/`medium`/`high`/`xhigh`/`max`/`auto`，见 `config.EFFORT_LEVELS`），
+各家 API 的字段完全不通用，由各 provider 自己翻译：
 
 | provider | 字段 | 取值 |
 |---|---|---|
-| openai / openrouter | `reasoning_effort` | 档位字符串直传 |
-| anthropic | `thinking.budget_tokens` | 整数预算，且**必须小于** `max_tokens` |
-| gemini（原生 SDK） | `thinking_config.thinking_budget` | 整数预算 |
-| gemini（REST 视频路径） | `thinkingConfig.thinkingBudget` | 同上，但**camelCase** |
+| openai（Chat Completions） | `reasoning_effort` | 档位字符串，**平铺** |
+| openai（Responses） | `reasoning.effort` | 同上，但**嵌套** |
+| openrouter | `reasoning.effort` | 全档位照收，自己往下游翻 |
+| anthropic 4.6+ / sonnet-5 / opus-5 | `output_config.effort` | 档位字符串，**顶层兄弟字段** |
+| anthropic 4.5 及更早 | `thinking.budget_tokens` | 整数预算，且**必须小于** `max_tokens` |
+| gemini 3.x | `thinking_config.thinking_level` | `MINIMAL`/`LOW`/`MEDIUM`/`HIGH` 枚举 |
+| gemini 2.5 及更早 | `thinking_config.thinking_budget` | 整数预算（`-1`=dynamic） |
+| gemini（REST 视频路径） | `thinkingConfig.thinkingLevel/Budget` | 同上，但**camelCase** |
 
-坑都集中在"配了但静默无效"：
+**档位是按「模型」支持的，不是按「家」。** 这是最容易踩的一层：同一家不同代次
+认的字段和值都不一样，猜错的后果通常是 400 而不是降级。三条已经踩过的：
+
+- **Anthropic 2026 架构变了，effort 不在 `thinking` 里。** 现在是两个字段：
+  `thinking` 管模式（`enabled`/`adaptive`/`disabled`），`output_config.effort` 管强度。
+  **Opus 4.7+ 收到旧的 `{"type":"enabled","budget_tokens":N}` 直接 400**
+  （`thinking.type.enabled is not supported for this model`）。
+  `adaptive` 是模式名不是档位名，别当 effort 值传。
+- **Gemini 3.x 必须用 `thinkingLevel`，2.5 必须用 `thinkingBudget`**，两个方向传错都报错。
+  3.x 关不掉思考，所以 `none` 只降到 `MINIMAL` 而不是发 `budget=0`；
+  Gemini 只有 4 档，`xhigh`/`max` 一起降到 `HIGH`。
+- **Responses API 要嵌套 `reasoning={"effort":...}`**，平铺 `reasoning_effort` 会
+  `400 unsupported_parameter`。`_filter_supported_kwargs` 救不了这个——`reasoning`
+  本身是合法顶层参数名，它不知道里面该放什么。
+
+代次判断靠**模型名子串**（`_supports_native_effort()` / `_uses_thinking_level()`），
+一定会有猜错的时候（网关改名、新模型没进列表），所以三家都必须有"摘掉字段重试一次"
+的兜底（`_is_effort_rejection` / `_strip_effort_fields`）。**别把重试分支删掉**——
+否则一个可选调优字段会让整个别名不可用。判断代次时**用反向匹配**（"是不是老型号"）
+而不是枚举新型号：新模型只会往上出，枚举必然过期，过期就是新模型直接报错。
+
+⚠️ **流式路径的重试只能发生在第一个 yield 之前**（`emitted_any` 闸门）。
+400 是建流那一刻抛的，正常不会冲突；但流中途断的话重试会把已发给用户的文本再发一遍。
+
+其余"配了但静默无效"的坑：
 
 - **Gemini 有两套命名，不能合并。** SDK 的 `generation_config` 走 snake_case，
   而 `_video_stream_via_rest` 直接拼 REST body，必须 camelCase。
@@ -427,16 +456,27 @@ draw_desc 未输出 [DRAW_PROMPT] 区块，整段文本作为提示词。
   `if not self.effort` 会把 `none` 档（显式关闭思考）一起吞掉。
   配置层同理：`get_llm_effort()` 返回 `None` 表示不传字段，返回 `"none"` 表示传关闭。
   预算侧则是 `None` vs `0`。
+- **`auto` 是本项目自己的第 8 档，不是任何一家的合法字符串值。** 语义是"让端点自己
+  决定"，各家翻译成自己的原生自动模式：openai 不传字段 / gemini 2.5 用
+  `thinkingBudget=-1` / anthropic 新模型用 `thinking={"type":"adaptive"}`。
+  `EFFORT_BUDGET_TOKENS["auto"] = -1` 是 Gemini 的 dynamic 哨兵，**不是"负预算"**——
+  不吃这个哨兵的 API（anthropic 旧模型）必须自己判负数，别直接塞进 `budget_tokens`。
+- **`ultracode` 不是档位。** 那是 Claude Code 的编排关键词，没有任何 API 对应物。
+  有测试钉死它不在 `EFFORT_LEVELS` 里。
 - **Anthropic 的 `budget_tokens` 必须小于 `max_tokens`**，否则直接报错。
-  `_apply_effort` 会按 `max_tokens` 夹一下并留 512 token 给正文；
+  `_apply_budget_effort` 会按 `max_tokens` 夹一下并留 512 token 给正文；
   `max_tokens` 太小时宁可不开思考，也不能发非法请求。
-- **不支持推理的模型收到 `reasoning_effort` 会 400。** OpenAI 侧
-  `chat()` / `chat_stream()` 都有"去掉该字段重试一次"的分支
-  （`_is_effort_rejection`），别把它删掉——否则一个可选调优字段会让整个别名不可用。
+- **关不掉思考的模型：** `fable-5` / `mythos-5` 连 `{"type":"disabled"}` 都 400，
+  `none` 档只能降到最低档；Opus 5 的 `disabled` 只在 effort ≤ high 时合法。
+- **GPT-5.4+ 在 Chat Completions 里带 function tools 就不能传 `reasoning_effort`**
+  （除了 `none`），必须走 Responses——后脑工具循环正是这个组合。
+- **改 effort 会失效 Anthropic 的 prompt cache**（配置被渲染进 prompt）。
 - **改动在下次创建该模型客户端时才生效。** effort 在 `__init__` 里读进实例字段，
   `/effort` 写完 config.yml 后，已存在的 client 实例仍用旧值。
 - 新增模型别名时改 `adapters/telegram/commands.py` 的 `MODEL_ALIASES`
   一处即可，`/model` 和 `/effort` 共用它。
+- Telegram 的 `_EFFORT_CHOICES` **直接引用 `config.EFFORT_LEVELS`**，不要另抄一份；
+  抄了就会漂移，表现是按钮能点的档位写进 config.yml 后被 `normalize_effort` 判非法丢掉。
 
 ## 6. 成本跟踪
 

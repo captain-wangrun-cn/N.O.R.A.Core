@@ -261,23 +261,66 @@ def get_llm_max_output_tokens(model_alias: str = "smart"):
     return llm_cfg.get("max_output_tokens")
 
 
-# 推理强度（reasoning effort）。三家 API 的字段完全不通用，所以这里只存一个
-# 统一档位，由各 provider 自己翻译：
-#   openai / openrouter → reasoning_effort="high"（字符串直传）
-#   anthropic           → thinking={"type":"enabled","budget_tokens":N}
-#   gemini(原生 SDK)     → thinking_config={"thinking_budget":N}
-# "none" 表示显式关闭思考；未配置（None）表示完全不传该字段，用端点自己的默认值。
+# 推理强度（reasoning effort）。档位表照 OpenAI 官方 reasoning 文档的枚举取：
+# none / minimal / low / medium / high / xhigh / max（原文：「Supported values are
+# model-dependent and can include ...」——注意是 model-dependent，同一家不同模型
+# 认的子集都不一样，所以 provider 侧必须有降级重试，不能假设配了就能用）。
+#
+# `auto` 是**本项目自己加的第 8 档**，不是任何一家的合法字符串值，语义是"让端点
+# 自己决定思考多少"。三家都有这个能力但都没有这个名字，由 provider 翻译成各自的
+# 原生自动模式：openai 不传该字段 / gemini 2.5 用 thinkingBudget=-1（dynamic）/
+# anthropic 新模型用 thinking={"type":"adaptive"}。
+#
+# 各家字段互不通用（详见各 provider 的 _apply_effort / _effort_generation_config）：
+#   openai(Chat)      → reasoning_effort="high"           ← 平铺
+#   openai(Responses) → reasoning={"effort":"high"}        ← 嵌套，写平铺会 400
+#   openrouter        → reasoning={"effort":"high"}        ← 全档位照收，自己往下游翻
+#   anthropic 4.6+    → output_config={"effort":"high"}    ← 顶层兄弟字段，不在 thinking 里
+#   anthropic 4.5-    → thinking={"type":"enabled","budget_tokens":N}
+#   gemini 3.x        → thinking_config={"thinking_level":"HIGH"}
+#   gemini 2.5        → thinking_config={"thinking_budget":N}
+#
+# 未配置（None）表示完全不传该字段；"none" 是显式关闭思考，两者不是一回事
+# （所以判据一律是 `is None`，写 `if not effort` 会把 none 档吞掉）。
 EFFORT_NONE = "none"
-EFFORT_LEVELS = (EFFORT_NONE, "minimal", "low", "medium", "high")
+EFFORT_AUTO = "auto"
+EFFORT_LEVELS = (
+    EFFORT_NONE,
+    "minimal",
+    "low",
+    "medium",
+    "high",
+    "xhigh",
+    "max",
+    EFFORT_AUTO,
+)
 
-# 档位 → thinking token 预算。给 anthropic / gemini 这类要整数预算的 API 用。
-# 数值是经验取值，够区分档位即可；none=0 就是关闭思考。
+# 档位 → thinking token 预算。给 anthropic 旧模型 / gemini 2.5 这类要整数预算的 API 用。
+# 数值是经验取值，够区分档位即可；none=0 是关闭思考。
+# auto=-1 不是"负预算"，是 Gemini 的 dynamic thinking 哨兵值（模型自己按复杂度调预算）；
+# 不吃这个哨兵的 API（anthropic）必须自己判负数，别直接塞进 budget_tokens。
 EFFORT_BUDGET_TOKENS = {
     EFFORT_NONE: 0,
     "minimal": 1024,
     "low": 2048,
     "medium": 8192,
     "high": 24576,
+    "xhigh": 32768,
+    "max": 32768,
+    EFFORT_AUTO: -1,
+}
+
+# 档位 → Gemini 3.x 的 thinkingLevel 枚举。Gemini 只有 4 档，所以 xhigh/max 一起
+# 降到 HIGH（OpenRouter 官方映射表也是这么降的，原文标注 "mapped down"）。
+# none 也映射成 MINIMAL 而不是不传：Gemini 3.x 关不掉思考，最低档就是 MINIMAL。
+EFFORT_THINKING_LEVELS = {
+    EFFORT_NONE: "MINIMAL",
+    "minimal": "MINIMAL",
+    "low": "LOW",
+    "medium": "MEDIUM",
+    "high": "HIGH",
+    "xhigh": "HIGH",
+    "max": "HIGH",
 }
 
 
@@ -288,7 +331,15 @@ def normalize_effort(value):
         return None
     if raw in ("off", "disable", "disabled", "false"):
         return EFFORT_NONE
+    if raw in ("adaptive", "dynamic", "default"):
+        # 三家的"自动"各叫各的名字，统一收进 auto 档，省得用户按某一家的叫法写就失效。
+        return EFFORT_AUTO
     return raw if raw in EFFORT_LEVELS else None
+
+
+def get_effort_thinking_level(effort):
+    """档位 → Gemini 3.x 的 thinkingLevel 枚举值；auto/未配置返回 None（不传字段）。"""
+    return EFFORT_THINKING_LEVELS.get(effort or "")
 
 
 def get_llm_effort(model_alias: str = "smart"):

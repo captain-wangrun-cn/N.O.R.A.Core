@@ -2,31 +2,56 @@
 
 ### 🧩 推理强度（effort）按模型别名配置 + `/effort` 按钮
 
-新增 `llm.effort`（全局）与 `llm.effort_by_alias`（按别名覆盖），档位
-`none / minimal / low / medium / high`；**不配置 = 完全不传该字段**，保持端点默认行为。
+新增 `llm.effort`（全局）与 `llm.effort_by_alias`（按别名覆盖）。档位表照 OpenAI 官方
+reasoning 文档的枚举取：`none / minimal / low / medium / high / xhigh / max`，外加本项目
+自己的第 8 档 `auto`（= 让端点自己决定，翻译成各家的原生自动模式）。
+**不配置 = 完全不传该字段**，保持端点默认行为。
+
+> `ultracode` **不是**档位——那是 Claude Code 的编排关键词，没有任何 API 对应物，
+> 有测试钉死它不在 `EFFORT_LEVELS` 里。
+
+**档位是按「模型」支持的，不是按「家」。** 同一家不同代次认的字段和值都不一样，
+猜错通常是 400 而不是降级，所以每家都按模型名分支 + 摘字段重试兜底。
 
 - **`config.py`**：`get_llm_effort(alias)` / `get_llm_effort_budget_tokens(alias)` /
-  `set_llm_effort_by_alias(alias, effort)` / `normalize_effort(value)`，
-  两级回退仿 `get_llm_max_output_tokens`。`EFFORT_LEVELS` + `EFFORT_BUDGET_TOKENS`
-  是档位与 token 预算的唯一映射表。
-- **各 provider 自己翻译同一个档位**（三家 API 字段完全不通用）：
-  - `brain/providers/openai.py`：`_apply_effort()` 写 `reasoning_effort` 字符串，
-    覆盖 chat / chat_stream 的 Chat Completions 与 Responses 四个 payload 点。
-    端点不认该字段时（`_is_effort_rejection`）**去掉它重试一次**，避免一个可选调优
-    字段让整个别名不可用。OpenRouter 通过继承自动获得。
-  - `brain/providers/anthropic.py`：`_apply_effort()` 映射
-    `thinking={type:enabled, budget_tokens:N}`；按 `max_tokens` 夹预算并留 512 token
-    给正文（Anthropic 要求 `budget_tokens < max_tokens`），塞不下就不开思考。
-  - `brain/providers/gemini.py`：`_effort_generation_config(camel_case)` ——
-    SDK 路径 `thinking_config.thinking_budget`（snake_case），
-    `_video_stream_via_rest` 的 REST body `thinkingConfig.thinkingBudget`（camelCase）。
+  `get_effort_thinking_level(effort)` / `set_llm_effort_by_alias(alias, effort)` /
+  `normalize_effort(value)`，两级回退仿 `get_llm_max_output_tokens`。
+  `EFFORT_LEVELS` + `EFFORT_BUDGET_TOKENS` + `EFFORT_THINKING_LEVELS` 是唯一映射表。
+  `EFFORT_BUDGET_TOKENS["auto"] = -1` 是 Gemini 的 dynamic 哨兵，不是"负预算"。
+- **各 provider 自己翻译同一个档位**（各家字段完全不通用）：
+  - `brain/providers/openai.py`：`_apply_effort(payload, responses_api=)` ——
+    Chat Completions 平铺 `reasoning_effort`，**Responses 嵌套 `reasoning={"effort":...}`**。
+    平铺字段传给 Responses 是 `400 unsupported_parameter`，而 `_filter_supported_kwargs`
+    救不了它（`reasoning` 本身是合法顶层参数名）。`_is_effort_rejection` 除了认"字段不支持"
+    也认"值不支持"（老模型收到 `xhigh`/`max` 只列合法值、不提字段名），命中就去掉重试一次。
+    OpenRouter 通过继承自动获得，且它全档位照收、自己往下游翻。
+  - `brain/providers/anthropic.py`：**2026 架构变更**——effort 档位字符串在顶层
+    `output_config.effort`，`thinking` 只管模式。4.6+/sonnet-5/opus-5 走
+    `_apply_native_effort()`，4.5 及更早走 `_apply_budget_effort()`
+    （`thinking={type:enabled, budget_tokens:N}`，按 `max_tokens` 夹并留 512 token 给正文）。
+    **Opus 4.7+ 收到旧写法直接 400**。`auto` → `thinking={"type":"adaptive"}`；
+    `minimal` → `low`（Anthropic 没有 minimal）；`fable-5`/`mythos-5` 关不掉思考，
+    `none` 只降到最低档。新增 `_strip_effort_fields()` 给 chat / chat_stream 兜底重试。
+  - `brain/providers/gemini.py`：`_effort_generation_config(camel_case)` 按代次分两路——
+    **3.x 用 `thinking_level` 枚举**（`MINIMAL/LOW/MEDIUM/HIGH`），
+    **2.5 及更早用 `thinking_budget` 整数**，两个方向传错都报错。
+    3.x 关不掉思考所以 `none` → `MINIMAL`；只有 4 档所以 `xhigh`/`max` → `HIGH`。
+    SDK 路径 snake_case、`_video_stream_via_rest` 的 REST body camelCase，
     **两套命名不能合并**，写错的一侧不报错、只会被 API 静默忽略。
 - **`adapters/telegram/`**：`/effort` 两级 inline keyboard（选别名 → 选档位，
   含"跟随全局"清除覆盖），仿 `/model` + `/custom_scope`。
   回调前缀 `effort_pick:` / `effort_set:`。只列出**已配置模型**的别名。
   别名列表提取为 `commands.py` 的 `MODEL_ALIASES`，`/model` 与 `/effort` 共用。
+  `_EFFORT_CHOICES` 直接引用 `config.EFFORT_LEVELS`，不另抄以防漂移。
+- ⚠️ 代次判断靠模型名子串，一律**反向匹配**（判"是不是老型号"）而不是枚举新型号——
+  新模型只会往上出，枚举必然过期，过期就是新模型直接报错。
+- ⚠️ 流式路径的摘字段重试只在**第一个 yield 之前**允许（`emitted_any` 闸门），
+  否则流中途断的重试会把已发给用户的文本再发一遍。
 - ⚠️ effort 在 provider `__init__` 里读进实例字段，改动**在下次创建该模型客户端时生效**。
-- 测试：`tests/test_llm_effort.py`（19）、`tests/test_effort_telegram.py`（12）。
+- ⚠️ GPT-5.4+ 在 Chat Completions 里带 function tools 就不能传 `reasoning_effort`
+  （除 `none`），必须走 Responses——后脑工具循环正是这个组合。改 effort 还会失效
+  Anthropic 的 prompt cache。
+- 测试：`tests/test_llm_effort.py`、`tests/test_effort_telegram.py`。
 
 ### 🖼️ 引用表情包不触发 fast-image 识别（修复）
 

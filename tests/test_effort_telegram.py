@@ -122,10 +122,21 @@ def test_level_menu_offers_all_levels_plus_inherit(monkeypatch):
     monkeypatch.setattr(config, "get_config", lambda: {"llm": {"effort": "low"}})
     _, markup = _DummyAdapter()._build_effort_level_menu("smart")
     callbacks = _menu_callbacks(markup)
-    for level in ("none", "minimal", "low", "medium", "high"):
+    # 遍历 config.EFFORT_LEVELS 而不是写死清单：菜单少一档就是那档点不到，
+    # 写死清单会在加新档位时静默漏测。
+    for level in config.EFFORT_LEVELS:
         assert f"effort_set:smart:{level}" in callbacks
     assert "effort_set:smart:inherit" in callbacks
     assert "effort_pick:back" in callbacks
+
+
+def test_level_menu_choices_track_config(monkeypatch):
+    """按钮档位必须和 config.EFFORT_LEVELS 是同一份来源。
+
+    另抄一份就会漂移，表现是按钮能点的档位写进 config.yml 后被
+    normalize_effort 判为非法丢掉——点了像生效了，实际没有。
+    """
+    assert tuple(TelegramAdapter._EFFORT_CHOICES) == tuple(config.EFFORT_LEVELS)
 
 
 def test_level_menu_checks_current_level(monkeypatch):

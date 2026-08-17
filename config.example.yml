@@ -138,14 +138,21 @@ llm:
   #   fast: 512
   #   coder: 1024
 
-  # 推理强度（reasoning effort）。取值: none / minimal / low / medium / high
+  # 推理强度（reasoning effort）
+  # 取值: none / minimal / low / medium / high / xhigh / max / auto
   #   不配置 = 完全不传该字段，用端点自己的默认行为
   #   none   = 显式关闭思考（适合 fast / fast-image 这类要求低延迟的别名）
+  #   auto   = 让模型自己决定思考多少（本项目自己的档位，翻译成各家的原生自动模式）
+  # ⚠️ 档位是**按模型**支持的，不是按家：xhigh/max 只有少数新模型认。
   # 各家 API 字段不通用，由 provider 自己翻译同一个档位：
-  #   openai / openrouter → reasoning_effort="high"
-  #   anthropic           → thinking={type:enabled, budget_tokens:24576}
-  #   gemini（原生 SDK）   → thinking_config={thinking_budget:24576}
-  # ⚠️ 不支持推理的模型收到该字段可能报 400。报错就把对应 alias 设为不配置。
+  #   openai(Chat)      → reasoning_effort="high"
+  #   openai(Responses) → reasoning={effort:high}          ← 嵌套，和上面不是一个写法
+  #   openrouter        → reasoning={effort:high}
+  #   anthropic 4.6+    → output_config={effort:high}       ← 顶层字段，不在 thinking 里
+  #   anthropic 4.5-    → thinking={type:enabled, budget_tokens:24576}
+  #   gemini 3.x        → thinking_config={thinking_level:HIGH}
+  #   gemini 2.5        → thinking_config={thinking_budget:24576}
+  # 不支持推理的模型收到该字段会 400，provider 会自动摘掉该字段重试一次。
   # effort: "medium"
 
   # 按 alias 单独设置推理强度（优先级高于全局 effort）
@@ -153,7 +160,7 @@ llm:
   # effort_by_alias:
   #   smart: "high"
   #   fast: "none"
-  #   coder: "high"
+  #   coder: "xhigh"
   #   draw_desc: "low"
 
 memory:
