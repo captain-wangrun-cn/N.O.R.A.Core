@@ -572,7 +572,11 @@ class OneBotV11Adapter(
         reply_text = await self.segments_to_nora_text(reply_segments)
         if not reply_text:
             return
-        if any(str(segment.get("type") or "") in {"image", "video", "record", "file"} for segment in reply_segments):
+        # mface / marketface 是 QQ 商城表情，也是媒体段——漏了它们的话引用商城表情时
+        # reply_to_contains_media 不置位，被引用消息的 ID 补不进 platform_message_ids，
+        # 后脑想用 view_media 回查那张图就找不到。
+        media_segment_types = {"image", "video", "record", "file", "mface", "marketface"}
+        if any(str(segment.get("type") or "") in media_segment_types for segment in reply_segments):
             reply_text = f"{reply_text}\n{HISTORICAL_REPLY_MEDIA_NOTE}"
             event["reply_to_contains_media"] = True
         event["reply_to_text"] = reply_text

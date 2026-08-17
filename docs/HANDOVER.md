@@ -1,4 +1,33 @@
-## 近期关键改动（截至 2026-08-16）
+## 近期关键改动（截至 2026-08-17）
+
+### 🃏 表情包被路由到后脑，前脑没走、后脑没图（修复）
+
+生产现象：问"这个表情包是什么内容"，Nora 回"具体画面我看不到"，
+日志是 `检测到图片输入，直接启动后脑` + `Turn 1 模型: coder`（不是 `image`）。
+
+根因在 `core/message_handler.py` 的 `image_input_detected = bool(multimodal_images)`：
+`extract_image_payloads` 把 `[sticker:]` 和 `[image:]` **一起**提取（只多打个
+`is_sticker=True`），于是纯表情包消息满足"有图片输入"→ 直接路由后脑并 `return`、
+**跳过整段前脑**；到后脑那张图又刚好被 `is_sticker` 过滤掉。前脑没走 + 后脑没图。
+
+按设计，表情包应该走 fast-image 出一句 desc 带进**前脑**，真图不进主图模型。
+
+- **`core/message_handler.py`**：路由判据改为 `has_real_non_sticker_image`
+  （排除表情包后的真图）；混合消息（真图 + 表情包）行为不变。
+  `has_image_marker and not has_real_image` 那条**继续用含表情包的** `has_real_image`，
+  否则成功加载的表情包会被误判成加载失败、注入 `image_load_failed`。
+  前脑路径新增就地生成 desc（后脑那套注入条件是 `not message_saved`，而前脑马上
+  就置 True，不在这里生成就永远没有），且**同时回填 `context["text"]`**——
+  只改 `message_content` 的话入库有 desc、当轮前脑看不到。
+- **`adapters/onebotv11/main.py`**：`_enrich_reply_text` 判断媒体段的集合补上
+  `mface`/`marketface`，否则引用商城表情时 `reply_to_contains_media` 不置位，
+  被引用消息 ID 补不进 `platform_message_ids`，后脑 `view_media` 回查找不到那张图。
+- ⚠️ `_describe_stickers` 的 prompt 只要求描述"情绪或含义"、不描述画面，
+  所以"这是哪个系列的梗图"这类视觉问题 desc 天然答不上来——设计取舍，非 bug。
+- 测试：`tests/test_sticker_routing.py`（6，源码级断言）。
+- 详见 `docs/onboarding/COMMON_PITFALLS.md` §5.12。
+
+## 更早改动（截至 2026-08-16）
 
 ### 🧩 推理强度（effort）按模型别名配置 + `/effort` 按钮
 
@@ -67,8 +96,10 @@ reasoning 文档的枚举取：`none / minimal / low / medium / high / xhigh / m
   命名沿用 `sticker_<file_id>.<ext>`，同 file_id 不重复下载。
 - **sticker 分支必须排在历史查找之前**——否则历史查找先命中并返回裸 `[表情包]`，
   把 sticker 分支彻底挡掉。`tests/test_telegram_reply_sticker.py` 有测试锁这个顺序。
-- 未改：OneBot v11 的 `_enrich_reply_text` 产出 `[表情包:{file}]`，
-  与 `extract_image_payloads` 只认的 `[sticker:...]` 对不上，**QQ 侧引用表情包仍未识别**。
+- 已更正：OneBot v11 的引用表情包**本来就是通的**——`_enrich_reply_text` 调的是和
+  直发消息同一个 `segments_to_nora_text`，`media.py` 的 `mface`/`marketface` 分支
+  产出的就是 `[sticker: path]`。之前记的"QQ 侧仍未识别"是误判：`message.py` 那个
+  `[表情包:{file}]` 只是给人看的摘要函数，不在入站链路上。
 - 测试：`tests/test_telegram_reply_sticker.py`（9）。
 
 ### 🎨 draw_desc 被拦截时把错误提示当成生图提示词（修复）

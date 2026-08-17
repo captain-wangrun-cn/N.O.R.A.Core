@@ -373,9 +373,50 @@
 - 重建的格式必须和 `_handle_sticker`（`adapters/telegram/incoming.py`）**逐字一致**：
   emoji/贴纸包那行给模型看语义，路径那行才是载荷。少了后者，标记等于没重建。
 - 命名沿用 `sticker_<file_id>.<ext>`，同 file_id 不重复下载。
-- OneBot v11 是**另一条独立的路**：它的 `_enrich_reply_text` 产出的是
-  `[表情包:{file}]`，而 `extract_image_payloads` 只匹配 `[sticker:...]`，两者对不上。
-  QQ 侧的引用表情包**目前仍未识别**，要修需要单独处理该格式。
+- OneBot v11 走的是**另一条路但不用修**：`_enrich_reply_text` 调的是和直发消息同一个
+  `segments_to_nora_text`，`media.py` 的 `mface`/`marketface` 分支产出的就是
+  `[sticker: path]`，标记是对的。（`message.py:176` 那个 `[表情包:{file}]` 只是
+  给人看的摘要函数，不在入站链路上——别被它误导，我曾照它误判过一次。）
+
+---
+
+## 5.12 表情包被路由到后脑（前脑没走、后脑没图）
+
+**表情包不算"图片输入"。** 它的设计是：走 fast-image 生成一句话 desc 带进**前脑**，
+真图不进主图模型（`core/back_brain.py` 按 `is_sticker` 过滤掉，也不进 ImageStore /
+标签 OCR / 向量图库）。
+
+历史 bug（2026-08-17 生产复现）：`core/message_handler.py` 里
+`image_input_detected = bool(multimodal_images)`，而 `extract_image_payloads`
+**把 `[sticker:]` 和 `[image:]` 一起提取**（只是多打个 `is_sticker=True`）。
+于是纯表情包消息满足"有图片输入"，被直接路由到后脑并 `return`，**跳过整段前脑**；
+到了后脑，那张图又刚好被 `is_sticker` 过滤掉。两头落空：
+
+> 前脑没走 → 没有即时回复链路；后脑没图 → 退化成一轮没有任何图片的纯文本轮。
+
+现象很好认：问"这个表情包是什么内容"，回一句"具体画面我看不到"，
+日志里是 `Turn 1 模型: coder` 而不是 `image`，且全程只有一条 coder 的 cost 记录。
+
+- 判据必须是**排除表情包之后**的图（`has_real_non_sticker_image`）。
+  混合消息（真图 + 表情包）仍然算图片输入，行为不变。
+- 但 `has_image_marker and not has_real_image`（"标记有但没加载到"）要继续用
+  **含表情包**的 `has_real_image`——否则一个成功加载的表情包会被误判成加载失败，
+  给模型注入 `image_load_failed`，让它以为用户发图失败了。
+- `context["multimodal_images"]` **仍要带着表情包**，别为了修路由把它摘掉——
+  `_describe_stickers` 全靠它，摘了 desc 永远为空。
+- desc 必须在**前脑路径上就地生成**：后脑那套注入的条件是 `not message_saved`，
+  而前脑路径马上就把 `_message_saved` 置 True，注入永远不会发生。
+  生成后要同时回填 `context["text"]`，只改 `message_content` 的话入库有 desc、
+  **当轮前脑却看不到**（前脑读的是 context）。
+- `_describe_stickers` 的 prompt（`back_brain.py`）只要求描述"情绪或含义"，不描述画面。
+  所以用户问"这是哪个系列的梗图"这类**视觉**问题，desc 天然答不上来——
+  这是设计取舍不是 bug，真要支持得放行真图进 image 模型。
+- OneBot 的 `_enrich_reply_text` 判断媒体段的集合要含 `mface`/`marketface`，
+  漏了的话引用商城表情时 `reply_to_contains_media` 不置位，被引用消息 ID 补不进
+  `platform_message_ids`，后脑用 `view_media` 回查那张图会找不到。
+
+`tests/test_sticker_routing.py` 用源码级断言锁住上面每一条（这个 bug 的本质就是
+一个布尔量的取值来源，跑完整 `handle_new_message` 要拉起 DB/LLM/presence 一大套依赖）。
 
 ---
 

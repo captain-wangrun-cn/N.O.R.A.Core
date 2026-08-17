@@ -618,13 +618,23 @@ class MessageHandlerMixin:
         # has_image_input 用来探测"用户文本里疑似带图片标记/链接"，
         # multimodal_images 是真正成功加载的图片字节。两者要分开使用：
         #  - has_image_marker: 判断文本里是否出现图片相关标记（用于上下文提示）
-        #  - has_real_image: 真的有图片字节（用于决定是否走后脑 image 模型）
+        #  - has_real_image: 真的有图片字节（含表情包），用于判断"标记有但没加载到"
+        #  - has_real_non_sticker_image: 排除表情包后的真图，用于决定是否走后脑 image 模型
         has_image_marker = has_image_input(text)
         has_real_image = bool(multimodal_images)
-        # 仅当真的拿到了图片字节，才把它当作"图片输入"来路由到后脑。
+        # 表情包**不算**"图片输入"。它的设计是走 fast-image 生成一句话 desc 带进前脑，
+        # 真图不进主图模型（`back_brain.py` 里会把 is_sticker 过滤掉）。
+        # 如果把它计入 image_input_detected，纯表情包消息会被路由到后脑、跳过整段前脑，
+        # 而后脑拿到的图又刚好被过滤空——两头落空：前脑没走，后脑没图，
+        # 退化成一轮没有任何图片的纯文本 coder 轮。
+        # 混合消息（真图 + 表情包）仍然算图片输入，行为不变。
+        has_real_non_sticker_image = any(
+            not img.get("is_sticker") for img in multimodal_images
+        )
+        # 仅当真的拿到了非表情包的图片字节，才把它当作"图片输入"来路由到后脑。
         # 文本里出现 [image: xxx] 但加载失败时，按普通文本处理，让模型基于上下文回应，
         # 而不是直接弹"没读取到图片"硬编码消息（也避免模型臆想图片内容）。
-        image_input_detected = has_real_image
+        image_input_detected = has_real_non_sticker_image
         if clean_text:
             text = clean_text
 
@@ -1144,6 +1154,23 @@ class MessageHandlerMixin:
         # --- 前脑优先路由 (Front-Brain-First) ---
         # 1) 保存用户消息到数据库（保证前脑能读到历史）
         message_content = group_message_content(context, user_name, text, chat_type)
+        # 表情包走的就是这条路（它不算图片输入，见上面 image_input_detected 的注释），
+        # 所以 desc 必须在这里生成：往下 `_message_saved` 一置 True，后脑那套注入
+        # （条件是 `not message_saved`）就永远不会发生，前脑也就只看到一个裸标记。
+        if getattr(self, "fast_image_llm", None) and not context.get("_message_saved"):
+            try:
+                sticker_desc = await self._describe_stickers(
+                    context.get("multimodal_images") or []
+                )
+                if sticker_desc:
+                    sticker_context = f"[表情包: {sticker_desc}]"
+                    message_content = f"{message_content}\n{sticker_context}"
+                    # 同时回填 context["text"]：前脑读的是 context 而不是 message_content，
+                    # 只改后者的话入库有 desc、当轮前脑却看不到。
+                    context["text"] = f"{context.get('text') or text}\n{sticker_context}"
+                    logger.debug(f"[{chat_id}] 前脑路径表情包描述注入: {sticker_desc[:60]}")
+            except Exception as e:
+                logger.warning(f"[{chat_id}] 前脑路径表情包描述生成失败: {e}")
         if not context.get("_message_saved"):
             user_metadata = {}
             platform_msg_ids = _context_platform_message_ids(context)
