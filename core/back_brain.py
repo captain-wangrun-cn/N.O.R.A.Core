@@ -388,8 +388,18 @@ class BackBrainMixin:
         return tool_args
 
     async def _describe_stickers(self, multimodal_images: List[Dict[str, Any]]) -> str:
-        """用 fast-image 模型快速描述表情包，供 fast 模型/followup 理解上下文。
+        """用 fast-image 模型客观描述表情包，供前脑/后脑理解上下文。
         仅在 fast_image_llm 已配置且存在 sticker 图片时才调用。
+
+        走 `brain/templates/sticker_analysis.jinja`，理由同 `media_analysis.jinja`：
+        这一轮的输出不是给用户看的话，而是被压成一行 `[表情包: ...]` 注入上下文的
+        **观察数据**。所以要剥离人设、要求"画面 + 情绪"而不只是情绪——原本那句内联
+        prompt 只问"情绪或含义"，用户问"这是什么内容/哪个系列的梗图"时描述里根本
+        没有可用信息，还容易被模型写成一句主观感想混进上下文。
+
+        注意这里**故意不走** `_chat_stream_wrapper`：那个包装会往 system_prompt 里
+        注入词库全局说明和系统环境信息（时间/ChatID/OS/Python 版本）。对一个"看图说
+        一句话"的分析轮来说那些全是噪音，而且正是它们把无关上下文带进了描述。
         """
         fast_llm = getattr(self, "fast_image_llm", None)
         if not fast_llm:
@@ -397,18 +407,27 @@ class BackBrainMixin:
         sticker_images = get_sticker_images(multimodal_images)
         if not sticker_images:
             return ""
+        system_prompt = render_template(
+            'sticker_analysis.jinja',
+            'sticker_analysis_system',
+        )
+        user_prompt = render_template(
+            'sticker_analysis.jinja',
+            'sticker_analysis_user',
+            sticker_count=len(sticker_images),
+        )
+        if not system_prompt or not user_prompt:
+            logger.warning("sticker_analysis.jinja 渲染为空，跳过表情包描述")
+            return ""
         try:
-            stream = self._chat_stream_wrapper(
-                fast_llm,
-                "",
-                system_prompt="你是表情包描述助手。用一句简短的中文描述这个表情包表达的情绪或含义，不要废话。",
-                user_prompt="请描述这个表情包。",
+            desc = ""
+            async for chunk in fast_llm.chat_stream(
+                system_prompt=system_prompt,
+                user_prompt=user_prompt,
                 history=[],
                 tools=[],
                 multimodal_images=sticker_images,
-            )
-            desc = ""
-            async for chunk in stream:
+            ):
                 if isinstance(chunk, dict) and chunk.get("type") == "text":
                     desc += chunk["content"]
                 elif isinstance(chunk, str):

@@ -198,6 +198,7 @@ python tui.py
 | `brain/templates/system.jinja` | **主系统提示词** — 所有行为规则、协议、约定 |
 | `brain/templates/persona_nora.jinja` | 人设提示词回退（Nora 的性格，当 SOUL.md 不存在时使用） |
 | `brain/templates/media_analysis.jinja` | **回查媒体的分析轮专用**（`view_media` 返回图片/视频后的那一轮）：无人设的"媒体内容分析引擎"，输出是给上层推理模型看的内部观察数据 |
+| `brain/templates/sticker_analysis.jinja` | **表情包描述轮专用**（fast-image 那一轮）：无人设的"表情包内容识别引擎"，要求「画面 + 情绪」而不只是情绪。输出被压成一行 `[表情包: ...]` 注入上下文。该轮**不走** `_chat_stream_wrapper`（避免注入词库说明/系统环境信息这些噪音） |
 | `brain/templates/draw_desc.jinja` | **`[DRAW:]` 生图提示词轮专用**：无人设的"生图提示词生成引擎"，输出直接进文生图模型（用户看不到）。SOUL 在这里是判断表情/姿态的**素材**，不是让它扮演 Nora。顶部有「外观 / 风格 / 本次要求」三份输入的职责边界表。提示词写法按 `llm.draw_prompt_style` 分支（natural 句子 / tags 标签串） |
 | `brain/prompts.py` | 提示词组装逻辑 + 身份上下文加载 |
 | `adapters/PROMPT.md` | 通用平台适配协议：跨平台人格连续性、媒体标记、`[SPLIT]` |

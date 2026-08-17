@@ -27,9 +27,16 @@
   （但表情包没入 ImageStore，`view_media` 查不到、补了是空），更糟的是附上
   `HISTORICAL_REPLY_MEDIA_NOTE`「上方媒体就是被回复的真实内容」，而模型拿不到那张图。
   引用商城表情本来就会下载并产出 `[sticker: path]`，和直发走同一条路，不需要特殊处理。
-- ⚠️ `_describe_stickers` 的 prompt 只要求描述"情绪或含义"、不描述画面，
-  所以"这是哪个系列的梗图"这类视觉问题 desc 天然答不上来——设计取舍，非 bug。
+- **`brain/templates/sticker_analysis.jinja`（新增）** + `_describe_stickers` 改写：
+  表情包描述轮改成**客观分析**，和 `media_analysis.jinja` 同源同理（输出不是给用户
+  看的话，是被压成一行 `[表情包: ...]` 注入上下文的观察数据，所以要剥离人设）。
+  两处改动：①要求「画面 + 情绪」而不只是情绪——原来那句内联 prompt 只问"情绪或含义"，
+  用户问"这是什么内容/哪个系列的梗图"时描述里没有可用信息；②**不再走
+  `_chat_stream_wrapper`**，那个包装会注入词库全局说明和系统环境信息
+  （时间/ChatID/OS/Python 版本），对看图说一句话全是噪音，正是它把无关上下文
+  带进了描述、让非 ONLINE 场景的描述变得不客观。
 - 测试：`tests/test_sticker_routing.py`（6，源码级断言）、
+  `tests/test_sticker_description.py`（15，含 env 噪音回归锁）、
   `tests/test_onebotv11_adapter.py` 新增 7 条（表情包 vs 媒体的判定与引用行为）。
 - 详见 `docs/onboarding/COMMON_PITFALLS.md` §5.12。
 

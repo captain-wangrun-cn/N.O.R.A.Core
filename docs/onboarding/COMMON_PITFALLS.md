@@ -408,9 +408,13 @@
   而前脑路径马上就把 `_message_saved` 置 True，注入永远不会发生。
   生成后要同时回填 `context["text"]`，只改 `message_content` 的话入库有 desc、
   **当轮前脑却看不到**（前脑读的是 context）。
-- `_describe_stickers` 的 prompt（`back_brain.py`）只要求描述"情绪或含义"，不描述画面。
-  所以用户问"这是哪个系列的梗图"这类**视觉**问题，desc 天然答不上来——
-  这是设计取舍不是 bug，真要支持得放行真图进 image 模型。
+- `_describe_stickers` 走 `brain/templates/sticker_analysis.jinja`（无人设的
+  "表情包内容识别引擎"），要求「画面 + 情绪」两者都给。**该轮故意不走
+  `_chat_stream_wrapper`**——那个包装会往 system_prompt 里注入词库全局说明和系统
+  环境信息（时间/ChatID/OS/Python 版本），对"看图说一句话"全是噪音，正是它把无关
+  上下文带进了描述。历史实现是一句内联 prompt 只问"情绪或含义"，所以用户问
+  "这是什么内容/哪个系列的梗图"时描述里没有可用信息，且模型容易写成一句主观感想。
+  和 `media_analysis.jinja` 同源同理：输出不是给用户看的话，是注入上下文的观察数据。
 - OneBot 的 `_enrich_reply_text` 判断"媒体"时**必须排除表情包**（用
   `message.py` 的 `is_media_segment()`，它内部调 `is_sticker_segment()`）。
   置位 `reply_to_contains_media` 会带来两个坏处：被引用消息 ID 补进
