@@ -222,6 +222,26 @@ def get_draw_api():
     return DRAW_API_CHAT if raw == DRAW_API_CHAT else DRAW_API_IMAGES
 
 
+# images.edit 参考图上传格式（仅 draw_api=images 时生效）
+DRAW_EDIT_ENCODING_FORM = "form"
+DRAW_EDIT_ENCODING_JSON = "json"
+
+
+def get_draw_edit_encoding():
+    """
+    openai 类型 provider 的 images.edit 请求体格式。
+
+    - "form"（默认）：multipart/form-data，OpenAI SDK 官方行为（OpenAI 官方、gpt-image-1）
+    - "json"：application/json，参考图以 base64 data URI 内嵌在 image 字段
+      （部分中转站把 /v1/images/edits 实现成只收 JSON，form 会直接 415）
+
+    gemini / openrouter 类型 provider 忽略此项。
+    """
+    cfg = _safe_config()
+    raw = str(cfg.get("llm", {}).get("draw_edit_encoding", "") or "").strip().lower()
+    return DRAW_EDIT_ENCODING_JSON if raw == DRAW_EDIT_ENCODING_JSON else DRAW_EDIT_ENCODING_FORM
+
+
 # draw_desc 产出的提示词写法。两类生图模型吃的东西完全不同，跟接口形态无关：
 #   natural —— 自然语言句子（Gemini / nano-banana、Grok、GPT-Image 按语言理解画面）
 #   tags    —— 逗号分隔的关键词标签（Stable Diffusion / NovelAI 系按标签匹配）

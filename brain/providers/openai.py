@@ -390,6 +390,118 @@ class OpenAIProvider(BaseLLM):
                     pass
             return await self.client.images.edit(model=self.model, image=files[0], prompt=prompt, n=1)
 
+    async def _images_edit_json(
+        self,
+        prompt: str,
+        files: List[Any],
+        fallback_form: bool = False,
+    ):
+        """
+        以 application/json 调 images.edit——部分中转站把 /v1/images/edits 实现成
+        只收 JSON（参考图以 base64 data URI 内嵌），SDK 的 multipart 会直接 415。
+
+        body 直接交给 httpx，不经 SDK。编码、校验都在本地做：
+        - fallback_form=True：先试 JSON，415 时自动退回 SDK multipart（见 generate_image）
+        - 传 None 的情况不会走到这里（generate_image 已把无参考图拆走）
+        """
+        body: Dict[str, Any] = {"model": self.model, "prompt": prompt, "n": 1}
+        for idx, f in enumerate(files):
+            if not hasattr(f, "seek") or not hasattr(f, "read"):
+                continue
+            try:
+                f.seek(0)
+                raw = f.read()
+                f.seek(0)
+            except Exception:
+                continue
+            mime_type = self._guess_mime(raw)
+            body[f"image[{idx}]"] = f"data:{mime_type};base64,{base64.b64encode(raw).decode('utf-8')}"
+
+        url = f"{config.get_base_url(self.provider_name)}/images/edits"
+        headers = {
+            "Authorization": f"Bearer {config.get_api_key(self.provider_name)}",
+            "Content-Type": "application/json",
+        }
+
+        r = None
+        try:
+            import httpx
+
+            timeout = httpx.Timeout(180)
+            async with httpx.AsyncClient(timeout=timeout) as client:
+                r = await client.post(url, headers=headers, json=body)
+                raw = r.read()
+        except Exception:
+            try:
+                import aiohttp
+
+                timeout = aiohttp.ClientTimeout(total=180)
+                async with aiohttp.ClientSession(timeout=timeout) as session:
+                    async with session.post(url, headers=headers, json=body) as r:
+                        raw = await r.read()
+            except Exception as e:
+                raise RuntimeError(
+                    f"images.edit JSON 直传失败（{type(e).__name__}: {e}）："
+                    f"httpx 与 aiohttp 都不可用或请求失败"
+                ) from e
+
+        if r.status == 415 and fallback_form:
+            logger.warning("images.edit JSON 直传被拒（HTTP 415），退回 SDK multipart 重试。")
+            return await self.client.images.edit(
+                model=self.model, image=files, prompt=prompt, n=1
+            )
+        if r.status != 200:
+            raise RuntimeError(
+                f"images.edit JSON 直传失败 HTTP {r.status}: {raw[:500].decode('utf-8', errors='replace')}"
+            )
+        text = raw.decode("utf-8", errors="replace")
+        payload = json.loads(text) if text.strip() else None
+        if not payload:
+            raise RuntimeError("images.edit JSON 直传未返回响应")
+
+        data = payload.get("data") or []
+        if not data:
+            raise RuntimeError(f"images.edit JSON 直传未返回 data: {text[:500]}")
+
+        item = data[0] or {}
+        b64 = item.get("b64_json") or item.get("b64")
+        if b64:
+            raw_bytes = base64.b64decode(b64)
+        else:
+            url = item.get("url")
+            if not url:
+                raise RuntimeError("images.edit JSON 直传返回项既无 b64_json 也无 url")
+            import aiohttp
+
+            timeout = aiohttp.ClientTimeout(total=120)
+            async with aiohttp.ClientSession(timeout=timeout) as session:
+                async with session.get(url) as r:
+                    if r.status != 200:
+                        raise RuntimeError(f"下载生成图失败 HTTP {r.status}: {url}")
+                    raw_bytes = await r.read()
+
+        # 拼成与 SDK 响应同构的对象（.data[].b64_json），generate_image 用同一段解析，
+        # 避免两个分支各写一套「取 b64 / 取 url」的逻辑。
+        from types import SimpleNamespace
+
+        resp_item = SimpleNamespace(b64_json=base64.b64encode(raw_bytes).decode("utf-8"), url=None)
+        return SimpleNamespace(data=[resp_item], usage=None)
+
+    @staticmethod
+    def _guess_mime(raw: bytes) -> str:
+        """根据文件头推断 mime，推断不出退回 image/png。"""
+        if raw.startswith(b"\xff\xd8\xff"):
+            return "image/jpeg"
+        if raw.startswith(b"\x89PNG\r\n\x1a\n"):
+            return "image/png"
+        if raw.startswith(b"GIF87a") or raw.startswith(b"GIF89a"):
+            return "image/gif"
+        if raw.startswith(b"RIFF"):
+            return "image/webp"
+        if raw.startswith(b"BM"):
+            return "image/bmp"
+        return "image/png"
+
     async def _images_generate(self, prompt: str):
         """调 images.generate。dall-e-* 需要显式 response_format 才回 b64；gpt-image-1 不认这个参数。"""
         try:
@@ -544,7 +656,14 @@ class OpenAIProvider(BaseLLM):
             buf.name = f"ref_{idx}{self._IMAGE_EXT_BY_MIME.get(mime, '.png')}"
             files.append(buf)
 
-        resp = await (self._images_edit(prompt, files) if files else self._images_generate(prompt))
+        if not files:
+            resp = await self._images_generate(prompt)
+        elif config.get_draw_edit_encoding() == config.DRAW_EDIT_ENCODING_JSON:
+            # 中转站把 /v1/images/edits 实现成只收 JSON。SDK 是 multipart，
+            # 直接发会 415；先试 JSON 直传，被拒再退回 SDK multipart 保底。
+            resp = await self._images_edit_json(prompt, files, fallback_form=True)
+        else:
+            resp = await self._images_edit(prompt, files)
 
         usage = getattr(resp, "usage", None)
         if usage is not None:

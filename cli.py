@@ -1559,8 +1559,33 @@ class StepModels(ConfigStep):
                     if draw_api is None:
                         return False
                     self.state['draw_api'] = draw_api
+
+                    # 走原生 images API 时，参考图上传格式也要问——部分中转站的
+                    # /v1/images/edits 只收 JSON，SDK 默认 multipart 会直接 415。
+                    if draw_api == _cfg_mod.DRAW_API_IMAGES:
+                        edit_encoding = questionary.select(
+                            "images.edit 参考图怎么传？（仅带参考图的图生图；纯文生图不受影响）",
+                            choices=[
+                                questionary.Choice(
+                                    title="multipart/form-data（OpenAI SDK 官方行为，OpenAI 官方 / gpt-image-1 / dall-e-*）",
+                                    value=_cfg_mod.DRAW_EDIT_ENCODING_FORM,
+                                ),
+                                questionary.Choice(
+                                    title="application/json + base64 data URI（中转站把 edits 实现成只收 JSON 时）",
+                                    value=_cfg_mod.DRAW_EDIT_ENCODING_JSON,
+                                ),
+                            ],
+                            default=self.state.get('draw_edit_encoding')
+                            or _cfg_mod.DRAW_EDIT_ENCODING_FORM,
+                        ).ask()
+                        if edit_encoding is None:
+                            return False
+                        self.state['draw_edit_encoding'] = edit_encoding
+                    else:
+                        self.state.pop('draw_edit_encoding', None)
                 else:
                     self.state.pop('draw_api', None)
+                    self.state.pop('draw_edit_encoding', None)
 
                 # 提示词写法与接口形态无关：同一个端点后面可能挂 nano-banana，也可能挂 SD。
                 prompt_style = questionary.select(
@@ -1745,6 +1770,8 @@ def _read_yaml_file(path: str) -> Dict[str, Any]:
 
 def _build_final_config(state: Dict[str, Any]) -> Dict[str, Any]:
     """把向导 state 组装成最终配置（与确认保存使用同一份逻辑）。"""
+    import config as config_loader
+
     final_config: Dict[str, Any] = {
         'workspace': state.get('workspace', {'root_path': '~/.nora/workspace'}),
         'network': state.get('network', {}),
@@ -1767,6 +1794,12 @@ def _build_final_config(state: Dict[str, Any]) -> Dict[str, Any]:
     draw_api = state.get('draw_api')
     if draw_api and final_config['llm'].get('models', {}).get('draw'):
         final_config['llm']['draw_api'] = draw_api
+
+    # images.edit 参考图上传格式：只对 draw_api=images 有意义
+    draw_edit_encoding = state.get('draw_edit_encoding')
+    if (draw_edit_encoding and final_config['llm'].get('models', {}).get('draw')
+            and final_config['llm'].get('draw_api') == config_loader.DRAW_API_IMAGES):
+        final_config['llm']['draw_edit_encoding'] = draw_edit_encoding
 
     # 提示词写法：配了 draw 就有意义，与 provider 类型无关
     draw_prompt_style = state.get('draw_prompt_style')
@@ -1884,6 +1917,8 @@ def _load_wizard_state() -> Dict[str, Any]:
     }
     if llm_cfg.get("draw_api"):
         state['draw_api'] = llm_cfg.get("draw_api")
+    if llm_cfg.get("draw_edit_encoding"):
+        state['draw_edit_encoding'] = llm_cfg.get("draw_edit_encoding")
     if llm_cfg.get("draw_prompt_style"):
         state['draw_prompt_style'] = llm_cfg.get("draw_prompt_style")
     return state
