@@ -400,59 +400,68 @@ class OpenAIProvider(BaseLLM):
         以 application/json 调 images.edit——部分中转站把 /v1/images/edits 实现成
         只收 JSON（参考图以 base64 data URI 内嵌），SDK 的 multipart 会直接 415。
 
-        body 直接交给 httpx，不经 SDK。编码、校验都在本地做：
-        - fallback_form=True：先试 JSON，415 时自动退回 SDK multipart（见 generate_image）
-        - 传 None 的情况不会走到这里（generate_image 已把无参考图拆走）
+        body 形态经实测确定（wrapi / newapi 系）：参考图是**单个** `image` 对象
+        `{"url": "data:image/png;base64,..."}`。其它写法都会被拒，且报错各不相同，
+        改这里之前先照 docs 里记的实测结果确认：
+          image[N]: "data:..."   → 400 image 不能为空（不认下标写法）
+          image: "data:..."      → 422 expected struct ImageUrl（要对象不要裸串）
+          image: [{"url": ...}]  → 422 invalid type: map（不吃数组）
+        所以多张参考图只能取第一张——形象锚多传也传不进去，这是端点限制不是取舍。
+
+        返回项是 `{"url", "mime_type"}`（不是 b64_json），所以下面两种都要认。
+        - fallback_form=True：415 时自动退回 SDK multipart（见 generate_image）
         """
-        body: Dict[str, Any] = {"model": self.model, "prompt": prompt, "n": 1}
-        for idx, f in enumerate(files):
+        ref_uri: Optional[str] = None
+        for f in files:
             if not hasattr(f, "seek") or not hasattr(f, "read"):
                 continue
             try:
                 f.seek(0)
-                raw = f.read()
+                raw_ref = f.read()
                 f.seek(0)
             except Exception:
                 continue
-            mime_type = self._guess_mime(raw)
-            body[f"image[{idx}]"] = f"data:{mime_type};base64,{base64.b64encode(raw).decode('utf-8')}"
+            if not raw_ref:
+                continue
+            ref_uri = (
+                f"data:{self._guess_mime(raw_ref)};base64,"
+                f"{base64.b64encode(raw_ref).decode('utf-8')}"
+            )
+            break  # 端点只吃单张，多传会 422
 
-        url = f"{config.get_base_url(self.provider_name)}/images/edits"
+        if len(files) > 1:
+            logger.warning(
+                f"images.edit JSON 直传只支持单张参考图，本次 {len(files)} 张仅使用第一张。"
+            )
+
+        body: Dict[str, Any] = {
+            "model": self.model,
+            "prompt": prompt,
+            "n": 1,
+            # 要 base64 而不是 url：返回的图常托管在模型厂商自己的 CDN（grok-imagine
+            # 回 imgen.x.ai），那些域名在国内机器上多半直连不通，拿到 url 也下不下来。
+            # 端点不认这个参数时会照旧回 url，下面的 url 分支仍然兜底。
+            "response_format": "b64_json",
+        }
+        if ref_uri:
+            body["image"] = {"url": ref_uri}
+
+        endpoint = f"{config.get_base_url(self.provider_name)}/images/edits"
         headers = {
             "Authorization": f"Bearer {config.get_api_key(self.provider_name)}",
             "Content-Type": "application/json",
         }
 
-        r = None
-        try:
-            import httpx
+        status, raw = await self._post_json_raw(endpoint, headers, body)
 
-            timeout = httpx.Timeout(180)
-            async with httpx.AsyncClient(timeout=timeout) as client:
-                r = await client.post(url, headers=headers, json=body)
-                raw = r.read()
-        except Exception:
-            try:
-                import aiohttp
-
-                timeout = aiohttp.ClientTimeout(total=180)
-                async with aiohttp.ClientSession(timeout=timeout) as session:
-                    async with session.post(url, headers=headers, json=body) as r:
-                        raw = await r.read()
-            except Exception as e:
-                raise RuntimeError(
-                    f"images.edit JSON 直传失败（{type(e).__name__}: {e}）："
-                    f"httpx 与 aiohttp 都不可用或请求失败"
-                ) from e
-
-        if r.status == 415 and fallback_form:
+        if status == 415 and fallback_form:
             logger.warning("images.edit JSON 直传被拒（HTTP 415），退回 SDK multipart 重试。")
             return await self.client.images.edit(
                 model=self.model, image=files, prompt=prompt, n=1
             )
-        if r.status != 200:
+        if status != 200:
             raise RuntimeError(
-                f"images.edit JSON 直传失败 HTTP {r.status}: {raw[:500].decode('utf-8', errors='replace')}"
+                f"images.edit JSON 直传失败 HTTP {status}: {raw[:500].decode('utf-8', errors='replace')}"
             )
         text = raw.decode("utf-8", errors="replace")
         payload = json.loads(text) if text.strip() else None
@@ -468,16 +477,16 @@ class OpenAIProvider(BaseLLM):
         if b64:
             raw_bytes = base64.b64decode(b64)
         else:
-            url = item.get("url")
-            if not url:
+            img_url = item.get("url")
+            if not img_url:
                 raise RuntimeError("images.edit JSON 直传返回项既无 b64_json 也无 url")
             import aiohttp
 
             timeout = aiohttp.ClientTimeout(total=120)
             async with aiohttp.ClientSession(timeout=timeout) as session:
-                async with session.get(url) as r:
+                async with session.get(img_url) as r:
                     if r.status != 200:
-                        raise RuntimeError(f"下载生成图失败 HTTP {r.status}: {url}")
+                        raise RuntimeError(f"下载生成图失败 HTTP {r.status}: {img_url}")
                     raw_bytes = await r.read()
 
         # 拼成与 SDK 响应同构的对象（.data[].b64_json），generate_image 用同一段解析，
@@ -501,6 +510,35 @@ class OpenAIProvider(BaseLLM):
         if raw.startswith(b"BM"):
             return "image/bmp"
         return "image/png"
+
+    @staticmethod
+    async def _post_json_raw(
+        url: str,
+        headers: Dict[str, str],
+        body: Dict[str, Any],
+    ):
+        """
+        POST JSON 并返回 (status, body_bytes)，优先 httpx，httpx 不可用或失败时退回
+        aiohttp。两个库的响应属性名不同（httpx .status_code / aiohttp .status），
+        这里统一归一成 status，避免下游写错属性。
+        """
+        try:
+            import httpx
+
+            timeout = httpx.Timeout(180)
+            async with httpx.AsyncClient(timeout=timeout) as client:
+                r = await client.post(url, headers=headers, json=body)
+                return r.status_code, r.read()
+        except Exception as e:
+            logger.warning(
+                f"httpx POST 失败（{type(e).__name__}: {e}），退回 aiohttp。"
+            )
+            import aiohttp
+
+            timeout = aiohttp.ClientTimeout(total=180)
+            async with aiohttp.ClientSession(timeout=timeout) as session:
+                async with session.post(url, headers=headers, json=body) as r:
+                    return r.status, await r.read()
 
     async def _images_generate(self, prompt: str):
         """调 images.generate。dall-e-* 需要显式 response_format 才回 b64；gpt-image-1 不认这个参数。"""
@@ -679,7 +717,10 @@ class OpenAIProvider(BaseLLM):
         item = data[0]
         b64 = getattr(item, "b64_json", None)
         if b64:
-            return {"bytes": base64.b64decode(b64), "mime_type": "image/png"}
+            # mime 按魔数认，不要硬编码 png：同一个 draw 别名后面可能挂回 JPEG 的模型
+            # （grok-imagine 就回 JPEG），写死 png 会让落盘扩展名与实际内容不符。
+            raw_bytes = base64.b64decode(b64)
+            return {"bytes": raw_bytes, "mime_type": self._guess_mime(raw_bytes)}
 
         url = getattr(item, "url", None)
         if url:
@@ -691,10 +732,8 @@ class OpenAIProvider(BaseLLM):
                     if r.status != 200:
                         raise RuntimeError(f"下载生成图失败 HTTP {r.status}: {url}")
                     raw = await r.read()
-            mime = "image/png"
-            if url.split("?")[0].lower().endswith((".jpg", ".jpeg")):
-                mime = "image/jpeg"
-            return {"bytes": raw, "mime_type": mime}
+            # 魔数优先：CDN 链接常带查询参数或干脆没扩展名，靠后缀猜会错。
+            return {"bytes": raw, "mime_type": self._guess_mime(raw)}
 
         raise RuntimeError("OpenAI 生图返回项既无 b64_json 也无 url")
 

@@ -128,6 +128,7 @@ llm:
   #   form（默认）：multipart/form-data，OpenAI SDK 官方行为（OpenAI 官方、gpt-image-1 / dall-e-*）
   #   json：application/json，参考图以 base64 data URI 内嵌（部分中转站把 /v1/images/edits
   #         实现成只收 JSON，form 会直接 415；设置 json 后仍会先试 JSON，被拒才退回 form）
+  #   ⚠️ json 模式下参考图只能传一张（端点不吃数组），多余的会被丢弃并打 warning。
   # draw_edit_encoding: "form"
 
   # 生图提示词写法（与接口形态无关，取决于 draw 模型吃哪种提示词）

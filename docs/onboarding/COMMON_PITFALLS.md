@@ -271,6 +271,36 @@
   照样出图，只是标签串喂 nano-banana 会丢掉空间关系、长句喂 SD 会被 CLIP 截断，表现为"图能出但总画不对"。
   同一个 openai 端点后面既可能挂 nano-banana 也可能挂 SD，所以 CLI 里 `draw_api` 只在 provider 是
   openai 时问，`draw_prompt_style` 配了 `draw` 就问。
+- **`draw_edit_encoding` 决定 images.edit 的请求体格式，选错是 415 不是静默降级。**
+  官方 SDK 的 `images.edit` 走 **multipart/form-data**（`openai/resources/images.py` 里
+  `extract_files()` + 写死 `Content-Type: multipart/form-data`），而不少中转站把
+  `/v1/images/edits` 实现成只收 JSON，于是 SDK 一发请求就
+  `415 图片编辑仅支持 application/json`。设 `json` 时走 `_images_edit_json()` 手写请求体
+  （不经 SDK），415 会自动退回 multipart 保底。**只影响带参考图的图生图**——纯文生图走
+  `images.generate`（本来就是 JSON），不受此项影响，所以现象是"有时能出图有时 415"。
+- **JSON 直传的字段形态是实测出来的，不是猜的，改之前先看这张表**（wrapi / newapi 系，2026-08 实测）：
+
+  | 请求写法 | 结果 |
+  |---|---|
+  | `image: {"url": "data:image/png;base64,..."}` | ✅ 200 |
+  | `image[0]: "data:..."` | 400 `image 不能为空`（不认下标写法） |
+  | `image: "data:..."` | 422 `expected struct ImageUrl`（要对象不要裸串） |
+  | `image: [{"url": ...}]` | 422 `invalid type: map`（不吃数组） |
+
+  所以**参考图只能传一张**——多张形象锚传不进去，这是端点限制不是代码取舍，多余的会被
+  丢弃并打 warning。
+- **JSON 直传必须显式要 `response_format: "b64_json"`，否则拿到的 url 很可能下不下来。**
+  不带这个参数时端点回 `{"url", "mime_type"}`，而图托管在模型厂商自己的 CDN
+  （`grok-imagine` 回 `imgen.x.ai`）——那些域名在国内机器上直连不通，表现为生图"成功"了
+  却卡在下载并最终 `ConnectTimeout`。带上该参数后直接回 base64，绕开 CDN。
+  端点不认这个参数会照旧回 url，url 分支仍保留作兜底。
+- **生图的 mime 一律按魔数认，不要硬编码 `image/png`。** `grok-imagine` 回的是 **JPEG**，
+  而 `b64_json` 分支曾写死 png，落盘就会得到"扩展名 .png、内容是 JPEG"的文件。
+  url 分支同理——CDN 链接常带查询参数或没有扩展名，按后缀猜同样会错，统一走 `_guess_mime()`。
+- **httpx 和 aiohttp 的响应属性名不一样，混写会 AttributeError。** httpx 是
+  `.status_code`，aiohttp 是 `.status`。两个库在同一函数里做主备时必须归一化
+  （现在统一走 `_post_json_raw()` 返回 `(status, bytes)`），否则备用分支一旦被触发就崩，
+  而这条路平时跑不到、测试也容易漏掉。
 - **写法分支有两条路，改一条不够。** `[DRAW:]` 走 `draw_desc.jinja`（`prompt_style` 变量，
   **system 和 user 两个 block 都要传**——`render_template` 每个 block 独立渲染，不共享 context）；
   参考图工具 `generate_appearance_reference` 不过 `draw_desc`，提示词在 `brain/tools.py` 里硬拼，

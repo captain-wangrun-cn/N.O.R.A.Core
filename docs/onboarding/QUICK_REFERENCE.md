@@ -39,6 +39,7 @@ core/controller.py            NoraController.handle_message()
 | API Keys | `config.yml` → `llm.api_keys.*` | |
 | 模型别名 | `config.yml` → `llm.models.*` | `smart` / `fast` / `coder` / `image` / `video` / `fast-image`(可选) / `draw`+`draw_desc`(可选，成对) / `summary` |
 | 生图接口形态 | `config.yml` → `llm.draw_api` | `images`(默认) / `chat`；只对 openai 类型 provider 生效 |
+| 生图 edit 请求格式 | `config.yml` → `llm.draw_edit_encoding` | `form`(默认，SDK multipart) / `json`(中转站只收 JSON 时)；仅 `draw_api=images` 且带参考图时生效，415 会自动退回 form |
 | 生图提示词写法 | `config.yml` → `llm.draw_prompt_style` | `natural`(默认，句子) / `tags`(标签串)；与接口形态无关，取决于 `draw` 模型 |
 | 推理强度 | `config.yml` → `llm.effort` / `llm.effort_by_alias.*` | `none`/`minimal`/`low`/`medium`/`high`/`xhigh`/`max`/`auto`；按别名覆盖全局。不配置=不传该字段，`auto`=让模型自己决定。档位按**模型**支持，provider 会自动摘字段重试。可用 `/effort` 按钮改 |
 | 消息历史 | `config.yml` → `memory.message_history.*` | `raw_window`, `compress_window` 等 |
