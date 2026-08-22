@@ -191,6 +191,10 @@ memory:
     # Qdrant Cloud / 远程实例：配置 url 后优先走 HTTPS + API key，host/port 失效。
     # 例：url: "https://xxxx.us-west-1-0.aws.cloud.qdrant.io"
     #     api_key: "eyJhbGciOi..."
+    # collection 前缀（可选）：同一个 Qdrant 实例上区分多套部署/环境。
+    # 原样拼接到基础名前（分隔符自带），留空则用默认 nora_memory / nora_images。
+    # 例：collection_prefix: "dev_"  ->  dev_nora_memory / dev_nora_images
+    # collection_prefix: ""
 
   # Document Database (MongoDB)
   mongo:

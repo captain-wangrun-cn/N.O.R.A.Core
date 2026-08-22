@@ -582,9 +582,12 @@ def show_config_summary() -> None:
                       + ("已配置" if _section_nonempty(mh_cfg) else "未配置"), style="bold" if mh_cfg else "")
     qdrant_cfg = mem_cfg.get("qdrant", {}) or {}
     from memory.qdrant_conn import describe_qdrant_target
+    _qdrant_prefix = str(qdrant_cfg.get("collection_prefix") or "").strip()
+    _qdrant_desc = (describe_qdrant_target(mem_cfg)
+                    + (f" | collection 前缀: {_qdrant_prefix}" if _qdrant_prefix else "")
+                    ) if _section_nonempty(qdrant_cfg) else "未配置"
     questionary.print(f"{_status_emoji(_section_nonempty(qdrant_cfg))} Qdrant: "
-                      + (describe_qdrant_target(mem_cfg)
-                         if _section_nonempty(qdrant_cfg) else "未配置"), style="")
+                      + _qdrant_desc, style="")
     mongo_cfg = mem_cfg.get("mongo", {}) or {}
     questionary.print(f"{_status_emoji(_section_nonempty(mongo_cfg))} MongoDB: "
                       + ("已配置" if _section_nonempty(mongo_cfg) else "未配置"), style="")
@@ -1130,6 +1133,12 @@ class StepDatabase(ConfigStep):
         q_port = questionary.text(t('wizard.qdrant_port'), default=qdrant_port_def).ask()
         if q_port is None: return False
 
+        # 可选：collection 前缀（同一实例区分多套部署，留空即用默认 nora_memory / nora_images）
+        prefix_def = str(existing_qdrant.get('collection_prefix', '') or '')
+        q_prefix = questionary.text(t('wizard.qdrant_collection_prefix'), default=prefix_def).ask()
+        if q_prefix is None: return False
+        q_prefix = str(q_prefix).strip()
+
         # Mongo Config
         mongo_uri_def = self.state.get('memory', {}).get('mongo', {}).get('uri', 'mongodb://nora:nora_password@localhost:27017/')
         mongo_uri = questionary.text(t('wizard.mongo_uri'), default=mongo_uri_def).ask()
@@ -1142,6 +1151,8 @@ class StepDatabase(ConfigStep):
             qdrant_save['url'] = q_url
         if q_api_key:
             qdrant_save['api_key'] = q_api_key
+        if q_prefix:
+            qdrant_save['collection_prefix'] = q_prefix
         self.state['memory']['qdrant'] = qdrant_save
         self.state['memory']['mongo'] = {'uri': mongo_uri}
         return True
@@ -2106,7 +2117,7 @@ def test_qdrant():
     """测试 Qdrant 连接和基本操作"""
     try:
         from qdrant_client.http import models
-        from memory.qdrant_conn import build_qdrant_client, describe_qdrant_target
+        from memory.qdrant_conn import build_qdrant_client, describe_qdrant_target, prefixed_collection_name
         import config
 
         logger.info("🔍 测试 Qdrant 连接...")
@@ -2123,8 +2134,8 @@ def test_qdrant():
         collections = client.get_collections()
         logger.info(f"📋 当前 Collections: {[c.name for c in collections.collections]}")
         
-        # 检查 nora_memory collection
-        collection_name = "nora_memory"
+        # 检查 nora_memory collection（带上配置前缀）
+        collection_name = prefixed_collection_name("nora_memory", mem_cfg)
         exists = any(c.name == collection_name for c in collections.collections)
         
         if exists:

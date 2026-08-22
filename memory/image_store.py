@@ -19,7 +19,7 @@ from qdrant_client.http import models as qdrant_models
 import pymongo
 
 from memory.embed import EmbeddingClient
-from memory.qdrant_conn import build_qdrant_client
+from memory.qdrant_conn import build_qdrant_client, prefixed_collection_name
 import config
 
 logger = logging.getLogger(__name__)
@@ -27,7 +27,7 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 # Constants
 # ---------------------------------------------------------------------------
-IMAGE_COLLECTION = "nora_images"          # Qdrant collection 名称
+IMAGE_COLLECTION = "nora_images"          # Qdrant collection 基础名（实际名会加上 memory.qdrant.collection_prefix 前缀）
 DEFAULT_MONGO_DB_NAME = "nora"             # MongoDB 数据库名称（无显式配置且 URI 未带库名时的兜底）
 MONGO_COLLECTION = "images"                # MongoDB collection 名称
 IMAGE_TEXT_INDEX_NAME = "tags_ocr_text_index"
@@ -261,6 +261,9 @@ class ImageStore:
 
         self.vector_size = embed_cfg.get("dimensions", 1024)
 
+        # Qdrant collection 实际名 = 配置前缀 + 基础名（无前缀时即 IMAGE_COLLECTION）
+        self.qdrant_collection = prefixed_collection_name(IMAGE_COLLECTION, mem_cfg)
+
         # --- Qdrant ---
         try:
             self.qdrant = build_qdrant_client(mem_cfg)
@@ -305,11 +308,11 @@ class ImageStore:
             return
         try:
             collections = self.qdrant.get_collections()
-            exists = any(c.name == IMAGE_COLLECTION for c in collections.collections)
+            exists = any(c.name == self.qdrant_collection for c in collections.collections)
             if not exists:
-                logger.info(f"创建 Qdrant collection: {IMAGE_COLLECTION}")
+                logger.info(f"创建 Qdrant collection: {self.qdrant_collection}")
                 self.qdrant.create_collection(
-                    collection_name=IMAGE_COLLECTION,
+                    collection_name=self.qdrant_collection,
                     vectors_config=qdrant_models.VectorParams(
                         size=self.vector_size,
                         distance=qdrant_models.Distance.COSINE,
@@ -330,7 +333,7 @@ class ImageStore:
     def _ensure_qdrant_payload_index(self, field_name: str, field_schema) -> None:
         try:
             self.qdrant.create_payload_index(
-                collection_name=IMAGE_COLLECTION,
+                collection_name=self.qdrant_collection,
                 field_name=field_name,
                 field_schema=field_schema,
             )
@@ -567,7 +570,7 @@ class ImageStore:
                 if vector:
                     point_id = str(uuid.uuid4())
                     self.qdrant.upsert(
-                        collection_name=IMAGE_COLLECTION,
+                        collection_name=self.qdrant_collection,
                         points=[
                             qdrant_models.PointStruct(
                                 id=point_id,
@@ -762,7 +765,7 @@ class ImageStore:
                     point_id = str(uuid.uuid4())
                     media_type_val = existing.get("media_type", "image")
                     self.qdrant.upsert(
-                        collection_name=IMAGE_COLLECTION,
+                        collection_name=self.qdrant_collection,
                         points=[
                             qdrant_models.PointStruct(
                                 id=point_id,
@@ -1172,7 +1175,7 @@ class ImageStore:
 
             offset = max(0, int(offset or 0))
             response = self.qdrant.query_points(
-                collection_name=IMAGE_COLLECTION,
+                collection_name=self.qdrant_collection,
                 query=vector,
                 query_filter=qdrant_filter,
                 limit=top_k + offset,

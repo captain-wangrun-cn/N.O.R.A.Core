@@ -4,7 +4,7 @@ import time
 from typing import List, Dict, Any, Optional
 from qdrant_client.http import models
 import config
-from memory.qdrant_conn import build_qdrant_client, describe_qdrant_target
+from memory.qdrant_conn import build_qdrant_client, describe_qdrant_target, prefixed_collection_name
 
 logger = logging.getLogger(__name__)
 
@@ -18,7 +18,7 @@ class VectorStore:
         mem_cfg = config.get_config().get("memory", {})
         embed_cfg = mem_cfg.get("embedding", {})
 
-        self.collection_name = "nora_memory"
+        self.collection_name = prefixed_collection_name("nora_memory", mem_cfg)
         self.vector_size = embed_cfg.get("dimensions", 1536) # 默认为 1536 (OpenAI small)
 
         try:

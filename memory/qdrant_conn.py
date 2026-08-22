@@ -36,6 +36,25 @@ def build_qdrant_client(mem_cfg: Optional[Dict[str, Any]] = None) -> QdrantClien
     return QdrantClient(host=host, port=port)
 
 
+def get_collection_prefix(mem_cfg: Optional[Dict[str, Any]] = None) -> str:
+    """
+    读取 Qdrant collection 前缀（`memory.qdrant.collection_prefix`）。
+
+    用于在同一个 Qdrant 实例上区分多套部署/环境。未配置时返回空串（保持
+    历史 collection 名 `nora_memory` / `nora_images` 不变）。前缀原样拼接，
+    分隔符由用户自行带上（如 `dev_` → `dev_nora_memory`）。
+    """
+    mem_cfg = mem_cfg or {}
+    qdrant_cfg = mem_cfg.get("qdrant", {}) or {}
+    return str(qdrant_cfg.get("collection_prefix") or "").strip()
+
+
+def prefixed_collection_name(base_name: str, mem_cfg: Optional[Dict[str, Any]] = None) -> str:
+    """把基础 collection 名加上配置的前缀；无前缀时原样返回。"""
+    prefix = get_collection_prefix(mem_cfg)
+    return f"{prefix}{base_name}" if prefix else base_name
+
+
 def describe_qdrant_target(mem_cfg: Optional[Dict[str, Any]] = None) -> str:
     """
     返回当前 Qdrant 连接目标的可读描述，用于 CLI 展示与日志。

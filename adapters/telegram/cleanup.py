@@ -19,13 +19,13 @@ class TelegramCleanupMixin:
             messages.append(f"- Qdrant 记忆集合清空失败: {e}")
 
         try:
-            from memory.image_store import ImageStore, IMAGE_COLLECTION
+            from memory.image_store import ImageStore
             img_store = ImageStore()
             if not img_store.qdrant:
                 return "⚠️ Qdrant 未连接（图片库），未执行。"
-            img_store.qdrant.delete_collection(collection_name=IMAGE_COLLECTION)
+            img_store.qdrant.delete_collection(collection_name=img_store.qdrant_collection)
             img_store._ensure_qdrant_collection()
-            messages.append(f"- Qdrant 图片集合已清空: {IMAGE_COLLECTION}")
+            messages.append(f"- Qdrant 图片集合已清空: {img_store.qdrant_collection}")
         except Exception as e:
             messages.append(f"- Qdrant 图片集合清空失败: {e}")
 

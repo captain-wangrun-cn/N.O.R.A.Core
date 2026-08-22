@@ -24,6 +24,7 @@ wizard:
   qdrant_port: "Qdrant 端口 (默认为 6333):"
   qdrant_url: "Qdrant Cloud/远程 URL (HTTPS 地址，留空则用本地 host:port):"
   qdrant_api_key: "Qdrant API Key (Cloud 必填，本地留空):"
+  qdrant_collection_prefix: "Qdrant collection 前缀 (可选，同一实例区分多套部署；留空用默认 nora_memory/nora_images):"
   mongo_uri: "MongoDB 连接串 (默认为 docker-compose 设置):"
   embed_provider_prompt: "请选择 Embedding (向量化) 服务商:"
   embed_base_url_prompt: "Embedding API Base URL (已自动预填):"
