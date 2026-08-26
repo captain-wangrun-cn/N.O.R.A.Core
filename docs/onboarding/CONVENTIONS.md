@@ -22,6 +22,7 @@
 | `core/` | 核心业务逻辑 | 控制器、成本跟踪 |
 | `brain/` | LLM 相关 | 提供方、工具、提示词 |
 | `adapters/` | 平台适配 | 每个平台一个子目录 |
+| `tts/` | 语音合成子系统 | 既是子系统（base/registry/config_utils）也是 provider 容器：一 provider 一文件夹（`provider.py` + `config.json` + `config.example.json`），importlib 自动发现；编写文档 `tts/TTS_GUIDE.md` |
 | `memory/` | 记忆/存储 | 消息历史、向量、RAG |
 | `skills/` | 技能插件 | 每个技能一个子目录（`main.py` + `SKILL.md`） |
 | `lexicon/` | 轻量词库 | `.dict` 每行 `词: 含义`，支持 `@prompt: 用途说明` |
@@ -36,7 +37,7 @@
 - **不提交** `config.yml`、`.env`（已在 `.gitignore`）
 - 新增配置项时，同步更新 `config.example.yml`
 - 配置读取统一走 `config.py` 的 helper 函数（如 `get_message_history_config()`）
-- 平台 adapter 的私有配置放在对应目录的 `config.json`，并提供 `config.example.json`；不要把 token、access token、websocket URL 等 adapter 私有项塞回全局 `config.yml`。例如 Telegram 使用 `adapters/telegram/config.json`，OneBot v11 使用 `adapters/onebotv11/config.json`。
+- 平台 adapter 的私有配置放在对应目录的 `config.json`，并提供 `config.example.json`；不要把 token、access token、websocket URL 等 adapter 私有项塞回全局 `config.yml`。例如 Telegram 使用 `adapters/telegram/config.json`，OneBot v11 使用 `adapters/onebotv11/config.json`。TTS provider 同理：`tts/<name>/config.json`（`tts/*/config.json` 已在 .gitignore）。
 
 ---
 

@@ -1373,6 +1373,17 @@ class MessageHandlerMixin:
                 draw_identity = (send_target or {}).get("identity") or identity
                 self.start_appearance_image_task(draw_key, draw_request, draw_identity)
 
+        # 3.10) 旁路语音：前脑 [VOICE]...[/VOICE]，与 [DRAW:] / [NEED_BACKEND] 都独立。
+        #       位置约束同上（用 send_target 的 runtime_key，且在 presence_markers 之前）。
+        voice_text = str(front_result.get("voice_text", "") or "").strip()
+        if voice_text:
+            voice_key = (send_target or {}).get("runtime_key") or ""
+            if send_target is not None and not voice_key:
+                logger.info(f"[{chat_id}] 投递目标被拒绝，跳过语音合成。")
+            else:
+                voice_key = voice_key or chat_id
+                self.start_voice_task(voice_key, voice_text)
+
         presence_ended = await self._apply_presence_markers(
             chat_id,
             chat_type,
@@ -2042,6 +2053,9 @@ class MessageHandlerMixin:
             # 否则 /stop 之后图还会自己冒出来。
             if hasattr(self, "cancel_appearance_image_task"):
                 self.cancel_appearance_image_task(chat_id)
+            # 语音同理：旁路任务单独取消。
+            if hasattr(self, "cancel_voice_task"):
+                self.cancel_voice_task(chat_id)
             # 标记被前端打断，避免 finally 再次调度排队任务
             session = self.sessions.setdefault(chat_id, {"history": [], "interrupted_thought": "", "pending_text": ""})
             session["_interrupted_by_frontend"] = True

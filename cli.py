@@ -692,6 +692,7 @@ def _edit_single_item() -> None:
         questionary.Choice("💾 数据库与记忆（Qdrant/MongoDB）", value=("database", StepDatabase)),
         questionary.Choice("🧠 Embedding 向量化", value=("embedding", StepEmbedding)),
         questionary.Choice("🔍 Tavily 搜索 API", value=("tavily", StepTavily)),
+        questionary.Choice("🎤 语音合成 TTS（Fish Audio / 自定义 provider）", value=("tts", StepTTS)),
         questionary.Choice("🕐 时区", value=("timezone", StepTimezone)),
         questionary.Choice("🧩 模型角色（smart/fast/coder/image/video/summary 等）", value=("models", StepModels)),
         questionary.Choice("🧷 输出 token 上限", value=("output_limit", StepOutputLimit)),
@@ -1260,6 +1261,59 @@ class StepTavily(ConfigStep):
         }
         return True
 
+class StepTTS(ConfigStep):
+    """语音合成（TTS）配置 — 只选 provider；连接参数在 tts/<name>/config.json"""
+    def run(self):
+        tts_cfg = self.state.get('tts', {})
+
+        configure = questionary.confirm(
+            "是否配置语音合成 TTS？(可选，配置后 Nora 可用 [VOICE] 发语音)",
+            default=bool(tts_cfg.get('provider'))
+        ).ask()
+
+        if not configure:
+            return True
+
+        # 列出 tts/ 下可用 provider（内置 + 自定义同目录）
+        try:
+            from tts.config_utils import list_provider_names
+            available = list_provider_names()
+        except Exception:
+            available = []
+        available = [n for n in available if n != '_template']
+
+        default_provider = tts_cfg.get('provider', 'fish_audio')
+        if available:
+            provider = questionary.select(
+                "选择 TTS provider（tts/ 目录下可用的）:",
+                choices=available + [questionary.Separator(), "手动输入其他名字"],
+                default=default_provider if default_provider in available else available[0],
+            ).ask()
+        else:
+            provider = default_provider
+
+        if provider == "手动输入其他名字":
+            provider = questionary.text(
+                "输入 provider 名（= tts/ 下的文件夹名）:",
+                default=default_provider
+            ).ask()
+
+        if provider is None or not str(provider).strip():
+            return False
+        provider = str(provider).strip()
+
+        # 连接参数（api_key 等）在 tts/<provider>/config.json，不写全局 config.yml。
+        cfg_path = os.path.join("tts", provider, "config.json")
+        example_path = os.path.join("tts", provider, "config.example.json")
+        questionary.print(
+            f"ℹ️ 该 provider 的连接参数（api_key 等）请编辑 {cfg_path}\n"
+            f"   （模板：{example_path}，复制为 config.json 后填写）",
+            style="fg:yellow"
+        )
+
+        self.state['tts'] = {'provider': provider}
+        return True
+
 class StepTimezone(ConfigStep):
     """时区配置"""
     def run(self):
@@ -1765,7 +1819,7 @@ WIZARD_BACKUP_FILE = "config.yml.wizard-backup"
 # 向导步骤顺序（模块级常量，便于测试注入）
 WIZARD_STEPS = [
     StepWorkspace, StepProxy, StepProvider, StepAPIKeys, StepDatabase, StepEmbedding,
-    StepTavily, StepTimezone, StepModels, StepOutputLimit, StepCostTracking,
+    StepTavily, StepTTS, StepTimezone, StepModels, StepOutputLimit, StepCostTracking,
 ]
 
 
@@ -1838,6 +1892,10 @@ def _build_final_config(state: Dict[str, Any]) -> Dict[str, Any]:
     # 添加 Tavily 配置（如果存在）
     if state.get('tavily'):
         final_config['tavily'] = state['tavily']
+
+    # 添加 TTS 配置（如果存在）：只有 provider 名，连接参数在 tts/<name>/config.json
+    if state.get('tts'):
+        final_config['tts'] = state['tts']
 
     # 将模型选择的价格写入配置，便于后续成本计算
     model_prices = state.get('model_prices', {})

@@ -323,3 +323,68 @@ def test_adapter_output_sanitizer_strips_draw_marker_as_safety_net():
     """生图标记只在前脑主对话轮被消费；任何其它发送路径出现都只是泄漏。"""
     assert sanitize_adapter_output_text("拍好了[DRAW:自拍]") == "拍好了"
     assert sanitize_user_visible_text("拍好了[DRAW:自拍]") == "拍好了"
+
+
+def test_front_brain_voice_marker_is_parsed_and_hidden():
+    """块格式提取：语音文本里的 provider 情绪方括号标记必须原样保留。"""
+    result = parse_front_brain_response("等我一下～[VOICE][happy]嗯…[break]今天也想你啦～[/VOICE]")
+
+    assert result["voice_text"] == "[happy]嗯…[break]今天也想你啦～"
+    assert result["user_reply"] == "等我一下～"
+    assert "[VOICE" not in result["user_reply"]
+    assert result["needs_backend"] is False
+
+
+def test_front_brain_voice_short_form_fallback():
+    """模型习惯性输出短格式时也能提取，不吞内容。"""
+    result = parse_front_brain_response("好呀[VOICE:说句话给你听]")
+
+    assert result["voice_text"] == "说句话给你听"
+    assert result["user_reply"] == "好呀"
+
+
+def test_front_brain_voice_marker_absent():
+    result = parse_front_brain_response("今天天气不错呀")
+
+    assert result["voice_text"] == ""
+
+
+def test_front_brain_review_voice_marker_is_stripped():
+    """轮询审查轮不触发语音合成，但标记必须剥掉，否则会作为字面文本泄漏给用户。"""
+    from core.routing import parse_front_brain_review
+
+    result = parse_front_brain_review("好啦[VOICE][happy]xx[/VOICE] [TASK_DONE]")
+
+    assert result["action"] == "done"
+    assert result["user_reply"] == "好啦"
+    assert "[VOICE" not in result["user_reply"]
+    # 审查轮不产出 voice_text 字段（只有主对话轮触发合成）
+    assert "voice_text" not in result
+
+
+def test_front_brain_voice_coexists_with_backend_and_draw():
+    result = parse_front_brain_response(
+        "拍一张![DRAW:自拍][VOICE][laughing]哈哈[/VOICE][TASK_INSTRUCTION]\n查一下今天天气\n[/TASK_INSTRUCTION] [NEED_BACKEND]"
+    )
+
+    assert result["voice_text"] == "[laughing]哈哈"
+    assert result["draw_request"] == "自拍"
+    assert result["needs_backend"] is True
+    assert result["task_instruction"] == "查一下今天天气"
+    assert result["user_reply"] == "拍一张!"
+
+
+def test_front_brain_voice_empty_block_ignored():
+    result = parse_front_brain_response("嗯嗯[VOICE]  [/VOICE]")
+
+    assert result["voice_text"] == ""
+    assert result["user_reply"] == "嗯嗯"
+
+
+def test_adapter_output_sanitizer_strips_voice_marker_as_safety_net():
+    """语音标记只在前脑主对话轮被消费；任何其它发送路径出现都只是泄漏。含未闭合兜底。"""
+    assert sanitize_adapter_output_text("x[VOICE][happy]hi[/VOICE]y") == "xy"
+    assert sanitize_adapter_output_text("x[VOICE:短]y") == "xy"
+    # 未闭合的裸标记也要清掉
+    assert sanitize_adapter_output_text("x[VOICE] 未闭合 y") == "x 未闭合 y"
+    assert sanitize_user_visible_text("x[VOICE][happy]hi[/VOICE]y") == "xy"

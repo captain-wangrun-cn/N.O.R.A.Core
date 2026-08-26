@@ -22,6 +22,7 @@ from brain.prompts import (
 )
 from skills.loader import SkillLoader
 from brain.appearance import draw_models_configured
+from tts.registry import tts_available, get_active_tts_guidance
 from core.message_handler import group_message_content
 from core.message_dedup import drop_current_user_message
 from core.override_gate import build_override_block, override_active
@@ -442,6 +443,9 @@ class FrontBrainMixin:
             proactive_context=proactive_context,
             # 未配置 draw / draw_desc 时不注入 [DRAW:] 说明，避免前脑输出无法执行的标记
             draw_enabled=draw_models_configured(),
+            # 未配置 TTS provider 时不注入 [VOICE] 说明；配置了则带上 provider 的写法指南
+            tts_enabled=tts_available(),
+            voice_guidance=get_active_tts_guidance(),
         )
         if yesterday_memory_block:
             system_prompt = system_prompt + "\n\n---\n" + yesterday_memory_block

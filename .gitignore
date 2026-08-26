@@ -3,6 +3,7 @@ __pycache__/
 .env
 config.yml
 adapters/*/config.json
+tts/*/config.json
 .DS_Store
 .vscode/
 .idea/

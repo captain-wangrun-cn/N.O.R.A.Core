@@ -498,6 +498,18 @@ def get_workspace_config():
     return cfg.get("workspace", {})
 
 
+def get_tts_config() -> dict:
+    """获取语音合成配置。只有 provider（选择名）；连接参数在 tts/<name>/config.json。"""
+    cfg = _safe_config()
+    data = cfg.get("tts", {}) or {}
+    return data if isinstance(data, dict) else {}
+
+
+def get_tts_provider_name() -> str:
+    """当前启用的 TTS provider 名（tts: provider:），空串表示未启用。"""
+    return str(get_tts_config().get("provider", "") or "").strip()
+
+
 def get_custom_injection_scopes():
     """Gets the CUSTOM.md injection scopes configuration."""
     cfg = _safe_config()

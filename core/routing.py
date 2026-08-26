@@ -76,6 +76,13 @@ _TASK_INSTRUCTION_PATTERN = re.compile(r"\[TASK_INSTRUCTION\](.*?)\[/TASK_INSTRU
 # 可选：生成形象图（旁路生图，独立于 NEED_BACKEND）。要求文本里不能带 `]`，
 # front_brain.jinja 已明确禁止，这里非贪婪匹配到第一个 `]` 为止。
 _DRAW_PATTERN = re.compile(r"\[DRAW\s*:\s*([^\]]*)\]", re.IGNORECASE)
+# 可选：语音合成（旁路 TTS，独立于 NEED_BACKEND）。用块格式而不是 [VOICE:...] 短格式——
+# 语音文本里可能带 provider 的方括号情绪标记（如 fish_audio 的 [happy] [break]），
+# 短格式在第一个 `]` 截断会把它们切碎。短格式仅作兜底（模型习惯性输出时也能提取）。
+_VOICE_BLOCK_PATTERN = re.compile(r"\[VOICE\](.*?)\[/VOICE\]", re.IGNORECASE | re.DOTALL)
+_VOICE_SHORT_PATTERN = re.compile(r"\[VOICE\s*:\s*([^\]]*)\]", re.IGNORECASE)
+# 未闭合的裸 VOICE 标记残 token（sanitize 兜底用）
+_VOICE_BARE_PATTERN = re.compile(r"\[/?VOICE\]", re.IGNORECASE)
 
 # ── 路由重定向标记（多平台/多场景）──
 # [platform:X]  指定目标平台（telegram / onebotv11 / qq...）
@@ -184,6 +191,10 @@ def sanitize_adapter_output_text(text: str) -> str:
     # 兜底剥离生图标记：它只在前脑主对话轮被消费，其它任何发送路径（后脑最终文本、
     # 主动消息、轮询审查）出现都只是泄漏，绝不能作为字面文本发给用户。
     cleaned = _DRAW_PATTERN.sub("", cleaned)
+    # 同理剥离语音标记（块/短/裸三种形态，覆盖未闭合残 token）。
+    cleaned = _VOICE_BLOCK_PATTERN.sub("", cleaned)
+    cleaned = _VOICE_SHORT_PATTERN.sub("", cleaned)
+    cleaned = _VOICE_BARE_PATTERN.sub("", cleaned)
     cleaned = re.sub(r"\n{3,}", "\n\n", cleaned)
     return cleaned.strip()
 
@@ -219,6 +230,7 @@ def parse_front_brain_response(response_text: str) -> dict:
             "keep_segment_open": False,
             "retract_message_target": "",
             "draw_request": "",
+            "voice_text": "",
             "route": _empty_route(),
         }
 
@@ -259,6 +271,23 @@ def parse_front_brain_response(response_text: str) -> dict:
         if not draw_request:
             logger.warning("前脑输出了空的 [DRAW:] 标记，已忽略")
 
+    # 提取语音文本（旁路 TTS；与 needs_backend / draw_request 互不影响）。
+    # 块格式优先；短格式兜底（情绪方括号标记在块内才安全）。只取第一个。
+    voice_text = ""
+    voice_block = _VOICE_BLOCK_PATTERN.search(response_text)
+    if voice_block:
+        voice_text = voice_block.group(1).strip()
+        if not voice_text:
+            logger.warning("前脑输出了空的 [VOICE] 块，已忽略")
+    if not voice_text:
+        voice_short = _VOICE_SHORT_PATTERN.search(response_text)
+        if voice_short:
+            voice_text = voice_short.group(1).strip()
+            if voice_text:
+                logger.info("前脑输出短格式 [VOICE:...] 标记，已提取（推荐用 [VOICE]...[/VOICE] 块格式）")
+            else:
+                logger.warning("前脑输出了空的 [VOICE:] 标记，已忽略")
+
     # 仅有后脑标记、却没有明确任务指示时，默认视为普通聊天，避免把
     # “嗯嗯/好的/收到/晚安” 这类轻量回复误升级为后脑任务。
     if needs_backend and not task_instruction:
@@ -287,6 +316,8 @@ def parse_front_brain_response(response_text: str) -> dict:
     user_reply = _USE_IMAGE_MODEL_PATTERN.sub("", user_reply)
     user_reply = _TASK_INSTRUCTION_PATTERN.sub("", user_reply)
     user_reply = _DRAW_PATTERN.sub("", user_reply)
+    user_reply = _VOICE_BLOCK_PATTERN.sub("", user_reply)
+    user_reply = _VOICE_SHORT_PATTERN.sub("", user_reply)
     user_reply = sanitize_adapter_output_text(user_reply)
 
     if not should_reply:
@@ -304,6 +335,7 @@ def parse_front_brain_response(response_text: str) -> dict:
         "keep_segment_open": keep_segment_open,
         "retract_message_target": retract_target,
         "draw_request": draw_request,
+        "voice_text": voice_text,
         "route": route,
     }
 
@@ -337,7 +369,6 @@ def parse_front_brain_review(response_text: str) -> dict:
             "retract_message_target": "",
             "route": _empty_route(),
         }
-
     # 提取路由标记（[platform:X] / [scene:...]）并抹除
     route, response_text = parse_route_markers(response_text)
 
@@ -396,6 +427,11 @@ def parse_front_brain_review(response_text: str) -> dict:
     if _DRAW_PATTERN.search(user_reply):
         logger.info("前脑审查轮出现 [DRAW:] 标记，已剥离（审查轮不触发生图）")
     user_reply = _DRAW_PATTERN.sub("", user_reply)
+    # 语音标记同理：审查轮只剥离不合成。
+    if _VOICE_BLOCK_PATTERN.search(user_reply) or _VOICE_SHORT_PATTERN.search(user_reply):
+        logger.info("前脑审查轮出现 [VOICE] 标记，已剥离（审查轮不触发语音合成）")
+    user_reply = _VOICE_BLOCK_PATTERN.sub("", user_reply)
+    user_reply = _VOICE_SHORT_PATTERN.sub("", user_reply)
     user_reply = sanitize_adapter_output_text(user_reply)
 
     if not should_reply:

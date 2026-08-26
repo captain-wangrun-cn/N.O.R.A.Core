@@ -71,6 +71,7 @@ from core.back_brain import BackBrainMixin
 from core.polling import PollingMixin
 from core.scheduler_mixin import SchedulerMixin
 from core.appearance_gen import AppearanceGenMixin
+from core.speech_gen import SpeechGenMixin
 
 logger = logging.getLogger(__name__)
 
@@ -83,6 +84,7 @@ class NoraController(
     PollingMixin,
     SchedulerMixin,
     AppearanceGenMixin,
+    SpeechGenMixin,
 ):
     """处理机器人的核心业务逻辑。"""
 
@@ -170,6 +172,8 @@ class NoraController(
         self.front_brain_tasks: Dict[str, asyncio.Task] = {}
         # 形象生图任务：per-runtime_key asyncio.Task；同一窗口只保留最新一张请求
         self.image_gen_tasks: Dict[str, asyncio.Task] = {}
+        # 语音合成任务：per-runtime_key asyncio.Task；同一窗口只保留最新一条请求
+        self.voice_gen_tasks: Dict[str, asyncio.Task] = {}
         # 前脑流式生成的"实时缓冲"：per-chat 字符串，被打断时作为草稿带入下轮
         self.front_brain_partial: Dict[str, str] = {}
         # 后脑流式生成的"实时缓冲"：per-chat 字符串，被新图片打断时作为草稿带入合并重启
@@ -839,6 +843,8 @@ class NoraController(
         """停止控制器持有的监听、Trigger 与调度服务。"""
         for key in list(self.image_gen_tasks.keys()):
             self.cancel_appearance_image_task(key)
+        for key in list(self.voice_gen_tasks.keys()):
+            self.cancel_voice_task(key)
         await self.group_listener.shutdown()
         await self.stop_triggers()
         self.stop_scheduler()

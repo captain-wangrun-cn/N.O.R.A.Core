@@ -49,6 +49,7 @@ core/controller.py            NoraController.handle_message()
 | 外部触发器 | `triggers/config.yml` | `enabled`、`default_chat_id`、`email.*` |
 | 工作区路径 | `config.yml` → `workspace.root_path` | 技能/下载/数据的根目录 |
 | CUSTOM 注入范围 | `config.yml` → `custom_injection.scopes` | `fast`/`smart`/`image`/`coder`/`video`/`none` |
+| 语音合成 | `config.yml` → `tts.provider` | = `tts/` 下文件夹名（内置 `fish_audio`）；连接参数在该文件夹 `config.json`；配置后前脑才有 `[VOICE]` 标记 |
 
 ---
 
@@ -272,6 +273,20 @@ python tui.py
   - 失败：只记日志，不向用户追发安慰或报错文本。
   - 改形象设定（不是拍照）→ 走 `[TASK_INSTRUCTION]`+`[NEED_BACKEND]`，让后脑改 `APPEARANCE.md` +
     调 `generate_appearance_reference`。用户发图说"你就长这样"也走这条，后脑把图路径传 `source_images`。
+
+- `[VOICE]要念的话[/VOICE]`
+  - 含义：语音合成（旁路 TTS）。块内文本直接送 tts provider 合成、逐字念出，不经改写；
+    语音内容可与文字回复不同。用块格式（而非 `[VOICE:...]`）是因为 provider 情绪标记本身是
+    方括号（fish_audio 的 `[happy]` `[break]`），短格式会在第一个 `]` 截断。
+  - provider 的情绪/停顿标记写法由 `get_text_guidance()` 注入前脑（`voice_guidance` 变量）。
+  - 行为：旁路通路，与 `[DRAW:]` / `[NEED_BACKEND]` 正交可共存。文字先发，语音合成完追发。
+    单轮只取第一个；per-runtime_key 只保留最新一条；失败只记日志不追发文本。
+  - 触发范围：只在**主对话轮**。审查轮只剥离。
+  - 前置：`tts.provider` 配置且 provider 可加载；否则前脑提示不注入该说明。
+  - 落盘：`workspace/data/voice/YYYY-MM-DD/voice_<8hex>.oga`，以 `[voice: path]` 追发
+    （Telegram send_voice / OneBot record 段，两端都是语音条）。
+  - provider 体系：`tts/` 目录一 provider 一文件夹（内置 `fish_audio`、模板 `_template`），
+    importlib 自动发现，编写文档 `tts/TTS_GUIDE.md`；连接参数在各自文件夹 `config.json`。
 
 ---
 

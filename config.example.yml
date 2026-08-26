@@ -185,6 +185,12 @@ llm:
   #   coder: "xhigh"
   #   draw_desc: "low"
 
+# 语音合成（可选；配置 provider 后前脑才有 [VOICE] 标记能力）。
+# 一个 provider = tts/ 下一个文件夹（连接参数在 tts/<name>/config.json，不放这里）。
+# 内置：fish_audio。自定义：复制 tts/_template/ 为 tts/<你的名字>/，见 tts/TTS_GUIDE.md。
+# tts:
+#   provider: "fish_audio"
+
 memory:
   # 消息历史管理
   message_history:

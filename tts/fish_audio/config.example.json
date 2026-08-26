@@ -1,0 +1,11 @@
+{
+  "api_key": "YOUR_FISH_AUDIO_API_KEY",
+  "reference_id": "",
+  "model": "s2.1-pro",
+  "format": "opus",
+  "latency": "balanced",
+  "normalize": true,
+  "mp3_bitrate": 128,
+  "base_url": "https://api.fish.audio",
+  "proxy": ""
+}

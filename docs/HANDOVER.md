@@ -1,5 +1,45 @@
 ## 近期关键改动（截至 2026-08-27）
 
+### 🎤 TTS 语音合成子系统（[VOICE] 标记 + Fish Audio + 可扩展 provider）
+
+仿 `[DRAW:]` 旁路模式加语音合成：前脑输出 `[VOICE]要念的话[/VOICE]` → tts provider
+后台合成 → 落盘 `.oga` → 以 `[voice: path]` 追发（两端都显示语音条）。文字先发、语音后到，
+与 `[NEED_BACKEND]` / `[DRAW:]` 正交。**允许 Nora 在合适的时候主动发语音**（情绪浓/深夜
+亲密/长解释/用户反馈好；正事/用户在忙/文字党用文字），判据写在前脑提示里。
+
+- **`tts/` 子系统（新）**：目录既是子系统也是 provider 容器（与 `adapters/` 同构）——
+  内置 `fish_audio` 和用户自写 provider 平级放在 `tts/<name>/`（`provider.py` +
+  `config.json` + `config.example.json`）。`registry.py` importlib 动态发现加载
+  （**仓库首个进程内动态加载用户代码的先例**，无沙箱、只放可信代码）；单个 provider
+  加载失败只跳过不崩启动；下划线开头目录（`_template/`）跳过。
+- **provider 内置提示词**：`get_text_guidance()` 返回该 provider 的文本写法指南
+  （fish_audio 是 S2 情绪标记速查：句首 `[happy]`/自然语言 `[warm and happy]`/强度
+  `[very excited]`，任意位置 `[whispering]` `[laughing]` `[break]`），经
+  `voice_guidance` 变量注入 front_brain.jinja——Nora 写 `[VOICE]` 内容时就知道可用标记。
+- **标记语法用块格式而非短格式**：provider 情绪标记本身是方括号，`[VOICE:...]`
+  会在第一个 `]` 截断切碎情绪标记。`routing.py` 的 `_VOICE_BLOCK_PATTERN` 块优先、
+  `_VOICE_SHORT_PATTERN` 兜底；两个解析器 + sanitize 兜底三处都剥（照抄 DRAW 四位置）。
+- **`core/speech_gen.py`（新）**：`SpeechGenMixin`，per-runtime_key 只保留最新一条、
+  失败只记日志不追发文本、`/stop` 与 `shutdown()` 单独 cancel（同 image_gen_tasks）。
+  语音文本剥离系统标记时**逐个点名**（SPLIT/NEED_BACKEND/reply 等）——不能用宽逻辑
+  剥所有方括号，会误杀 provider 情绪标记。
+- **失败约定与 LLM provider 相反**：TTS `synthesize` 失败 **raise** 而非返回错误文本
+  ——产物是二进制、调用方是任务 Mixin，异常即失败。
+- **Telegram FILE_PATTERN 补 `voice` 标记**（`.oga` 已映射 voice→send_voice）；
+  OneBot `_MEDIA_TAG_PATTERN` 原本已含 voice→record 段，无需改。
+- **Fish Audio 契约**（openapi.json 实测）：`POST /v1/tts`、Bearer 认证、**模型经
+  `Model` header 不在 body**、`format: opus` 落盘 **`.oga`**（Ogg 容器；`.opus` 不在
+  TG voice 扩展集会退化成 document）、`proxy` 配置键单独指代理否则 trust_env 继承全局。
+- 配置：全局 `config.yml` 只有 `tts.provider: "fish_audio"`；连接参数在
+  `tts/fish_audio/config.json`（`tts/*/config.json` 已 gitignore）。CLI 加 StepTTS +
+  单项修改菜单。文档：`tts/TTS_GUIDE.md`（编写指南，仿 ADAPTER_GUIDE）+
+  `docs/architecture/tts.md`。
+- 测试：`tests/test_tts.py`（20：registry 发现/坏文件跳过/配置层叠/fish payload 与错误/
+  Mixin 生成-取消-守卫/接线断言）、`test_routing.py` +7（VOICE 镜像 DRAW 命名）、
+  `test_front_brain_prompt.py` +2（注入/不注入）。全量 748 passed / 11 failed，
+  失败集与基线一致（context_pricing×4、cost_tracker×2、image_memory×2[干净基线同样失败，
+  顺序污染]、retry_queue×2、timezone×1）。
+
 ### 🎛️ CUSTOM 注入范围新增 `video`（后加的视频模型没被 scope 覆盖）
 
 `/custom_scope` 只有 fast/smart/image/coder，而 `core/back_brain.py` 早已按输入类型切到真正的

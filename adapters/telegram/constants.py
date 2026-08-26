@@ -27,10 +27,11 @@ MEDIA_TYPES = {
     },
 }
 
+# 方括号自定义媒体标记：[voice: path] 供 TTS 语音追发用（.oga → send_voice 语音条）。
 FILE_PATTERN = re.compile(
     r'(?:!\[.*?\]\((.*?)\))|'
     r'(?:<img\s+src="(.*?)"[^>]*>)|'
-    r'(?:\[(?:image|file|audio|video|doc):\s*(.*?)\])|'
+    r'(?:\[(?:image|file|audio|video|voice|doc):\s*(.*?)\])|'
     r'(?:^|\s)((?:https?://[^\s]+\.(?:'
     + '|'.join(ext.lstrip('.') for exts in MEDIA_TYPES.values() for ext in exts)
     + r'))\b)|'

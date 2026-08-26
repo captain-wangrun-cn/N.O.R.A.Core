@@ -143,6 +143,54 @@ def test_front_brain_review_system_includes_platform_prompt_and_preferences():
     assert "多说话者" in system_prompt
 
 
+def test_front_brain_prompt_injects_voice_block_when_tts_enabled():
+    """配置 TTS 时注入 [VOICE] 说明 + provider 写法指南 + 主动发语音判据。"""
+    system_prompt = render_template(
+        "front_brain.jinja",
+        "system",
+        soul_prompt="SOUL",
+        identity_context="",
+        user_preferences_block="",
+        platform_prompt_block="",
+        schedule_block="",
+        custom_block="",
+        tool_intro_block="",
+        skill_intro_block="",
+        proactive_context="",
+        tts_enabled=True,
+        voice_guidance="[happy] [break] [whispering] 情绪标记速查",
+    )
+
+    assert "[VOICE]要念的话[/VOICE]" in system_prompt
+    # provider 写法指南注入
+    assert "[whispering] 情绪标记速查" in system_prompt
+    # 主动发语音判据（不是只能用户开口要）
+    assert "什么时候主动发" in system_prompt
+    assert "语音是你的表达方式之一" in system_prompt
+
+
+def test_front_brain_prompt_omits_voice_block_when_tts_disabled():
+    """未配置 TTS 时不注入任何 [VOICE] 说明，避免前脑输出无法执行的标记。"""
+    system_prompt = render_template(
+        "front_brain.jinja",
+        "system",
+        soul_prompt="SOUL",
+        identity_context="",
+        user_preferences_block="",
+        platform_prompt_block="",
+        schedule_block="",
+        custom_block="",
+        tool_intro_block="",
+        skill_intro_block="",
+        proactive_context="",
+        tts_enabled=False,
+        voice_guidance="",
+    )
+
+    assert "[VOICE" not in system_prompt
+    assert "发语音" not in system_prompt
+
+
 def test_group_listener_templates_define_strict_actions_and_batches():
     passive_system = render_template("group_listener.jinja", "passive_system")
     passive_user = render_template(

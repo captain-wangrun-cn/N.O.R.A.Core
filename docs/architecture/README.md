@@ -222,6 +222,10 @@ flowchart TB
   - 偏好配置结构、follow-up / proactive 概率逻辑、prompt 注入分层、Telegram `/nora_prefs` 调整入口。
 - **[词库系统 (Lexicon System)](./lexicon-system.md)**
   - 轻量“词:含义”检索系统，支持常加载与懒加载双层词库。
+- **[TTS 语音合成 (Text-to-Speech)](./tts.md)**
+  - 前脑 `[VOICE]` 旁路合成与追发；`tts/` 既是子系统也是 provider 容器
+    （一 provider 一文件夹 + config.json，importlib 动态发现），内置 fish_audio，
+    provider 内置情绪/停顿标记提示词。编写指南见 `tts/TTS_GUIDE.md`。
 
 ### 🌉 平台适配 (Adapters)
 
