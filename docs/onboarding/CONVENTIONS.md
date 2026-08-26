@@ -75,8 +75,16 @@
 2. **两个解析器都要改**：`parse_front_brain_response()` 与 `parse_front_brain_review()`。
    审查轮就算不消费该标记，也必须剥离，否则会作为字面文本发给用户
 3. 需要时在 `sanitize_adapter_output_text()` 里加兜底剥离（覆盖后脑/主动消息等其它发送路径）
-4. 在 `brain/templates/front_brain.jinja` 写用法说明（可选能力用 `{% if %}` 包住）
-5. 在 `tests/test_routing.py` 补测试：正常解析 + 标记缺失 + 审查轮剥离 + 与既有标记共存
+4. **`core/front_brain.py` 的最终 return dict 必须透传新字段**（如 `draw_request` / `voice_text`）。
+   解析层提取了但这里不透传，下游 `front_result.get(...)` 永远拿到空——标记被剥掉、
+   功能不触发，且不报错，表现为"模型明明输出了标记却什么都没发生"甚至"回复为空"。
+   早退分支（`needs_backend=True` 兜底返回）也要检查是否需要带字段
+5. 在 `brain/templates/front_brain.jinja` 写用法说明（可选能力用 `{% if %}` 包住）
+6. **调用方全链路检查**：`core/message_handler.py`（主对话轮触发）、
+   `core/scheduler_mixin.py`（主动消息轮是否需要同款"已剥离"日志）、轮询审查轮
+7. 在 `tests/test_routing.py` 补测试：正常解析 + 标记缺失 + 审查轮剥离 + 与既有标记共存
+   （另可仿 `tests/test_tts.py` 的 `test_controller_has_voice_gen_tasks_wired` 做源码级接线断言，
+   能在不上拉完整 controller 的情况下锁住"return dict 透传了字段"）
 
 ### 添加新技能
 1. 使用 `create_new_skill` 工具生成标准目录

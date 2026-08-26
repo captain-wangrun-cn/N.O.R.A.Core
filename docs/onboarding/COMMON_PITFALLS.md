@@ -85,6 +85,31 @@
 - 检测到 `tool_call` 时会清空 `response_text_buffer`，避免"思考过程"泄漏给用户。
 - 但如果工具调用前已经通过 `[SPLIT]` 发出了部分文本，这些**已发送的无法撤回**。
 
+### ❌ 新加前脑标记/字段：解析层提取了，但前脑 return dict 没透传，功能静默失效
+
+现象：模型明明输出了标记（日志/原始回复里能看到），但下游什么都没发生——
+标记被正常剥离、功能不触发、也不报错；若模型只输出了标记没配文字，用户侧
+表现为"回复是空的"。2026-08-27 的 `[VOICE:]` 就栽在这：`parse_front_brain_response()`
+正确提取了 `voice_text`，但 `_generate_front_chat_response()`（`core/front_brain.py`）
+的最终 return dict 漏了这个字段，`message_handler` 里 `front_result.get("voice_text")`
+永远拿到空串。
+
+- **根因模式**：字段要过**三层**才生效——① routing 解析层提取（两个解析器）→
+  ② 前脑 return dict 透传（`core/front_brain.py` 的最终 return + 各早退分支）→
+  ③ 调用方消费（`message_handler` / `scheduler_mixin` / 轮询审查）。只改 ①③ 不改 ②，
+  中间就是断的，且**任何一层都不报错**。
+- **新增任何 parse 返回字段时，核对清单**：
+  - `parse_front_brain_response()` 空输入早退 dict 也加同名字段（保持键集一致）
+  - `_generate_front_chat_response()` 最终 return dict 透传
+  - 主动消息轮（`scheduler_mixin.py`）与审查轮是否需要处理/记日志
+  - 排查手段：debug 输出（`⚡ 前脑:` 块）和 `前脑结果:` 日志行把关键字段打出来
+    （draw/voice 都是这么展示的），出问题一眼能看到是"模型没输出"还是"输出被丢"
+- 通用化：这不止前脑标记——**任何"解析层产出新字段 → 上层 dict 转发"的链路**
+  （adapter context、工具结果、provider 返回）都有同一个坑：中间一层忘了带字段，
+  静默降级为空值。新增字段时沿调用链 grep 字段名核对每一层。
+- 测试建议：仿 `tests/test_tts.py` 的 `test_controller_has_voice_gen_tasks_wired`，
+  用源码级断言（`inspect.getsource` 查 return dict 含字段名）锁住透传，不用拉起完整链路。
+
 ---
 
 ## 5. Telegram 适配
