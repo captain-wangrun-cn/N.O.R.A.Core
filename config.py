@@ -281,6 +281,25 @@ def get_llm_max_output_tokens(model_alias: str = "smart"):
     return llm_cfg.get("max_output_tokens")
 
 
+def get_llm_temperature(model_alias: str = "smart"):
+    """获取某个模型别名的采样温度（temperature）。
+
+    优先级：llm.temperature_by_alias[alias] → llm.temperature → None（不传字段，用端点默认）。
+    返回 float 或 None；非法值（无法转 float）按 None 处理。
+    取值范围各家不同（OpenAI/Gemini 0~2，Anthropic 0~1），这里不裁剪，交给端点校验。
+    """
+    cfg = _safe_config()
+    llm_cfg = cfg.get("llm", {}) or {}
+    per_alias = (llm_cfg.get("temperature_by_alias") or {})
+    raw = per_alias.get(model_alias) if model_alias in per_alias else llm_cfg.get("temperature")
+    if raw is None:
+        return None
+    try:
+        return float(raw)
+    except (TypeError, ValueError):
+        return None
+
+
 # 推理强度（reasoning effort）。档位表照 OpenAI 官方 reasoning 文档的枚举取：
 # none / minimal / low / medium / high / xhigh / max（原文：「Supported values are
 # model-dependent and can include ...」——注意是 model-dependent，同一家不同模型

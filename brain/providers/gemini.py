@@ -62,6 +62,7 @@ class GeminiProvider(BaseLLM):
         self.max_output_tokens = config.get_llm_max_output_tokens(model_alias)
         self.effort = config.get_llm_effort(model_alias)
         self.effort_budget_tokens = config.get_llm_effort_budget_tokens(model_alias)
+        self.temperature = config.get_llm_temperature(model_alias)
         model_name = config.get_model_name(model_alias)
         if not model_name:
             raise ValueError(f"Model for alias '{model_alias}' not found in config.")
@@ -656,6 +657,8 @@ class GeminiProvider(BaseLLM):
             gen_config: Dict[str, Any] = {}
             if self.max_output_tokens:
                 gen_config["maxOutputTokens"] = int(self.max_output_tokens)
+            if self.temperature is not None:
+                gen_config["temperature"] = float(self.temperature)
             gen_config.update(self._effort_generation_config(camel_case=True))
             async for chunk in self._video_stream_via_rest(
                 system_prompt=system_prompt if tools else "",
@@ -697,6 +700,8 @@ class GeminiProvider(BaseLLM):
         generation_config: Dict[str, Any] = {}
         if self.max_output_tokens:
             generation_config["max_output_tokens"] = int(self.max_output_tokens)
+        if self.temperature is not None:
+            generation_config["temperature"] = float(self.temperature)
         # SDK 分支用 snake_case；REST 视频分支在上面用 camelCase。
         generation_config.update(self._effort_generation_config())
 

@@ -605,6 +605,12 @@ class BackBrainMixin:
             base_model_alias = "coder"
             active_llm = self.coder_llm
 
+        # CUSTOM.md 注入范围：与实际使用的多模态模型对齐（video / image）。
+        # video 是可独立开关的 scope，不能再并进 image/smart，否则 /custom_scope 里
+        # 单独关/开 video 就失效。无媒体时返回 None，由各调用点回退到自己的默认
+        # （正文轮 smart / 工具轮 coder）。
+        media_custom_scope = base_model_alias if base_model_alias in ("video", "image") else None
+
         try:
             if self.tui_callback: self.tui_callback(f"🏃 Handling new message...")
             
@@ -710,7 +716,7 @@ class BackBrainMixin:
 
             # Inject CUSTOM.md based on scope configuration
             try:
-                custom_scope = "image" if multimodal_images else "smart"
+                custom_scope = media_custom_scope or "smart"
                 if should_inject_custom(custom_scope):
                     custom_prompt = load_custom_prompt()
                     if custom_prompt:
@@ -837,7 +843,7 @@ class BackBrainMixin:
             system_prompt = get_system_prompt(
                 instructions,
                 platform=self.adapter.platform_name,
-                custom_scope="coder" if not multimodal_images else "image",
+                custom_scope=media_custom_scope or "coder",
                 actor_display_name=actor_display_name,
                 is_owner=identity.is_owner,
                 chat_type=chat_type,
@@ -1599,10 +1605,16 @@ class BackBrainMixin:
             # 仅当存在“新用户图片”（非工具回查/历史回复图片）时才校验/重试 IMAGE_TAGS。
             # 用户从图库找回并回发图片（from_tool=True）属于纯展示场景，不需要再生标签。
             if expected_ids and not historical_reply_image_direct:
+                def _canon_tag_text(s: str) -> str:
+                    # 归一中文逗号「，」/顿号「、」为半角逗号：模型（尤其中文模型）常用它们
+                    # 分隔标签，而 bad_comma 校验用的是 "," in tags。不归一就会把合法的
+                    # 多标签判成格式异常、触发无谓重试，最终报“图片输出异常，已自动重试失败”。
+                    return re.sub(r"\s*[，、]\s*", ", ", s)
+
                 source_text_for_tags = final_response_buffer or last_image_raw_output or ""
                 for m in self._IMAGE_TAGS_PATTERN.finditer(source_text_for_tags):
                     img_id = m.group(1).strip()
-                    tags_text = m.group(2).strip()
+                    tags_text = _canon_tag_text(m.group(2).strip())
                     if img_id and tags_text:
                         image_tags_extracted[img_id] = tags_text
                         parsed_tag_blocks.append((img_id, tags_text))
@@ -1721,16 +1733,35 @@ class BackBrainMixin:
                         f"⚠️ IMAGE_TAGS 异常（{reason_text}），正在为您重新生成完整回复（第 {retry_attempt}/{MAX_TAG_RETRY} 次）..."
                     )
                     
-                    # 重新生成整个回复：将错误输出作为 assistant 历史，然后发送 user 纠正
+                    # 重新生成整个回复：把错误输出作为 assistant 历史，再发 user 纠正。
+                    # 关键：retry_history 里并不包含首轮那份 image_tags 规范（它只作为
+                    # 首轮的 user_prompt 一次性传入，没进 temp_history），所以重试必须把完整
+                    # 规范重新注入，并叠加针对本次失败的强调——否则等于用比首轮更弱的提示重试，
+                    # 自然“没什么效果”。同时降低温度，提高格式遵从度。
                     retry_history = list(temp_history)
                     retry_history.append({"role": "assistant", "content": source_text_for_tags})
-                    retry_prompt = (
-                        f"你上一次的输出存在格式问题/不完整：{reason_text}。\n"
-                        "请无视那次错误的输出，重新生成完整的回复。你的回复应该同时包括你想对我说的话（如果有），并在回复末尾附上所有图片的 [IMAGE_TAGS:ID] 块。\n"
-                        "要求：为下面列表中的每一张图片提取至少8个细节相关的关键词，必须使用英文逗号分隔。\n"
-                        "图片 ID 列表：\n" + "\n".join(f"- {mid}" for mid in expected_ids)
+                    retry_image_id_lines = "\n".join(
+                        f"- 图片 ID: {img['image_id']}  文件: {os.path.basename(img['path'])}"
+                        for img in multimodal_images if not img.get("from_tool")
+                    ) or "\n".join(f"- 图片 ID: {mid}" for mid in expected_ids)
+                    retry_spec_block = render_template(
+                        'image_tags.jinja', 'image_tags_prompt', image_id_lines=retry_image_id_lines
                     )
-                    
+                    retry_prompt = (
+                        f"⚠️ 这是第 {retry_attempt}/{MAX_TAG_RETRY} 次重试。你上一次的输出不合格：{reason_text}。\n"
+                        "请完全忽略上一次的错误输出，严格按下面的完整要求重新生成一条完整回复。"
+                        "本次格式合规是硬性要求，务必逐条满足：\n\n"
+                        f"{retry_spec_block}\n\n"
+                        "【本次特别强调（针对上次的错误）】\n"
+                        "1. 上方列表里的每一个图片 ID 都必须各自带上成对闭合的 "
+                        "[IMAGE_TAGS:ID]…[/IMAGE_TAGS]、[IMAGE_OCR:ID]…[/IMAGE_OCR]、"
+                        "[IMAGE_DESC:ID]…[/IMAGE_DESC] 三个区块，缺一不可，且必须使用原始 ID、不要编造；\n"
+                        "2. 标签之间只能用半角英文逗号 `,` 分隔（示例：`猫, 沙发, 阳光, 特写`），"
+                        "严禁使用中文逗号「，」或顿号「、」；\n"
+                        "3. 每张图至少 8 个关键词；\n"
+                        "4. 即使识别不出也要用占位词（如 `未识别`）把区块补全，绝不能省略、也不要只回聊天文本。"
+                    )
+
                     retry_stream = self._chat_stream_wrapper(
                         self.image_llm if multimodal_images else self.coder_llm,
                         chat_id,
@@ -1739,7 +1770,6 @@ class BackBrainMixin:
                         history=retry_history,
                         tools=[],
                         multimodal_images=multimodal_images,
-                        temperature=0.7
                     )
                     
                     retry_buffer = ""
@@ -1756,13 +1786,15 @@ class BackBrainMixin:
                     
                     image_tags_extracted.clear()
                     image_ocr_extracted.clear()
+                    image_desc_extracted.clear()
                     parsed_tag_blocks.clear()
                     parsed_ocr_blocks.clear()
-                    
+                    parsed_desc_blocks.clear()
+
                     source_text_for_tags = final_response_buffer
                     for m in self._IMAGE_TAGS_PATTERN.finditer(source_text_for_tags):
                         img_id = m.group(1).strip()
-                        tags_text = m.group(2).strip()
+                        tags_text = _canon_tag_text(m.group(2).strip())
                         if img_id and tags_text:
                             image_tags_extracted[img_id] = tags_text
                             parsed_tag_blocks.append((img_id, tags_text))
@@ -1772,6 +1804,12 @@ class BackBrainMixin:
                         if img_id and ocr_text and ocr_text != "（无文字）":
                             image_ocr_extracted[img_id] = ocr_text
                             parsed_ocr_blocks.append((img_id, ocr_text))
+                    for m in self._IMAGE_DESC_PATTERN.finditer(source_text_for_tags):
+                        img_id = m.group(1).strip()
+                        desc_text = m.group(2).strip()
+                        if img_id and desc_text and desc_text != "未识别":
+                            image_desc_extracted[img_id] = desc_text
+                            parsed_desc_blocks.append((img_id, desc_text))
 
                     # LLM 可能输出占位符/错误 image_id
                     if parsed_tag_blocks:

@@ -2298,7 +2298,7 @@ class MessageHandlerMixin:
                     chat_id,
                     "🧭 CUSTOM 注入范围\n"
                     f"当前: {scope_desc}\n"
-                    "用法: /custom_scope（按钮多选）或 /custom_scope fast smart | image | coder | all | none",
+                    "用法: /custom_scope（按钮多选）或 /custom_scope fast smart | image | coder | video | all | none",
                 )
                 return
 
@@ -2307,12 +2307,12 @@ class MessageHandlerMixin:
             elif any(a in ("none", "off") for a in args):
                 scopes_to_set = ["none"]
             else:
-                allowed = {"fast", "smart", "image", "coder"}
+                allowed = {"fast", "smart", "image", "coder", "video"}
                 invalid = [a for a in args if a not in allowed]
                 if invalid:
                     await self._send_platform_message(
                         chat_id,
-                        "❌ 无效范围: " + ", ".join(invalid) + "。可选: fast, smart, image, coder, all, none",
+                        "❌ 无效范围: " + ", ".join(invalid) + "。可选: fast, smart, image, coder, video, all, none",
                     )
                     return
                 scopes_to_set = list(dict.fromkeys(args))

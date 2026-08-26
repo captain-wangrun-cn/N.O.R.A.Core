@@ -26,6 +26,7 @@ class AnthropicProvider(BaseLLM):
         self.max_output_tokens = config.get_llm_max_output_tokens(model_alias) or 1024
         self.effort = config.get_llm_effort(model_alias)
         self.effort_budget_tokens = config.get_llm_effort_budget_tokens(model_alias)
+        self.temperature = config.get_llm_temperature(model_alias)
         if not self.model:
             raise ValueError(f"Model for alias '{model_alias}' not found in config.")
 
@@ -102,6 +103,27 @@ class AnthropicProvider(BaseLLM):
         # minimal 是 OpenAI 的档，Anthropic 最低是 low。
         native = "low" if effort == "minimal" else effort
         payload["output_config"] = {"effort": native}
+        return payload
+
+    def _apply_temperature(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+        """把采样温度写进请求体。
+
+        ⚠️ Anthropic 的硬约束：开启思考（thinking=enabled，或新模型的 output_config.effort）
+        时 temperature 只能是 1，传别的值直接 400。所以这里只在**没有激活思考**时才下发
+        temperature——思考态下采样温度本就由端点固定，跳过既安全又符合语义。
+        （thinking=disabled 或压根没配思考时，temperature 正常下发。）
+
+        用 getattr 取值：绕过 __init__ 的实例少这属性也不该崩。
+        """
+        temperature = getattr(self, "temperature", None)
+        if temperature is None:
+            return payload
+        thinking = payload.get("thinking")
+        reasoning_active = ("output_config" in payload) or (
+            isinstance(thinking, dict) and thinking.get("type") == "enabled"
+        )
+        if not reasoning_active:
+            payload["temperature"] = float(temperature)
         return payload
 
     def _apply_budget_effort(self, payload: Dict[str, Any], effort: str) -> Dict[str, Any]:
@@ -255,6 +277,7 @@ class AnthropicProvider(BaseLLM):
             "max_tokens": int(self.max_output_tokens),
         }
         self._apply_effort(payload)
+        self._apply_temperature(payload)
         if tools:
             payload["tools"] = self._convert_tools_schema(tools)
         try:
@@ -324,6 +347,7 @@ class AnthropicProvider(BaseLLM):
             "max_tokens": int(self.max_output_tokens),
         }
         self._apply_effort(payload)
+        self._apply_temperature(payload)
         if tools:
             payload["tools"] = self._convert_tools_schema(tools)
 

@@ -38,6 +38,7 @@ class OpenAIProvider(BaseLLM):
         self.model = config.get_model_name(model_alias)
         self.max_output_tokens = config.get_llm_max_output_tokens(model_alias)
         self.effort = config.get_llm_effort(model_alias)
+        self.temperature = config.get_llm_temperature(model_alias)
         if not self.model:
             raise ValueError(f"Model for alias '{model_alias}' not found in config.")
 
@@ -72,6 +73,20 @@ class OpenAIProvider(BaseLLM):
             payload["reasoning_effort"] = effort
         return payload
 
+    def _apply_temperature(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+        """把采样温度写进请求体（Chat Completions 与 Responses 都是顶层 `temperature`）。
+
+        None 表示不配置（用端点默认，不发字段）。不支持自定义温度的推理模型
+        （o 系列 / GPT-5 等）收到该字段会 400——chat() / chat_stream() 的异常分支
+        用 `_is_temperature_rejection()` 识别并摘掉该字段重试一次。
+
+        用 getattr 取值：绕过 __init__ 的实例（测试里的 object.__new__）少这属性也不该崩。
+        """
+        temperature = getattr(self, "temperature", None)
+        if temperature is not None:
+            payload["temperature"] = float(temperature)
+        return payload
+
     @staticmethod
     def _is_effort_rejection(error: Exception) -> bool:
         """判断异常是否由推理强度字段本身引起（用于去掉它重试一次）。
@@ -95,6 +110,23 @@ class OpenAIProvider(BaseLLM):
         return any(word in msg for word in effort_words) and any(
             word in msg for word in rejection_words
         )
+
+    @staticmethod
+    def _is_temperature_rejection(error: Exception) -> bool:
+        """判断异常是否由 temperature 字段本身引起（用于摘掉它重试一次）。
+
+        推理模型的典型报错：`Unsupported value: 'temperature' does not support 0.55
+        with this model. Only the default (1) value is supported.`——只要错误里同时
+        提到 temperature 和"不支持/只支持默认值"这类措辞就算命中。
+        """
+        msg = str(error).lower()
+        if "temperature" not in msg:
+            return False
+        rejection_words = (
+            "unsupported", "unknown", "unrecognized", "invalid",
+            "not supported", "does not support", "only the default",
+        )
+        return any(word in msg for word in rejection_words)
 
     @staticmethod
     def _convert_history_for_responses(history: List[Dict[str, str]]) -> List[Dict[str, Any]]:
@@ -765,6 +797,7 @@ class OpenAIProvider(BaseLLM):
             if self.max_output_tokens:
                 payload["max_output_tokens"] = int(self.max_output_tokens)
             self._apply_effort(payload, responses_api=True)
+            self._apply_temperature(payload)
             if tools:
                 payload["tools"] = self._convert_tools_schema_for_responses(tools)
             try:
@@ -799,6 +832,7 @@ class OpenAIProvider(BaseLLM):
         if self.max_output_tokens:
             kwargs["max_tokens"] = int(self.max_output_tokens)
         self._apply_effort(kwargs)
+        self._apply_temperature(kwargs)
 
         # 如果有 tools，转换格式并传入
         if tools:
@@ -810,15 +844,20 @@ class OpenAIProvider(BaseLLM):
             try:
                 response = await self._with_retry(lambda: self.client.chat.completions.create(**kwargs))
             except Exception as first_error:
-                # 不支持推理的模型会因 reasoning_effort 直接 400。去掉它重试一次，
-                # 否则一个可选的调优字段会让整个别名不可用。
-                if "reasoning_effort" not in kwargs or not self._is_effort_rejection(first_error):
+                # 不支持推理/自定义温度的模型会因 reasoning_effort 或 temperature 直接 400。
+                # 去掉惹事的可选字段重试一次，否则一个调优字段会让整个别名不可用。
+                stripped = []
+                if "reasoning_effort" in kwargs and self._is_effort_rejection(first_error):
+                    kwargs.pop("reasoning_effort", None)
+                    stripped.append("reasoning_effort")
+                if "temperature" in kwargs and self._is_temperature_rejection(first_error):
+                    kwargs.pop("temperature", None)
+                    stripped.append("temperature")
+                if not stripped:
                     raise
                 logger.warning(
-                    f"[OpenAI chat/{self.model_alias}] 端点不接受 reasoning_effort"
-                    f"={kwargs.get('reasoning_effort')!r}，去掉该字段重试: {first_error}"
+                    f"[OpenAI chat/{self.model_alias}] 端点不接受 {'/'.join(stripped)}，去掉后重试: {first_error}"
                 )
-                kwargs.pop("reasoning_effort", None)
                 response = await self._with_retry(lambda: self.client.chat.completions.create(**kwargs))
 
             # 防御：兼容异常返回类型（例如 str）
@@ -911,6 +950,7 @@ class OpenAIProvider(BaseLLM):
             if self.max_output_tokens:
                 payload["max_output_tokens"] = int(self.max_output_tokens)
             self._apply_effort(payload, responses_api=True)
+            self._apply_temperature(payload)
             if tools:
                 payload["tools"] = self._convert_tools_schema_for_responses(tools)
             try:
@@ -978,6 +1018,7 @@ class OpenAIProvider(BaseLLM):
         if self.max_output_tokens:
             kwargs["max_tokens"] = int(self.max_output_tokens)
         self._apply_effort(kwargs)
+        self._apply_temperature(kwargs)
 
         # 如果有 tools，转换格式并传入
         if tools:
@@ -1002,6 +1043,7 @@ class OpenAIProvider(BaseLLM):
             ("原始请求", None),
             ("去掉 stream_options", "stream_options"),
             ("去掉 reasoning_effort", "reasoning_effort"),
+            ("去掉 temperature", "temperature"),
         ):
             if strip_key is not None:
                 if strip_key not in kwargs:
@@ -1012,6 +1054,7 @@ class OpenAIProvider(BaseLLM):
                     or "unrecognized" in str(last_stream_error).lower()
                     or "unsupported" in str(last_stream_error).lower()
                     or (strip_key == "reasoning_effort" and self._is_effort_rejection(last_stream_error))
+                    or (strip_key == "temperature" and self._is_temperature_rejection(last_stream_error))
                 )
                 if not implicated:
                     break

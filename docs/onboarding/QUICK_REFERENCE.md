@@ -42,12 +42,13 @@ core/controller.py            NoraController.handle_message()
 | 生图 edit 请求格式 | `config.yml` → `llm.draw_edit_encoding` | `form`(默认，SDK multipart) / `json`(中转站只收 JSON 时)；仅 `draw_api=images` 且带参考图时生效，415 会自动退回 form |
 | 生图提示词写法 | `config.yml` → `llm.draw_prompt_style` | `natural`(默认，句子) / `tags`(标签串)；与接口形态无关，取决于 `draw` 模型 |
 | 推理强度 | `config.yml` → `llm.effort` / `llm.effort_by_alias.*` | `none`/`minimal`/`low`/`medium`/`high`/`xhigh`/`max`/`auto`；按别名覆盖全局。不配置=不传该字段，`auto`=让模型自己决定。档位按**模型**支持，provider 会自动摘字段重试。可用 `/effort` 按钮改 |
+| 采样温度 | `config.yml` → `llm.temperature` / `llm.temperature_by_alias.*` | 浮点；按别名覆盖全局。不配置=不传该字段、用端点默认(~1.0)。取值 OpenAI/Gemini 0~2、Anthropic 0~1。推理模型(o系列/GPT-5)收到会 400，provider 自动摘字段重试；Anthropic 思考态自动不下发 |
 | 消息历史 | `config.yml` → `memory.message_history.*` | `raw_window`, `compress_window` 等 |
 | 成本跟踪 | `config.yml` → `cost_tracking.*` | `enabled`, `custom_prices` |
 | 主动消息调度 | `config.yml` → `schedule.*` | `enabled` |
 | 外部触发器 | `triggers/config.yml` | `enabled`、`default_chat_id`、`email.*` |
 | 工作区路径 | `config.yml` → `workspace.root_path` | 技能/下载/数据的根目录 |
-| CUSTOM 注入范围 | `config.yml` → `custom_injection.scopes` | `fast`/`smart`/`image`/`coder`/`none` |
+| CUSTOM 注入范围 | `config.yml` → `custom_injection.scopes` | `fast`/`smart`/`image`/`coder`/`video`/`none` |
 
 ---
 
@@ -146,7 +147,7 @@ python main.py --no-tui --adapter onebotv11
 # Telegram 指令（运行后在聊天中）
 # /regenerate_proactive [replace|append]
 # /schedule_today
-# /custom_scope （按钮勾选 fast/smart/image/coder，含 none/关闭）
+# /custom_scope （按钮勾选 fast/smart/image/coder/video，含 none/关闭）
 # /effort （按钮为每个已配置的模型别名单独设推理强度：none/minimal/low/medium/high/xhigh/max/auto，或"跟随全局"；写回 config.yml）
 # /debug_cleanup （按钮选择清理范围：Qdrant 记忆、Qdrant 图片、Mongo 图片库、消息镜像库、上下文压缩库、聊天记录，含“全部清空”与取消；二次确认防误触）
 # /undo （撤销上一条前脑发送的消息；删除消息历史与镜像库，若记录了平台 message_id 且平台支持，会尝试删除聊天界面消息）

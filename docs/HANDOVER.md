@@ -1,3 +1,55 @@
+## 近期关键改动（截至 2026-08-27）
+
+### 🎛️ CUSTOM 注入范围新增 `video`（后加的视频模型没被 scope 覆盖）
+
+`/custom_scope` 只有 fast/smart/image/coder，而 `core/back_brain.py` 早已按输入类型切到真正的
+`video` 模型轮（`multimodal_videos and video_llm_available`）。但 CUSTOM 注入范围原来只判
+`"image" if multimodal_images else "smart"/"coder"`，视频轮被并进 smart/coder，
+导致 `video` 这个 scope 根本无从单独开关。
+
+- **`core/back_brain.py`**：模型选择后算出 `media_custom_scope`（video/image，否则 None）；
+  正文轮 `media_custom_scope or "smart"`、工具轮 `media_custom_scope or "coder"`，与实际使用的
+  多模态模型对齐。
+- **`adapters/telegram/callbacks.py`**：按钮键盘 + 回调白名单加 `video`。
+- **`core/message_handler.py`**：文本命令 `/custom_scope` 的 allowed 集合、用法提示、报错提示补上 `video`。
+- **`config.example.yml`**：注释可选值与默认 scopes 列表加 `video`。
+- ⚠️ 现存 config.yml 若仍是老的 `[fast,smart,image,coder]`，视频轮现在不再注入 CUSTOM，
+  需在 `/custom_scope` 里手动勾上 video（空列表=全量注入则不受影响）。
+
+### 🖼️ IMAGE_TAGS 重试加强（“图片输出异常，已自动重试失败”老是没效果）
+
+旧重试只把 `retry_prompt` 发出去，而首轮那份完整的 `image_tags.jinja` 规范只作为首轮
+user_prompt 传入、没进 temp_history——等于用**比首轮更弱**的提示重试，自然没效果；且严格的
+`"," in tags` 校验遇到中文逗号必判失败、反复空转。
+
+- **`core/back_brain.py`**：重试提示重新注入完整 `image_tags.jinja` 规范 + 针对本次失败的强调
+  （每个 ID 三区块成对闭合、必须半角逗号并给示例、每图 ≥8 词、识别不出用占位补全）。
+  另：原重试传的 `temperature=0.55` 其实一直被 `_chat_stream_wrapper` 的 `_filter_kwargs`
+  过滤掉（provider 签名不收该 kwarg），已删除；温度改由下面新增的全局配置统一管辖。
+- 标签解析归一「，」「、」为半角逗号（`_canon_tag_text`），避免合法多标签被判 `bad_comma`
+  触发无谓重试；初解析与重试后解析都归一。
+- 重试后一并 clear + 重解析 `IMAGE_DESC`（原来只重解析 TAGS/OCR，DESC 会残留首轮结果，
+  与“整条重写”语义不符）。
+
+### 🌡️ 新增全局 / 按别名采样温度配置（原来 temperature 根本没接上）
+
+发现：`temperature` 在整个主链路里从没被设置过——三个 provider 的 `chat_stream` 签名都不收这个
+参数，`_chat_stream_wrapper`（`core/controller.py`）的 `_filter_kwargs` 会把任何 provider 不认的
+kwarg 静默丢掉。所以此前无论谁传 `temperature=` 都到不了 API，一律用各家端点默认（~1.0），
+也不存在"项目全局默认温度"。
+
+新增（完全对齐 `effort` / `max_output_tokens` 的既有形态：provider 只拿 alias，自己按 alias 读 config）：
+- **`config.py`**：`get_llm_temperature(alias)`，优先级 `llm.temperature_by_alias[alias] → llm.temperature → None`；非法值按 None。
+- **三个 provider**：`__init__` 读 `self.temperature`，在各自 build payload 处（紧挨 max_tokens）下发：
+  - openai：`_apply_temperature()`，chat / responses 都是顶层 `temperature`；
+  - gemini：`generationConfig.temperature`（REST camel + SDK snake 两条路）；
+  - anthropic：`_apply_temperature()`，**思考态（thinking=enabled / output_config.effort）下不下发**——
+    Anthropic 硬约束此时温度只能为 1，否则 400。
+- **推理模型 400 兜底**（用户选的"自动降级"）：openai 新增 `_is_temperature_rejection()`，
+  chat() 与 chat_stream() 的 strip-retry 把 `temperature` 一并纳入，被拒时摘掉重试一次。
+- **`config.example.yml`**：`llm.temperature` + `llm.temperature_by_alias` 注释块（含各家取值范围与推理模型/思考态的坑）。
+- 默认**不配置** = 行为不变（不发字段、用端点默认）。
+
 ## 近期关键改动（截至 2026-08-17）
 
 ### 🃏 表情包被路由到后脑，前脑没走、后脑没图（修复）

@@ -118,6 +118,21 @@ llm:
   # 输出 token 上限（统一）
   max_output_tokens: 768
 
+  # 采样温度（temperature，可选）
+  #   不配置 = 不传该字段，用各家端点自己的默认（通常 ~1.0）
+  #   取值范围各家不同：OpenAI / Gemini 0~2，Anthropic 0~1（超出会被端点拒）
+  #   越低越确定/稳定，越高越发散；想让输出更稳（如严格格式场景）就调低。
+  # ⚠️ 推理模型（OpenAI o 系列 / GPT-5）只接受默认温度，配了会 400——provider 会
+  #    自动摘掉该字段重试一次；Anthropic 开启思考(effort)时 temperature 只能是 1，
+  #    provider 会在思考态下自动不下发 temperature。
+  # temperature: 0.7
+
+  # 按 alias 单独设置采样温度（优先级高于全局 temperature）
+  # temperature_by_alias:
+  #   smart: 0.7
+  #   coder: 0.3
+  #   image: 0.4
+
   # 生图接口形态（只对 openai 类型 provider 生效；gemini / openrouter 各有自己的固定端点）
   #   images（默认）：/v1/images/generations + /v1/images/edits（OpenAI 官方、gpt-image-1 / dall-e-*）
   #   chat：/v1/chat/completions + modalities: ["text","image"]，图片以 data URI 内嵌在回复里
@@ -212,7 +227,7 @@ memory:
 
 # CUSTOM.md 注入范围（可选）
 # scopes 为空或缺失时表示全量注入。
-# 可选值: fast, smart, image, coder
+# 可选值: fast, smart, image, coder, video
 # 设置为 ["none"] 可关闭全部 CUSTOM 注入
 custom_injection:
   scopes:
@@ -220,6 +235,7 @@ custom_injection:
     - smart
     - image
     - coder
+    - video
 
 # Nora 偏好设置
 nora_preferences:
