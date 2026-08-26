@@ -1198,6 +1198,9 @@ class SchedulerMixin:
         # 标记已在 parse_front_brain_response 里剥掉，这里只记一笔便于排查。
         if str(front_result.get("draw_request", "") or "").strip():
             logger.info(f"[{chat_id}] 主动消息里出现 [DRAW:] 标记，已剥离（主动消息轮不生图）")
+        # 语音标记同理：主动消息轮不合成，只记日志。
+        if str(front_result.get("voice_text", "") or "").strip():
+            logger.info(f"[{chat_id}] 主动消息里出现 [VOICE] 标记，已剥离（主动消息轮不合成语音）")
 
         # 发送前脑回复。闹钟与显式提醒锁定创建时目标；自主消息可选择已知目标，
         # 但进入群聊必须显式使用 typed [scene:group:ID]。

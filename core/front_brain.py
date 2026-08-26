@@ -711,7 +711,7 @@ class FrontBrainMixin:
                 logger.warning(f"[{chat_id}] 前脑 API 异常补救重试失败，保持原流程。", exc_info=True)
         logger.info(
             "[%s] 前脑结果: needs_backend=%s should_reply=%s need_follow=%s "
-            "force_online=%s force_semi_online=%s keep_segment_open=%s draw=%s reply_length=%d",
+            "force_online=%s force_semi_online=%s keep_segment_open=%s draw=%s voice=%s reply_length=%d",
             chat_id,
             parsed["needs_backend"],
             parsed.get("should_reply"),
@@ -720,6 +720,7 @@ class FrontBrainMixin:
             parsed.get("force_semi_online", False),
             parsed.get("keep_segment_open", False),
             bool(parsed.get("draw_request")),
+            bool(parsed.get("voice_text")),
             len(str(parsed.get("user_reply", ""))),
         )
         await self._send_debug(
@@ -731,6 +732,7 @@ class FrontBrainMixin:
             f"keep_segment_open={parsed.get('keep_segment_open')}\n"
             f"retract_message_target={parsed.get('retract_message_target', '')}\n"
             f"生图要求: {str(parsed.get('draw_request', ''))[:120]}\n"
+            f"语音文本: {str(parsed.get('voice_text', ''))[:200]}\n"
             f"回复: {parsed['user_reply'][:200]}"
         )
 
@@ -746,6 +748,7 @@ class FrontBrainMixin:
             "keep_segment_open": parsed.get("keep_segment_open", False),
             "retract_message_target": parsed.get("retract_message_target", ""),
             "draw_request": parsed.get("draw_request", ""),
+            "voice_text": parsed.get("voice_text", ""),
             "route": parsed.get("route"),
             "raw_response": response_text,
         }
