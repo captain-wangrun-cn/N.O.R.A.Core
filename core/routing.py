@@ -80,8 +80,11 @@ _DRAW_PATTERN = re.compile(r"\[DRAW\s*:\s*([^\]]*)\]", re.IGNORECASE)
 # 语音文本里可能带 provider 的方括号情绪标记（如 fish_audio 的 [happy] [break]），
 # 短格式在第一个 `]` 截断会把它们切碎。短格式仅作兜底（模型习惯性输出时也能提取）。
 _VOICE_BLOCK_PATTERN = re.compile(r"\[VOICE\](.*?)\[/VOICE\]", re.IGNORECASE | re.DOTALL)
-_VOICE_SHORT_PATTERN = re.compile(r"\[VOICE\s*:\s*([^\]]*)\]", re.IGNORECASE)
-# 未闭合的裸 VOICE 标记残 token（sanitize 兜底用）
+# ⚠️ 短格式必须**大小写敏感**（只认大写 [VOICE:...]）：小写 [voice: path] 是平台媒体
+# 发送协议（Telegram FILE_PATTERN / OneBot record 段），IGNORECASE 会把它当 TTS 标记
+# 在 sanitize 链路里剥掉，语音文件就永远发不出去（2026-08-27 生产踩过）。
+_VOICE_SHORT_PATTERN = re.compile(r"\[VOICE\s*:\s*([^\]]*)\]")
+# 未闭合的裸 VOICE 标记残 token（sanitize 兜底用）。媒体标签必带冒号，不会被它误伤。
 _VOICE_BARE_PATTERN = re.compile(r"\[/?VOICE\]", re.IGNORECASE)
 
 # ── 路由重定向标记（多平台/多场景）──

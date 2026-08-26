@@ -388,3 +388,23 @@ def test_adapter_output_sanitizer_strips_voice_marker_as_safety_net():
     # 未闭合的裸标记也要清掉
     assert sanitize_adapter_output_text("x[VOICE] 未闭合 y") == "x 未闭合 y"
     assert sanitize_user_visible_text("x[VOICE][happy]hi[/VOICE]y") == "xy"
+
+
+def test_voice_marker_case_sensitivity_vs_media_protocol():
+    """大写 [VOICE:...] 是 TTS 前脑标记；小写 [voice: path] 是平台媒体发送协议，绝不能剥。
+
+    2026-08-27 生产事故：短格式正则带 IGNORECASE，把出站的 [voice: /path/x.oga]
+    媒体标签剥掉 → 文本变空 → 语音静默发不出去。
+    """
+    # 大写短格式：剥离（模型兜底路径）
+    assert sanitize_adapter_output_text("x[VOICE:文本]y") == "xy"
+    # 小写媒体协议：必须原样保留（Telegram FILE_PATTERN / OneBot record 消费它）
+    assert sanitize_adapter_output_text("x[voice: /path/to/a.oga]y") == "x[voice: /path/to/a.oga]y"
+    # 媒体协议大写形式也不剥（File: ... 不是前脑标记；FILE_PATTERN 自己 IGNORECASE）
+    assert sanitize_adapter_output_text("[voice: /a/b.oga]") == "[voice: /a/b.oga]"
+
+    from core.routing import parse_front_brain_response
+    # 小写媒体标签不触发 voice_text 提取
+    r = parse_front_brain_response("[voice: /path/a.oga]")
+    assert r["voice_text"] == ""
+    assert r["user_reply"] == "[voice: /path/a.oga]"

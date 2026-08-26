@@ -110,6 +110,26 @@
 - 测试建议：仿 `tests/test_tts.py` 的 `test_controller_has_voice_gen_tasks_wired`，
   用源码级断言（`inspect.getsource` 查 return dict 含字段名）锁住透传，不用拉起完整链路。
 
+### ❌ 前脑标记与平台媒体协议撞名：IGNORECASE 剥掉了出站媒体标签，语音静默发不出
+
+现象（2026-08-27 生产）：日志完整走完 `语音合成完成，已落盘` → `消息控制标记` →
+`语音已追发给用户`，但 Telegram 侧什么都没到。真因：`_VOICE_SHORT_PATTERN` 带
+`re.IGNORECASE`，把出站媒体标签小写 `[voice: /path/x.oga]` 也当成 TTS 前脑标记
+在 `sanitize_adapter_output_text()` 里剥掉 → `_send_platform_message` 里文本变空 →
+`if not text: return []` **静默返回**，调用方却照常打"已追发"。
+
+- **命名空间规则**：大写 `[VOICE]...[/VOICE]` / `[DRAW:...]` 等是**前脑标记**（进站方向，
+  模型输出）；小写 `[voice: path]` / `[image: path]` 是**平台媒体发送协议**（出站方向，
+  adapter 消费）。两者同名不同大小写时，剥离正则**绝不能 IGNORECASE**——
+  `_VOICE_SHORT_PATTERN` 现在是大小写敏感的（块格式无碰撞不受影响）。
+- **新增前脑标记前先 grep 平台协议**：查 `adapters/*/constants.py` 的
+  `FILE_PATTERN` / `_MEDIA_TAG_PATTERN`，确认新标记名（含大小写变体）不与媒体
+  标签撞名；撞了就换名或收紧大小写。
+- **`if not text: return []` 是静默点**：`_send_platform_message` 对空文本直接返回，
+  调用方无感知。排查"发了但没收到"时，先在 sanitize 之后 log 一次文本内容确认没被剥空。
+- 测试锁：`tests/test_routing.py::test_voice_marker_case_sensitivity_vs_media_protocol`
+  断言小写媒体标签原样保留、不触发 `voice_text` 提取。
+
 ---
 
 ## 5. Telegram 适配
