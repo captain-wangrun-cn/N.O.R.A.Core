@@ -105,8 +105,12 @@ class SpeechGenMixin:
             provider = build_tts_provider()
 
             logger.info(
-                "[%s] 语音合成开始: provider=%s text=%s",
-                runtime_key, provider.name, voice_text[:80].replace("\n", " "),
+                "[%s] 检测到 [VOICE] 标记，语音文本: %s",
+                runtime_key, voice_text.replace("\n", " "),
+            )
+            logger.info(
+                "[%s] 语音合成开始: provider=%s",
+                runtime_key, provider.name,
             )
             result = await provider.synthesize(voice_text)
             audio_bytes = (result or {}).get("bytes")
