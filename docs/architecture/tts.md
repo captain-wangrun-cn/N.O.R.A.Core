@@ -107,6 +107,35 @@ body: text / reference_id / format(opus|mp3|wav|pcm) / mp3_bitrate /
   `/stop` 与 `shutdown()` 单独 cancel（旁路任务不在 generation_tasks 里）。
 - 失败只记日志，不向用户追发任何文本（对齐 `[DRAW:]` 约定）。
 
+## RTC 实时通话复用：open_live_session + voice_source=tts
+
+TTS provider 不只服务 `[VOICE]` 单句合成——RTC 通话可以把 Nora 的台词也交给它
+（自定义音色），链路与单句合成完全不同（`rtc/tts_downlink.py`）：
+
+```text
+Live 模型 outputAudioTranscription 转写增量（native audio 模型只出音频不出文本）
+  ↓ rtc/server.py _on_transcript（who == assistant）
+TtsDownlink.feed_transcript(text)
+  ↓ provider.open_live_session(on_audio)（流式会话，tts/base.py 约定）
+feed_text 增量喂 → provider 边收边合成 → on_audio(bytes) 即时回调
+  ↓ on_audio = server 的 ws.send_bytes
+前端 PCM16/24k 播放管线（与 Live 原生音频同规格，零改动）
+```
+
+- 配置：`rtc/config.json` 的 `voice_source: "tts"`（默认 `"live"` 用 Live 模型
+  30 个预置音色，零依赖低延迟）。
+- **回落**：provider 未配置 / 未实现 `open_live_session`（返回 None）/ 建连失败
+  → 该通话回落 Live 内置音色，日志说明原因。**不回落逐句 `synthesize()`**——
+  产物带容器（.oga/.mp3）且采样率不定，前端 PCM 管线吃不了，逐句延迟也太差。
+- 流式会话约定（四方法 duck typing，见 `tts/base.py` 的 `BaseTTSLiveSession`）：
+  `feed_text` / `flush` / `end_turn` / `close` 全 async；`on_audio` 回调
+  **PCM16 little-endian 单声道 24kHz 裸块**，异常自吞。
+- provider 的 `get_text_guidance()` 在此模式下同样生效：`rtc/prompt.py` 的
+  `build_system_instruction(voice_source="tts")` 会把标记指南注入通话提示词
+  （通话中也能用情绪标记/音素标记）。
+- 内置实现：`tts/fish_audio/provider.py` 的 `_FishLiveSession`（WebSocket
+  `wss://api.fish.audio/v1/tts/live`，MessagePack 协议，msgpack 依赖为此引入）。
+
 ## 配置
 
 ```yaml
@@ -126,9 +155,11 @@ CLI：`python cli.py configure` → 单项「🎤 语音合成 TTS」或向导�
 | 触发块 | `core/message_handler.py`（3.10，紧随 DRAW 块） |
 | 合成 Mixin | `core/speech_gen.py` |
 | provider 基类/注册表/配置 | `tts/base.py` / `tts/registry.py` / `tts/config_utils.py` |
-| 内置 provider | `tts/fish_audio/provider.py` |
+| 内置 provider | `tts/fish_audio/provider.py`（含 `_FishLiveSession` 流式会话） |
+| RTC 下行复用 | `rtc/tts_downlink.py`（voice_source=tts 的桥接与回落） |
 | 编写文档 | `tts/TTS_GUIDE.md` |
 | 前脑提示词 | `brain/templates/front_brain.jinja`（`{% if tts_enabled %}`） |
+| 通话提示词注入 | `rtc/prompt.py`（`build_system_instruction` 的 voice_source 分支） |
 | Telegram 语音条 | `adapters/telegram/constants.py`（FILE_PATTERN 含 voice）+ `sender.py` send_voice |
 | OneBot record 段 | `adapters/onebotv11/sender.py`（原本已支持） |
-| 测试 | `tests/test_tts.py`、`tests/test_routing.py`（VOICE 用例）、`tests/test_front_brain_prompt.py` |
+| 测试 | `tests/test_tts.py`、`tests/test_routing.py`（VOICE 用例）、`tests/test_front_brain_prompt.py`、`tests/test_rtc_tts_downlink.py` |

@@ -231,6 +231,10 @@ flowchart TB
 
 - **[Adapter 系统](./adapter-system.md)**
   - 轻量 Adapter/Event/Message 分层、metadata 清单、通用/平台 prompt 分层与 Telegram 拆分示例。
+- **[实时通话 (RTC)](./rtc.md)** — P2 已实现，真机验收进行中
+  - Gemini Live API 服务端桥接（浏览器 → rtc bridge → Google WS）、TG Mini App 无状态前端、
+    连接轮换/resumption、双轨认证（initData + token）、双端发起（/rtc 命令 + [RTC] 前脑标记邀请）、
+    短时视频输入、转写回写、TTS provider 流式音色（voice_source=tts）与分期计划。
 
 ### 🛡️ 监控与运维 (Ops & Monitoring)
 

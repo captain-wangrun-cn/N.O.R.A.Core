@@ -1,0 +1,22 @@
+{
+  "enabled": false,
+  "listen": {
+    "host": "127.0.0.1",
+    "port": 8085
+  },
+  "public_url": "",
+  "model": "gemini-3.1-flash-live-preview",
+  "voice_name": "Kore",
+  "voice_source": "live",
+  "max_call_duration_seconds": 1800,
+  "invitation_ttl_seconds": 300,
+  "tools_whitelist": [
+    "search",
+    "set_alarm",
+    "list_alarms",
+    "cancel_alarm"
+  ],
+  "proxy": "",
+  "api_key": "",
+  "static_token": ""
+}

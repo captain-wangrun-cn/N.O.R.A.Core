@@ -131,6 +131,27 @@ def create_adapters(adapter_name: str = "auto") -> list:
     return [_instantiate_adapter(n) for n in resolve_adapter_names(adapter_name)]
 
 
+async def _maybe_start_rtc(controller):
+    """rtc/config.json enabled 时随主进程启动 RTC 桥接服务器（同一 loop）。
+
+    独立 task：RTC 服务器自身常驻，不阻塞 adapter 的 gather。
+    controller.shutdown() 里的 rtc_server.stop() 负责收链。
+    """
+    try:
+        from rtc import config_utils
+        from rtc.server import RTCServer
+
+        cfg = config_utils.load_config()
+        if not cfg.get("enabled"):
+            return
+        server = RTCServer(cfg)
+        await server.start()  # start 内部已判 enabled，这里 cfg 直传避免二次读盘
+        controller.rtc_server = server
+        logging.getLogger(__name__).info("RTC 桥接服务器已随主进程启动")
+    except Exception as e:  # noqa: BLE001 - RTC 启动失败不阻断主流程
+        logging.getLogger(__name__).error(f"RTC 服务器启动失败: {e}")
+
+
 async def _run_adapters_async(controller, adapters: list):
     """在单个事件循环中并发运行所有适配器，on_ready 服务只启动一次。"""
     services_started = {"done": False}
@@ -143,6 +164,7 @@ async def _run_adapters_async(controller, adapters: list):
             services_started["done"] = True
             controller.start_scheduler()
             await controller.start_triggers()
+            await _maybe_start_rtc(controller)
 
     # 每个 adapter 就绪后尝试启动一次公共服务（scheduler/triggers）。
     for adapter in adapters:

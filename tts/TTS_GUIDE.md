@@ -56,12 +56,47 @@ class Provider(BaseTTSProvider):
 - 你的上游支持什么特殊标记（情绪、停顿、拟声、SSML……）与写法示例
 - 注意事项（每句标记数上限、标记不会被念出等）
 
-参考 `tts/fish_audio/provider.py` 的实现（S2 系模型的方括号情绪标记速查）。无特殊语法就返回空串。
+参考 `tts/fish_audio/provider.py` 的实现（S2 系模型的方括号情绪标记速查 +
+中/英/日 `<|phoneme_start|>` 音素标记控制指定词语发音）。无特殊语法就返回空串。
+RTC 通话 `voice_source: "tts"` 时，这份指南同样会注入 Live 通话提示词
+（`rtc/prompt.py` 的 `build_system_instruction`）。
 
 ### 可选
 
 - `health_check() -> str`：启动自检，返回问题描述；空串健康。
 - 构造函数里抛 `ValueError` 表示配置缺失/非法（registry 会把它透传给调用方）。
+
+### 可选：open_live_session(on_audio) —— 给 RTC 实时通话提供流式语音
+
+RTC 语音通话支持 `voice_source: "tts"`（rtc/config.json）：Nora 的台词不走 Live 模型
+内置音色，而是喂给你的 provider 合成。台词来源是 Live 的实时转写**增量碎片**
+（一个词一个词到），所以标准 `synthesize()`（整句一次合成）延迟太高——流式接口
+让你边收文本边出声：
+
+```python
+def open_live_session(self, on_audio):
+    """返回一个 live 会话对象；不实现（或返回 None）= 该 provider 不支持
+    RTC 语音（通话自动回落 Live 内置音色，不影响 [VOICE] 单句合成）。"""
+    return MyLiveSession(on_audio)
+```
+
+会话对象只需满足四个 async 方法（duck typing，不要求继承任何基类；
+约定文档见 `tts/base.py` 的 `BaseTTSLiveSession`）：
+
+| 方法 | 语义 |
+|---|---|
+| `feed_text(text)` | 增量喂转写碎片（应尽快进入合成管线） |
+| `flush()` | 提示"到这里先出声"（句子边界；实现可忽略） |
+| `end_turn()` | 本轮台词结束（收尾剩余缓冲全部合成完） |
+| `close()` | 通话结束释放资源（幂等） |
+
+**音频回调约定**：`on_audio(bytes)` 接收 **PCM16 little-endian 单声道 24kHz** 裸块
+（与 Google Live 音频同规格，前端播放管线零改动直接播）。回调随时可能被调用，
+实现方保证异常自吞（打日志），不要抛给调用方。
+
+参考实现：`tts/fish_audio/provider.py` 的 `_FishLiveSession`（Fish Audio
+WebSocket TTS live 端点，MessagePack 协议，首字延迟几百毫秒）。具体怎么做——
+WebSocket 流式、逐句拼接、本地模型推流——由你决定，满足语义即可。
 
 ## 3. 配置约定
 
@@ -97,3 +132,4 @@ tts:
 - [ ] `get_text_guidance` 里的示例不会包含 `[VOICE]` / `[/VOICE]` 字样（会被当成真标记剥离）。
 - [ ] config.example.json 入库、config.json 已被 gitignore。
 - [ ] 网络调用走 aiohttp（异步），超时有上限；需要代理时用 `trust_env=True` 或读 cfg 里的 proxy。
+- [ ] （若实现 open_live_session）音频回调输出 PCM16/24k/单声道裸块；四个方法全部 async 且异常自吞；close 幂等。

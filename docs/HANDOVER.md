@@ -1,4 +1,37 @@
-## 近期关键改动（截至 2026-08-27）
+## 近期关键改动（截至 2026-08-29）
+
+### 📞 RTC 实时通话子系统（Gemini Live 桥接，P0-P2 落地）
+
+Telegram 里和 Nora 实时语音通话（`/rtc` 命令或菜单按钮）：她带人设带记忆接听，实时转写
+字幕、插话打断、短时开摄像头（1FPS 关键帧）让她看画面，通话结束总结回写记忆。设计文档
+`docs/architecture/rtc.md`（Live API 全部协议坑都在那，改前必读）。
+
+- **`rtc/` 子系统（新）**：`server.py`（aiohttp WS 桥接 + 静态托管，嵌主进程或独立跑）
+  / `live_client.py`（Google Live WS 封装，连接轮换 + resumption）/ `auth.py`（双轨：
+  initData HMAC + 静态 token，owner-only）/ `session.py`（状态机 + 时长硬上限 + 单并发）
+  / `prompt.py`（精简身份 + 最近对话段 + TTS 标记指南组装 systemInstruction）
+  / `history_writer.py` + `recorder.py`（通话总结回写：转写 + 视频段关键帧每 5 张一批
+  送 image 模型 → fast 总总结 → message_history + 镜像库）/ `invitation.py`（TTL/冷却）
+  / `tts_downlink.py`（voice_source=tts 的流式音色桥接）。
+- **`rtc/web/index.html`**：无状态瘦前端（原生 JS + AudioWorklet），底部固定控制条
+  （静音/摄像头/前后切换/挂断——挂断是唯一实心红钮，永远在屏内）；中央托管镜像
+  同步部署 Vercel（rtc.nora.wris.me）。
+- **语音来源双轨**：`voice_source: "live"`（Live 模型内置音色）| `"tts"`（Nora 台词走
+  TTS provider 流式合成，自定义音色）。tts 模式经 `open_live_session(on_audio)` 四方法
+  约定（`tts/base.py`）喂转写增量、回调 PCM16/24k 裸块；provider 未实现/失败回落 Live
+  音色（**不回落逐句 synthesize**——容器音频前端吃不了）。fish_audio 已实现
+  （`_FishLiveSession`，WebSocket + MessagePack，为此引入 `msgpack` 依赖）。
+- **fish_audio 音素发音标记**：`get_text_guidance()` 增 `<|phoneme_start|>发音<|phoneme_end|>`
+  写法（中：拼音+声调一字一对；英：CMU Arpabet；日：OpenJTalk 罗马音+音高），多音字/易错
+  名字可控发音；文字聊天（前脑 `[VOICE]`）与 RTC 通话（`build_system_instruction`）两条
+  路都会注入这份指南。
+- **配置**：`rtc/config.json`（adapter 私有配置约定，gitignore）；`static_token` 留空时
+  首启随机生成写回（真 token 永不进仓库）；`max_call_duration_seconds` 语音/视频共用
+  （旧字段 `max_call_seconds` 兼容读取自动迁移）。
+- **测试**：`tests/test_rtc_*.py` 共 92 个（server 握手/鉴权/会话/邀请/配置/提示词/
+  回写/录制/tts_downlink），`tests/conftest.py`（anyio backend 固定 asyncio）。
+- 未做（P3/P4）：通话中工具桥（tools_bridge）、Nora 主动邀约（`[RTC:]` 前脑标记）、
+  通话独占的消息拦截、cost_tracker 入账。
 
 ### 🎤 TTS 语音合成子系统（[VOICE] 标记 + Fish Audio + 可扩展 provider）
 

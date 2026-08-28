@@ -50,6 +50,7 @@ core/controller.py            NoraController.handle_message()
 | 工作区路径 | `config.yml` → `workspace.root_path` | 技能/下载/数据的根目录 |
 | CUSTOM 注入范围 | `config.yml` → `custom_injection.scopes` | `fast`/`smart`/`image`/`coder`/`video`/`none` |
 | 语音合成 | `config.yml` → `tts.provider` | = `tts/` 下文件夹名（内置 `fish_audio`）；连接参数在该文件夹 `config.json`；配置后前脑才有 `[VOICE]` 标记 |
+| 实时通话 | `rtc/config.json` | `enabled` 总开关（默认关）；`public_url`/`listen`/`api_key`(留空回落全局 gemini)/`voice_source`(live内置音色\|tts走provider)/`max_call_duration_seconds`/`static_token`(留空首启随机生成)；架构见 `docs/architecture/rtc.md` |
 
 ---
 

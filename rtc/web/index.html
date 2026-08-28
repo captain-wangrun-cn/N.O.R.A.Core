@@ -1,0 +1,600 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no, viewport-fit=cover">
+<title>和 Nora 通话</title>
+<style>
+    :root {
+        --bg: #0f0f11;
+        --line: #26262b;
+        --fg: #ededef;
+        --fg-dim: #6e6e77;
+        --danger: #e5484d;
+        --warn: #f5a524;
+        --ok: #46a758;
+    }
+    * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+    html, body { margin: 0; padding: 0; height: 100%; }
+    body {
+        font-family: -apple-system, "system-ui", "PingFang SC", "Microsoft YaHei", sans-serif;
+        background: var(--bg);
+        color: var(--fg);
+        height: 100dvh;
+        max-width: 520px; margin: 0 auto;
+        display: flex; flex-direction: column;
+        overflow: hidden;
+    }
+
+    /* ---------- 头部：状态一览（固定） ---------- */
+    header {
+        flex: 0 0 auto;
+        padding: max(18px, env(safe-area-inset-top)) 20px 14px;
+    }
+    header h1 { font-size: 13px; font-weight: 600; margin: 0; letter-spacing: 3px; }
+    #who { color: var(--fg-dim); font-size: 12px; margin-top: 5px; min-height: 15px; }
+    #who .dot { display: inline-block; width: 6px; height: 6px; border-radius: 50%;
+                background: var(--fg-dim); margin-right: 6px; vertical-align: 1px; }
+    #who.live .dot { background: var(--ok); }
+
+    /* ---------- 视频区 ---------- */
+    #videoCard {
+        position: relative; display: none;
+        flex: 0 0 auto;
+        border-radius: 12px; overflow: hidden;
+        background: #000;
+        margin: 0 20px 8px;
+        aspect-ratio: 4 / 3;
+    }
+    #videoCard.on { display: block; }
+    #videoPreview { width: 100%; height: 100%; object-fit: cover; display: block; }
+    #videoCard.front #videoPreview { transform: scaleX(-1); }
+    #videoBadge {
+        position: absolute; left: 10px; top: 10px;
+        background: rgba(0,0,0,.5);
+        color: #fff; font-size: 10.5px; padding: 3px 9px; border-radius: 99px;
+        letter-spacing: 1px;
+    }
+
+    /* ---------- 字幕：对话流（占满剩余空间，唯一滚动区） ---------- */
+    #subtitle {
+        flex: 1; min-height: 0; overflow-y: auto;
+        display: flex; flex-direction: column; gap: 14px;
+        padding: 6px 20px;
+        line-height: 1.8; font-size: 15px;
+        -webkit-overflow-scrolling: touch;
+    }
+    #subtitle:empty::after {
+        content: "字幕将在这里出现";
+        color: var(--fg-dim); font-size: 12px; margin: auto; letter-spacing: 1px;
+    }
+    .bubble { max-width: 86%; animation: fadein .2s ease; }
+    @keyframes fadein { from { opacity: 0; } to { opacity: 1; } }
+    .user { align-self: flex-end; color: #9db8e8; text-align: right; }
+    .assistant { align-self: flex-start; color: var(--fg); }
+    .sys { align-self: center; color: var(--fg-dim); font-size: 12px; }
+
+    /* ---------- 状态行（字幕与控制条之间） ---------- */
+    #statusRow { display: flex; align-items: center; gap: 10px;
+                 flex: 0 0 auto; padding: 10px 20px 0; }
+    #meter { flex: 1; height: 3px; background: var(--line); border-radius: 2px; overflow: hidden; }
+    #meterFill { height: 100%; width: 0%; background: var(--ok);
+                 border-radius: 2px; transition: width .12s; }
+    #status { color: var(--fg-dim); font-size: 12px; font-variant-numeric: tabular-nums;
+              max-width: 72%; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    #status.err { color: var(--danger); }
+
+    /* ---------- 控制条：固定底部（挂断永远在屏内） ---------- */
+    #controls {
+        flex: 0 0 auto;
+        display: none;              /* 通话开始才出现 */
+        gap: 26px;
+        justify-content: center;
+        align-items: center;
+        padding: 12px 20px max(16px, env(safe-area-inset-bottom));
+    }
+    #controls.on { display: flex; }
+
+    .ctl {
+        width: 56px; height: 56px; border-radius: 50%;
+        border: 1px solid var(--line); background: transparent;
+        color: var(--fg); cursor: pointer; padding: 0;
+        display: flex; align-items: center; justify-content: center;
+        transition: background .15s, border-color .15s, transform .08s;
+    }
+    .ctl:active { transform: scale(.92); }
+    .ctl svg { width: 22px; height: 22px; fill: none; stroke: currentColor;
+               stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
+    .ctl.on { border-color: var(--fg); background: var(--line); }
+    .ctl.on.svg-mute { border-color: var(--warn); color: var(--warn); }
+
+    /* 挂断：全页唯一实心色按钮——无边框对照组里一眼锁定 */
+    #hangup {
+        width: 64px; height: 64px;
+        border: none; background: var(--danger); color: #fff;
+    }
+    #hangup:active { transform: scale(.92); }
+
+    /* 通话前的开始按钮（控制条出现前的唯一入口） */
+    #startRow { flex: 0 0 auto; padding: 14px 20px max(22px, env(safe-area-inset-bottom)); }
+    #start {
+        width: 100%; padding: 15px; border-radius: 14px; cursor: pointer;
+        border: 1px solid var(--fg-dim); background: transparent;
+        color: var(--fg); font-size: 15px; font-weight: 500; letter-spacing: 2px;
+        transition: background .15s, transform .08s;
+    }
+    #start:not(:disabled):active { background: var(--line); transform: scale(.98); }
+    #start:disabled { opacity: .35; }
+
+    #hint { color: var(--fg-dim); font-size: 11px; margin: 0;
+            line-height: 1.8; text-align: center; display: none;
+            padding: 0 30px max(10px, env(safe-area-inset-bottom)); }
+</style>
+</head>
+<body>
+<header>
+    <h1>NORA</h1>
+    <div id="who"><span class="dot"></span><span id="whoText">准备中…</span></div>
+</header>
+
+<div id="videoCard">
+    <video id="videoPreview" autoplay playsinline muted></video>
+    <div id="videoBadge">后置 · 1 FPS</div>
+</div>
+
+<div id="subtitle"></div>
+
+<div id="statusRow">
+    <div id="meter"><div id="meterFill"></div></div>
+    <div id="status">未连接</div>
+</div>
+
+<!-- 通话中的控制条：静音 / 摄像头 / 翻转 / 挂断（唯一实心红钮） -->
+<div id="controls">
+    <button id="muteBtn" class="ctl svg-mute" title="静音" aria-label="静音">
+        <svg viewBox="0 0 24 24"><path d="M12 3a3 3 0 0 1 3 3v6a3 3 0 0 1-6 0V6a3 3 0 0 1 3-3z"/><path class="wave" d="M5 11a7 7 0 0 0 14 0"/><line x1="4" y1="4" x2="20" y2="20"/></svg>
+    </button>
+    <button id="camBtn" class="ctl" title="摄像头" aria-label="让 Nora 看看">
+        <svg viewBox="0 0 24 24"><rect x="3" y="7" width="13" height="10" rx="2"/><path d="M16 11l5-3v8l-5-3z"/></svg>
+    </button>
+    <button id="flipBtn" class="ctl" title="切换前后摄像头" aria-label="切换摄像头">
+        <svg viewBox="0 0 24 24"><path d="M4 9a8 8 0 0 1 14-2"/><polyline points="18 3 18 7 14 7"/><path d="M20 15a8 8 0 0 1-14 2"/><polyline points="6 21 6 17 10 17"/></svg>
+    </button>
+    <button id="hangup" class="ctl" title="挂断" aria-label="挂断">
+        <svg viewBox="0 0 24 24" style="transform: rotate(135deg); width: 26px; height: 26px;"><path d="M5 4h4l2 5-2.5 1.5a12 12 0 0 0 5 5L15 13l5 2v4a2 2 0 0 1-2 2A16 16 0 0 1 3 6a2 2 0 0 1 2-2z"/></svg>
+    </button>
+</div>
+
+<!-- 通话前 -->
+<div id="startRow">
+    <button id="start">开始通话</button>
+</div>
+<div id="hint">通话中 Nora 只说语音 · 字幕来自实时转写可能略滞后 · 随时插话可以打断她</div>
+
+<script src="https://telegram.org/js/telegram-web-app.js"></script>
+<script>
+'use strict';
+const statusEl = document.getElementById('status');
+const subtitleEl = document.getElementById('subtitle');
+const meterFill = document.getElementById('meterFill');
+const whoEl = document.getElementById('who');
+const whoText = document.getElementById('whoText');
+const startBtn = document.getElementById('start');
+const controlsEl = document.getElementById('controls');
+const startRowEl = document.getElementById('startRow');
+const muteBtn = document.getElementById('muteBtn');
+const hangupBtn = document.getElementById('hangup');
+const hintEl = document.getElementById('hint');
+const videoCard = document.getElementById('videoCard');
+const camBtn = document.getElementById('camBtn');
+const flipBtn = document.getElementById('flipBtn');
+const videoPreview = document.getElementById('videoPreview');
+const videoBadge = document.getElementById('videoBadge');
+
+let ws = null, audioCtx = null, workletNode = null, micStream = null;
+let playbackCtx = null, nextPlayTime = 0;
+let micWatchdog = null, lastUpBytes = 0, durationTimer = null;
+let muted = false, callActive = false, startAborted = false, meterTimer = null;
+let camStream = null, videoTimer = null, camFacing = 'environment';
+
+// ---- Telegram WebApp 环境 ----
+const tg = window.Telegram && window.Telegram.WebApp;
+if (tg) {
+    try { tg.expand(); tg.ready(); } catch (e) {}
+    if (tg.themeParams && tg.themeParams.bg_color) {
+        document.documentElement.style.setProperty('--bg', tg.themeParams.bg_color);
+        document.documentElement.style.setProperty('--fg', tg.themeParams.text_color || '#eceef4');
+        document.documentElement.style.setProperty('--line', tg.themeParams.secondary_bg_color || '#26262b');
+    }
+}
+const initData = tg ? (tg.initData || '') : '';
+if (initData) setWho('Telegram 已验证', false);
+else { setWho('浏览器模式（需要访问令牌）', false); hintEl.style.display = 'block'; }
+
+function setWho(text, live) {
+    whoText.textContent = text;
+    whoEl.classList.toggle('live', !!live);
+}
+function setStatus(s, isErr) {
+    statusEl.textContent = s;
+    statusEl.classList.toggle('err', !!isErr);
+    console.log('[rtc]', s);
+}
+
+// ---- 字幕按 turn 聚合 ----
+// Live 的转写是增量文本块（一个词一个词到），逐块显示会碎片化。
+// 聚合策略：每个 who 维护"进行中"的气泡，增量追加进去；
+// interrupted / turn 边界时封口（下次该 who 的增量开新气泡）。
+const activeBubble = {}; // who -> {el, text}
+function appendTranscript(who, text) {
+    let b = activeBubble[who];
+    if (!b) {
+        const el = document.createElement('div');
+        el.className = 'bubble ' + who;
+        subtitleEl.appendChild(el);
+        b = activeBubble[who] = { el, text: '' };
+    }
+    b.text += text;
+    b.el.textContent = b.text;
+    while (subtitleEl.children.length > 60) subtitleEl.removeChild(subtitleEl.firstChild);
+    subtitleEl.scrollTop = subtitleEl.scrollHeight;
+}
+function sealAllTranscripts() {
+    delete activeBubble.user;
+    delete activeBubble.assistant;
+}
+function addSysLine(text) {
+    const el = document.createElement('div');
+    el.className = 'sys';
+    el.textContent = text;
+    subtitleEl.appendChild(el);
+    while (subtitleEl.children.length > 60) subtitleEl.removeChild(subtitleEl.firstChild);
+    subtitleEl.scrollTop = subtitleEl.scrollHeight;
+}
+
+// 播放队列（24k PCM16 → context 采样率线性插值）；interrupted 时清空
+const pendingNodes = [];
+function clearPlayback() {
+    pendingNodes.forEach(n => { try { n.stop(); } catch (e) {} });
+    pendingNodes.length = 0;
+    nextPlayTime = 0;
+}
+function playPcm(int16) {
+    if (!playbackCtx || playbackCtx.state !== 'running') return;
+    const srcRate = 24000, dstRate = playbackCtx.sampleRate;
+    const outLen = Math.round(int16.length * dstRate / srcRate);
+    const f32 = new Float32Array(outLen);
+    for (let i = 0; i < outLen; i++) {
+        const pos = i * srcRate / dstRate;
+        const i0 = Math.floor(pos), i1 = Math.min(i0 + 1, int16.length - 1);
+        const t = pos - i0;
+        f32[i] = (int16[i0] / 32768) * (1 - t) + (int16[i1] / 32768) * t;
+    }
+    const buffer = playbackCtx.createBuffer(1, outLen, dstRate);
+    buffer.copyToChannel(f32, 0);
+    const node = playbackCtx.createBufferSource();
+    node.buffer = buffer;
+    node.connect(playbackCtx.destination);
+    const now = playbackCtx.currentTime;
+    if (nextPlayTime < now + 0.05) nextPlayTime = now + 0.05;
+    node.start(nextPlayTime);
+    nextPlayTime += buffer.duration;
+    pendingNodes.push(node);
+    node.onended = () => {
+        const i = pendingNodes.indexOf(node);
+        if (i >= 0) pendingNodes.splice(i, 1);
+        if (nextPlayTime - playbackCtx.currentTime < 0.05) nextPlayTime = playbackCtx.currentTime;
+    };
+}
+
+function sendControl(action) {
+    if (ws && ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ action }));
+}
+
+// ---- 摄像头 ----
+const frameCanvas = document.createElement('canvas');
+frameCanvas.width = 640; frameCanvas.height = 480;
+const frameCtx = frameCanvas.getContext('2d');
+
+async function toggleCam() {
+    if (camStream) { stopCam(); return; }
+    await startCam();
+}
+
+async function startCam() {
+    stopCamTracks(); // 切换前后时先停旧流
+    try {
+        // Telegram Mini App 不自动弹摄像头权限（麦克风会弹）：先走官方 API 申请
+        if (tg && typeof tg.requestVideoAccess === 'function') {
+            try { await tg.requestVideoAccess(); } catch (e) { console.warn('[rtc] requestVideoAccess:', e); }
+        }
+        camStream = await navigator.mediaDevices.getUserMedia({
+            video: { width: 640, height: 480, facingMode: { ideal: camFacing } }
+        });
+        videoPreview.srcObject = camStream;
+        videoCard.classList.add('on');
+        videoCard.classList.toggle('front', camFacing === 'user');
+        videoBadge.textContent = (camFacing === 'user' ? '前置' : '后置') + ' · 1 FPS';
+        camBtn.classList.add('on');
+        addSysLine('（摄像头已开，Nora 能看到画面）');
+        // 通知后端开始录制视频段（封段时送 image 模型做画面总结）
+        if (ws && ws.readyState === WebSocket.OPEN) {
+            ws.send(JSON.stringify({ type: 'video_on' }));
+        }
+        // Android TG WebView 的 video 不会因 autoplay+muted 自动渲染，
+        // 必须 await play()；play() 被拒时循环重试（画面黑 = drawImage 画黑帧）
+        try { await videoPreview.play(); } catch (e) { console.warn('[rtc] play():', e); }
+        const kick = () => {
+            if (!camStream) return;
+            if (!videoPreview.videoWidth) {
+                videoPreview.play().catch(() => {});
+                setTimeout(kick, 500);
+            }
+        };
+        setTimeout(kick, 300);
+        if (!videoTimer) videoTimer = setInterval(sendVideoFrame, 1000);
+        setTimeout(() => {
+            if (camStream && !videoPreview.videoWidth) {
+                setStatus('⚠️ 摄像头开了但无画面，请重启通话再试', true);
+            }
+        }, 5000);
+    } catch (err) {
+        const name = err && err.name ? err.name : '';
+        let tip = '';
+        if (name === 'NotAllowedError') tip = '（Telegram 设置里未允许摄像头，或 BotFather 应用配置未开视频）';
+        else if (name === 'NotFoundError') tip = '（没找到可用的摄像头）';
+        setStatus('摄像头失败: ' + err.message + tip, true);
+        addSysLine('（摄像头打开失败' + (tip ? '——' + tip : '') + '）');
+        camStream = null;
+    }
+}
+
+async function flipCam() {
+    camFacing = (camFacing === 'environment') ? 'user' : 'environment';
+    if (camStream) await startCam(); // 摄像头开着：直接重开新朝向的流
+    else videoBadge.textContent = (camFacing === 'user' ? '前置' : '后置') + ' · 1 FPS';
+}
+
+function stopCamTracks() {
+    if (camStream) { camStream.getTracks().forEach(t => t.stop()); camStream = null; }
+}
+
+function stopCam() {
+    if (videoTimer) { clearInterval(videoTimer); videoTimer = null; }
+    stopCamTracks();
+    if (ws && ws.readyState === WebSocket.OPEN) {
+        ws.send(JSON.stringify({ type: 'video_off' }));  // 后端封段
+    }
+    videoCard.classList.remove('on');
+    camBtn.classList.remove('on');
+    addSysLine('（摄像头已关）');
+}
+
+function sendVideoFrame() {
+    if (!camStream || !videoPreview.videoWidth) return;
+    frameCtx.drawImage(videoPreview, 0, 0, frameCanvas.width, frameCanvas.height);
+    frameCanvas.toBlob(blob => {
+        if (!blob) return;
+        const reader = new FileReader();
+        reader.onloadend = () => {
+            const b64 = reader.result.split(',')[1];
+            if (ws && ws.readyState === WebSocket.OPEN) {
+                ws.send(JSON.stringify({ type: 'video_frame', data: b64 }));
+            }
+        };
+        reader.readAsDataURL(blob);
+    }, 'image/jpeg', 0.6);
+}
+
+// ---- 开始通话 ----
+async function start() {
+    startBtn.disabled = true;
+    startAborted = false;
+    let phase = 'init';
+    const aborted = () => startAborted;
+    try {
+        audioCtx = new AudioContext();
+        playbackCtx = new AudioContext();
+
+        setStatus('请求麦克风…');
+        phase = 'getUserMedia';
+        micStream = await navigator.mediaDevices.getUserMedia({
+            audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true }
+        });
+        if (aborted()) return;
+
+        phase = 'ws';
+        const params = new URLSearchParams(location.search);
+        const backend = params.get('backend') || location.origin;
+        const token = params.get('token') || '';
+        const wsUrl = backend.replace(/\/$/, '') +
+            (params.get('backend') ? '/rtc/ws' : location.pathname.replace(/[^/]*$/, '') + 'ws');
+        ws = new WebSocket(wsUrl.startsWith('https') ? wsUrl.replace('https', 'wss')
+                           : wsUrl.replace('http', 'ws'));
+        ws.binaryType = 'arraybuffer';
+        const wsReady = new Promise((res, rej) => {
+            ws.onopen = res; ws.onerror = () => rej(new Error('WS 连接失败'));
+        });
+        await wsReady;
+        ws.onmessage = onMessage;
+        ws.onclose = () => { if (callActive) { setStatus('连接断开', true); cleanup(); } };
+
+        ws.send(JSON.stringify({
+            type: 'hello',
+            version: 1,
+            auth: initData ? { initData } : { token },
+        }));
+
+        phase = 'audioCtx';
+        await audioCtx.resume();
+        await playbackCtx.resume();
+        if (aborted()) return;
+        phase = 'worklet';
+        // worklet 模块 URL：显式绝对化（相对解析在某些 Mini App 环境/带参数 URL
+        // 下会解析到意外路径，报 "unable to load a worklet's module"）
+        const workletUrl = new URL('audio-worklet.js', document.baseURI).href;
+        try {
+            await audioCtx.audioWorklet.addModule(workletUrl);
+        } catch (e) {
+            // 兜底：重试一次（偶发的网络/缓存问题）
+            console.error('[rtc] worklet load failed:', workletUrl, e);
+            try { await audioCtx.audioWorklet.addModule(workletUrl + '?r=' + Date.now()); }
+            catch (e2) { throw new Error('worklet 加载失败: ' + e2.message); }
+        }
+        if (aborted()) return;
+        workletNode = new AudioWorkletNode(audioCtx, 'capture-processor');
+        audioCtx.createMediaStreamSource(micStream).connect(workletNode);
+
+        const analyser = audioCtx.createAnalyser();
+        analyser.fftSize = 256;
+        audioCtx.createMediaStreamSource(micStream).connect(analyser);
+        const buf = new Float32Array(analyser.fftSize);
+        if (meterTimer) clearInterval(meterTimer);
+        meterTimer = setInterval(() => {
+            analyser.getFloatTimeDomainData(buf);
+            let sum = 0;
+            for (let i = 0; i < buf.length; i++) sum += buf[i] * buf[i];
+            meterFill.style.width = Math.min(100, Math.sqrt(sum / buf.length) * 400) + '%';
+        }, 100);
+
+        workletNode.port.onmessage = (e) => {
+            if (muted) return;
+            if (ws && ws.readyState === WebSocket.OPEN) ws.send(e.data);
+            lastUpBytes += e.data.byteLength;
+        };
+        if (micWatchdog) clearInterval(micWatchdog);
+        lastUpBytes = 0;
+        micWatchdog = setInterval(() => {
+            if (!callActive) return;
+            if (lastUpBytes === 0 && !muted) {
+                setStatus('⚠️ 麦克风无信号，请检查权限', true);
+            }
+            lastUpBytes = 0;
+        }, 8000);
+
+        setStatus('等待鉴权…');
+    } catch (err) {
+        setStatus(`启动失败@${phase}: ${err.message}`, true);
+        console.error('[rtc] phase=' + phase, err);
+        cleanup();
+    }
+}
+
+function onMessage(ev) {
+    if (typeof ev.data !== 'string') { playPcm(new Int16Array(ev.data)); return; }
+    let msg;
+    try { msg = JSON.parse(ev.data); } catch (e) { return; }
+    switch (msg.type) {
+        case 'welcome':
+            callActive = true;
+            startAborted = false;
+            startRowEl.style.display = 'none';
+            controlsEl.classList.add('on');   // 底部控制条（挂断永远可见）
+            setWho('通话中 · ' + (msg.voice || ''), true);
+            setStatus('说话吧');
+            startDurationTimer(msg.max_seconds);
+            break;
+        case 'auth_failed':
+            setStatus('鉴权失败: ' + msg.reason + (msg.reason === 'token_invalid'
+                ? '（链接缺 token 或已失效）' : ''), true);
+            if (msg.reason === 'init_data_auth_date_expired') {
+                addSysLine('（页面打开太久了——请关闭后从 Telegram 重新点开通话按钮）');
+            } else {
+                addSysLine('（鉴权失败，无法通话）');
+            }
+            startAborted = true;
+            callActive = false;
+            if (ws) { try { ws.close(); } catch (e) {} }
+            setTimeout(() => { if (startAborted && !callActive) cleanup(); }, 400);
+            break;
+        case 'transcript':
+            appendTranscript(msg.who, msg.text);
+            break;
+        case 'interrupted':
+            clearPlayback();
+            sealAllTranscripts();
+            addSysLine('（打断）');
+            break;
+        case 'state':
+            if (msg.state === 'connecting') setStatus('连接中…');
+            else if (msg.state === 'rotating') setStatus('连接轮换中…');
+            break;
+        case 'bye':
+            callActive = false;
+            clearPlayback();
+            sealAllTranscripts();
+            addSysLine(msg.reason === 'limit' ? '（到达时长上限，通话结束）' : '（通话结束）');
+            setStatus(msg.reason === 'limit' ? '已达时长上限' : '通话已结束');
+            setWho('已挂断', false);
+            cleanup();
+            break;
+        case 'error':
+            setStatus('错误: ' + (msg.message || msg.code || ''), true);
+            if (msg.code === 'busy') {
+                callActive = false;
+                startAborted = true;
+                if (ws) { try { ws.close(); } catch (e) {} }
+                setTimeout(() => { if (startAborted && !callActive) cleanup(); }, 400);
+            }
+            break;
+    }
+}
+
+function startDurationTimer(maxSeconds) {
+    const startedAt = Date.now();
+    if (durationTimer) clearInterval(durationTimer);
+    durationTimer = setInterval(() => {
+        if (!callActive) return;
+        const elapsed = Math.floor((Date.now() - startedAt) / 1000);
+        const mm = String(Math.floor(elapsed / 60)).padStart(2, '0');
+        const ss = String(elapsed % 60).padStart(2, '0');
+        const near = maxSeconds && elapsed > maxSeconds - 60;
+        setStatus(near ? `${mm}:${ss} · ⚠️ 即将到达上限` : `${mm}:${ss}`, near);
+    }, 1000);
+}
+
+function toggleMute() {
+    muted = !muted;
+    muteBtn.classList.toggle('on', muted);
+    muteBtn.title = muted ? '取消静音' : '静音';
+    sendControl(muted ? 'mute' : 'unmute');
+    if (muted) meterFill.style.width = '0%';
+}
+
+function hangup() {
+    hangupBtn.disabled = true;
+    sendControl('hangup');
+    setTimeout(() => { if (ws) { ws.close(); } }, 1500);
+}
+
+function cleanup() {
+    callActive = false;
+    startBtn.disabled = false;
+    startRowEl.style.display = '';
+    controlsEl.classList.remove('on');
+    hangupBtn.disabled = false;
+    if (muted) { muted = false; muteBtn.classList.remove('on'); muteBtn.title = '静音'; }
+    if (durationTimer) { clearInterval(durationTimer); durationTimer = null; }
+    if (micWatchdog) { clearInterval(micWatchdog); micWatchdog = null; }
+    if (meterTimer) { clearInterval(meterTimer); meterTimer = null; }
+    clearPlayback();
+    stopCam();
+    if (workletNode) { workletNode.disconnect(); workletNode = null; }
+    if (audioCtx) { try { audioCtx.close(); } catch (e) {} audioCtx = null; }
+    if (playbackCtx) { try { playbackCtx.close(); } catch (e) {} playbackCtx = null; }
+    if (micStream) { micStream.getTracks().forEach(t => t.stop()); micStream = null; }
+    if (ws) {
+        ws.onclose = null; ws.onmessage = null;
+        try { ws.close(); } catch (e) {}
+        ws = null;
+    }
+}
+
+startBtn.onclick = start;
+muteBtn.onclick = toggleMute;
+hangupBtn.onclick = hangup;
+camBtn.onclick = toggleCam;
+flipBtn.onclick = flipCam;
+</script>
+</body>
+</html>

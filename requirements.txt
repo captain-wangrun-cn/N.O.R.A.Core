@@ -15,3 +15,4 @@ tavily-python  # Web search API (optional: will fallback to HTTP if not installe
 Pillow
 APScheduler>=3.10,<4  # Async job scheduler for proactive messages
 cryptography>=42.0.0
+msgpack  # Fish Audio WebSocket TTS live 流式协议（rtc tts_downlink）

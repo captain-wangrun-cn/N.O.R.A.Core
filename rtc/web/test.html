@@ -1,0 +1,287 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>RTC P0 冒烟测试</title>
+<style>
+    body { font-family: system-ui, sans-serif; max-width: 640px; margin: 40px auto; padding: 0 16px; background: #111; color: #eee; }
+    button { font-size: 18px; padding: 12px 28px; margin: 8px 8px 8px 0; border: none; border-radius: 8px; cursor: pointer; }
+    #start { background: #4CAF50; color: #fff; }
+    #hangup { background: #f44336; color: #fff; }
+    #status { padding: 10px; border-radius: 6px; background: #222; margin: 16px 0; font-family: monospace; }
+    #subtitle { min-height: 60px; padding: 12px; background: #1a1a2e; border-radius: 6px; line-height: 1.6; }
+    .user { color: #8bc; } .assistant { color: #cb8; }
+    #meter { width: 100%; height: 8px; background: #333; border-radius: 4px; overflow: hidden; margin-top: 8px; }
+    #meterFill { height: 100%; width: 0%; background: #4CAF50; transition: width 0.1s; }
+    #videoRow { margin: 12px 0; }
+    #camBtn { background: #2196F3; color: #fff; font-size: 15px; padding: 8px 18px; }
+    #videoPreview { max-width: 320px; border-radius: 8px; display: none; margin-top: 8px; }
+    #videoHint { color: #888; font-size: 13px; display: none; }
+    #modelRow { margin: 12px 0; font-size: 14px; }
+    #modelSel { background: #222; color: #eee; border: 1px solid #555; border-radius: 6px; padding: 6px 10px; font-size: 14px; margin-left: 6px; }
+    #textRow { margin: 12px 0; display: flex; gap: 8px; }
+    #textInput { flex: 1; background: #222; color: #eee; border: 1px solid #555; border-radius: 6px; padding: 8px 12px; font-size: 14px; }
+    #textSend { background: #2196F3; color: #fff; border: none; border-radius: 6px; padding: 8px 18px; font-size: 14px; cursor: pointer; }
+</style>
+</head>
+<body>
+<h1>RTC P0 冒烟（麦 → 后端 → Google → 扬声器）</h1>
+<div id="modelRow">
+    <label for="modelSel">模型:</label>
+    <select id="modelSel">
+        <option value="gemini-3.1-flash-live-preview">3.1 flash live（推荐，语音稳定）</option>
+        <option value="gemini-2.5-flash-native-audio-preview-12-2025">2.5 native audio 12-2025（破限松但语音会哑）</option>
+        <option value="gemini-2.5-flash-native-audio-preview-09-2025">2.5 native audio 09-2025（实验）</option>
+    </select>
+</div>
+<button id="start">开始通话</button>
+<button id="hangup" disabled>挂断</button>
+<div id="textRow">
+    <input id="textInput" placeholder="输入文本发送给 Nora（她会语音回应）" disabled>
+    <button id="textSend" disabled>发送</button>
+</div>
+<div id="status">未连接</div>
+<div id="meter"><div id="meterFill"></div></div>
+<div id="videoRow">
+    <button id="camBtn" disabled>📷 开摄像头</button>
+    <video id="videoPreview" autoplay playsinline muted></video>
+    <div id="videoHint">视频以 1FPS 发给 Nora（≤1 分钟为宜，看完关掉）</div>
+</div>
+<h3>实时字幕（转写）</h3>
+<div id="subtitle"></div>
+
+<script>
+const statusEl = document.getElementById('status');
+const subtitleEl = document.getElementById('subtitle');
+const meterFill = document.getElementById('meterFill');
+const camBtn = document.getElementById('camBtn');
+const videoPreview = document.getElementById('videoPreview');
+const videoHint = document.getElementById('videoHint');
+let ws = null, audioCtx = null, workletNode = null, micStream = null;
+let playbackCtx = null, nextPlayTime = 0;
+let camStream = null, videoTimer = null;
+let micWatchdog = null, lastUpBytes = 0;
+
+function setStatus(s) { statusEl.textContent = s; console.log('[status]', s); }
+
+document.getElementById('start').onclick = start;
+document.getElementById('hangup').onclick = hangup;
+camBtn.onclick = toggleCam;
+
+const textInput = document.getElementById('textInput');
+const textSend = document.getElementById('textSend');
+function sendText() {
+    const t = textInput.value.trim();
+    if (!t || !ws || ws.readyState !== WebSocket.OPEN) return;
+    ws.send(JSON.stringify({ type: 'text', text: t }));
+    addSubtitle('user', t);
+    textInput.value = '';
+}
+textSend.onclick = sendText;
+textInput.addEventListener('keydown', e => { if (e.key === 'Enter') sendText(); });
+
+// ---- 摄像头：canvas 抓帧 → JPEG base64 JSON，1FPS ----
+const frameCanvas = document.createElement('canvas');
+frameCanvas.width = 640; frameCanvas.height = 480;
+const frameCtx = frameCanvas.getContext('2d');
+
+async function toggleCam() {
+    if (camStream) { stopCam(); return; }
+    try {
+        camStream = await navigator.mediaDevices.getUserMedia({
+            video: { width: 640, height: 480, facingMode: { ideal: 'environment' } } // 后置
+        });
+        videoPreview.srcObject = camStream;
+        videoPreview.style.display = 'block';
+        videoHint.style.display = 'block';
+        camBtn.textContent = '📷 关摄像头';
+        videoTimer = setInterval(sendVideoFrame, 1000); // 1 FPS
+    } catch (err) {
+        setStatus('摄像头失败: ' + err.message);
+    }
+}
+
+function sendVideoFrame() {
+    if (!camStream || !videoPreview.videoWidth) return;
+    frameCtx.drawImage(videoPreview, 0, 0, frameCanvas.width, frameCanvas.height);
+    frameCanvas.toBlob(blob => {
+        if (!blob) return;
+        const reader = new FileReader();
+        reader.onloadend = () => {
+            // dataURL: "data:image/jpeg;base64,...."
+            const b64 = reader.result.split(',')[1];
+            if (ws && ws.readyState === WebSocket.OPEN) {
+                ws.send(JSON.stringify({ type: 'video_frame', data: b64 }));
+            }
+        };
+        reader.readAsDataURL(blob);
+    }, 'image/jpeg', 0.6);
+}
+
+function stopCam() {
+    if (videoTimer) { clearInterval(videoTimer); videoTimer = null; }
+    if (camStream) { camStream.getTracks().forEach(t => t.stop()); camStream = null; }
+    videoPreview.style.display = 'none';
+    videoHint.style.display = 'none';
+    camBtn.textContent = '📷 开摄像头';
+}
+
+async function start() {
+    document.getElementById('start').disabled = true;
+    let phase = 'init';
+    try {
+        // ⚠️ 必须在用户手势内同步创建 AudioContext：Android 上任何 await 之后创建
+        // 的 context 失去激活资格，resume() 静默失败、state 停在 suspended，
+        // 采集处理器永远不跑（表现=通话通但麦克风上行全零）。故两个 context 放最前。
+        audioCtx = new AudioContext();
+        playbackCtx = new AudioContext();
+        setStatus('请求麦克风…');
+        phase = 'getUserMedia';
+        micStream = await navigator.mediaDevices.getUserMedia({
+            audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true }
+        });
+
+        setStatus('连接后端…');
+        const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
+        const base = location.pathname.replace(/[^/]*$/, ''); // 页面所在目录（"/rtc/" 或 "/"）
+        const params = new URLSearchParams(location.search);
+        const token = params.get('token') || '';
+        const model = document.getElementById('modelSel').value;
+        const qs = new URLSearchParams();
+        if (token) qs.set('token', token);
+        if (model) qs.set('model', model);
+        const qsStr = qs.toString() ? `?${qs.toString()}` : '';
+        ws = new WebSocket(`${proto}//${location.host}${base}ws${qsStr}`);
+        ws.binaryType = 'arraybuffer';
+        ws.onopen = () => setStatus('WS 已连接，等待 Live…');
+        ws.onclose = () => { setStatus('连接关闭'); cleanup(); };
+        ws.onerror = () => setStatus('WS 错误');
+        ws.onmessage = onMessage;
+
+        // 采集链：AudioContext 不强制 16k（Android Chrome 常不支持任意采样率会抛错），
+        // 用 context 实际采样率，降采样在 worklet 里做
+        phase = 'audioCtx';
+        await audioCtx.resume(); // 移动端需要显式唤醒
+        phase = 'worklet';
+        await audioCtx.audioWorklet.addModule('audio-worklet.js');
+        workletNode = new AudioWorkletNode(audioCtx, 'capture-processor');
+        const src = audioCtx.createMediaStreamSource(micStream);
+        src.connect(workletNode);
+
+        // 上行音量表（简单 RMS）
+        const analyser = audioCtx.createAnalyser();
+        analyser.fftSize = 256;
+        src.connect(analyser);
+        const buf = new Float32Array(analyser.fftSize);
+        setInterval(() => {
+            if (!analyser) return;
+            analyser.getFloatTimeDomainData(buf);
+            let sum = 0;
+            for (let i = 0; i < buf.length; i++) sum += buf[i] * buf[i];
+            meterFill.style.width = Math.min(100, Math.sqrt(sum / buf.length) * 400) + '%';
+        }, 100);
+
+        workletNode.port.onmessage = (e) => {
+            if (ws && ws.readyState === WebSocket.OPEN) ws.send(e.data);
+            lastUpBytes = (lastUpBytes || 0) + e.data.byteLength;
+        };
+        // 看门狗：8s 内上行 0 字节 = 采集链路没在跑（suspended / worklet 未挂载）
+        if (micWatchdog) clearInterval(micWatchdog);
+        lastUpBytes = 0;
+        micWatchdog = setInterval(() => {
+            if (!ws || ws.readyState !== WebSocket.OPEN) return;
+            if (lastUpBytes === 0) {
+                setStatus(`⚠️ 麦克风无信号（上行 0 字节）: audioCtx=${audioCtx.state}`);
+            }
+            lastUpBytes = 0;
+        }, 8000);
+
+        // 播放链：不强制 24k，playPcm 里按 context 实际采样率重采样
+        phase = 'playbackCtx';
+        await playbackCtx.resume();
+        if (audioCtx.state !== 'running') {
+            // Android 手势外创建的 context 会卡在 suspended；这里创建在 start() 第一行
+            // （手势内），正常应为 running，但兜底报出来别静默
+            setStatus(`警告: audioCtx state=${audioCtx.state}`);
+        }
+        setStatus('通话中（说话吧）');
+        document.getElementById('hangup').disabled = false;
+        camBtn.disabled = false;
+        textInput.disabled = false;
+        textSend.disabled = false;
+    } catch (err) {
+        setStatus(`启动失败@${phase}: ${err.message}`);
+        console.error('[rtc-p0] phase=' + phase, err);
+        cleanup();
+        document.getElementById('start').disabled = false;
+    }
+}
+
+function onMessage(ev) {
+    if (typeof ev.data === 'string') {
+        const msg = JSON.parse(ev.data);
+        if (msg.type === 'ready') setStatus('通话中 · voice=' + msg.voice);
+        else if (msg.type === 'transcript') addSubtitle(msg.who, msg.text);
+        else if (msg.type === 'interrupted') addSubtitle('sys', '（打断）');
+        else if (msg.type === 'error') setStatus('错误: ' + msg.message);
+    } else {
+        playPcm(new Int16Array(ev.data));
+    }
+}
+
+// 下行 PCM16 24kHz → 重采样到 context 实际采样率 → AudioBufferSourceNode 队列
+// （Android Chrome 的 AudioContext 常不支持强制 24k）
+function playPcm(int16) {
+    if (!playbackCtx) return;
+    const srcRate = 24000;
+    const dstRate = playbackCtx.sampleRate;
+    const outLen = Math.round(int16.length * dstRate / srcRate);
+    const f32 = new Float32Array(outLen);
+    for (let i = 0; i < outLen; i++) {
+        const pos = i * srcRate / dstRate;
+        const i0 = Math.floor(pos), i1 = Math.min(i0 + 1, int16.length - 1);
+        const t = pos - i0;
+        f32[i] = (int16[i0] / 32768) * (1 - t) + (int16[i1] / 32768) * t; // 线性插值
+    }
+    const buffer = playbackCtx.createBuffer(1, outLen, dstRate);
+    buffer.copyToChannel(f32, 0);
+    const node = playbackCtx.createBufferSource();
+    node.buffer = buffer;
+    node.connect(playbackCtx.destination);
+
+    const now = playbackCtx.currentTime;
+    if (nextPlayTime < now + 0.05) nextPlayTime = now + 0.05; // 50ms 预缓冲
+    node.start(nextPlayTime);
+    nextPlayTime += buffer.duration;
+    node.onended = () => { if (nextPlayTime - playbackCtx.currentTime < 0.05) nextPlayTime = playbackCtx.currentTime; };
+}
+
+function addSubtitle(who, text) {
+    const div = document.createElement('div');
+    div.className = who;
+    div.textContent = (who === 'user' ? '你: ' : who === 'assistant' ? 'Nora: ' : '') + text;
+    subtitleEl.appendChild(div);
+    subtitleEl.scrollTop = subtitleEl.scrollHeight;
+    while (subtitleEl.children.length > 30) subtitleEl.removeChild(subtitleEl.firstChild);
+}
+
+function hangup() { if (ws) ws.close(); }
+
+function cleanup() {
+    document.getElementById('start').disabled = false;
+    document.getElementById('hangup').disabled = true;
+    camBtn.disabled = true;
+    textInput.disabled = true;
+    textSend.disabled = true;
+    stopCam();
+    if (micWatchdog) { clearInterval(micWatchdog); micWatchdog = null; }
+    if (workletNode) { workletNode.disconnect(); workletNode = null; }
+    if (audioCtx) { audioCtx.close(); audioCtx = null; }
+    if (playbackCtx) { playbackCtx.close(); playbackCtx = null; }
+    if (micStream) { micStream.getTracks().forEach(t => t.stop()); micStream = null; }
+    ws = null;
+}
+</script>
+</body>
+</html>

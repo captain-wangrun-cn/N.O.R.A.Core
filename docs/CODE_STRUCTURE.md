@@ -12,6 +12,8 @@ N.O.R.A.Core/
 ├─ brain/
 ├─ core/
 ├─ adapters/
+├─ rtc/
+├─ tts/
 ├─ memory/
 ├─ skills/
 ├─ triggers/
@@ -67,6 +69,23 @@ N.O.R.A.Core/
 - `PROMPT.md`：通用平台适配协议（跨平台连续性、媒体标记、输出分层）。
 - `ADAPTER_GUIDE.md`：新增/维护 adapter 的开发指南。
 - `telegram/`：Telegram 适配实现，按 `main/incoming/sender/reply/commands/callbacks` 等职责拆分，含 `metadata.json` 与平台提示。
+
+### `rtc/`（实时通话子系统）
+
+- `server.py`：aiohttp WS 桥接服务器（hello/welcome 握手 + 静态托管 + 会话编排），可嵌主进程或独立跑。
+- `live_client.py`：Google Live API WebSocket 封装（setup/双向音频/resumption 轮换/转写聚合）。
+- `auth.py`：双轨认证（TG initData HMAC + 静态 token），owner-only。
+- `session.py` / `invitation.py`：通话状态机（时长上限/单并发）与邀请管理（TTL/冷却）。
+- `prompt.py` / `history_writer.py` / `recorder.py` / `tts_downlink.py`：通话提示词组装、结束总结回写、视频段录制、TTS provider 流式音色桥接。
+- `web/`：无状态瘦前端（原生 JS + AudioWorklet）。
+- 设计文档：`docs/architecture/rtc.md`。
+
+### `tts/`（语音合成子系统）
+
+- `base.py`：`BaseTTSProvider` 基类（synthesize / get_text_guidance / open_live_session 流式会话约定）。
+- `registry.py`：provider 发现 + importlib 加载（一 provider 一文件夹，内置 `fish_audio`）。
+- `TTS_GUIDE.md`：provider 编写指南。
+- 前脑 `[VOICE]` 标记 → 后台合成 → `[voice: path]` 语音条追发；RTC 通话可复用 provider 出自定义音色。
 
 ### `memory/`（记忆与数据）
 

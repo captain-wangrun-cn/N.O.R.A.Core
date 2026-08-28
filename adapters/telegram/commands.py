@@ -167,6 +167,51 @@ class TelegramCommandsMixin:
         event_context = await self._command_context(update, self._command_text(update, "/undo"))
         await self._message_handler(event_context)
 
+    async def _rtc_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """发起实时通话邀请：发一条带 WebApp 按钮的消息（rtc.md §10.1）。"""
+        if not self._command_should_process(update) or not update.message:
+            return
+        if update.effective_chat.type != "private":
+            await update.message.reply_text("通话邀请只能在私聊里发起。")
+            return
+
+        try:
+            from rtc import config_utils
+            from rtc.invitation import (
+                InvitationStore, build_call_url, invitation_text,
+            )
+
+            rtc_cfg = config_utils.load_config()
+        except Exception as e:  # noqa: BLE001
+            logger.error(f"/rtc 配置读取失败: {e}")
+            await update.message.reply_text("❌ RTC 子系统不可用。")
+            return
+
+        if not rtc_cfg.get("enabled"):
+            await update.message.reply_text("❌ 实时通话未启用。")
+            return
+        public_url = str(rtc_cfg.get("public_url") or "").strip()
+        if not public_url:
+            await update.message.reply_text("❌ 实时通话未配置 public_url。")
+            return
+
+        store: InvitationStore = getattr(self, "_rtc_invitations", None) or InvitationStore(
+            default_ttl=int(rtc_cfg.get("invitation_ttl_seconds") or 300)
+        )
+        self._rtc_invitations = store
+        user_id = str(update.effective_user.id) if update.effective_user else ""
+        inv = store.issue(user_id, platform="telegram")
+        url = build_call_url(public_url)
+
+        from telegram import WebAppInfo
+
+        await update.message.reply_text(
+            invitation_text(remaining_seconds=inv.remaining_seconds),
+            reply_markup=InlineKeyboardMarkup(
+                [[InlineKeyboardButton("📞 开始通话", web_app=WebAppInfo(url=url))]]
+            ),
+        )
+
     async def _override_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """一次性放行：撤掉上一条回复并带放行声明重新生成，透传给 controller。"""
         if not self._command_should_process(update):

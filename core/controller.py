@@ -848,6 +848,13 @@ class NoraController(
         await self.group_listener.shutdown()
         await self.stop_triggers()
         self.stop_scheduler()
+        rtc = getattr(self, "rtc_server", None)
+        if rtc is not None:
+            try:
+                await rtc.stop()
+            except Exception as e:  # noqa: BLE001
+                logger.error(f"RTC 服务器停止失败: {e}")
+            self.rtc_server = None
 
     # ------------------------------------------------------------------
     # 模型重载

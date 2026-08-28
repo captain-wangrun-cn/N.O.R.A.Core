@@ -176,6 +176,7 @@ class TelegramAdapter(
         self.application.add_handler(CommandHandler('debug_cleanup', self._debug_cleanup_command))
         self.application.add_handler(CommandHandler('model', self._model_command))
         self.application.add_handler(CommandHandler('effort', self._effort_command))
+        self.application.add_handler(CommandHandler('rtc', self._rtc_command))
         self.application.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), self._handle_incoming_message))
         self.application.add_handler(MessageHandler(filters.PHOTO, self._handle_photo))
         self.application.add_handler(MessageHandler(filters.VIDEO | filters.VIDEO_NOTE, self._handle_video))
@@ -195,7 +196,28 @@ class TelegramAdapter(
             logger.error(f"无法获取机器人用户名: {e}")
             self.bot_username = None
             self.bot_user_id = ""
+        await self._maybe_setup_rtc_menu_button(application)
         await self.on_ready()
+
+    async def _maybe_setup_rtc_menu_button(self, application: Application) -> None:
+        """RTC 启用时把私聊菜单按钮配成 /rtc 入口（rtc.md §10.1）。失败只记日志。"""
+        try:
+            from rtc import config_utils
+            from rtc.invitation import build_call_url
+
+            rtc_cfg = config_utils.load_config()
+            public_url = str(rtc_cfg.get("public_url") or "").strip()
+            if not (rtc_cfg.get("enabled") and public_url):
+                return
+            from telegram import MenuButtonWebApp
+
+            await application.bot.set_chat_menu_button(
+                menu_button=MenuButtonWebApp(text="📞 和 Nora 通话",
+                                             web_app={"url": build_call_url(public_url)})
+            )
+            logger.info("已配置 Telegram 菜单按钮为 RTC 通话入口")
+        except Exception as e:  # noqa: BLE001 - 菜单按钮失败不影响主流程
+            logger.warning(f"RTC 菜单按钮配置失败: {e}")
 
     async def _notify_debug_exception(self, chat_id: Optional[str], error: Exception):
         """在 debug 模式下将异常详情输出给用户。"""
