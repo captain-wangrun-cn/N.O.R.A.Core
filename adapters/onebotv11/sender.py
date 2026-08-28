@@ -1,11 +1,14 @@
 from __future__ import annotations
 
+import base64
 import logging
 import os
 import re
 import asyncio
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlparse
+from urllib.request import url2pathname
 
 from adapters.message_controls import parse_message_controls, strip_message_control_markers
 
@@ -94,9 +97,33 @@ class OneBotSenderMixin:
         return None
 
     def _file_uri(self, resolved: str) -> str:
-        if resolved.startswith(("http://", "https://", "file://", "base64://")):
+        if resolved.startswith(("http://", "https://")):
+            return resolved
+        if bool(getattr(self, "send_media_as_base64", False)):
+            return self._media_as_base64_uri(resolved)
+        if resolved.startswith(("file://", "base64://")):
             return resolved
         return Path(resolved).resolve().as_uri()
+
+    def _media_as_base64_uri(self, resolved: str) -> str:
+        """跨机部署模式：读本地文件转 base64://，避免 NapCat 访问不到本机路径。"""
+        if resolved.startswith("base64://"):
+            return resolved
+        local_path = resolved
+        if resolved.startswith("file://"):
+            local_path = url2pathname(urlparse(resolved).path)
+        try:
+            encoded = base64.b64encode(Path(local_path).read_bytes()).decode("ascii")
+        except OSError as exc:
+            logger.warning(
+                "[onebotv11] base64 encode failed path=%s err=%s, fallback to file uri",
+                local_path,
+                exc,
+            )
+            if not resolved.startswith("file://") and os.path.isfile(local_path):
+                return Path(local_path).resolve().as_uri()
+            return resolved
+        return f"base64://{encoded}"
 
     def _media_segment(self, tag_type: str, raw_path: str) -> dict[str, Any] | None:
         resolved = self._resolve_local_media_path(raw_path)

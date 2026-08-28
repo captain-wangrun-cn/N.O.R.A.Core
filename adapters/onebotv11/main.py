@@ -48,6 +48,7 @@ DEFAULT_CONFIG = {
     "group_message_policy": "at_or_reply",
     "enable_napcat_api": False,
     "download_media": True,
+    "send_media_as_base64": False,
     "reconnect_interval_seconds": 5,
 }
 
@@ -119,6 +120,8 @@ class OneBotV11Adapter(
         self.group_message_policy = str(self.config.get("group_message_policy") or "at_or_reply").strip().lower()
         self.enable_napcat_api = bool(self.config.get("enable_napcat_api", False))
         self.download_media = bool(self.config.get("download_media", True))
+        # 跨机部署（Nora 与 NapCat 不同机器）时置 true：出站媒体读成本地 bytes 后以 base64:// 传给 OneBot 端
+        self.send_media_as_base64 = bool(self.config.get("send_media_as_base64", False))
         self.reconnect_interval = max(1, int(self.config.get("reconnect_interval_seconds") or 5))
 
         self.client = OneBotWebSocketClient(self)

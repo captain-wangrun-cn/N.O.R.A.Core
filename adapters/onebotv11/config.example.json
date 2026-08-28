@@ -10,5 +10,6 @@
   "group_message_policy": "at_or_reply",
   "enable_napcat_api": false,
   "download_media": true,
+  "send_media_as_base64": false,
   "reconnect_interval_seconds": 5
 }

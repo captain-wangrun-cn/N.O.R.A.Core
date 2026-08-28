@@ -449,6 +449,56 @@ def test_onebot_sender_parses_face_and_emoji_segments():
     ]
 
 
+def test_onebot_sender_base64_mode_encodes_local_media():
+    import base64 as base64_mod
+    import os
+    import tempfile
+
+    adapter = SenderOnlyOneBot()
+    adapter.send_media_as_base64 = True
+
+    with tempfile.TemporaryDirectory() as tmp:
+        media = os.path.join(tmp, "voice_test.oga")
+        with open(media, "wb") as f:
+            f.write(b"\x4f\x67\x67\x53\x00\x02")
+        uri = adapter._file_uri(media)
+
+    assert uri.startswith("base64://")
+    assert base64_mod.b64decode(uri[len("base64://"):]) == b"\x4f\x67\x67\x53\x00\x02"
+
+
+def test_onebot_sender_base64_mode_converts_file_uri_and_passes_remote_through():
+    import os
+    import tempfile
+    from pathlib import Path as PathMod
+
+    adapter = SenderOnlyOneBot()
+    adapter.send_media_as_base64 = True
+
+    assert adapter._file_uri("https://example.com/a.png") == "https://example.com/a.png"
+    assert adapter._file_uri("base64://eHg=") == "base64://eHg="
+
+    with tempfile.TemporaryDirectory() as tmp:
+        media = PathMod(tmp) / "img.png"
+        media.write_bytes(b"\x89PNG\r\n")
+        file_uri = media.resolve().as_uri()
+        uri = adapter._file_uri(str(media))
+        assert uri.startswith("base64://")
+        # file:// URI 引用同一个文件时也要能转成本地 bytes
+        assert adapter._file_uri(file_uri) == uri
+
+
+def test_onebot_sender_base64_mode_falls_back_when_file_unreadable():
+    adapter = SenderOnlyOneBot()
+    adapter.send_media_as_base64 = True
+
+    uri = adapter._file_uri("Z:/definitely/not/here/x.png")
+
+    # 不可读且不是本地存在的文件：原样返回（后续按"文件未找到"路径处理）
+    assert uri == "Z:/definitely/not/here/x.png"
+
+
+
 class ContextInjectionProbe(BackBrainMixin):
     def __init__(self):
         async def onebot_tool(user_id: str, group_id: str = "", chat_id: str = ""):
