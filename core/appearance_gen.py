@@ -22,6 +22,7 @@ from brain.prompts import (
     WORKSPACE_SCHEDULE_FILE,
     WORKSPACE_SOUL_FILE,
     _read_file_safe,
+    append_custom_scope_block,
     render_template,
 )
 
@@ -148,6 +149,11 @@ class AppearanceGenMixin:
 
         desc_client = get_llm_client(model_alias="draw_desc")
         # 不带对话历史：历史里满是 Nora 的说话方式，会把这一轮拽回对话口吻。
+        # CUSTOM.md（draw_desc scope）作为用户全局指令附加在 system prompt 后面。
+        try:
+            system_prompt = append_custom_scope_block(system_prompt, "draw_desc")
+        except Exception:
+            logger.debug("[%s] draw_desc CUSTOM 注入失败，已忽略。", draw_key)
         raw = await desc_client.chat(
             system_prompt=system_prompt,
             user_prompt=user_prompt,

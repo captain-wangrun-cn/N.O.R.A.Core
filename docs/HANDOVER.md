@@ -1,4 +1,26 @@
-## 近期关键改动（截至 2026-08-29）
+## 近期关键改动（截至 2026-08-30）
+
+### 🧭 Telegram 命令菜单 / end_segment 指令 / custom_scope 扩展
+
+- **启动自动注册命令菜单**：`adapters/telegram/main.py` 的 `_post_init_setup` 新增
+  `_register_bot_commands()`，把全部现有命令（含新的 `/end_segment`）通过
+  `set_my_commands` 登记到 Telegram，输入框 `/` 自动补全。失败只记日志不影响主流程。
+- **`/end_segment` 新指令**：直接封闭当前消息段（`close_session`，跨平台共享作用域语义
+  与自动封段一致），不清历史、不打断生成——归入**非中断命令快速路径**（前脑生成中也能用），
+  并顺带取消该 chat 的 followup 定时器。实现：`core/message_handler.py::_cmd_end_segment`
+  + Telegram 侧 `_end_segment_command` 透传。注意 `_dispatch_non_interrupting_cmd` 里
+  原有几个分支正则曾误写 `\debug`（匹配数字 0-999+ "ebug"），已一并修正为 `/debug`。
+- **custom_scope 新增 `summary` / `draw_desc` 两个 scope**：
+  - `brain/prompts.py` 新增 `append_custom_scope_block(system_prompt, scope)` 公共 helper，
+    给不走 `get_system_prompt()` 的独立 LLM 轮复用（内部走 `should_inject_custom`）。
+  - summary 路径接入：`memory/message_history.py`（一级压缩/归档/段落摘要三处）、
+    `memory/context_store.py`（滑动窗口压缩）、`core/scheduler_mixin.py`（每日总结）。
+  - draw_desc 路径接入：`core/appearance_gen.py::_resolve_draw_prompt`。
+  - `/custom_scope` 按钮（`adapters/telegram/callbacks.py`）与文本命令
+    （`core/message_handler.py::_cmd_custom_scope`）的可选值同步加这两项；
+    `config.example.yml` 同步。
+  - ⚠️ CUSTOM.md 若写了行为类指令，注入 summary 可能改变摘要风格——这是该 scope 的用途，
+    但默认 `config.yml` 里没这两个 scope 的旧配置不受影响（不在列表里=不注入）。
 
 ### 📞 RTC 实时通话子系统（Gemini Live 桥接，P0-P2 落地）
 

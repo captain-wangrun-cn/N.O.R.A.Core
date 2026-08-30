@@ -14,7 +14,7 @@ import logging
 import re
 from typing import Dict, Any, List
 
-from brain.prompts import get_soul_prompt, render_template, _read_file_safe, WORKSPACE_SCHEDULE_FILE, WORKSPACE_SOUL_FILE, WORKSPACE_USER_FILE, WORKSPACE_MEMORY_FILE, _resolve_memory_file, load_custom_prompt, should_inject_custom
+from brain.prompts import get_soul_prompt, render_template, _read_file_safe, WORKSPACE_SCHEDULE_FILE, WORKSPACE_SOUL_FILE, WORKSPACE_USER_FILE, WORKSPACE_MEMORY_FILE, _resolve_memory_file, load_custom_prompt, should_inject_custom, append_custom_scope_block
 from core.scheduler import (
     AIPresence,
     set_ai_presence,
@@ -178,6 +178,10 @@ class SchedulerMixin:
             "你是对话日志整理助手，请为给定日期生成简明的每日总结。"
             " 保留关键事件、决定、情绪、待办，避免复述冗余。"
         )
+        try:
+            system_prompt = append_custom_scope_block(system_prompt, "summary")
+        except Exception:
+            pass
         user_prompt = (
             f"日期: {target_date.isoformat()}\n"
             f"已有总结(可为空):\n{existing_content}\n\n"

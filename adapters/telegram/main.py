@@ -6,6 +6,7 @@ import os
 import traceback
 from typing import Any, Callable, Dict, Optional
 
+from telegram import BotCommand
 from telegram.ext import (
     Application,
     ApplicationBuilder,
@@ -171,6 +172,7 @@ class TelegramAdapter(
         self.application.add_handler(CommandHandler('set_stream', self._set_stream_command))
         self.application.add_handler(CommandHandler('nonstream', self._set_stream_command))
         self.application.add_handler(CommandHandler('context', self._context_command))
+        self.application.add_handler(CommandHandler('end_segment', self._end_segment_command))
         self.application.add_handler(CommandHandler('undo', self._undo_command))
         self.application.add_handler(CommandHandler('override', self._override_command))
         self.application.add_handler(CommandHandler('debug_cleanup', self._debug_cleanup_command))
@@ -196,8 +198,38 @@ class TelegramAdapter(
             logger.error(f"无法获取机器人用户名: {e}")
             self.bot_username = None
             self.bot_user_id = ""
+        await self._register_bot_commands(application)
         await self._maybe_setup_rtc_menu_button(application)
         await self.on_ready()
+
+    async def _register_bot_commands(self, application: Application) -> None:
+        """启动时把已注册的命令登记到 Telegram 命令菜单（输入框 '/' 自动补全）。失败只记日志。"""
+        commands = [
+            BotCommand("start", "开始对话"),
+            BotCommand("status", "查看状态报告"),
+            BotCommand("context", "查看当前上下文"),
+            BotCommand("undo", "撤销上一条回复"),
+            BotCommand("override", "撤回并重新回复"),
+            BotCommand("stop", "停止当前任务"),
+            BotCommand("end_segment", "结束当前消息段"),
+            BotCommand("clear", "清空聊天记录"),
+            BotCommand("set_stream", "切换输出模式"),
+            BotCommand("nonstream", "一次性输出（同 set_stream on）"),
+            BotCommand("model", "查看/切换模型"),
+            BotCommand("effort", "设置推理强度"),
+            BotCommand("custom_scope", "CUSTOM 注入范围"),
+            BotCommand("nora_prefs", "Nora 偏好设置"),
+            BotCommand("schedule_today", "查看今日主动消息计划"),
+            BotCommand("regenerate_proactive", "重建主动消息计划"),
+            BotCommand("rtc", "语音/视频通话"),
+            BotCommand("debug", "调试模式开关"),
+            BotCommand("debug_cleanup", "清理本地数据"),
+        ]
+        try:
+            await application.bot.set_my_commands(commands)
+            logger.info(f"已注册 {len(commands)} 条 Telegram 命令菜单")
+        except Exception as e:  # noqa: BLE001 - 菜单注册失败不影响主流程
+            logger.warning(f"注册命令菜单失败: {e}")
 
     async def _maybe_setup_rtc_menu_button(self, application: Application) -> None:
         """RTC 启用时把私聊菜单按钮配成 /rtc 入口（rtc.md §10.1）。失败只记日志。"""

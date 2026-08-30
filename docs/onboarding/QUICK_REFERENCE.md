@@ -48,7 +48,7 @@ core/controller.py            NoraController.handle_message()
 | 主动消息调度 | `config.yml` → `schedule.*` | `enabled` |
 | 外部触发器 | `triggers/config.yml` | `enabled`、`default_chat_id`、`email.*` |
 | 工作区路径 | `config.yml` → `workspace.root_path` | 技能/下载/数据的根目录 |
-| CUSTOM 注入范围 | `config.yml` → `custom_injection.scopes` | `fast`/`smart`/`image`/`coder`/`video`/`none` |
+| CUSTOM 注入范围 | `config.yml` → `custom_injection.scopes` | `fast`/`smart`/`image`/`coder`/`video`/`summary`/`draw_desc`/`none` |
 | 语音合成 | `config.yml` → `tts.provider` | = `tts/` 下文件夹名（内置 `fish_audio`）；连接参数在该文件夹 `config.json`；配置后前脑才有 `[VOICE]` 标记 |
 | 实时通话 | `rtc/config.json` | `enabled` 总开关（默认关）；`public_url`/`listen`/`api_key`(留空回落全局 gemini)/`voice_source`(live内置音色\|tts走provider)/`max_call_duration_seconds`/`static_token`(留空首启随机生成)；架构见 `docs/architecture/rtc.md` |
 
@@ -149,10 +149,11 @@ python main.py --no-tui --adapter onebotv11
 # Telegram 指令（运行后在聊天中）
 # /regenerate_proactive [replace|append]
 # /schedule_today
-# /custom_scope （按钮勾选 fast/smart/image/coder/video，含 none/关闭）
+# /custom_scope （按钮勾选 fast/smart/image/coder/video/summary/draw_desc，含 none/关闭）
 # /effort （按钮为每个已配置的模型别名单独设推理强度：none/minimal/low/medium/high/xhigh/max/auto，或"跟随全局"；写回 config.yml）
 # /debug_cleanup （按钮选择清理范围：Qdrant 记忆、Qdrant 图片、Mongo 图片库、消息镜像库、上下文压缩库、聊天记录，含“全部清空”与取消；二次确认防误触）
 # /undo （撤销上一条前脑发送的消息；删除消息历史与镜像库，若记录了平台 message_id 且平台支持，会尝试删除聊天界面消息）
+# /end_segment （直接封闭当前消息段：close_session 跨平台共享作用域，不清历史、不打断生成）
 
 # 查看聊天记录统计
 python cli.py history stats

@@ -391,6 +391,26 @@ def should_inject_custom(scope: str, scopes_override: Optional[Iterable[str]] = 
     return scope_value in scopes
 
 
+def append_custom_scope_block(system_prompt: str, scope: str) -> str:
+    """按 scope 配置把 CUSTOM.md 附加到给定 system_prompt 后面。
+
+    供不走 get_system_prompt() 的独立 LLM 轮（summary 压缩/每日总结、draw_desc
+    生图提示词等）复用：命中 scope 则注入，否则原样返回。
+    """
+    try:
+        if not should_inject_custom(scope):
+            return system_prompt
+        custom_prompt = load_custom_prompt()
+    except Exception:
+        return system_prompt
+    if not custom_prompt:
+        return system_prompt
+    return (
+        f"{system_prompt}\n\n"
+        + render_template("context_injection.jinja", "custom", custom_content=custom_prompt)
+    )
+
+
 def get_lexicon_manager() -> Optional[LexiconManager]:
     """懒初始化词库管理器。"""
     global _LEXICON_MANAGER

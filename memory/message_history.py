@@ -9,7 +9,7 @@ import logging
 from contextlib import suppress
 
 from workspace_config import get_workspace_manager
-from brain.prompts import render_template
+from brain.prompts import render_template, append_custom_scope_block
 from memory.context_store import ContextCompressor, MessageLog
 
 logger = logging.getLogger(__name__)
@@ -1180,7 +1180,9 @@ class MessageHistory:
         try:
             # 调用LLM总结
             summary = await self._summarizer.chat(
-                system_prompt=render_template('compression.jinja', 'compress_system'),
+                system_prompt=append_custom_scope_block(
+                    render_template('compression.jinja', 'compress_system'), "summary"
+                ),
                 user_prompt=prompt,
                 history=[]
             )
@@ -1254,7 +1256,9 @@ class MessageHistory:
         
         try:
             archive_summary = await self._summarizer.chat(
-                system_prompt=render_template('compression.jinja', 'archive_system'),
+                system_prompt=append_custom_scope_block(
+                    render_template('compression.jinja', 'archive_system'), "summary"
+                ),
                 user_prompt=prompt,
                 history=[]
             )
@@ -1451,7 +1455,9 @@ class MessageHistory:
                                      conversation_text=conversation_text)
 
             summary = await self._summarizer.chat(
-                system_prompt=render_template('compression.jinja', 'compress_system'),
+                system_prompt=append_custom_scope_block(
+                    render_template('compression.jinja', 'compress_system'), "summary"
+                ),
                 user_prompt=prompt,
                 history=[]
             )

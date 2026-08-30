@@ -707,6 +707,7 @@ class MessageHandlerMixin:
             r"(?m)^\s*/nonstream\b",
             r"(?m)^\s*/undo\b",
             r"(?m)^\s*/context\b",
+            r"(?m)^\s*/end_segment\b",
         )
         for _pat in _NON_INTERRUPTING_CMDS:
             if re.search(_pat, stripped_early):
@@ -2142,6 +2143,8 @@ class MessageHandlerMixin:
             await self._cmd_set_stream(chat_id, chat_type, user_id, stripped)
         elif re.search(r"(?m)^\s*/context\b", stripped):
             await self._cmd_context(chat_id, chat_type, user_id)
+        elif re.search(r"(?m)^\s*/end_segment\b", stripped):
+            await self._cmd_end_segment(chat_id)
 
     async def _cmd_status(self, chat_id: str, chat_type: str, user_id: str):
         identity = self._identity_for_runtime_key(chat_id)
@@ -2312,7 +2315,7 @@ class MessageHandlerMixin:
                     chat_id,
                     "🧭 CUSTOM 注入范围\n"
                     f"当前: {scope_desc}\n"
-                    "用法: /custom_scope（按钮多选）或 /custom_scope fast smart | image | coder | video | all | none",
+                    "用法: /custom_scope（按钮多选）或 /custom_scope fast smart | image | coder | video | summary | draw_desc | all | none",
                 )
                 return
 
@@ -2321,12 +2324,12 @@ class MessageHandlerMixin:
             elif any(a in ("none", "off") for a in args):
                 scopes_to_set = ["none"]
             else:
-                allowed = {"fast", "smart", "image", "coder", "video"}
+                allowed = {"fast", "smart", "image", "coder", "video", "summary", "draw_desc"}
                 invalid = [a for a in args if a not in allowed]
                 if invalid:
                     await self._send_platform_message(
                         chat_id,
-                        "❌ 无效范围: " + ", ".join(invalid) + "。可选: fast, smart, image, coder, video, all, none",
+                        "❌ 无效范围: " + ", ".join(invalid) + "。可选: fast, smart, image, coder, video, summary, draw_desc, all, none",
                     )
                     return
                 scopes_to_set = list(dict.fromkeys(args))
@@ -2345,6 +2348,29 @@ class MessageHandlerMixin:
         except Exception as e:
             logger.error(f"[{chat_id}] /custom_scope 执行失败: {e}", exc_info=True)
             await self._send_platform_message(chat_id, f"❌ 设置失败: {e}")
+
+    async def _cmd_end_segment(self, chat_id: str):
+        """直接结束当前消息段（对话段落），不清理任何历史。"""
+        identity = self._identity_for_runtime_key(chat_id)
+        try:
+            # 取消该 chat 的对话延续定时器：段落已手动封闭，followup 不应再续
+            self._cancel_followup_timer(chat_id)
+            session_id = self.message_history.close_session(
+                platform=identity.platform,
+                chat_id=identity.storage_id,
+                trigger_type="user",
+                memory_scope_id=identity.memory_scope_id,
+            )
+            if session_id:
+                await self._send_platform_message(
+                    chat_id, f"✅ 对话段落 #{session_id} 已封闭，下一条消息开启新的消息段。"
+                )
+                logger.info(f"[{chat_id}] 通过 /end_segment 封闭对话段落 #{session_id}")
+            else:
+                await self._send_platform_message(chat_id, "当前没有未封闭的消息段。")
+        except Exception as e:
+            logger.error(f"[{chat_id}] /end_segment 执行失败: {e}", exc_info=True)
+            await self._send_platform_message(chat_id, f"❌ 结束消息段失败: {e}")
 
     async def _undo_last_assistant(self, chat_id: str) -> Optional[Dict[str, Any]]:
         """删除上一条 assistant 消息：DB + 内存 history + 平台消息。

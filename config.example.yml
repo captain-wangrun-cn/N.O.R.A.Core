@@ -233,7 +233,7 @@ memory:
 
 # CUSTOM.md 注入范围（可选）
 # scopes 为空或缺失时表示全量注入。
-# 可选值: fast, smart, image, coder, video
+# 可选值: fast, smart, image, coder, video, summary, draw_desc
 # 设置为 ["none"] 可关闭全部 CUSTOM 注入
 custom_injection:
   scopes:
@@ -242,6 +242,8 @@ custom_injection:
     - image
     - coder
     - video
+    - summary
+    - draw_desc
 
 # Nora 偏好设置
 nora_preferences:

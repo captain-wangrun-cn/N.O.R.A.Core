@@ -12,7 +12,7 @@ from pathlib import Path
 from typing import Dict, List, Optional, Callable, Any
 
 from workspace_config import get_workspace_manager
-from brain.prompts import render_template
+from brain.prompts import render_template, append_custom_scope_block
 from brain.prompts import load_identity_context
 
 logger = logging.getLogger(__name__)
@@ -622,7 +622,9 @@ class ContextCompressor:
         conversation_text = "\n\n".join(messages)
         prompt = render_template("compression.jinja", "compress_user", conversation_text=conversation_text)
         return await self._call_summary(
-            system_prompt=render_template("compression.jinja", "compress_system"),
+            system_prompt=append_custom_scope_block(
+                render_template("compression.jinja", "compress_system"), "summary"
+            ),
             user_prompt=prompt,
             fallback_text=conversation_text,
             min_chars=min_chars,

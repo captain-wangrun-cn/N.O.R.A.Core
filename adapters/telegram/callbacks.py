@@ -231,7 +231,7 @@ class TelegramCallbacksMixin:
             await query.edit_message_text(self._render_custom_scope_text(scopes))
             return
 
-        if action not in {"fast", "smart", "image", "coder", "video", "none"}:
+        if action not in {"fast", "smart", "image", "coder", "video", "summary", "draw_desc", "none"}:
             await query.edit_message_text("❌ 无效范围。")
             return
 
@@ -302,6 +302,10 @@ class TelegramCallbacksMixin:
                 InlineKeyboardButton(f"{mark('video')}video", callback_data="custom_scope:video"),
             ],
             [InlineKeyboardButton(f"{mark('coder')}coder", callback_data="custom_scope:coder")],
+            [
+                InlineKeyboardButton(f"{mark('summary')}summary", callback_data="custom_scope:summary"),
+                InlineKeyboardButton(f"{mark('draw_desc')}draw_desc", callback_data="custom_scope:draw_desc"),
+            ],
             [InlineKeyboardButton(f"{none_mark}关闭全部", callback_data="custom_scope:none")],
             [InlineKeyboardButton("取消", callback_data="custom_scope:close")],
         ]
