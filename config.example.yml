@@ -159,6 +159,8 @@ llm:
   #   smart: 768
   #   fast: 512
   #   coder: 1024
+  #   image: 8192  # image 轮要输出「聊天回复 + 每图 IMAGE_TAGS/OCR/DESC 三块」，OCR 原文可能很长；
+  #                # 上限太小会在标签块中途截断（表现为"图片输出异常，已自动重试失败"）
 
   # 推理强度（reasoning effort）
   # 取值: none / minimal / low / medium / high / xhigh / max / auto

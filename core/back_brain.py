@@ -1611,7 +1611,10 @@ class BackBrainMixin:
                     # 多标签判成格式异常、触发无谓重试，最终报“图片输出异常，已自动重试失败”。
                     return re.sub(r"\s*[，、]\s*", ", ", s)
 
-                source_text_for_tags = final_response_buffer or last_image_raw_output or ""
+                # 提取源优先用 image 轮的逐字原始输出：tags-first 顺序下标签块在回复开头，
+                # 若落在某个 [SPLIT] 分段里，分段会先剥掉标签再进 final_response_buffer，
+                # 从后者提取就会漏标签、误触发重试。raw 输出永远含完整标签块。
+                source_text_for_tags = last_image_raw_output or final_response_buffer or ""
                 for m in self._IMAGE_TAGS_PATTERN.finditer(source_text_for_tags):
                     img_id = m.group(1).strip()
                     tags_text = _canon_tag_text(m.group(2).strip())
@@ -1756,10 +1759,12 @@ class BackBrainMixin:
                         "1. 上方列表里的每一个图片 ID 都必须各自带上成对闭合的 "
                         "[IMAGE_TAGS:ID]…[/IMAGE_TAGS]、[IMAGE_OCR:ID]…[/IMAGE_OCR]、"
                         "[IMAGE_DESC:ID]…[/IMAGE_DESC] 三个区块，缺一不可，且必须使用原始 ID、不要编造；\n"
-                        "2. 标签之间只能用半角英文逗号 `,` 分隔（示例：`猫, 沙发, 阳光, 特写`），"
+                        "2. 所有标签区块必须放在回复的**最开头**、任何聊天文字之前，写完最后一个 [/IMAGE_DESC] "
+                        "才可以开始聊天——顺序错了等于没写；\n"
+                        "3. 标签之间只能用半角英文逗号 `,` 分隔（示例：`猫, 沙发, 阳光, 特写`），"
                         "严禁使用中文逗号「，」或顿号「、」；\n"
-                        "3. 每张图至少 8 个关键词；\n"
-                        "4. 即使识别不出也要用占位词（如 `未识别`）把区块补全，绝不能省略、也不要只回聊天文本。"
+                        "4. 每张图至少 8 个关键词；\n"
+                        "5. 即使识别不出也要用占位词（如 `未识别`）把区块补全，绝不能省略、也不要只回聊天文本。"
                     )
 
                     retry_stream = self._chat_stream_wrapper(
@@ -1783,7 +1788,7 @@ class BackBrainMixin:
                     final_response_buffer = retry_buffer
                     if multimodal_images:
                         last_image_raw_output = retry_buffer
-                    
+
                     image_tags_extracted.clear()
                     image_ocr_extracted.clear()
                     image_desc_extracted.clear()
@@ -1791,7 +1796,8 @@ class BackBrainMixin:
                     parsed_ocr_blocks.clear()
                     parsed_desc_blocks.clear()
 
-                    source_text_for_tags = final_response_buffer
+                    # 与首轮同源：优先 raw 输出（这里两者同值，显式用 raw 保持语义一致）
+                    source_text_for_tags = last_image_raw_output or final_response_buffer
                     for m in self._IMAGE_TAGS_PATTERN.finditer(source_text_for_tags):
                         img_id = m.group(1).strip()
                         tags_text = _canon_tag_text(m.group(2).strip())
@@ -2023,7 +2029,8 @@ class BackBrainMixin:
                 # 仅对新用户视频（非工具回查）提取标签和描述，和图片逻辑一致
                 expected_video_ids = [vid["video_id"] for vid in multimodal_videos if not vid.get("from_tool")]
                 if expected_video_ids:
-                    source_text_for_vtags = final_response_buffer or last_video_raw_output or ""
+                    # 同图片逻辑：优先逐字原始输出，避免 [SPLIT] 分段剥掉标签后提取源残缺
+                    source_text_for_vtags = last_video_raw_output or final_response_buffer or ""
                     parsed_vtag_blocks: List[tuple[str, str]] = []
                     parsed_vdesc_blocks: List[tuple[str, str]] = []
                     for m in self._VIDEO_TAGS_PATTERN.finditer(source_text_for_vtags):

@@ -654,6 +654,77 @@ def test_view_media_tool_schema_has_text_query():
     assert "text_query" in view_media_schema["parameters"]["properties"]
 
 
+# ---------------------------------------------------------------------------
+# 6. tags-first 输出顺序（IMAGE_TAGS/VIDEO_TAGS 标签块在聊天文字之前）
+# ---------------------------------------------------------------------------
+
+def test_image_tags_prompt_requires_tags_first():
+    """image_tags_prompt 必须要求标签块放在回复最开头（tags-first）。
+
+    背景：标签块放回复末尾时，模型"着急说话"漏写标签、或输出被 max_output_tokens
+    截断把标签腰斩，都会触发整轮重试（用户看到"图片输出异常，已自动重试失败"）。
+    tags-first 让截断只砍聊天尾巴、标签块始终完整。
+    """
+    from brain.prompts import render_template
+
+    prompt = render_template(
+        "image_tags.jinja", "image_tags_prompt", image_id_lines="- 图片 ID: img_test0001  文件: a.png"
+    )
+    assert "最开头" in prompt, "标签块位置要求必须是「回复最开头」"
+    assert "聊天" in prompt and ("之前" in prompt or "标签块之后" in prompt)
+    assert "最末尾" not in prompt, "旧的「聊天回复最末尾」措辞必须移除"
+
+
+def test_video_tags_prompt_requires_tags_first():
+    """video_tags_prompt 同样要求 tags-first。"""
+    from brain.prompts import render_template
+
+    prompt = render_template(
+        "video_tags.jinja", "video_tags_prompt", video_id_lines="- 视频 ID: vid_test0001  文件: a.mp4"
+    )
+    assert "最开头" in prompt
+    assert "最末尾" not in prompt
+
+
+def test_image_tags_extraction_prefers_raw_output():
+    """标签提取源必须优先用 image 轮逐字原始输出（last_image_raw_output）。
+
+    tags-first 顺序下标签块落在回复开头；若它处于某个 [SPLIT] 分段内，分段会先被
+    _strip_thinking_content 剥掉标签再进 final_response_buffer，从后者提取就漏标签、
+    误触发重试。raw 输出是逐字原文，永远含完整标签块。
+    """
+    import inspect
+    from core.back_brain import BackBrainMixin
+
+    source = inspect.getsource(BackBrainMixin._generate_response)
+    match = re.search(r"source_text_for_tags\s*=\s*(.+)", source)
+    assert match, "找不到 source_text_for_tags 赋值"
+    rhs = match.group(1)
+    assert "last_image_raw_output" in rhs, f"提取源应优先 last_image_raw_output，实际: {rhs}"
+    # last_image_raw_output 必须排在 final_response_buffer 之前（or 短路即优先级）
+    assert rhs.index("last_image_raw_output") < rhs.index("final_response_buffer"), (
+        f"last_image_raw_output 应排在 final_response_buffer 之前，实际: {rhs}"
+    )
+
+    vmatch = re.search(r"source_text_for_vtags\s*=\s*(.+)", source)
+    assert vmatch, "找不到 source_text_for_vtags 赋值"
+    vrhs = vmatch.group(1)
+    assert "last_video_raw_output" in vrhs
+    assert vrhs.index("last_video_raw_output") < vrhs.index("final_response_buffer")
+
+
+def test_image_tag_retry_prompt_pins_tags_first_order():
+    """IMAGE_TAGS 重试 prompt 的特别强调里必须显式钉住「标签块在最开头」的顺序。"""
+    import inspect
+    from core.back_brain import BackBrainMixin
+
+    source = inspect.getsource(BackBrainMixin._generate_response)
+    assert "所有标签区块必须放在回复的**最开头**" in source, (
+        "重试 prompt 的特别强调列表应包含标签块位置要求"
+    )
+
+
+
 def test_view_media_page_translates_to_offset():
     """page=N 应换算为 offset=(N-1)*limit 传给 ImageStore"""
     from unittest.mock import MagicMock

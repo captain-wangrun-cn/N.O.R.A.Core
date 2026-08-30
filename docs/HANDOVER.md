@@ -1,5 +1,28 @@
 ## 近期关键改动（截至 2026-08-30）
 
+### 🖼️ IMAGE_TAGS 输出顺序改为 tags-first（治"发图时重试/图片输出异常"）
+
+用户发图后 image 轮的"聊天回复 + 每图 IMAGE_TAGS/OCR/DESC 三块"原本要求标签块放回复
+**最末尾**，两个失败模式都源于此：模型聊嗨了在标签前收尾（漏标签 → 重试）；输出被
+`max_output_tokens`（全局默认仅 768）截断时标签块被腰斩（结构异常 → 重试，且上层只看到
+"IMAGE_TAGS 异常"，截断本身只在 provider 日志里有一条 warning）。修复三件套：
+
+- **`brain/templates/image_tags.jinja` / `video_tags.jinja`**：标签块位置改为回复**最开头**、
+  任何聊天文字之前。截断时被砍的只是聊天尾巴（优雅降级），标签块始终完整；"着急说话"
+  也不可能再把标签挤掉。标签块发送前本来就会被剥掉（`_strip_thinking_content`），顺序对
+  用户不可见。
+- **`core/back_brain.py`**：标签提取源改为**优先 `last_image_raw_output`**（视频侧同理
+  `last_video_raw_output`）。这是配套的必要修复——tags-first 后标签块落在回复开头，若
+  处于某个 `[SPLIT]` 分段内，分段会先剥掉标签再进 `final_response_buffer`，从后者提取
+  就漏标签、误触发重试；raw 输出是逐字原文永远含完整标签块。重试 prompt 的特别强调
+  列表也加了「标签块必须在最开头」一条（措辞 `所有标签区块必须放在回复的**最开头**`）。
+- **`config.example.yml`**：`max_output_tokens_by_alias` 注释块加 `image: 8192` 示例——
+  image 轮输出负载重（聊天 + 每图三块 + OCR 原文可能很长），768 太容易截断。
+- 测试：`tests/test_image_memory.py` 新增 4 个源码级/模板渲染断言
+  （tags-first 措辞、提取源优先 raw、重试 prompt 钉住顺序）。
+- ⚠️ 用户 config.yml 需手动/已同步 `max_output_tokens_by_alias.image: 8192`（改动只对新
+  创建的 client 生效，需重启进程）。
+
 ### 🧭 Telegram 命令菜单 / end_segment 指令 / custom_scope 扩展
 
 - **启动自动注册命令菜单**：`adapters/telegram/main.py` 的 `_post_init_setup` 新增

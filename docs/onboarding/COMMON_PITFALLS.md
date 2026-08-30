@@ -245,6 +245,23 @@
 被截断时 `tool_result` 会附提示引导收窄查询或用 `page` 翻页，`media_truncated_count`
 也会带进分析轮 prompt，让模型知道自己看的是子集。
 
+### ❌ IMAGE_TAGS 标签块必须放回复最开头（tags-first），提取源必须用 raw 输出
+
+发图时"图片输出异常，已自动重试失败"的两大根因：标签块放回复末尾时，模型聊嗨了在标签前
+收尾（漏标签）、或输出被 `max_output_tokens` 截断把标签腰斩（结构异常）。2026-08-30 改为
+tags-first（`image_tags.jinja` / `video_tags.jinja` 要求标签块在任何聊天文字之前），
+截断只砍聊天尾巴、标签块始终完整。**改动时不要把顺序改回去。**
+
+- **标签提取源必须优先 `last_image_raw_output`（视频 `last_video_raw_output`）**，
+  其次才是 `final_response_buffer`——tags-first 后标签块落在回复开头，若处于某个
+  `[SPLIT]` 分段内，分段会先剥掉标签再进 `final_response_buffer`，从后者提取就漏标签、
+  误触发重试。raw 输出是逐字原文。
+- **排障先看 provider 日志的「输出被长度上限截断」warning**：截断在上层只表现为
+  "IMAGE_TAGS 异常"，两件事日志里不在一处。`max_output_tokens_by_alias.image` 建议
+  8192（image 轮输出 = 聊天 + 每图三块 + OCR 原文，全局默认 768 很容易截断）。
+- 测试锁：`tests/test_image_memory.py` 的 tags-first 断言组
+  （`test_image_tags_prompt_requires_tags_first` 等 4 个）。
+
 ### ❌ 前脑审查 continue 后，上一轮用过的工具第一次调用就被提示"3 次调用"
 
 `sessions[chat_id]` 是 controller 级别的**长期** per-chat 字典，而 `last_loop_key` /
