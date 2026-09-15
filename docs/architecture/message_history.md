@@ -266,10 +266,35 @@ close_session() — 将所有 session_id=NULL 的消息归入新 session
 
 1. **永久标记的消息** — 带 📌 标记，始终出现
 2. **归档总结** (如果存在) — 带 📚 标记，描述早期对话
-3. **一级总结** (如果存在) — 带 💬 标记，近期摘要
+3. **一级总结** (如果存在) — 全部合并为**一条** `user` 消息注入
 4. **原始消息** (最近的) — 完整保留的最新对话
 
 所有消息按时间排序后返回给 LLM。
+
+### ⚠️ 一级总结为什么必须合并成单条 user 消息
+
+`summaries` 表里 `level < 3` 的行数量是**无上限**的：一级压缩每压缩一轮就写一条
+`level=1`，只有归档（`_create_archive_summary`）才会把它们并成 `level=3`。
+一旦归档没跟上（阈值太高、归档持续失败、或库很老），行数就会一直堆。
+
+历史上 `get_compressed_context_messages()` 与 `get_context_messages()` 都是
+**逐条 append 且 role=`system`**，于是一段长历史会变成上下文里几百条独立的
+system 消息（生产实测：一次前脑请求 322 条消息里 315 条是 system）。
+
+两个后果，第二个是致命的：
+
+1. 每条独立消息的 role/分隔开销在几百条规模下相当可观，token 白白浪费。
+2. 这些消息经网关映射后，会变成上游 provider 上下文中间的大批 system 块。
+   **Google 系端点对此直接返回 400 `INVALID_ARGUMENT`**
+   （实测：原请求 400；把这 315 条的 role 原样改成 `user`、内容一字不动 → 200）。
+
+现在两处都走 `_build_summary_message()`，合并成**一条 `user` 消息**
+（带「这是历史记忆背景、不是待回复消息」的说明头 + 日期 + 条数）。
+`user` 角色在 OpenAI/Gemini 全系都合法，不受非首条 system 支持差异影响。
+
+> 注意与段级滑动压缩区分：`context_store` 的槽位摘要（`[压缩段#N]` 等）用
+> `role="system"` 是**可以**的，因为 slot 只有 1-10 个、数量有界。
+> 不要为了「统一」把 `_build_summary_message` 的 role 改回 system。
 
 ## ⚙️ 配置参数
 
@@ -368,6 +393,22 @@ close_session() — 将所有 session_id=NULL 的消息归入新 session
 - 检查 `summary` 模型是否持续不可用
 - 检查后台 worker 是否已在运行（需有事件循环）
 - 若是 `context_refresh`，同时检查 `context_compression.db` 是否可写
+
+### 问题: 模型返回 400 INVALID_ARGUMENT / 上下文里 system 消息异常多
+
+先看上下文里的 role 分布。`summaries` 表 `level < 3` 的行数直接决定摘要块大小，
+可用下面这条 SQL 快速体检（数字上百就说明归档已经长期没跑了）：
+
+```sql
+SELECT level, COUNT(*) FROM summaries GROUP BY level;
+```
+
+- `level=1` 几百条、`level=3` 为 0 → 归档从未触发。检查 `archive_threshold`
+  与 `_check_and_compress` 是否真的被调用到。
+- 摘要块合并成单条 `user` 消息是**结构性修复**（见上文），不会再因为摘要多而
+  产生成百上千条 system 消息。若仍见到大量 system，说明代码被改回去了。
+- 归档欠账本身仍值得清一次：`python cli.py --configure` 调低
+  `archive_threshold`，或手动触发一次归档，把 `level=1` 收敛掉。
 
 ---
 

@@ -504,3 +504,108 @@ def test_legacy_add_message_defaults_to_shared_scope(tmp_path):
     assert row["memory_scope_id"] == SCOPE
     assert row["place_scope_id"] == "telegram:user_a"
 
+
+# ---------------------------------------------------------------------------
+# 摘要块合并（2026-09-15 生产 400 回归）
+# ---------------------------------------------------------------------------
+
+def _insert_summaries(history, rows):
+    """往 summaries 表插 level<3 的摘要。rows: [(summary_text, message_count, ts), ...]"""
+    conn = sqlite3.connect(str(history.db_path))
+    cur = conn.cursor()
+    for i, (text, count, ts) in enumerate(rows):
+        cur.execute(
+            """
+            INSERT INTO summaries (platform, chat_id, level, start_message_id, end_message_id,
+                                   summary_text, message_count, timestamp, memory_scope_id, place_scope_id)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            ("web", "sess_b", 1, i + 1, i + 1, text, count, ts, SCOPE, "web:sess_b"),
+        )
+    conn.commit()
+    conn.close()
+
+
+def test_summaries_merged_into_single_message(tmp_path):
+    """300 条摘要必须合并成**一条**消息。
+
+    历史上这里逐条 append，上下文里会多出几百条独立消息；生产实测载荷
+    322 条消息里 315 条是这些摘要。
+    """
+    history = _make_history(tmp_path)
+    _insert_summaries(history, [(f"摘要正文{i}", 10, float(i)) for i in range(300)])
+
+    msgs = history.get_compressed_context_messages("web", "sess_b", memory_scope_id=SCOPE)
+    summary_msgs = [m for m in msgs if "摘要正文" in str(m.get("content", ""))]
+
+    assert len(summary_msgs) == 1
+    blob = summary_msgs[0]["content"]
+    # 内容不能丢：首尾都要在
+    assert "摘要正文0" in blob
+    assert "摘要正文299" in blob
+
+
+def test_summary_message_role_is_user_not_system(tmp_path):
+    """摘要块的角色必须是 user。
+
+    摘要会被网关映射成上游 provider 的 system 消息；上下文中间夹几百条
+    system 会让 Google 侧直接 400 INVALID_ARGUMENT（实测 315 条 system → 400，
+    原样改成 user 后 → 200）。
+    """
+    history = _make_history(tmp_path)
+    _insert_summaries(history, [(f"摘要{i}", 5, float(i)) for i in range(60)])
+
+    msgs = history.get_compressed_context_messages("web", "sess_b", memory_scope_id=SCOPE)
+    summary_msgs = [m for m in msgs if "摘要0" in str(m.get("content", ""))]
+
+    assert len(summary_msgs) == 1
+    assert summary_msgs[0]["role"] == "user"
+
+    # 顺带锁住总量：不管摘要多少条，system 消息数都不该随之增长
+    n_system = sum(1 for m in msgs if m.get("role") == "system")
+    assert n_system <= 1, f"摘要不应产生 system 消息，实际 {n_system} 条"
+
+
+def test_get_context_messages_merges_summaries_too(tmp_path):
+    """get_context_messages 走的是另一条分支，同样必须合并（两处曾各写一份）。"""
+    history = _make_history(tmp_path)
+    _insert_summaries(history, [(f"另一处摘要{i}", 3, float(i)) for i in range(120)])
+
+    msgs = history.get_context_messages("web", "sess_b", memory_scope_id=SCOPE)
+    summary_msgs = [m for m in msgs if "另一处摘要" in str(m.get("content", ""))]
+
+    assert len(summary_msgs) == 1
+    assert summary_msgs[0]["role"] == "user"
+    assert "另一处摘要0" in summary_msgs[0]["content"]
+    assert "另一处摘要119" in summary_msgs[0]["content"]
+
+
+def test_no_summaries_means_no_placeholder_message(tmp_path):
+    """没有摘要时不能凭空插一条空消息。"""
+    history = _make_history(tmp_path)
+    history.add_message(platform="web", chat_id="sess_b", role="user", content="只有原文",
+                        memory_scope_id=SCOPE, place_scope_id="web:sess_b")
+
+    for msgs in (
+        history.get_compressed_context_messages("web", "sess_b", memory_scope_id=SCOPE),
+        history.get_context_messages("web", "sess_b", memory_scope_id=SCOPE),
+    ):
+        assert not any("历史摘要" in str(m.get("content", "")) for m in msgs)
+
+
+def test_summary_message_survives_bad_timestamp(tmp_path):
+    """时间戳异常不能把整块摘要吞掉。
+
+    summaries.timestamp 有 NOT NULL 约束，所以"真实可能"的坏值是存进去的
+    非数值字符串，而不是 NULL。
+    """
+    history = _make_history(tmp_path)
+    _insert_summaries(history, [("正文甲", 1, "not-a-number"), ("正文乙", 1, 42.0)])
+
+    msgs = history.get_compressed_context_messages("web", "sess_b", memory_scope_id=SCOPE)
+    blob = "\n".join(str(m.get("content", "")) for m in msgs)
+
+    assert "正文甲" in blob
+    assert "正文乙" in blob
+    assert "未知时间" in blob
+

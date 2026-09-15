@@ -624,6 +624,42 @@ draw_desc 未输出 [DRAW_PROMPT] 区块，整段文本作为提示词。
 - Telegram 的 `_EFFORT_CHOICES` **直接引用 `config.EFFORT_LEVELS`**，不要另抄一份；
   抄了就会漂移，表现是按钮能点的档位写进 config.yml 后被 `normalize_effort` 判非法丢掉。
 
+## 5.13 长历史实例发什么都是 400 INVALID_ARGUMENT
+
+现象（2026-09-15 生产）：某个跑了两个月的实例，用户发一句"你好"也 400
+`Request contains an invalid argument.`，前脑连试三次全败后回退后脑；同网关下
+**其它实例完全正常**。很容易误判成"中转站挂了"或"渠道单点"。
+
+**根因在上下文构建，不在模型也不在网关。** `summaries` 表里 `level < 3` 的行是
+逐条 append、且 role 一律 `system` 的，而这个集合**没有上限**——一级压缩每轮写一条，
+只有归档把它并成 `level=3` 才会收敛。归档欠账时它就无限堆。实测一次前脑请求
+322 条消息里 **315 条是这些摘要**。
+
+判据（不用猜，直接看 role 分布）：把失败请求的 body 打出来，数 `role`。
+上下文中间出现成百条 `system` 就是它。
+
+变量控制重放能一击定性——**只改 role、内容一字不动**：
+
+| 请求 | 改动 | 结果 |
+|---|---|---|
+| A | 原样 | 400 |
+| B | 非首条 `system` → `user`，内容不变 | **200** |
+| C | 只留首条 system + 最后 6 条 | **200** |
+
+B 通过就说明是角色/结构问题，与内容、模型、渠道都无关。
+
+- 修复是 `MessageHistory._build_summary_message()`：合并成**一条 `user`** 消息。
+- ⚠️ **别把它改回 system，也别和 `context_store` 的槽位摘要"统一"。**
+  `context_store` 的 `[压缩段#N]` 用 system 没问题——那边 slot 1-10 **数量有界**；
+  这里是**无界历史**，两者性质不同，这正是当年埋雷的地方。
+- ⚠️ 同一个坑在 `get_compressed_context_messages()` 和 `get_context_messages()`
+  里**各写了一份**。改这类"摘要注入"逻辑时两处都要看，漏一处等于没修。
+- 体检 SQL：`SELECT level, COUNT(*) FROM summaries GROUP BY level;`
+  `level=1` 上百条且 `level=3` 为 0 = 归档长期没跑（欠账本身是另一个问题，
+  结构性修复不会替你清理它，但不会再产生 400）。
+- 顺带：这类"实例 A 坏、实例 B 好，配置还一样"的问题，**先比数据量再比配置**。
+  那次三个实例配置逐项相同，差别是摘要数 1 / 308 / 797。
+
 ## 6. 成本跟踪
 
 ### ⚠️ 无内置价格表

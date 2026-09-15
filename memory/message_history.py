@@ -708,6 +708,53 @@ class MessageHistory:
             return "memory_scope_id = ?", (memory_scope_id,)
         return "platform = ? AND chat_id = ?", (platform, chat_id)
 
+    def _build_summary_message(self, rows: List[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+        """把 level<3 的摘要合并成**一条** user 消息，避免污染对话历史结构。
+
+        为什么不能一条摘要一条消息、也不能用 system 角色（2026-09-15 生产事故）：
+
+        1. **数量无上限**。一级压缩每压缩一轮就写一条 level=1 摘要，只有归档
+           （`_create_archive_summary`）才会把它们并成 level=3。归档没跟上时
+           摘要会一直堆——生产库实测积到 308 条。逐条 append 就等于把整段
+           历史摘要以 308 条独立消息灌进上下文。
+        2. **role 必须是 user**。摘要会被网关映射成上游 provider 的 system
+          消息；上下文中间夹几百条 system，Google 侧直接
+          400 `INVALID_ARGUMENT`（实测：322 条消息里 315 条是 system → 400；
+           把这 315 条的 role 原样改成 user、内容一字不动 → 200）。
+           OpenAI/Gemini 系对非首条 system 的支持本来就不一致，不能依赖。
+        3. **拼接成一条**同时解决 token 浪费——每条独立消息的 role/分隔开销
+           在几百条规模下相当可观。
+
+        与 context_store 的槽位摘要不同：那边 slot 1-10 是**有界**的，所以沿用
+        system 角色没问题；这里的 level<3 摘要是**无界**历史，两者性质不同，
+        不要为了"统一"把这里的 role 改回去。
+        """
+        if not rows:
+            return None
+
+        blocks: List[str] = []
+        for row in rows:
+            ts = row.get("timestamp")
+            try:
+                stamp = datetime.fromtimestamp(float(ts), tz=self.timezone).strftime("%Y-%m-%d")
+            except (TypeError, ValueError, OSError, OverflowError):
+                stamp = "未知时间"
+            blocks.append(
+                f"### {stamp}（共 {row.get('message_count') or 0} 条）\n"
+                f"{str(row.get('summary_text') or '').strip()}"
+            )
+
+        head = (
+            "以下是之前对话的历史摘要，按时间从早到晚排列。"
+            "它们是你自己的记忆背景，不是用户当前说的话，"
+            "不要把它们当作待回复的消息。"
+        )
+        return {
+            "role": "user",
+            "content": f"{head}\n\n" + "\n\n".join(blocks),
+            "timestamp": rows[0].get("timestamp", 0),
+        }
+
     @staticmethod
     def _platform_message_ids_from_metadata(metadata: Dict[str, Any]) -> List[str]:
         """从消息 metadata 中规范化平台消息 ID 列表。"""
@@ -825,12 +872,11 @@ class MessageHistory:
                 WHERE {scope_where} AND level < 3
                 ORDER BY timestamp ASC
             """, scope_params)
-            for row in cursor.fetchall():
-                messages.append({
-                    "role": "system",
-                    "content": f"[💬 对话摘要，共{row['message_count']}条] {row['summary_text']}",
-                    "timestamp": row["timestamp"],
-                })
+            # 合并成单条 user 消息——逐条 append 会让摘要以几百条独立消息
+            # （且是 system 角色）灌进上下文，见 _build_summary_message。
+            summary_message = self._build_summary_message([dict(r) for r in cursor.fetchall()])
+            if summary_message:
+                messages.append(summary_message)
 
         conn.close()
         messages.sort(key=lambda x: x.get("timestamp", 0))
@@ -970,12 +1016,10 @@ class MessageHistory:
                 ORDER BY timestamp ASC
             """, scope_params)
 
-            for row in cursor.fetchall():
-                messages.append({
-                    "role": "system",
-                    "content": f"[💬 对话摘要，共{row['message_count']}条] {row['summary_text']}",
-                    "timestamp": row["timestamp"]
-                })
+            # 合并成单条 user 消息——理由见 _build_summary_message（无界累积 + role 问题）
+            summary_message = self._build_summary_message([dict(r) for r in cursor.fetchall()])
+            if summary_message:
+                messages.append(summary_message)
 
         # 4. 获取原始消息（最近的）
         actual_limit = limit or self.raw_window

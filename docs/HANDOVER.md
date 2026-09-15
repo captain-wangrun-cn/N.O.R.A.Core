@@ -1,3 +1,39 @@
+## 近期关键改动（截至 2026-09-15）
+
+### 🧱 一级摘要改为合并成单条 user 消息（治"长历史下模型稳定 400"）
+
+长历史实例发任何消息都 400 `Request contains an invalid argument.`，前脑连续三次重试
+全败后回退后脑。根因不在模型也不在网关，在**上下文构建**：
+
+- `memory/message_history.py` 的 `get_compressed_context_messages()` 与
+  `get_context_messages()` 各自有一份相同实现：把 `summaries` 表里所有 `level < 3`
+  的行**逐条 append 成独立消息，且 role 一律 `system`**。这个集合没有 LIMIT 也没有
+  窗口——一级压缩每轮写一条，只有归档才收敛，归档一旦欠账就无限堆积。
+- 生产实测：一次前脑请求 322 条消息，**315 条是这些摘要（全是 system）**，请求体 489 KB。
+- 变量控制重放（原始请求体，逐项改一个变量）：
+  | | 改动 | 结果 |
+  |---|---|---|
+  | A | 原样 | **400**，5.07s |
+  | B | 只把非首条 `system` 改成 `user`，内容一字不动 | **200** ✅ |
+  | C | 只留首条 system + 最后 6 条 | **200** ✅ |
+  B 证明是 **role/结构**问题：几百条 system 夹在上下文中间，Google 系端点直接
+  `INVALID_ARGUMENT`。（OpenAI/Gemini 对非首条 system 的支持本来就各家不一，不能依赖。）
+
+修复：新增 `MessageHistory._build_summary_message()`，两处调用点都改为
+**合并成一条 `user` 消息**（说明头 + 按日期分节 + 条数），内容不丢。
+修复后同一份生产数据：**8 条消息（1 条合并摘要 + 7 条有界槽位）**，重放 **200**。
+
+- ⚠️ 与 `context_store` 的槽位摘要（`[压缩段#N]`，role 仍是 system）**不要统一**：
+  那边 slot 1-10 数量有界，不会堆积；这里是无界历史，性质不同。
+- ⚠️ `MessageHistory._build_summary_message` 的 docstring 与
+  `docs/architecture/message_history.md` 都写明了为什么不能用 system，别改回去。
+- 测试：`tests/test_message_history.py` 新增 5 个用例（合并成单条、role 非 system、
+  另一条分支同样合并、无摘要时不插空消息、坏时间戳不吞内容）。
+- 排障入口：`SELECT level, COUNT(*) FROM summaries GROUP BY level;`
+  —— `level=1` 上百条且 `level=3` 为 0，说明归档长期没跑（本次即如此，308 条 level=1、
+  0 条 level=3）。这是**独立的遗留问题**，本次结构性修复不解决归档欠账，但已让它不再
+  产生 400。
+
 ## 近期关键改动（截至 2026-08-30）
 
 ### 🖼️ IMAGE_TAGS 输出顺序改为 tags-first（治"发图时重试/图片输出异常"）
