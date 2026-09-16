@@ -75,6 +75,8 @@ class MessageHistory:
         self._init_db()
         self._summarizer = None  # 延迟加载
         self._last_compress_log_count: Dict[Tuple[str, str], int] = {}
+        # 每个 (platform, chat_id) 的压缩/归档互斥闸门，见 _acquire_compress_gate
+        self._compress_gate: set[Tuple[str, str]] = set()
         self.retry_base_delay_seconds = max(5.0, float(retry_base_delay_seconds))
         self.retry_max_attempts = max(1, int(retry_max_attempts))
         self.retry_scan_interval_seconds = max(10.0, float(retry_scan_interval_seconds))
@@ -466,6 +468,31 @@ class MessageHistory:
             return
         self._launch_background(self.context_compressor.refresh_context(platform, chat_id, memory_scope_id=memory_scope_id))
 
+    def _acquire_compress_gate(self, platform: str, chat_id: str) -> bool:
+        """尝试占用 (platform, chat_id) 的压缩闸门；已被占用则返回 False。
+
+        为什么需要（2026-09-16 生产实测）：`add_message` 每来一条消息就
+        `_launch_background(_check_and_compress)`，而那是裸 `loop.create_task`，
+        既没有互斥也没有在途去重。突发时段（生产有过单日 422 条）几十个 worker
+        同时读到同一个 count、同时执行 `SELECT ... LIMIT compress_ratio`，
+        在任何 commit 之前取到的都是同一批"最早的未归档消息"，于是各自生成一条
+        摘要并各自 INSERT。
+
+        证据：308 条一级总结只对应 **217 个不同区间**（91 条重复），同一区间最多堆
+        4 条且正文各不相同（651/501/644/719 字符，是独立 LLM 调用而非复制），
+        重复内容占摘要总字符数的 27%。
+
+        检查与置位之间没有 await，在单事件循环里是原子的。
+        """
+        key = (platform, chat_id)
+        if key in self._compress_gate:
+            return False
+        self._compress_gate.add(key)
+        return True
+
+    def _release_compress_gate(self, platform: str, chat_id: str) -> None:
+        self._compress_gate.discard((platform, chat_id))
+
     def _launch_background(self, coro):
         """安全地启动后台任务，如无事件循环则直接运行。"""
         try:
@@ -708,6 +735,61 @@ class MessageHistory:
             return "memory_scope_id = ?", (memory_scope_id,)
         return "platform = ? AND chat_id = ?", (platform, chat_id)
 
+    @staticmethod
+    def _dedupe_summaries(rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """按消息区间去重，同一区间只保留正文最长的一条（保持首次出现的顺序）。
+
+        为什么会有重复（2026-09-16 生产实测）：`add_message` 每来一条消息就
+        `_launch_background(_check_and_compress)`，而它是裸 `loop.create_task`，
+        既没有互斥也没有在途去重。突发时段几十个 worker 同时读到同一个 count、
+        同时 `SELECT ... LIMIT compress_ratio`，在任何 commit 之前取到的都是
+        同一批"最早的未归档消息"，于是各自生成一条摘要并各自 INSERT。
+
+        生产库实测：308 条一级总结只对应 217 个不同区间（91 条重复），同一区间
+        堆了 4 条且正文各不相同（651/501/644/719 字符，是独立 LLM 调用而非复制），
+        重复内容占摘要总字符数的 27%。
+
+        放在消费侧去重的意义：**已有数据库不需要手工清库**——读上下文时重复内容
+        不再进 prompt，归档时也不会把重复段落再喂一次给 LLM 做全局总结。
+
+        区间信息缺失的行（老数据 / 测试构造）不参与去重，避免把本该并存的内容合并掉。
+        """
+        merged: Dict[Any, Dict[str, Any]] = {}
+        for index, row in enumerate(rows):
+            start = row.get("start_message_id")
+            end = row.get("end_message_id")
+            key: Any = (start, end) if start is not None and end is not None else ("__row__", index)
+
+            prev = merged.get(key)
+            if prev is None:
+                merged[key] = row
+                continue
+            # 同区间保留信息量最大的那条（长度比较，取最长）
+            if len(str(row.get("summary_text") or "")) > len(str(prev.get("summary_text") or "")):
+                merged[key] = row
+        return list(merged.values())
+
+    def _build_archive_message(self, rows: List[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+        """把归档总结（level=3）合并成**一条** system 消息。
+
+        这里可以继续用 system：归档是**有界**的——`_create_archive_summary` 每次都会
+        把上一轮归档吸收进新的一条，正常情况下每个分区只留一条。这与无界的 level<3
+        摘要性质不同，理由见 `_build_summary_message`。
+
+        之所以改成"取出全部再合并"而不是原来的 `ORDER BY timestamp DESC LIMIT 1`：
+        跨平台共享作用域下同一 memory_scope 会有多个 (platform, chat_id) 分区、各有
+        各的归档，`LIMIT 1` 会让其余的归档永远读不到、也删不掉，内容静默丢失。
+        """
+        rows = self._dedupe_summaries([r for r in rows if r])
+        if not rows:
+            return None
+        content = "\n\n".join(
+            f"[📚 早期对话总结，共{r.get('message_count') or 0}条] "
+            f"{str(r.get('summary_text') or '').strip()}"
+            for r in rows
+        )
+        return {"role": "system", "content": content, "timestamp": 0}
+
     def _build_summary_message(self, rows: List[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
         """把 level<3 的摘要合并成**一条** user 消息，避免污染对话历史结构。
 
@@ -731,6 +813,10 @@ class MessageHistory:
         """
         if not rows:
             return None
+
+        # 同一区间的重复摘要只保留一条，见 _dedupe_summaries（历史库实测 308 条
+        # 一级总结里 91 条是并发重复，占摘要总字符数的 27%）。
+        rows = self._dedupe_summaries(rows)
 
         blocks: List[str] = []
         for row in rows:
@@ -834,18 +920,13 @@ class MessageHistory:
 
         if include_summaries:
             cursor.execute(f"""
-                SELECT summary_text, message_count FROM summaries
+                SELECT summary_text, message_count, start_message_id, end_message_id FROM summaries
                 WHERE {scope_where} AND level = 3
-                ORDER BY timestamp DESC
-                LIMIT 1
+                ORDER BY timestamp ASC
             """, scope_params)
-            archive_summary = cursor.fetchone()
-            if archive_summary:
-                messages.append({
-                    "role": "system",
-                    "content": f"[📚 早期对话总结，共{archive_summary['message_count']}条] {archive_summary['summary_text']}",
-                    "timestamp": 0,
-                })
+            archive_message = self._build_archive_message([dict(r) for r in cursor.fetchall()])
+            if archive_message:
+                messages.append(archive_message)
 
         active_segment_exists = bool(self.get_current_segment_messages(platform, chat_id, memory_scope_id=memory_scope_id))
         if include_summaries and self.context_compressor:
@@ -868,7 +949,8 @@ class MessageHistory:
 
         if include_summaries:
             cursor.execute(f"""
-                SELECT summary_text, level, message_count, timestamp FROM summaries
+                SELECT summary_text, level, message_count, timestamp,
+                       start_message_id, end_message_id FROM summaries
                 WHERE {scope_where} AND level < 3
                 ORDER BY timestamp ASC
             """, scope_params)
@@ -985,19 +1067,14 @@ class MessageHistory:
         # 2. 获取归档总结 (Level 3)
         if include_summaries:
             cursor.execute(f"""
-                SELECT summary_text, message_count FROM summaries
+                SELECT summary_text, message_count, start_message_id, end_message_id FROM summaries
                 WHERE {scope_where} AND level = 3
-                ORDER BY timestamp DESC
-                LIMIT 1
+                ORDER BY timestamp ASC
             """, scope_params)
 
-            archive_summary = cursor.fetchone()
-            if archive_summary:
-                messages.append({
-                    "role": "system",
-                    "content": f"[📚 早期对话总结，共{archive_summary['message_count']}条] {archive_summary['summary_text']}",
-                    "timestamp": 0
-                })
+            archive_message = self._build_archive_message([dict(r) for r in cursor.fetchall()])
+            if archive_message:
+                messages.append(archive_message)
 
         # 优先使用独立上下文数据库的滑动压缩结果
         if include_summaries and self.context_compressor:
@@ -1011,7 +1088,8 @@ class MessageHistory:
         # 3. 获取压缩总结 (Level 1-2)
         if include_summaries:
             cursor.execute(f"""
-                SELECT summary_text, level, message_count, timestamp FROM summaries
+                SELECT summary_text, level, message_count, timestamp,
+                       start_message_id, end_message_id FROM summaries
                 WHERE {scope_where} AND level < 3
                 ORDER BY timestamp ASC
             """, scope_params)
@@ -1162,16 +1240,35 @@ class MessageHistory:
         try:
             conn = sqlite3.connect(str(self.db_path))
             cursor = conn.cursor()
-            
-            # 统计未归档的消息数量
+
+            # 一级压缩判据：**未归档的原始消息数**。这个池子会被压缩自己排空，
+            # 所以它只能用来判"该不该做一级压缩"。
             cursor.execute("""
                 SELECT COUNT(*) as count FROM messages
                 WHERE platform = ? AND chat_id = ? AND is_archived = 0 AND is_pinned = 0
             """, (platform, chat_id))
-            
             count = cursor.fetchone()[0]
+
+            # 归档判据：**已被一级总结消化掉的消息总量**。
+            #
+            # 这里曾经错用上面的 count，导致归档从未执行过（2026-09-16 生产事故）：
+            # 压缩每次排掉 compress_ratio(10) 条，count 于是被自身压在
+            # compress_window 附近（生产实测稳定在 41~51），archive_threshold(500)
+            # 永远够不到。归档唯一能触发的场景只剩"压缩持续失败"——而那恰恰是最不
+            # 该再发一次 LLM 调用的时刻。结果是库里 308 条一级总结、0 条归档，
+            # 全部摘要原文长期灌进上下文（单次请求 148533 input tokens）。
+            #
+            # 归档阈值沿用"消息条数"语义（config 里的 archive_threshold 不变），
+            # 只是把被统计的对象从"没进总结的消息"换成"已经进过总结的消息"。
+            # 这样已有数据库无需迁移：历史库 SUM(message_count)=3080 立刻超过 500，
+            # 下一条消息就会触发归档把欠账收掉。
+            cursor.execute("""
+                SELECT COALESCE(SUM(message_count), 0) FROM summaries
+                WHERE platform = ? AND chat_id = ? AND level = 1
+            """, (platform, chat_id))
+            summarized_count = cursor.fetchone()[0]
             conn.close()
-            
+
             if count > self.compress_window:
                 key = (platform, chat_id)
                 last_count = self._last_compress_log_count.get(key, 0)
@@ -1180,16 +1277,33 @@ class MessageHistory:
                     logger.info(f"[{platform}/{chat_id}] 消息数 {count} 超过阈值 {self.compress_window}，开始压缩")
                     self._last_compress_log_count[key] = count
                 await self._perform_compression(platform, chat_id)
-            
-            if count > self.archive_threshold:
-                logger.info(f"[{platform}/{chat_id}] 消息数 {count} 超过归档阈值 {self.archive_threshold}，创建归档总结")
+
+            if summarized_count > self.archive_threshold:
+                logger.info(
+                    f"[{platform}/{chat_id}] 已总结消息数 {summarized_count} 超过归档阈值 "
+                    f"{self.archive_threshold}，创建归档总结"
+                )
                 await self._create_archive_summary(platform, chat_id)
-        
+
         except Exception as e:
             logger.error(f"压缩检查失败: {e}", exc_info=True)
     
     async def _perform_compression(self, platform: str, chat_id: str):
-        """执行消息压缩"""
+        """执行消息压缩（互斥入口，闸门原因见 _acquire_compress_gate）。
+
+        闸门放在这一层、而不是只放在 `_check_and_compress`：重试 worker 会绕过
+        `_check_and_compress` 直接调本方法，放这里两条路径才都覆盖得到。
+        """
+        if not self._acquire_compress_gate(platform, chat_id):
+            logger.debug(f"[{platform}/{chat_id}] 已有压缩/归档任务在途，跳过本次")
+            return
+        try:
+            await self._compress_locked(platform, chat_id)
+        finally:
+            self._release_compress_gate(platform, chat_id)
+
+    async def _compress_locked(self, platform: str, chat_id: str):
+        """执行消息压缩（调用方须已持有该 (platform, chat_id) 的压缩闸门）。"""
         self.start_retry_worker()
         if self._summarizer is None:
             from brain.llm import get_llm_client
@@ -1232,8 +1346,11 @@ class MessageHistory:
             )
             
             # 保存总结
-            start_id = messages_to_compress[0]["id"]
-            end_id = messages_to_compress[-1]["id"]
+            # 区间用**实际选中这 10 条的 min/max id**。选择是按 timestamp 排序的，
+            # 首尾未必就是 id 最小/最大的那条。
+            selected_ids = [m["id"] for m in messages_to_compress]
+            start_id = min(selected_ids)
+            end_id = max(selected_ids)
             timestamp = datetime.now().timestamp()
 
             # 总结继承源消息的作用域，保证共享模式下能检索到（缺失则归入默认共享作用域）。
@@ -1247,11 +1364,19 @@ class MessageHistory:
             """, (platform, chat_id, 1, start_id, end_id, summary, len(messages_to_compress), timestamp,
                   seg_scope, seg_place))
             
-            # 标记消息为已归档
-            cursor.execute("""
+            # 标记消息为已归档：**按实际选中的 id 精确标记**。
+            #
+            # 原来是 `WHERE id >= start_id AND id <= end_id`。在"id 顺序 == 时间顺序"
+            # 成立时两者等价（区间内不可能存在未归档却没被选中的消息：那 10 条就是
+            # 最早的未归档），生产库实测也确实是 0 次时间倒挂。
+            # 但那个等价性依赖"时间戳单调"这条没写在任何地方的隐含前提；一旦平台乱序
+            # 投递、或带历史时间戳回填，BETWEEN 就会把区间内没被总结的消息一并标记成
+            # 已归档，它们从此不再进上下文（静默丢记忆）。改按 id 列表标记就不依赖该前提。
+            placeholders = ','.join('?' * len(selected_ids))
+            cursor.execute(f"""
                 UPDATE messages SET is_archived = 1
-                WHERE id >= ? AND id <= ? AND platform = ? AND chat_id = ?
-            """, (start_id, end_id, platform, chat_id))
+                WHERE id IN ({placeholders}) AND platform = ? AND chat_id = ?
+            """, selected_ids + [platform, chat_id])
             
             conn.commit()
             self._mark_retry_success("compress", platform, chat_id)
@@ -1266,38 +1391,75 @@ class MessageHistory:
             conn.close()
     
     async def _create_archive_summary(self, platform: str, chat_id: str):
-        """创建归档总结（二级压缩）"""
+        """创建归档总结（互斥入口，闸门原因见 _acquire_compress_gate）。
+
+        并发跑两次归档的代价不只是重复内容：它会对同一批一级总结**各发一次大请求**
+        （历史欠账场景下提示词约 14.5 万字符），白白多烧一次。
+        """
+        if not self._acquire_compress_gate(platform, chat_id):
+            logger.debug(f"[{platform}/{chat_id}] 已有压缩/归档任务在途，跳过本次归档")
+            return
+        try:
+            await self._archive_locked(platform, chat_id)
+        finally:
+            self._release_compress_gate(platform, chat_id)
+
+    async def _archive_locked(self, platform: str, chat_id: str):
+        """创建归档总结（调用方须已持有该 (platform, chat_id) 的压缩闸门）。
+
+        滚动合并：把当前全部一级总结，连同上一轮的归档总结一起，重新压成一条新的
+        归档总结，随后删除被合并掉的旧行。
+
+        为什么必须吸收上一轮归档、而不是每轮各写一条（2026-09-16）：读取侧每个作用域
+        只认一条归档（`_build_archive_message`），若每轮另起一条，旧归档就成了永远
+        读不到、也删不掉的孤儿，内容静默丢失。滚动合并保证每个分区恒定只有一条归档，
+        上下文上界稳定。
+        """
         self.start_retry_worker()
         if self._summarizer is None:
             from brain.llm import get_llm_client
             self._summarizer = get_llm_client(model_alias="summary")
-        
+
         conn = sqlite3.connect(str(self.db_path))
         conn.row_factory = sqlite3.Row
         cursor = conn.cursor()
-        
-        # 获取所有一级总结
+
+        # 上一轮的归档总结（容忍历史库里存在多条）
+        cursor.execute("""
+            SELECT * FROM summaries
+            WHERE platform = ? AND chat_id = ? AND level = 3
+            ORDER BY timestamp ASC
+        """, (platform, chat_id))
+        old_archives = [dict(row) for row in cursor.fetchall()]
+
+        # 全部一级总结，按消息区间去重（并发重复写入，见 _dedupe_summaries）
         cursor.execute("""
             SELECT * FROM summaries
             WHERE platform = ? AND chat_id = ? AND level = 1
             ORDER BY timestamp ASC
         """, (platform, chat_id))
-        
-        level1_summaries = [dict(row) for row in cursor.fetchall()]
-        
+        raw_level1 = [dict(row) for row in cursor.fetchall()]
+        level1_summaries = self._dedupe_summaries(raw_level1)
+
         if not level1_summaries:
             conn.close()
             return
-        
-        # 构建归档总结提示
-        summaries_text = "\n\n".join([
-            f"[时间段 {i+1}] {s['summary_text']}" 
+
+        # 构建归档总结提示：此前归档（覆盖更早的对话）在前，本轮新增总结在后
+        blocks: List[str] = []
+        if old_archives:
+            blocks.append("【此前归档，覆盖更早的对话】\n" + "\n\n".join(
+                str(a.get("summary_text") or "") for a in old_archives
+            ))
+        blocks.append("【本轮新增对话总结】\n" + "\n\n".join(
+            f"[时间段 {i+1}] {s.get('summary_text') or ''}"
             for i, s in enumerate(level1_summaries)
-        ])
-        
+        ))
+        summaries_text = "\n\n".join(blocks)
+
         prompt = render_template('compression.jinja', 'archive_user',
                                  summaries_text=summaries_text)
-        
+
         try:
             archive_summary = await self._summarizer.chat(
                 system_prompt=append_custom_scope_block(
@@ -1306,40 +1468,57 @@ class MessageHistory:
                 user_prompt=prompt,
                 history=[]
             )
-            
-            # 保存归档总结
-            start_id = level1_summaries[0]["start_message_id"]
-            end_id = level1_summaries[-1]["end_message_id"]
-            total_count = sum(s["message_count"] for s in level1_summaries)
+
+            # 保存归档总结：覆盖范围 = 旧归档 ∪ 本轮全部一级总结
+            merged_rows = old_archives + level1_summaries
+            start_ids = [r["start_message_id"] for r in merged_rows if r.get("start_message_id") is not None]
+            end_ids = [r["end_message_id"] for r in merged_rows if r.get("end_message_id") is not None]
+            start_id = min(start_ids) if start_ids else None
+            end_id = max(end_ids) if end_ids else None
+            total_count = sum(int(r.get("message_count") or 0) for r in merged_rows)
             timestamp = datetime.now().timestamp()
 
             # 归档总结继承一级总结的作用域。
             arc_scope = level1_summaries[0].get("memory_scope_id") or DEFAULT_MEMORY_SCOPE_ID
             arc_place = level1_summaries[0].get("place_scope_id") or f"{platform}:{chat_id}"
 
+            # level 用字面量 3 写在 VALUES 里，所以占位符只有 9 个、参数也只能有 9 个。
+            # 原实现多传了一个参数（9 个 ? 配 10 个值），SQLite 会直接抛
+            # `ProgrammingError: Incorrect number of bindings supplied` —— 也就是说
+            # 归档只要被触发就必然失败。因为归档此前从未被触发过，这个错误一直没暴露。
             cursor.execute("""
                 INSERT INTO summaries (platform, chat_id, level, start_message_id, end_message_id,
                                      summary_text, message_count, timestamp, memory_scope_id, place_scope_id)
                 VALUES (?, ?, 3, ?, ?, ?, ?, ?, ?, ?)
-            """, (platform, chat_id, 3, start_id, end_id, archive_summary, total_count, timestamp,
+            """, (platform, chat_id, start_id, end_id, archive_summary, total_count, timestamp,
                   arc_scope, arc_place))
-            
-            # 删除已归档的一级总结
-            cursor.execute("""
-                DELETE FROM summaries
-                WHERE platform = ? AND chat_id = ? AND level = 1 AND id IN ({})
-            """.format(','.join('?' * len(level1_summaries))), 
-            [platform, chat_id] + [s["id"] for s in level1_summaries])
-            
+
+            # 删除被吸收的旧行：**必须按 id 精确删除**。
+            # 不能用 `WHERE platform=? AND chat_id=? AND level=3` —— 那会把上面刚插入的
+            # 新归档一起删掉（同样的 platform/chat_id/level），结果是"归档成功但库里
+            # 一条不剩"。一级总结按读到的全部行删除，含被去重丢弃的重复行，
+            # 已入库的并发重复数据就此自愈。
+            consumed_ids = [a["id"] for a in old_archives] + [s["id"] for s in raw_level1]
+            if consumed_ids:
+                placeholders = ','.join('?' * len(consumed_ids))
+                cursor.execute(
+                    f"DELETE FROM summaries WHERE id IN ({placeholders})",
+                    consumed_ids,
+                )
+
             conn.commit()
             self._mark_retry_success("archive", platform, chat_id)
-            logger.info(f"[{platform}/{chat_id}] 创建归档总结: {len(level1_summaries)} 段总结 -> 1 条归档")
-        
+            logger.info(
+                f"[{platform}/{chat_id}] 创建归档总结: {len(level1_summaries)} 段一级总结"
+                f"（去重前 {len(raw_level1)} 段） + {len(old_archives)} 条旧归档 -> 1 条归档，"
+                f"覆盖 {total_count} 条消息"
+            )
+
         except Exception as e:
             logger.error(f"归档总结失败: {e}", exc_info=True)
             conn.rollback()
             self._enqueue_retry("archive", platform, chat_id, error=str(e))
-        
+
         finally:
             conn.close()
     

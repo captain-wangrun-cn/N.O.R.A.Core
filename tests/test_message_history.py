@@ -10,18 +10,18 @@ from memory.message_history import (
 )
 
 
-def _make_history(tmp_path: Path) -> MessageHistory:
+def _make_history(tmp_path: Path, **overrides) -> MessageHistory:
     """构造一个完全隔离在临时目录的 MessageHistory（不触碰生产库）。
 
-    compress_window 调高、消息短，避免触发摘要 LLM 调用。
+    默认 compress_window 调高、消息短，避免触发摘要 LLM 调用。
     """
+    params = dict(raw_window=80, compress_window=9999, archive_threshold=99999)
+    params.update(overrides)
     return MessageHistory(
         db_path=str(tmp_path / "history.db"),
         mirror_db_path=str(tmp_path / "mirror.db"),
         context_db_path=str(tmp_path / "context.db"),
-        raw_window=80,
-        compress_window=9999,
-        archive_threshold=99999,
+        **params,
     )
 
 async def _async_test_message_history():
@@ -608,4 +608,281 @@ def test_summary_message_survives_bad_timestamp(tmp_path):
     assert "正文甲" in blob
     assert "正文乙" in blob
     assert "未知时间" in blob
+
+
+# ---------------------------------------------------------------------------
+# 归档链（二级压缩）：触发判据 / 滚动合并 / 去重自愈
+# ---------------------------------------------------------------------------
+
+
+class _RecordingSummarizer:
+    """记录最后一次提示词，用来断言归档到底喂了什么给 LLM。"""
+
+    def __init__(self, text: str = "归档正文"):
+        self.text = text
+        self.last_user_prompt = None
+
+    async def chat(self, system_prompt, user_prompt, history):
+        self.last_user_prompt = user_prompt
+        return self.text
+
+
+def _insert_summary_row(
+    history,
+    *,
+    level: int,
+    text: str,
+    count: int,
+    ts,
+    start,
+    end,
+    platform: str = "web",
+    chat_id: str = "sess_b",
+    scope: str = SCOPE,
+):
+    conn = sqlite3.connect(str(history.db_path))
+    conn.execute(
+        """
+        INSERT INTO summaries (platform, chat_id, level, start_message_id, end_message_id,
+                               summary_text, message_count, timestamp, memory_scope_id, place_scope_id)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (platform, chat_id, level, start, end, text, count, ts, scope, f"{platform}:{chat_id}"),
+    )
+    conn.commit()
+    conn.close()
+
+
+def _read_summary_rows(history):
+    conn = sqlite3.connect(str(history.db_path))
+    conn.row_factory = sqlite3.Row
+    rows = [
+        dict(r)
+        for r in conn.execute(
+            "SELECT level, summary_text, message_count, start_message_id, end_message_id "
+            "FROM summaries ORDER BY level, id"
+        ).fetchall()
+    ]
+    conn.close()
+    return rows
+
+
+def _run_check_and_compress(history, platform: str = "web", chat_id: str = "sess_b"):
+    """跑一次压缩检查（含结束重试 worker）。
+
+    这里用 asyncio.run 而不是 pytest.mark.asyncio：本仓库的 venv 没装
+    pytest-asyncio，async 测试在环境里根本不会被执行。
+    """
+
+    async def _run():
+        try:
+            await history._check_and_compress(platform, chat_id)
+        finally:
+            await history.stop_retry_worker()
+
+    asyncio.run(_run())
+
+
+def test_archive_trigger_counts_summarized_messages(tmp_path):
+    """归档判据必须是"已经被一级总结消化的消息总量"，不是"未归档消息数"。
+
+    用未归档消息数做判据时，压缩每次排掉 compress_ratio 条、把这个数压回
+    compress_window 附近（生产实测稳定在 41~51），archive_threshold(500)
+    永远够不到——归档从未执行过，库里攒了 308 条一级总结、0 条归档。
+    """
+    history = _make_history(tmp_path, compress_window=50, archive_threshold=500)
+    history._summarizer = _RecordingSummarizer()  # type: ignore[assignment]
+
+    # 关键是：一条未归档消息都没有（count=0），但已总结的消息量远超阈值
+    for i in range(60):
+        _insert_summary_row(
+            history, level=1, text=f"一级{i}", count=10, ts=float(i),
+            start=i * 10 + 1, end=i * 10 + 10,
+        )
+
+    _run_check_and_compress(history)
+
+    rows = _read_summary_rows(history)
+    assert [r["level"] for r in rows] == [3]
+    assert rows[0]["summary_text"] == "归档正文"
+    assert rows[0]["message_count"] == 600
+    # 归档真跑通了：没有落进重试队列（INSERT 绑定错会走到这里）
+    assert history.get_retry_queue_status() == []
+
+
+def test_archive_heals_duplicate_ranges_in_existing_db(tmp_path):
+    """已有库里的并发重复摘要，跑一次归档就自愈：同区间只喂一条给 LLM，重复行删除。
+
+    生产实测 308 条一级总结只对应 217 个不同区间，区间 155-294 堆了 4 条
+    （正文各不相同，是独立的 LLM 调用而非复制）。
+    """
+    history = _make_history(tmp_path, archive_threshold=10)
+    summarizer = _RecordingSummarizer()
+    history._summarizer = summarizer  # type: ignore[assignment]
+
+    for text in ("短甲", "重复区间里最长的这一条正文", "短乙", "中等长度正文"):
+        _insert_summary_row(history, level=1, text=text, count=10, ts=1.0, start=155, end=294)
+    _insert_summary_row(history, level=1, text="另一区间", count=10, ts=2.0, start=295, end=310)
+
+    _run_check_and_compress(history)
+
+    prompt = summarizer.last_user_prompt
+    assert "重复区间里最长的这一条正文" in prompt
+    assert "短甲" not in prompt
+    assert "短乙" not in prompt
+    assert "中等长度正文" not in prompt
+    assert "另一区间" in prompt
+
+    # 4 条重复行一并删掉，只留归档；message_count 按**去重后**的段累计（2 段 × 10）
+    rows = _read_summary_rows(history)
+    assert [r["level"] for r in rows] == [3]
+    assert rows[0]["message_count"] == 20
+
+
+def test_archive_absorbs_previous_archive(tmp_path):
+    """归档是滚动合并：上一轮归档要并进新的一条，而不是各留一条。
+
+    读取侧每个作用域只认一条归档，若每轮另起一条，旧归档就成了永远读不到、
+    也删不掉的孤儿。
+    """
+    history = _make_history(tmp_path, archive_threshold=5)
+    summarizer = _RecordingSummarizer()
+    history._summarizer = summarizer  # type: ignore[assignment]
+
+    _insert_summary_row(history, level=3, text="上一轮归档", count=1000, ts=1.0, start=1, end=1000)
+    _insert_summary_row(history, level=1, text="新增一级", count=10, ts=2.0, start=1001, end=1010)
+
+    _run_check_and_compress(history)
+
+    assert "上一轮归档" in summarizer.last_user_prompt
+    assert "新增一级" in summarizer.last_user_prompt
+
+    rows = _read_summary_rows(history)
+    assert [r["level"] for r in rows] == [3]
+    assert rows[0]["message_count"] == 1010
+    assert rows[0]["start_message_id"] == 1
+    assert rows[0]["end_message_id"] == 1010
+
+
+def test_all_archives_are_read_not_just_the_newest(tmp_path):
+    """读取侧不能只取最新一条归档。
+
+    原实现是 `ORDER BY timestamp DESC LIMIT 1`；跨平台共享作用域下同一
+    memory_scope 会有多个 (platform, chat_id) 分区、各有各的归档，
+    LIMIT 1 会让其余的归档永远读不到。
+    """
+    history = _make_history(tmp_path)
+    _insert_summary_row(history, level=3, text="地点A归档", count=100, ts=1.0, start=1, end=100)
+    _insert_summary_row(history, level=3, text="地点B归档", count=200, ts=2.0, start=101, end=300)
+
+    msgs = history.get_compressed_context_messages("web", "sess_b", memory_scope_id=SCOPE)
+    archive_msgs = [m for m in msgs if "归档" in str(m.get("content", ""))]
+
+    assert len(archive_msgs) == 1  # 仍要合并成一条
+    assert archive_msgs[0]["role"] == "system"
+    assert "地点A归档" in archive_msgs[0]["content"]
+    assert "地点B归档" in archive_msgs[0]["content"]
+
+
+def test_duplicate_ranges_deduped_in_context(tmp_path):
+    """同一区间的重复摘要，读上下文时就该只出现一条。"""
+    history = _make_history(tmp_path)
+    for text in ("重复区间短正文", "重复区间里最长的这一条正文"):
+        _insert_summary_row(history, level=1, text=text, count=10, ts=1.0, start=5, end=20)
+
+    msgs = history.get_compressed_context_messages("web", "sess_b", memory_scope_id=SCOPE)
+    hits = [m for m in msgs if "重复区间" in str(m.get("content", ""))]
+
+    assert len(hits) == 1
+    assert "重复区间里最长的这一条正文" in hits[0]["content"]
+    assert "重复区间短正文" not in hits[0]["content"]
+
+
+# ---------------------------------------------------------------------------
+# 并发闸门 / 归档标记精确性
+# ---------------------------------------------------------------------------
+
+
+class _SlowSummarizer:
+    """在 chat 里主动让出事件循环，让并发任务真的交错。"""
+
+    def __init__(self, text: str = "并发摘要"):
+        self.text = text
+        self.calls = 0
+
+    async def chat(self, system_prompt, user_prompt, history):
+        self.calls += 1
+        for _ in range(5):
+            await asyncio.sleep(0)
+        return self.text
+
+
+def test_concurrent_compression_does_not_duplicate_summaries(tmp_path):
+    """并发的压缩任务不能对同一批消息各写一条摘要。
+
+    `add_message` 每来一条消息就 `_launch_background(_check_and_compress)`，而那是
+    裸 `loop.create_task`。没有闸门时多个 worker 会同时执行
+    `SELECT ... LIMIT compress_ratio`，在任何 commit 之前取到同一批最早未归档消息，
+    于是各写一条。生产实测：308 条一级总结只对应 217 个不同区间。
+    """
+    history = _make_history(tmp_path, compress_window=9999, compress_ratio=10)
+    summarizer = _SlowSummarizer()
+    history._summarizer = summarizer  # type: ignore[assignment]
+
+    for i in range(20):
+        history.add_message("web", "sess_b", "user", f"消息{i}")
+
+    async def _run():
+        try:
+            await asyncio.gather(
+                history._perform_compression("web", "sess_b"),
+                history._perform_compression("web", "sess_b"),
+                history._perform_compression("web", "sess_b"),
+            )
+        finally:
+            await history.stop_retry_worker()
+
+    asyncio.run(_run())
+
+    assert summarizer.calls == 1, "同一批消息只应触发一次总结调用"
+    assert len(_read_summary_rows(history)) == 1
+
+
+def test_compression_marks_only_selected_ids(tmp_path):
+    """标记已归档必须按"实际选中的 id"，不能按 start~end 区间。
+
+    原实现是 `WHERE id >= start AND id <= end`，它只在"id 顺序 == 时间顺序"时才等价于
+    精确标记。一旦时间戳乱序（平台乱序投递 / 带历史时间戳回填），区间内**没被总结**的
+    消息会被一并标成已归档，从此不再进上下文——静默丢记忆。
+    """
+    history = _make_history(tmp_path, compress_ratio=10)
+    history._summarizer = _RecordingSummarizer("压缩正文")  # type: ignore[assignment]
+
+    ids = [history.add_message("web", "sess_b", "user", f"消息{i}") for i in range(30)]
+
+    # id 1-5 与 26-30 设成最早、6-25 设成最晚 —— 时间顺序与 id 顺序脱钩
+    conn = sqlite3.connect(str(history.db_path))
+    for idx, mid in enumerate(ids, start=1):
+        ts = float(idx) if idx <= 5 or idx >= 26 else 1000.0 + idx
+        conn.execute("UPDATE messages SET timestamp = ? WHERE id = ?", (ts, mid))
+    conn.commit()
+    conn.close()
+
+    async def _run():
+        try:
+            await history._perform_compression("web", "sess_b")
+        finally:
+            await history.stop_retry_worker()
+
+    asyncio.run(_run())
+
+    conn = sqlite3.connect(str(history.db_path))
+    archived = conn.execute("SELECT COUNT(*) FROM messages WHERE is_archived = 1").fetchone()[0]
+    in_between = conn.execute(
+        "SELECT COUNT(*) FROM messages WHERE is_archived = 0 AND timestamp > 1000"
+    ).fetchone()[0]
+    conn.close()
+
+    assert archived == 10, "只应标记真正被总结的那 10 条"
+    assert in_between == 20, "区间内没被选中的消息必须保持未归档"
 

@@ -1,3 +1,78 @@
+## 近期关键改动（截至 2026-09-16）
+
+### 🗄️ 归档链修复：归档从未执行过（判据错位 + INSERT 绑定错）
+
+上一节把"几百条 system 摘要"的结构问题治好了，但**摘要内容本身没减**：归档（二级压缩）
+从来没有执行过，一级摘要只增不减。生产实例单次请求仍是 148533 input tokens。
+
+根因有三层，前两层各自独立、都足以让归档永远不出结果：
+
+1. **判据挂在一个会被自己排空的变量上**。`_check_and_compress()` 只算了一个 `count`
+   （`platform/chat_id` 下 `is_archived=0 AND is_pinned=0` 的消息数），然后拿它同时判
+   "要不要一级压缩"和"要不要归档"。但压缩每次恰好排掉 `compress_ratio` 条，于是
+   `count` 被自身压在 `compress_window` 附近（生产实测稳定在 41~51），
+   `archive_threshold(500)` **永远够不到**。归档唯一能触发的场景只剩"压缩持续失败"，
+   而那恰恰是最不该再发一次 LLM 调用的时刻。
+   修法：归档判据改成**已被一级总结消化掉的消息总量**
+   （`SELECT SUM(message_count) FROM summaries WHERE level=1`），阈值语义仍是"消息条数"，
+   配置项与文档都不用动。已有库 `SUM=3080` 立刻越过 500，下一条消息即触发。
+2. **INSERT 的占位符与参数对不上**。`_create_archive_summary()` 里
+   `VALUES (?, ?, 3, ?, ...)` 只有 **9** 个 `?`，却传了 **10** 个参数（`level` 多传了一个
+   字面量 `3`），SQLite 直接抛 `ProgrammingError: Incorrect number of bindings supplied`
+   —— 归档只要被触发就必然失败。因为第 1 条让它从未触发，这个错误一直没暴露。
+3. **归档会写第二条、读不到旧的那条**。读取侧原本是
+   `ORDER BY timestamp DESC LIMIT 1`。若每轮归档各写一条，旧归档就成了永远读不到、
+   也删不掉的孤儿。修法：归档改成**滚动合并**（把上一轮归档连同本轮全部一级总结一起
+   压成新的一条，旧行按 id 删除），读取侧同时改为取出全部归档再合并成一条
+   （`_build_archive_message`），跨平台共享作用域下也不会再丢。
+
+**顺带挖出的并发重复（会放大 token 消耗）**：`add_message` 每来一条消息就
+`_launch_background(_check_and_compress)`，而它是裸 `loop.create_task`，没有互斥也没有
+在途去重。突发时段几十个 worker 同时读到同一个 `count`、同时 `SELECT ... LIMIT 10`，
+在任何 commit 之前取到的都是同一批最早未归档消息，于是各自生成一条摘要并各自 INSERT。
+生产实测：**308 条一级总结只对应 217 个不同区间（91 条重复）**，同一区间最多堆 4 条、
+正文各不相同（651/501/644/719 字符，是独立 LLM 调用而非复制），
+重复内容占摘要总字符数的 **27%**。
+
+修法（消费侧去重，已有库免手工清库）：新增 `MessageHistory._dedupe_summaries()`，
+按 `(start_message_id, end_message_id)` 去重、同区间保留正文最长的一条，
+`_build_summary_message()` / `_build_archive_message()` / `_create_archive_summary()`
+三处都走它；归档时被丢弃的重复行随被吸收行一并删除。
+
+**根因堵漏**：新增 `_acquire_compress_gate()` / `_release_compress_gate()`，按
+`(platform, chat_id)` 做在途互斥，闸门放在 `_perform_compression()` /
+`_create_archive_summary()` 这一层（重试 worker 会绕过 `_check_and_compress`
+直接调它们）。拿不到闸门直接 return，不排队、也不 `_mark_retry_success`
+（否则重试队列会把没干的活当成成功出队）。
+本地对照实验：拆掉闸门 → 3 次 LLM 调用 / 3 条重复摘要；装回去 → 1 次 / 1 条。
+
+**另外修正一处错误判断**：曾以为 `UPDATE ... WHERE id BETWEEN start AND end`
+会吞掉区间内没被总结的消息（"区间 71~154 却只总结了 10 条，静默丢了 74 条"）。
+**这个结论是错的** —— 查 `LAG(timestamp) OVER (ORDER BY id)` 发现时间倒挂 0 次，
+在"id 顺序 == 时间顺序"下 BETWEEN 与精确标记等价；那 84 条是被几十条摘要**累积**
+标满的。代码仍改成按选中 id 列表精确标记（区间也改用选中集合的 `min/max id`），
+理由是那条约等价性依赖时间戳单调这个没写下来的隐含前提，乱序投递 / 历史时间戳回填
+会让它失效——属于**防御性加固，不是修复已发生的 bug**。
+教训记在 `COMMON_PITFALLS.md` 5.16。
+
+**现有库自愈验证**（真实生产库副本 + stub summarizer，不出网）：
+
+| | summaries | 上下文 |
+|---|---|---|
+| 修复前 | level=1 × 309，摘要正文 202972 字符 | **1 条消息 / 153908 字符**（≈148K tokens） |
+| 修复后 | level=3 × 1（覆盖 2110 条）+ 另一会话 level=1 × 13 | **2 条消息 / 6092 字符** |
+
+归档喂给 LLM 的提示词从 202972 字符降到 145149 字符（去重省掉 28%），
+重试队列为空（证明 INSERT 通得过）。
+
+- ⚠️ 首次归档是一次大调用（145K 字符 ≈ 108K tokens，走 `summary` 模型）。
+  稳态下不会再有这么大的量：阈值 500 条消息就会归档一次，平时只有 ~50 段一级总结。
+- ⚠️ 不要把归档判据改回"未归档消息数"——它天然被压缩压住，改回去归档立刻又永久失效。
+- 测试：`tests/test_message_history.py` 新增 5 个用例（判据用已总结消息量、
+  纠已有库重复、滚动吸收旧归档、多归档全部读取、重复区间读时去重）。
+- 排障入口：`SELECT level, COUNT(*) FROM summaries GROUP BY level;`
+  出现"level=1 上百条且 level=3 为 0"就是本条所说的归档欠账。
+
 ## 近期关键改动（截至 2026-09-15）
 
 ### 🧱 一级摘要改为合并成单条 user 消息（治"长历史下模型稳定 400"）
