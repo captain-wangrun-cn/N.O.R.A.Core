@@ -7,6 +7,7 @@ from core.front_brain import FrontBrainMixin
 from core.group_listener import AppendAction, GroupMessageEvent, PassiveAction
 from core.group_presence_store import GroupPresence
 from core.message_handler import MessageHandlerMixin
+from core.routing import sanitize_user_visible_text
 from core.worker_status import BackendTaskQueue, WorkerStatus
 
 
@@ -26,6 +27,7 @@ class _FrontBrainProbe(FrontBrainMixin):
         self.responses = list(responses)
         self.system_prompts = []
         self.histories = []
+        self.user_prompts = []
         self.llm = object()
         self.front_brain_partial = {}
         self.cost_tracking_enabled = False
@@ -78,6 +80,7 @@ class _FrontBrainProbe(FrontBrainMixin):
     def _chat_stream_wrapper(self, model_client, chat_id, **kwargs):
         self.system_prompts.append(kwargs.get("system_prompt", ""))
         self.histories.append(list(kwargs.get("history") or []))
+        self.user_prompts.append(kwargs.get("user_prompt", ""))
         response = self.responses.pop(0)
 
         async def _gen():
@@ -475,6 +478,43 @@ def test_front_brain_prompt_includes_group_presence_trigger_and_online_examples(
     assert "陪我聊天" in system_prompt
     assert "必须输出 `[ONLINE]`" in system_prompt
     assert "一次性问答" in system_prompt
+
+
+def test_front_brain_system_note_ends_with_blank_line():
+    """`[系统备注]`（图片加载失败提示）必须排在 user_prompt 最后一个追加块之后，
+    且块尾留空行。
+
+    剥除正则 `_SYSTEM_NOTE_BLOCK_PATTERN` 的终止符是 `\\n\\s*\\n` 或字符串结尾。
+    曾经它排在懒加载词库块**之前**且块尾无空行，于是"图片加载失败 + 词库命中"
+    同时发生时，剥除把词库块一起吞掉了。块尾空行 + 排在最后，两者缺一不可。
+    """
+    probe = _FrontBrainProbe(["收到。"])
+
+    asyncio.run(
+        probe._generate_front_chat_response(
+            {
+                "platform": "telegram",
+                "chat_id": "private-chat",
+                "user_id": "owner",
+                "chat_type": "private",
+                "user_name": "Owner",
+                "text": "陪我聊天",
+                "image_load_failed": True,
+            }
+        )
+    )
+
+    prompt = probe.user_prompts[0]
+    assert "[系统备注]" in prompt
+    assert prompt.endswith("\n\n"), f"[系统备注] 块尾必须留空行: {prompt!r}"
+    # 备注之后不应再有任何内容（否则会被剥除一起吞掉）
+    tail = prompt.split("[系统备注]", 1)[1]
+    assert tail.strip().endswith("view_media 找历史图/视频。"), tail
+
+    # 端到端：剥除后用户正文完整保留，备注不泄漏
+    cleaned = sanitize_user_visible_text(prompt)
+    assert "[系统备注]" not in cleaned
+    assert "陪我聊天" in cleaned
 
 
 def test_front_brain_private_prompt_omits_group_presence_runtime_block():

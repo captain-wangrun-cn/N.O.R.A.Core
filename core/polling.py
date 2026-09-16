@@ -88,8 +88,10 @@ class PollingMixin:
                 new_user_msgs = self.message_history.get_messages_since(
                     platform, storage_id, backend_start_ts, role="user", memory_scope_id=memory_scope_id
                 )
+                # 保留时间戳前缀（本处当前是死代码：下面无条件清空。仅与
+                # front_brain._front_brain_review 的构造方式保持一致，见 message_dedup）
                 new_user_texts = [
-                    self._strip_timestamp_markers(str(msg["content"]))
+                    str(msg["content"])
                     for msg in new_user_msgs
                 ]
 
@@ -104,6 +106,8 @@ class PollingMixin:
                 backend_result = ""
                 for h in reversed(session_history):
                     if h.get("role") == "assistant":
+                        # 这是**模型自己生成的回复**（要转述给用户），不是入库历史，
+                        # 保留时间戳剥离——否则模型可能把自己正文里写的时间当回复内容。
                         backend_result = self._strip_timestamp_markers(str(h["content"]))
                         break
 

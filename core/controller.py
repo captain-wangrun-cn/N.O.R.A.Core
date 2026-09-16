@@ -23,6 +23,7 @@ N.O.R.A. 核心控制器 — 瘦身版。
 
 import asyncio
 from datetime import datetime
+from zoneinfo import ZoneInfo
 import inspect
 import logging
 import os
@@ -115,6 +116,7 @@ class NoraController(
         re.IGNORECASE | re.DOTALL,
     )
     _SYSTEM_ENV_MARKER = "【系统环境信息 (System Environment)】"
+    _CURRENT_TIME_MARKER = "【当前时间】"
     _LEXICON_GLOBAL_MARKER = "【词库全局说明 (Lexicon Global Prompt)】"
 
     # ------------------------------------------------------------------
@@ -911,6 +913,13 @@ class NoraController(
                 f"{system_prompt}\n\n---\n{self._build_system_environment_context(chat_id)}"
             )
 
+        # 「当前时间」注入到当轮 user prompt（而不是 system）——缓存与准确性考量见
+        # append_current_time_to_user_prompt 的 docstring。
+        user_prompt = kwargs.get("user_prompt")
+        if isinstance(user_prompt, str) and user_prompt:
+            kwargs = dict(kwargs)
+            kwargs["user_prompt"] = self.append_current_time_to_user_prompt(user_prompt)
+
         def _filter_kwargs(callable_obj, call_kwargs):
             try:
                 sig = inspect.signature(callable_obj)
@@ -937,17 +946,59 @@ class NoraController(
         return model_client.chat_stream(**safe_kwargs)
 
     def _build_system_environment_context(self, chat_id: str) -> str:
-        """构建注入到 system prompt 的系统环境信息。"""
-        now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        """构建注入到 system prompt 的系统环境信息。
+
+        **这里只放会话内稳定的内容**（ChatID / 平台 / OS / Python）——它们是常量，
+        留在 system 里可以随缓存前缀一起命中。
+
+        「当前时间」**不在这里**：它每轮都变，放在 system（整个 prompt 最靠前的位置）
+        会随缓存前缀一起失效，位置上也离模型最后读的地方最远。改由
+        `append_current_time_to_user_prompt` 注入到当轮最后一条 user 消息。
+        """
         adapter_platform = getattr(self.adapter, "platform_name", "unknown")
         return (
             f"{self._SYSTEM_ENV_MARKER}\n"
-            f"当前时间: {now}\n"
             f"Chat ID: {chat_id}\n"
             f"适配器平台: {adapter_platform}\n"
             f"操作系统: {py_platform.system()} {py_platform.release()}\n"
             f"Python: {sys.version.split()[0]}\n"
         )
+
+    @staticmethod
+    def _current_time_text() -> str:
+        """按配置时区（memory.message_history.timezone）格式化的当前时间。
+
+        不要用裸 `datetime.now()`——那是进程所在机器的本地时区。项目里别的时间路径
+        （消息时间戳前缀、调度器、日志）都统一走配置时区，只有系统环境块曾经漏掉，
+        结果同一时刻在 prompt 里出现两套时间。
+        """
+        tz_str = config.get_message_history_config().get("timezone", "Asia/Shanghai")
+        try:
+            now = datetime.now(ZoneInfo(tz_str))
+        except Exception:
+            logger.warning(f"解析显示时区失败（{tz_str}），回退系统本地时区。", exc_info=True)
+            now = datetime.now()
+        return now.strftime("%Y-%m-%d %H:%M:%S %A")
+
+    def append_current_time_to_user_prompt(self, user_prompt: str) -> str:
+        """把「当前时间」前置到本轮 user prompt。
+
+        放在这里有两个原因：
+
+        1. **缓存**：prompt 的拼装顺序是 system → history → 当前 user 消息，缓存按
+           前缀匹配。时间落在最后一条 user 消息里，前面那段稳定前缀原样命中；而这条
+           消息本来每轮就是新的，边际成本为零。放在 system 里则会每轮作废整个前缀。
+        2. **准确**：这是模型最后读到的位置，不会被一长串历史隔开；语义上也更对——
+           它描述的是"这条消息所在的此刻"。
+
+        与历史时间戳的分工：历史前缀 = 过去（每条消息自己的发生时刻，长期保留），
+        本函数 = 现在。任何时刻整个 prompt 里只应有一处"现在"。
+
+        幂等：重复调用不会叠加（按标记判断）。
+        """
+        if self._CURRENT_TIME_MARKER in user_prompt:
+            return user_prompt
+        return f"{self._CURRENT_TIME_MARKER}\n{self._current_time_text()}\n\n{user_prompt}"
 
     # ------------------------------------------------------------------
     # 通用辅助

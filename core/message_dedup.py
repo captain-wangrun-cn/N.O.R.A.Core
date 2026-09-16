@@ -22,6 +22,32 @@ from core.routing import strip_timestamp_markers
 PERSISTED_USER_MESSAGE_IDS_KEY = "_persisted_user_message_ids"
 
 
+def build_history_messages(db_context: List[Dict[str, Any]]) -> List[Dict[str, str]]:
+    """把数据库取出的上下文转成模型 history，并**保留**时间戳前缀。
+
+    为什么保留（这里曾是反的）：
+        `MessageHistory.add_message` 会把内容改写成 "[<时间>] <原文>"，时间冻结在
+        写入那一刻，之后每轮读出来字节完全一致——所以它落在缓存前缀里，**不随轮次
+        变化、不破坏 prompt cache**。而它同时是模型判断"这句话是多久以前说的"的
+        唯一锚点。此前在构造 history 时统一剥掉，模型看到的所有历史都没有时间，
+        只剩 system 里那一个"当前时间"，时间观念因此混乱。
+
+    与"当前时间"的分工：
+        - 历史前缀 = 过去（每条消息各自的发生时刻，长期保留）
+        - 当前时间 = 现在（每轮现算，只注入当轮最后一条 user 消息，见
+          core/controller.py 的 `append_current_time_to_user_prompt`）
+        任何时刻整个 prompt 里只应存在一处"现在"，否则模型分不清哪个才是真的。
+
+    注意这不是 `strip_timestamp_markers` 的替代品：那个函数仍然用在**输出侧**
+    （模型回复发给用户前、去重兜底比较），不能删。
+    """
+    return [
+        {"role": msg["role"], "content": str(msg["content"])}
+        for msg in db_context
+        if msg.get("role") in ("system", "user", "assistant")
+    ]
+
+
 def record_persisted_user_message(context: Optional[Dict[str, Any]], message_id: Any) -> None:
     """把刚写入 messages 表的用户消息行 id 记录到 context，供下游按 id 去重。"""
     if not isinstance(context, dict):

@@ -181,6 +181,30 @@ def test_sanitize_user_visible_text_removes_internal_and_system_notes():
     assert cleaned == "先这样。"
 
 
+def test_system_note_block_swallows_following_block_without_blank_line():
+    """`[系统备注]` 块后面还拼别的块、且块尾没空行时，剥除会把后续内容一起吞掉。
+
+    这是 `_SYSTEM_NOTE_BLOCK_PATTERN` 的终止符语义（`\\n\\s*\\n` 或串尾）导致的：
+    惰性匹配会一路吃到**下一个空行**为止。前脑的图片加载失败提示曾经就是这种写法，
+    与懒加载词库同时命中时把词库块整块吞了。
+
+    锁住这个陷阱本身，避免有人把块尾空行"优化"掉。
+    """
+    # ❌ 危险写法：块尾空行被吃掉后，后续块成为终止点，被一并删除
+    swallowed = sanitize_user_visible_text(
+        "正文。\n\n[系统备注] 参考用。\n\n[词库]\n词条解释"
+    )
+    assert "[词库]" in swallowed  # 有空行 → 安全
+
+    # ❌ 真危险：块直接贴着下一个块（无空行分隔）
+    dangerous = sanitize_user_visible_text("正文。\n\n[系统备注] 参考用。[词库] 词条解释")
+    assert "词库" not in dangerous, "这正是被吞掉的情形——所以块尾必须留空行"
+
+    # ✅ 安全写法：块在串尾
+    safe_tail = sanitize_user_visible_text("正文。\n\n[系统备注] 参考用。")
+    assert safe_tail == "正文。"
+
+
 def test_sanitize_user_visible_text_removes_source_labels():
     cleaned = sanitize_user_visible_text("[来自 onebotv11:749042488] 你好\n你好，大半夜的还没睡呢")
     assert cleaned == "你好\n你好，大半夜的还没睡呢"

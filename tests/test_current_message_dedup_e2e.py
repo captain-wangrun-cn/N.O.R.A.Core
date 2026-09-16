@@ -114,8 +114,17 @@ def test_front_brain_sees_current_message_exactly_once_group(tmp_path):
     assert not [m for m in sent_history if context["text"] in str(m["content"])], sent_history
 
 
-def test_front_brain_history_has_no_raw_timestamp_prefix(tmp_path):
-    """带秒与星期的时间戳必须被剥掉，不能泄漏进模型可见历史。"""
+def test_front_brain_history_keeps_timestamp_prefix(tmp_path):
+    """历史消息必须**保留**时间戳前缀。
+
+    这条断言曾经是反的（要求剥掉），理由是"时间戳泄漏进模型可见历史"。
+    但那个前缀是模型判断"这句话多久以前说的"的唯一锚点，剥掉之后所有历史都没有
+    时间，只剩 system 里一个"当前时间"，时间观念因此混乱。
+
+    保留它不破坏缓存：前缀在 `add_message` 写入那一刻就冻结，之后每轮读出来字节
+    完全一致，属于可缓存的稳定前缀。真正每轮变化的是"当前时间"，它只注入到当轮
+    最后一条 user 消息（见 core.controller.append_current_time_to_user_prompt）。
+    """
     history = _make_history(tmp_path)
     context = _base_context("private")
 
@@ -129,5 +138,32 @@ def test_front_brain_history_has_no_raw_timestamp_prefix(tmp_path):
 
     contents = [str(m["content"]) for m in probe.histories[0]]
     assert contents, "历史不应为空"
-    assert not [c for c in contents if c.lstrip().startswith("[20")], contents
-    assert any(c.strip() == "上一轮回答" for c in contents), contents
+    stamped = [c for c in contents if c.lstrip().startswith("[20")]
+    assert stamped, f"历史应保留时间戳前缀，实际：{contents}"
+    # 前缀形态必须是 `[YYYY-MM-DD HH:MM:SS 星期]` 开头，且正文仍在
+    assert any("上一轮回答" in c for c in stamped), contents
+
+
+def test_front_brain_history_timestamp_is_frozen_not_per_turn(tmp_path):
+    """时间戳前缀来自写入时刻、跨轮字节不变——这是它"零缓存成本"的前提。
+
+    如果哪天有人改成读取时现算当前时间拼上去，每轮 history 都会变、缓存前缀全废，
+    这条断言会立刻失败。
+    """
+    history = _make_history(tmp_path)
+    context = _base_context("private")
+
+    probe = _FrontBrainProbe(["今天多云。"])
+    probe.message_history = history
+
+    _store(history, probe, context, "assistant", "上一轮回答")
+    _store_user_message(history, probe, context, context["text"])
+
+    _run_front_brain(probe, context)
+    first = [str(m["content"]) for m in probe.histories[0]]
+
+    _run_front_brain(probe, context)
+    second = [str(m["content"]) for m in probe.histories[0]]
+
+    # 只比较历史部分（probe 记录的是传给模型的 history，不含本轮 user_prompt）
+    assert first == second, "历史时间戳前缀不应随轮次变化"

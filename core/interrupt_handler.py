@@ -17,6 +17,7 @@ from brain.prompts import (
     should_inject_custom,
     load_identity_context,
 )
+from core.message_dedup import build_history_messages
 from core.routing import strip_timestamp_markers
 from core.scene_context import build_current_scene_block, should_redact_cross_place_details
 from core.worker_status import WorkerStatus
@@ -29,6 +30,7 @@ class InterruptHandlerMixin:
 
     @classmethod
     def _strip_timestamp_markers(cls, text: str) -> str:
+        """仅用于**输出侧**清理；构造模型可见 history 用 `build_history_messages`。"""
         return strip_timestamp_markers(text)
 
     async def _detect_interrupt_intent_and_reply(
@@ -110,14 +112,9 @@ class InterruptHandlerMixin:
             )
             if len(db_context) > 20:
                 db_context = db_context[-20:]
-            recent_history = [
-                {
-                    "role": msg.get("role"),
-                    "content": self._strip_timestamp_markers(str(msg.get("content", ""))),
-                }
-                for msg in db_context
-                if msg.get("role") in ("user", "assistant") and msg.get("content")
-            ]
+            # 保留时间戳前缀：打断判定要区分"后脑跑了很久之前的对话"与"刚刚的新消息"，
+            # 时间正是判据之一（见 message_dedup.build_history_messages）。
+            recent_history = build_history_messages(db_context)
         except Exception:
             recent_history = []
         

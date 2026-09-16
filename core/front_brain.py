@@ -24,7 +24,7 @@ from skills.loader import SkillLoader
 from brain.appearance import draw_models_configured
 from tts.registry import tts_available, get_active_tts_guidance
 from core.message_handler import group_message_content
-from core.message_dedup import drop_current_user_message
+from core.message_dedup import build_history_messages, drop_current_user_message
 from core.override_gate import build_override_block, override_active
 from core.routing import (
     parse_front_brain_response,
@@ -109,6 +109,8 @@ class FrontBrainMixin:
 
     @classmethod
     def _strip_timestamp_markers(cls, text: str) -> str:
+        """仅用于**输出侧**：模型回复发给用户前清理。
+        构造模型可见 history 请用 `build_history_messages`（保留时间戳前缀）。"""
         return strip_timestamp_markers(text)
 
     @classmethod
@@ -466,9 +468,19 @@ class FrontBrainMixin:
         else:
             user_prompt = render_template('front_brain.jinja', 'user', user_message=text)
 
+        # 懒加载词库命中：仅命中词条注入 user prompt
+        lazy_lexicon_block = get_lazy_lexicon_user_prompt_block(text)
+        if lazy_lexicon_block:
+            user_prompt = f"{user_prompt}\n\n{lazy_lexicon_block}"
+
         # 图片加载失败提示：用户文本里出现了 [image: ...] 等图片标记，但系统没能成功加载图片字节
         # （网络下载失败 / 路径无效 / 引用历史图片但本轮未重传 等）。
         # 必须把这一事实告诉模型，避免它凭空臆想图片内容。
+        #
+        # 位置要求：**必须放在 user_prompt 最后一个追加块之后，且结尾留空行**。
+        # `_SYSTEM_NOTE_BLOCK_PATTERN` 的终止符是 `\n\s*\n` 或字符串结尾，所以
+        # 「末尾没有空行 + 后面还拼了别的块」会让剥除把后续内容一起吞掉
+        # （历史上图片加载失败 + 懒加载词库命中同时出现时，词库块就被整块吞了）。
         if context.get("image_load_failed"):
             user_prompt += (
                 "\n\n[系统备注] 用户消息里出现了图片相关标记，但本轮系统并没有真正接收到图片数据"
@@ -476,13 +488,8 @@ class FrontBrainMixin:
                 "→ 你绝对不能假装看到图片或编造图片内容。\n"
                 "→ 也不要硬邦邦地说 \"没读到图片，请重发原图\" 这种系统化的话；自然地表达即可，"
                 "比如轻松地说 \"诶？图片好像没传过来欸\" / \"这边没看到图片哦\"，"
-                "或者根据上下文判断是否调用 view_media 找历史图/视频。"
+                "或者根据上下文判断是否调用 view_media 找历史图/视频。\n\n"
             )
-
-        # 懒加载词库命中：仅命中词条注入 user prompt
-        lazy_lexicon_block = get_lazy_lexicon_user_prompt_block(text)
-        if lazy_lexicon_block:
-            user_prompt = f"{user_prompt}\n\n{lazy_lexicon_block}"
 
         # 一次性放行（/override）：主人特批本次重新生成。声明挂在 user prompt 上，
         # 不入库；后脑侧有对应的同款注入，两边都要盖——前脑放行了但后脑没见过声明，
@@ -525,14 +532,9 @@ class FrontBrainMixin:
         message_content = group_message_content(context, user_name, text, chat_type)
         db_context = drop_current_user_message(db_context, context, message_content)
 
-        history = [
-            {
-                "role": msg["role"],
-                "content": self._strip_timestamp_markers(str(msg["content"]))
-            }
-            for msg in db_context
-            if msg["role"] in ("system", "user", "assistant")
-        ]
+        # 保留时间戳前缀：历史消息各自的发生时刻是模型唯一的时间锚点，
+        # 且因写入时即冻结，落在缓存前缀里不产生额外成本。理由见 message_dedup。
+        history = build_history_messages(db_context)
 
         # 上下文增强：把前脑历史回复中携带的 routing 元信息（task_instruction / needs_backend）
         # 以"内部备注"形式回填到 assistant 消息末尾，这样下一轮前脑生成时就能看到
@@ -867,14 +869,8 @@ class FrontBrainMixin:
         db_context = self.message_history.get_forebrain_context_messages(
             platform, storage_id, memory_scope_id=memory_scope_id, current_place_scope_id=place_scope_id
         )
-        current_session_msgs = [
-            {
-                "role": msg["role"],
-                "content": self._strip_timestamp_markers(str(msg["content"]))
-            }
-            for msg in db_context
-            if msg.get("role") in ("system", "user", "assistant")
-        ]
+        # 审查轮同样保留时间戳前缀（与主轮一致，见 message_dedup.build_history_messages）
+        current_session_msgs = build_history_messages(db_context)
         # 同步注入历史路由备注，避免审查阶段误判任务是否已下达
         current_session_msgs = self._inject_routing_notes(current_session_msgs, db_context)
 

@@ -162,7 +162,15 @@ _SOURCE_LABEL_PATTERN = re.compile(
 
 
 def strip_timestamp_markers(text: str) -> str:
-    """移除 add_message 注入的自动时间戳标记，避免泄漏到用户/模型可见文本。
+    """移除 add_message 注入的自动时间戳标记。
+
+    ⚠️ 这是**输出侧**工具，不是"准备模型输入"的工具。两个用途：
+      1. 模型回复发给用户前清理——绝不能把 `[2026-09-16 18:31:02 星期三]` 发给用户；
+      2. 去重兜底比较（`core.message_dedup.drop_current_user_message`）——两边都剥才能比。
+
+    **构造模型可见 history 时不要用它**：时间戳前缀是模型判断"这句话多久以前说的"的
+    唯一锚点，剥掉之后所有历史都没有时间，只剩 system 里一个"当前时间"，时间观念会乱。
+    构造 history 请用 `core.message_dedup.build_history_messages`（保留前缀）。
 
     时间戳格式由 memory.message_history.timestamp_format 配置（默认带秒和星期），
     因此这里的模式必须宽松匹配到「秒 + 任意尾部字段」。全项目共用此实现，

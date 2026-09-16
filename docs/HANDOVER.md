@@ -1,5 +1,58 @@
 ## 近期关键改动（截至 2026-09-16）
 
+### 🕒 时间观念修复：历史时间戳不再剥离 + 「当前时间」挪出 system
+
+**症状**：Nora 对当前时间没有准确概念，答不出"现在几点"、也算不清两句之间隔了多久。
+
+**排查结论**：时间数据一直都在，是**读取侧把它剥掉了**。
+
+1. **历史全被剥光（主因）**。`MessageHistory.add_message` 给每条消息写
+   `[<时间>] <原文>` 前缀（`timestamp_format` 默认带秒+星期），这是**入库时就冻结**的。
+   但构造模型可见 history 时，前脑（主轮 + 审查轮）、打断轮、轮询审查五处都跑
+   `strip_timestamp_markers()` 把它剥掉。于是模型看到的所有历史都没有时间，
+   整个 prompt 里只剩 system 尾部一个"当前时间"。
+   讽刺的是**后脑从来没剥**（直接 `msg["content"]` 进 temp_history），所以只有前脑瞎。
+2. **那唯一的时间锚点位置还最差**。它挂在 `_chat_stream_wrapper` 注入的
+   `【系统环境信息】` 块里，位于 system 尾部——整个 prompt 最靠前的位置，中间隔着
+   一长串历史；而且内容是"构建该 call 那一刻"，用户隔半小时回来问"现在几点"，
+   读到的是半小时前。反倒是**主动消息轮一直准**（`scheduler_mixin` 用
+   `ZoneInfo(配置时区)` 算出 `current_time` 塞进 user prompt），这条对照坐实了因果。
+3. **时区 bug**。那行用的是裸 `datetime.now()`（机器本地时区），而别的时间路径
+   （消息前缀、调度器、日志）都走 `memory.message_history.timezone`。
+
+**改动**：
+
+- 新增 `core/message_dedup.build_history_messages()`：构造模型可见 history 的**唯一**入口，
+  **保留**时间戳前缀。前脑主轮/审查轮、打断轮、轮询审查全部改走它。
+  `core/routing.strip_timestamp_markers` 降格为**输出侧**专用（发给用户前清理、
+  去重兜底比较、轮询转述后脑结果），并在 docstring 里写明不要用它准备模型输入。
+- `_build_system_environment_context` 只剩会话内**稳定项**（ChatID/平台/OS/Python），
+  可随缓存前缀命中；「当前时间」改由新增的
+  `NoraController.append_current_time_to_user_prompt()` 前置到**当轮最后一条 user 消息**。
+  时区改走 `ZoneInfo(配置时区)`，解析失败回退本地。
+
+**为什么这个位置是对的（缓存判据）**：prompt 拼装顺序是 system → history → 当前 user
+消息，缓存按前缀匹配。历史时间戳**跨轮字节完全一致**（写库时冻结），属于可缓存前缀，
+**零成本**；"当前时间"落在最后一条 user 消息里，而这条消息每轮本来就是新的，
+**边际成本同样为零**。两处都避开了唯一的坏位置——system 里每轮都变的变量，
+它会作废整个缓存前缀。
+
+**分工原则**：历史前缀 = 过去（每条消息各自的发生时刻），当前时间 = 现在。
+**任何时刻整个 prompt 里只应有一处"现在"**，否则模型分不清哪个是真的。
+
+**顺带修的一个既有 bug（顺序敏感）**：前脑 user_prompt 里
+`[系统备注]`（图片加载失败提示）原本追加在懒加载词库**之前**且结尾无空行，
+而 `_SYSTEM_NOTE_BLOCK_PATTERN` 的终止符是 `\n\s*\n` 或串尾——两者同时命中时，
+剥除会把紧接着的词库块一起吞掉。修法：把 `[系统备注]` 移到词库块**之后**，
+并在块尾补一个空行（这样正则遇到它自带的空行就终止，不会再吃到后面的 `/override` 块）。
+新增的「当前时间」注入在最后一条消息上另行处理，不受此影响。
+
+**测试**：新增 `tests/test_current_time_injection.py`（时间进 user_prompt / 不进 system /
+幂等 / 空 prompt 不硬塞 / 时区跟随配置 / 坏时区回退）。
+`tests/test_current_message_dedup_e2e.py` 里那条"历史不能带时间戳"的断言**方向反转**
+为"必须保留"，并补一条"跨轮字节不变"的锁（防止有人改成读取时现算、把缓存前缀打废）。
+`tests/test_front_brain_prompt.py` 的探针补记 `user_prompts`。
+
 ### 🗄️ 归档链修复：归档从未执行过（判据错位 + INSERT 绑定错）
 
 上一节把"几百条 system 摘要"的结构问题治好了，但**摘要内容本身没减**：归档（二级压缩）
