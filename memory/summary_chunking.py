@@ -40,6 +40,11 @@ DEFAULT_CHUNK_CHAR_CAP = 250
 MIN_CHUNK_SIZE = 1
 
 # 真正干活的 LLM 调用：给定一段对话原文，返回总结文本。
+#
+# ⚠️ 这个回调**必须自带重试**再对上层报失败。分块层把一次空返回理解为"这段内容过不去"
+# 就直接劈半，而输出侧的 content_filter 是随机的——只试一次的话，二分树会被随机失败
+# 引着把本来能过的消息一路劈到单条，最后误判"无解"整条放弃。
+# 调用方见 `MessageHistory._chunked_fallback`（它内部走 `summary_retry.call_with_retry`）。
 SummaryCall = Callable[[str], Awaitable[str]]
 
 

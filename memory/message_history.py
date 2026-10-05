@@ -1372,12 +1372,20 @@ class MessageHistory:
         client = self._summarizer
 
         async def _call(prompt: str) -> str:
-            out = await client.chat(
-                system_prompt=system_prompt, user_prompt=prompt, history=[],
-            )
-            # 空串 = 这一块被拦，交给分块层劈半重试。
+            # ⚠️ 这里**必须**带精确重试。分块层把一次失败当成"这块过不去"就劈半，
+            # 而输出侧的 content_filter 是随机的（实测同一段内容上一秒被拦、
+            # 下一秒通过）。只试一次的话，二分树会被随机失败引着把好好的消息
+            # 一路劈到单条、最后误判"无解"而整条放弃。重试是这一层的前提，
+            # 不是可选项。
+            async def _one() -> Tuple[Optional[Any], str]:
+                out = await client.chat(
+                    system_prompt=system_prompt, user_prompt=prompt, history=[],
+                )
+                return client, out
+
+            _, out = await call_with_retry(_one, label=f"{label}分块")
             if summarize_error_reason(client, out):
-                return ""
+                return ""  # 重试后仍被拦 = 真的过不去，交给分块层劈半
             return str(out or "").strip()
 
         logger.warning(
