@@ -886,3 +886,120 @@ def test_compression_marks_only_selected_ids(tmp_path):
     assert archived == 10, "只应标记真正被总结的那 10 条"
     assert in_between == 20, "区间内没被选中的消息必须保持未归档"
 
+
+
+# --------------------------------------------------------------------------
+# 摘要产物守卫：provider 失败时返回的是错误**文本**而不是抛异常，
+# 曾把那段文案当摘要写进库、同时把源消息标记成已归档（原文永久丢失）。
+# 判据与重试的细节用例在 tests/test_summary_quality_guard.py，
+# 这里只锁「写入点真的接上了守卫」这条接线。
+# --------------------------------------------------------------------------
+
+class _BlockedSummarizer:
+    """模拟 provider 的失败约定：返回错误文本 + 置 last_error。"""
+
+    def __init__(self):
+        self.last_error = "blocked:PROHIBITED_CONTENT"
+
+    async def chat(self, system_prompt, user_prompt, history, **kwargs):
+        return "抱歉，处理您的请求时遇到了问题：400 prompt_blocked"
+
+
+def test_compression_guard_blocks_dirty_summary(tmp_path, monkeypatch):
+    history = MessageHistory(db_path=str(tmp_path / "mh.db"))
+    history._summarizer = _BlockedSummarizer()  # type: ignore[assignment]
+    monkeypatch.setattr(history, "start_retry_worker", lambda: None)
+
+    for i in range(12):
+        history.add_message("web", "sess_guard", "user", f"消息{i}")
+
+    asyncio.run(history._compress_locked("web", "sess_guard"))
+
+    conn = sqlite3.connect(str(history.db_path))
+    summaries = conn.execute("SELECT COUNT(*) FROM summaries").fetchone()[0]
+    archived = conn.execute("SELECT COUNT(*) FROM messages WHERE is_archived = 1").fetchone()[0]
+    pending = conn.execute(
+        "SELECT COUNT(*) FROM compression_retry_queue WHERE status = 'pending'"
+    ).fetchone()[0]
+    conn.close()
+
+    assert summaries == 0, "错误文本绝不能被当作摘要写库"
+    assert archived == 0, "守卫必须挡在标记 is_archived 之前——否则原文永久丢失"
+    assert pending >= 1, "失败应进重试队列"
+
+
+def test_session_summary_guard_blocks_dirty_summary(tmp_path, monkeypatch):
+    history = MessageHistory(db_path=str(tmp_path / "mh.db"))
+    history._summarizer = _BlockedSummarizer()  # type: ignore[assignment]
+    monkeypatch.setattr(history, "start_retry_worker", lambda: None)
+
+    history.add_message("web", "sess_s", "user", "消息1")
+    session_id = history.get_current_session_id("web", "sess_s")
+
+    asyncio.run(history._generate_session_summary("web", "sess_s", session_id))
+
+    conn = sqlite3.connect(str(history.db_path))
+    row = conn.execute(
+        "SELECT summary FROM conversation_sessions WHERE id = ?", (session_id,)
+    ).fetchone()
+    conn.close()
+    assert not (row and row[0]), "段落摘要写脏了会经会话边界注入后续对话"
+
+
+# --------------------------------------------------------------------------
+# 摘要产物守卫：provider 失败时返回的是错误**文本**而不是抛异常，
+# 曾把那段文案当摘要写进库、同时把源消息标记成 is_archived（原文永久丢失）。
+# 判据/重试/分块的细节用例在 tests/test_summary_quality_guard.py 与
+# tests/test_summary_chunking.py，这里只锁「三个写入点真的接上了守卫」这条接线。
+# --------------------------------------------------------------------------
+
+class _BlockedSummarizer:
+    """模拟 provider 的失败约定：返回错误文本 + 置 last_error。"""
+
+    def __init__(self):
+        self.last_error = "blocked:PROHIBITED_CONTENT"
+
+    async def chat(self, system_prompt, user_prompt, history):
+        return "抱歉，处理您的请求时遇到了问题：400 prompt_blocked"
+
+
+def test_compression_guard_blocks_dirty_summary(tmp_path, monkeypatch):
+    history = MessageHistory(db_path=str(tmp_path / "mh.db"))
+    history._summarizer = _BlockedSummarizer()  # type: ignore[assignment]
+    monkeypatch.setattr(history, "start_retry_worker", lambda: None)
+
+    for i in range(12):
+        history.add_message("web", "sess_guard", "user", f"消息{i}")
+
+    asyncio.run(history._compress_locked("web", "sess_guard"))
+
+    conn = sqlite3.connect(str(history.db_path))
+    summaries = conn.execute("SELECT COUNT(*) FROM summaries").fetchone()[0]
+    archived = conn.execute("SELECT COUNT(*) FROM messages WHERE is_archived = 1").fetchone()[0]
+    pending = conn.execute(
+        "SELECT COUNT(*) FROM compression_retry_queue WHERE status = 'pending'"
+    ).fetchone()[0]
+    conn.close()
+
+    assert summaries == 0, "错误文本绝不能被当作摘要写库"
+    assert archived == 0, "守卫必须挡在标记 is_archived 之前——否则原文永久丢失"
+    assert pending >= 1, "失败应进重试队列"
+
+
+def test_session_summary_guard_blocks_dirty_summary(tmp_path, monkeypatch):
+    history = MessageHistory(db_path=str(tmp_path / "mh.db"))
+    history._summarizer = _BlockedSummarizer()  # type: ignore[assignment]
+    monkeypatch.setattr(history, "start_retry_worker", lambda: None)
+
+    history.add_message("web", "sess_s", "user", "消息1")
+    session_id = history.get_current_session_id("web", "sess_s")
+
+    asyncio.run(history._generate_session_summary("web", "sess_s", session_id))
+
+    conn = sqlite3.connect(str(history.db_path))
+    row = conn.execute(
+        "SELECT summary FROM conversation_sessions WHERE id = ?", (session_id,)
+    ).fetchone()
+    conn.close()
+    # 写入前守卫会 raise → 更新语句根本没执行；段落摘要脏了会经会话边界注入后续对话
+    assert not (row and row[0])

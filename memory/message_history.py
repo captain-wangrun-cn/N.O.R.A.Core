@@ -11,6 +11,9 @@ from contextlib import suppress
 from workspace_config import get_workspace_manager
 from brain.prompts import render_template, append_custom_scope_block
 from memory.context_store import ContextCompressor, MessageLog
+from memory.summary_quality import ensure_usable_summary, summarize_error_reason
+from memory.summary_retry import call_with_retry
+from memory.summary_chunking import DEFAULT_CHUNK_SIZE, DEFAULT_CHUNK_CHAR_CAP, chunked_summary
 
 logger = logging.getLogger(__name__)
 
@@ -779,14 +782,23 @@ class MessageHistory:
         之所以改成"取出全部再合并"而不是原来的 `ORDER BY timestamp DESC LIMIT 1`：
         跨平台共享作用域下同一 memory_scope 会有多个 (platform, chat_id) 分区、各有
         各的归档，`LIMIT 1` 会让其余的归档永远读不到、也删不掉，内容静默丢失。
+
+        ⚠️ **潜在风险（目前不触发）**：多个 (platform, chat_id) 分区合并成一条时，
+        各平台的「我／你」会被无声地混在一起（摘要正文用第一/二人称）。
+        只有同一 memory_scope 下真的出现**第二个分区**才会踩到——届时必须改成按分区分别标注，
+        不能继续这样直接拼。当前生产只有一个分区（telegram/6112866979），安全。
         """
         rows = self._dedupe_summaries([r for r in rows if r])
         if not rows:
             return None
-        content = "\n\n".join(
-            f"[📚 早期对话总结，共{r.get('message_count') or 0}条] "
-            f"{str(r.get('summary_text') or '').strip()}"
-            for r in rows
+        content = (
+            "以下是更早对话的归档总结。"
+            "（摘要正文中「我」指你 Nora，「你」指主人）\n\n"
+            + "\n\n".join(
+                f"[📚 早期对话总结，共{r.get('message_count') or 0}条] "
+                f"{str(r.get('summary_text') or '').strip()}"
+                for r in rows
+            )
         )
         return {"role": "system", "content": content, "timestamp": 0}
 
@@ -810,6 +822,11 @@ class MessageHistory:
         与 context_store 的槽位摘要不同：那边 slot 1-10 是**有界**的，所以沿用
         system 角色没问题；这里的 level<3 摘要是**无界**历史，两者性质不同，
         不要为了"统一"把这里的 role 改回去。
+
+        ⚠️ 人称对照必须写进头部：这条消息的 role 是 `user`
+        （上面第 2 点），而头部文案说的是"这不是用户说的话"—— 角色和正文互相打架。
+        摘要正文现在用「我」= Nora、「你」= 主人，注入时旁边并没有说明这一点，
+        模型只能靠猜。写死对照表就不依赖 role 怎么被网关映射，也不怕哪天 role 再改。
         """
         if not rows:
             return None
@@ -834,6 +851,7 @@ class MessageHistory:
             "以下是之前对话的历史摘要，按时间从早到晚排列。"
             "它们是你自己的记忆背景，不是用户当前说的话，"
             "不要把它们当作待回复的消息。"
+            "（摘要正文中「我」指你 Nora，「你」指主人）"
         )
         return {
             "role": "user",
@@ -1302,6 +1320,79 @@ class MessageHistory:
         finally:
             self._release_compress_gate(platform, chat_id)
 
+    # ------------------------------------------------------------------
+    # 摘要产物质量：判据在 memory/summary_quality.py，重试在 memory/summary_retry.py，
+    # 分块降级在 memory/summary_chunking.py。这里只做封装。
+    # ------------------------------------------------------------------
+
+    def _compress_system_prompt(self) -> str:
+        return append_custom_scope_block(
+            render_template('compression.jinja', 'compress_system'), "summary"
+        )
+
+    def _archive_system_prompt(self) -> str:
+        return append_custom_scope_block(
+            render_template('compression.jinja', 'archive_system'), "summary"
+        )
+
+    @staticmethod
+    def _render_conversation_prompt(conversation_text: str) -> str:
+        return render_template('compression.jinja', 'compress_user',
+                               conversation_text=conversation_text)
+
+    async def _summarize_once(
+        self,
+        system_prompt: str,
+        user_prompt: str,
+        label: str,
+    ) -> Tuple[Optional[Any], str]:
+        """一次带精确重试的摘要调用。返回 (client, text)，text 可能是错误文本。"""
+        async def _one_call() -> Tuple[Optional[Any], str]:
+            out = await self._summarizer.chat(
+                system_prompt=system_prompt,
+                user_prompt=user_prompt,
+                history=[],
+            )
+            return self._summarizer, out
+
+        return await call_with_retry(_one_call, label=label)
+
+    async def _chunked_fallback(
+        self,
+        texts: List[str],
+        system_prompt: str,
+        render,
+        label: str,
+    ) -> str:
+        """整段被拦时的退化路径。**全部块都成功才返回**，否则返回空串。
+
+        返回空串不是"没有摘要"，而是"救不回来"——调用方必须放弃整条写入，
+        绝不能拿部分结果拼一份有缺口的摘要（静默损坏比彻底失败更危险）。
+        """
+        client = self._summarizer
+
+        async def _call(prompt: str) -> str:
+            out = await client.chat(
+                system_prompt=system_prompt, user_prompt=prompt, history=[],
+            )
+            # 空串 = 这一块被拦，交给分块层劈半重试。
+            if summarize_error_reason(client, out):
+                return ""
+            return str(out or "").strip()
+
+        logger.warning(
+            "%s整段被拦，转入分块降级（%s 段，每块 %s 段 / 单段上限 %s 字符）",
+            label, len(texts), DEFAULT_CHUNK_SIZE, DEFAULT_CHUNK_CHAR_CAP,
+        )
+        result = await chunked_summary(
+            texts,
+            _call,
+            render,
+            chunk_size=DEFAULT_CHUNK_SIZE,
+            char_cap=DEFAULT_CHUNK_CHAR_CAP,
+        )
+        return result or ""
+
     async def _compress_locked(self, platform: str, chat_id: str):
         """执行消息压缩（调用方须已持有该 (platform, chat_id) 的压缩闸门）。"""
         self.start_retry_worker()
@@ -1334,17 +1425,31 @@ class MessageHistory:
         
         prompt = render_template('compression.jinja', 'compress_user',
                                  conversation_text=conversation_text)
-        
+        system_prompt = self._compress_system_prompt()
+
         try:
-            # 调用LLM总结
-            summary = await self._summarizer.chat(
-                system_prompt=append_custom_scope_block(
-                    render_template('compression.jinja', 'compress_system'), "summary"
-                ),
-                user_prompt=prompt,
-                history=[]
+            # 调用 LLM 总结：先精确重试（捞输出侧的随机拦截），整段仍被拦则分块降级。
+            # 输入侧拦截（prompt_blocked / PROHIBITED_CONTENT）重试必然无效，
+            # 实测同一份输入 27 次调用 0 次成功，只有切小才有用。
+            _, summary = await self._summarize_once(system_prompt, prompt, f"[{platform}/{chat_id}] 压缩")
+
+            if summarize_error_reason(self._summarizer, summary):
+                chunk_texts = [
+                    f"{msg['role']}: {msg['content']}" for msg in messages_to_compress
+                ]
+                summary = await self._chunked_fallback(
+                    chunk_texts, system_prompt, self._render_conversation_prompt,
+                    f"[{platform}/{chat_id}] 压缩",
+                )
+
+            # ⚠️ 必须放在**第一条写语句之前**。下面 INSERT 一级总结与 UPDATE
+            # is_archived=1 之间没有事务边界：一旦带着错误文本走到那里，摘要表里是
+            # 「抱歉，处理您的请求时遇到了问题：…」，而这 10 条消息被标成已归档、
+            # 原文从此不再进上下文 —— 永久丢失，且看不出来。
+            summary = ensure_usable_summary(
+                self._summarizer, summary, f"[{platform}/{chat_id}] 压缩摘要"
             )
-            
+
             # 保存总结
             # 区间用**实际选中这 10 条的 min/max id**。选择是按 timestamp 排序的，
             # 首尾未必就是 id 最小/最大的那条。
@@ -1459,14 +1564,38 @@ class MessageHistory:
 
         prompt = render_template('compression.jinja', 'archive_user',
                                  summaries_text=summaries_text)
+        system_prompt = self._archive_system_prompt()
 
         try:
-            archive_summary = await self._summarizer.chat(
-                system_prompt=append_custom_scope_block(
-                    render_template('compression.jinja', 'archive_system'), "summary"
-                ),
-                user_prompt=prompt,
-                history=[]
+            _, archive_summary = await self._summarize_once(
+                system_prompt, prompt, f"[{platform}/{chat_id}] 归档"
+            )
+
+            if summarize_error_reason(self._summarizer, archive_summary):
+                # 归档的输入是摘要而非原文，分块时逐段切。来源标记（此前归档 / 本轮新增）
+                # 必须**随每块带着走** —— 分块后各块是独立调用，看不到原始的
+                # 【此前归档，覆盖更早的对话】/【本轮新增对话总结】结构，丢掉标记就分不清
+                # 哪段更早、哪段来自哪个场景。
+                chunk_texts = (
+                    [f"【此前归档，覆盖更早的对话】\n{str(a.get('summary_text') or '')}"
+                     for a in old_archives]
+                    + [f"【本轮新增对话总结】\n{str(s.get('summary_text') or '')}"
+                       for s in level1_summaries]
+                )
+                archive_summary = await self._chunked_fallback(
+                    chunk_texts,
+                    system_prompt,
+                    lambda text: render_template('compression.jinja', 'archive_user',
+                                                 summaries_text=text),
+                    f"[{platform}/{chat_id}] 归档",
+                )
+
+            # ⚠️ 必须在 INSERT 与 DELETE 之前。这段代码下面是滚动合并：新归档入库后
+            # 会**按 id 删除**被吸收的旧归档与全部一级总结（第 1501 行附近）。
+            # 带错误文本走到那里 = 脏串顶掉已经压缩好的内容，旧行同时被删 ——
+            # 不是"没记下来"，是把已记好的抹掉，且每轮都在删上一轮，没有上限。
+            archive_summary = ensure_usable_summary(
+                self._summarizer, archive_summary, f"[{platform}/{chat_id}] 归档摘要"
             )
 
             # 保存归档总结：覆盖范围 = 旧归档 ∪ 本轮全部一级总结
@@ -1676,13 +1805,23 @@ class MessageHistory:
             # 使用压缩模板生成摘要
             prompt = render_template('compression.jinja', 'compress_user',
                                      conversation_text=conversation_text)
+            system_prompt = self._compress_system_prompt()
 
-            summary = await self._summarizer.chat(
-                system_prompt=append_custom_scope_block(
-                    render_template('compression.jinja', 'compress_system'), "summary"
-                ),
-                user_prompt=prompt,
-                history=[]
+            _, summary = await self._summarize_once(
+                system_prompt, prompt, f"[{platform}/{chat_id}] 段落摘要 #{session_id}"
+            )
+
+            if summarize_error_reason(self._summarizer, summary):
+                chunk_texts = [f"{msg['role']}: {msg['content']}" for msg in messages]
+                summary = await self._chunked_fallback(
+                    chunk_texts, system_prompt, self._render_conversation_prompt,
+                    f"[{platform}/{chat_id}] 段落摘要 #{session_id}",
+                )
+
+            # 段落摘要会在会话边界（message_history.get_context_messages）被注入后续对话，
+            # 脏串进去就是 Nora 把一句报错当成自己的记忆。
+            summary = ensure_usable_summary(
+                self._summarizer, summary, f"[{platform}/{chat_id}] 段落摘要 #{session_id}"
             )
 
             # 更新 session 摘要

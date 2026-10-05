@@ -9,11 +9,13 @@ import sqlite3
 import asyncio
 from datetime import datetime
 from pathlib import Path
-from typing import Dict, List, Optional, Callable, Any
+from typing import Dict, List, Optional, Callable, Any, Tuple
 
 from workspace_config import get_workspace_manager
 from brain.prompts import render_template, append_custom_scope_block
 from brain.prompts import load_identity_context
+from memory.summary_quality import summarize_error_reason
+from memory.summary_retry import call_with_retry
 
 logger = logging.getLogger(__name__)
 
@@ -598,7 +600,9 @@ class ContextCompressor:
             conversation_text=f"{role}: {raw_text}",
         )
         return await self._call_summary(
-            system_prompt=render_template("compression.jinja", "compress_system"),
+            system_prompt=append_custom_scope_block(
+                render_template("compression.jinja", "compress_system"), "summary"
+            ),
             user_prompt=prompt,
             fallback_text=raw_text,
             min_chars=min_chars,
@@ -685,37 +689,32 @@ class ContextCompressor:
         if self._summarizer is None:
             return self._fallback_summary(fallback_text)
 
-        for attempt in range(1, self.summary_max_retries + 1):
-            try:
-                summary = await self._summarizer.chat(
-                    system_prompt=system_prompt,
-                    user_prompt=user_prompt,
-                    history=[],
-                )
-                sanitized = self._sanitize_summary(summary, fallback_text, min_chars)
-                if self._is_too_short_summary(sanitized, min_chars):
-                    raise RuntimeError("summary 返回字数过短")
-                return sanitized
-            except Exception as e:
-                if attempt >= self.summary_max_retries:
-                    logger.error(
-                        "调用 summary 模型失败（已重试 %s 次），使用回退: %s",
-                        self.summary_max_retries,
-                        e,
-                    )
-                    return self._fallback_summary(fallback_text)
+        # 重试交给 memory/summary_retry.py 统一实现。这里原本自带一套 3 次指数退避，
+        # 叠加上层重试就是 3×3=9 次调用——对生产上已确认是确定性的输入侧拦截纯属浪费。
+        async def _one_call() -> Tuple[Optional[Any], str]:
+            out = await self._summarizer.chat(
+                system_prompt=system_prompt,
+                user_prompt=user_prompt,
+                history=[],
+            )
+            return self._summarizer, out
 
-                delay = self.summary_retry_base_delay * (2 ** (attempt - 1))
-                logger.warning(
-                    "调用 summary 模型失败，第 %s/%s 次重试，%.1fs 后重试: %s",
-                    attempt,
-                    self.summary_max_retries,
-                    delay,
-                    e,
-                )
-                await asyncio.sleep(delay)
+        _, raw = await call_with_retry(
+            _one_call,
+            attempts=self.summary_max_retries,
+            base_delay=self.summary_retry_base_delay,
+            label="上下文段摘要",
+        )
 
-        return self._fallback_summary(fallback_text)
+        # ⚠️ 判据必须是 last_error，不能只看长度。这里原来只比字符数，阈值 80 ——
+        # provider 的失败说明（"抱歉，处理您的请求时遇到了问题：…"）实测长 96 字，
+        # **正好长过阈值**，于是报错文案被当成上下文摘要存进槽位、注入后续对话。
+        if summarize_error_reason(self._summarizer, raw):
+            logger.error("上下文段摘要被拦截，改用回退摘要")
+            return self._fallback_summary(fallback_text)
+
+        sanitized = self._sanitize_summary(raw, fallback_text, min_chars)
+        return sanitized
 
     def _fallback_summary(self, text: str, max_length: int = 200) -> str:
         if len(text) <= max_length:

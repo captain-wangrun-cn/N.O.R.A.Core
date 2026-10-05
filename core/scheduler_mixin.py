@@ -28,6 +28,7 @@ from core.scheduler import (
     get_user_idle_seconds,
 )
 from core.routing import parse_route_markers, sanitize_adapter_output_text
+from memory.summary_quality import summarize_error_reason
 from core.group_presence_store import GroupPresence
 from core.private_presence_store import PrivatePresence
 from core.conversation_identity import normalize_chat_type
@@ -174,36 +175,51 @@ class SchedulerMixin:
             return
 
         # 7) 生成总结
-        system_prompt = (
-            "你是对话日志整理助手，请为给定日期生成简明的每日总结。"
-            " 保留关键事件、决定、情绪、待办，避免复述冗余。"
+        # 统一规范与压缩/归档共用同一份 macro（brain/templates/summary_style.jinja），
+        # 否则每日总结和记忆里的摘要会是两种文风、两套人称。
+        system_prompt = append_custom_scope_block(
+            "你是对话日志整理助手，请为给定日期生成每日总结。\n"
+            + render_template("summary_style.jinja", "spec")
+            + "\n把当天发生的事按时间线写清，关键事件、决定、情绪、待办都要落到具体事上，"
+              "避免复述冗余，也避免用模糊动词概括。",
+            "summary",
         )
-        try:
-            system_prompt = append_custom_scope_block(system_prompt, "summary")
-        except Exception:
-            pass
         user_prompt = (
             f"日期: {target_date.isoformat()}\n"
             f"已有总结(可为空):\n{existing_content}\n\n"
             f"当日对话原文:\n{convo_text}\n\n"
-            "请输出 Markdown，要点列表和待办 (如有)。"
+            "请输出 Markdown，包含时间线与待办 (如有)。"
         )
 
+        # 8) 调用 + 失败判据
+        #
+        # ⚠️ 这里原本是 `if not summary_text: 用原始要点兜底`。那个分支**永远进不去**：
+        # provider 失败时返回的是一段非空的错误说明（"抱歉，处理您的请求时遇到了问题：…"），
+        # 空字符串只可能来自"模型真的返回了空"。于是报错文案被当成当日总结写进 .md，
+        # 再经 brain/prompts.load_recent_daily_memory(days=3) 注入后续对话当成记忆。
+        # 判据必须是 last_error / is_error_result，不是"字符串空不空"。
         summary_text = ""
+        failure_reason = ""
         try:
             summary_text = await llm_client.chat(
                 system_prompt=system_prompt,
                 user_prompt=user_prompt,
                 history=[],
             )
+            failure_reason = summarize_error_reason(llm_client, summary_text) or ""
         except Exception as e:
-            logger.error(f"每日总结生成失败，使用回退: {e}")
+            logger.error(f"每日总结生成失败: {e}")
+            failure_reason = f"exception:{e}"
 
-        if not summary_text:
+        if failure_reason or not str(summary_text or "").strip():
             if not msgs:
                 summary_text = "今日无对话记录。"
             else:
                 summary_text = "生成失败，以下为原始要点：\n" + "\n".join(convo_lines[:20])
+                logger.error(
+                    f"每日总结回退为原始要点（原因={failure_reason or 'empty_result'}）"
+                    f"，共 {len(convo_lines)} 条"
+                )
 
         content_to_write = f"# Daily Summary {target_date.isoformat()}\n\n" + summary_text.strip()
         try:

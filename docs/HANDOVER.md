@@ -1,3 +1,68 @@
+## 近期关键改动（截至 2026-10-05）
+
+### 🛡️ 摘要链路：报错文案被当记忆写库 + 统一摘要风格
+
+生产上从压缩链路挖出一条**静默丢记忆**的链路：`summaries` / 每日记忆 / 会话摘要里出现了
+`抱歉，处理您的请求时遇到了问题：400 prompt_blocked` 这种行，而对应的原始消息已被标成
+`is_archived=1` —— 记忆被替换成一句报错，且看不出来。
+
+根因是 provider 的失败约定（**返回错误文本而不是抛异常**）没在这条链路上被检查。
+修复分四块，**顺序有讲究**：
+
+1. **`memory/summary_quality.py`（新）** —— 统一判据。
+   主判据是 `client.last_error`，**不能只查返回值前缀**：只有
+   `check_finish_reason_and_log` 带 `ERROR_RESULT_PREFIX`，各 provider 自己的 `_fail()`
+   返回的是「抱歉，处理您的请求时遇到了问题：…」这类**没有前缀**的文案 ——
+   而且**不能去改那些字符串**，它们同时是直接发给用户的聊天回复。
+   `ensure_usable_summary()` 在不可用时 `raise`：三个写入点的 `except` 里已有
+   `rollback()` + `_enqueue_retry()`，抛出等于免费接上重试队列。
+   ⚠️ 调用必须放在**第一条写语句之前**，尤其在 `_compress_locked`（写摘要的同时标
+   `is_archived`）和 `_archive_locked`（滚动合并会 **DELETE** 旧归档）里。
+
+2. **三个写入点接上守卫**：`message_history._compress_locked` / `_archive_locked` /
+   `_generate_session_summary`、`scheduler_mixin` 的每日总结、`context_store._call_summary`。
+   其中每日总结那处的 `if not summary_text:` 分支**永远进不去**（失败返回的是非空错误文本），
+   报错文案就这么写进了 `.md`，再经 `load_recent_daily_memory(days=3)` 注入后续对话。
+   `context_store` 侧原来只比字符数、阈值 80，而报错串实测 96 字，**正好通过**。
+   顺带把 `context_store` 自带的 3 次退避删掉（与统一重试叠加就是 3×3=9 次调用）。
+
+3. **`memory/summary_retry.py` + `memory/summary_chunking.py`（新）** —— 重试与降级。
+   实测**两种拦截必须分开对待**：输出侧 `content_filter` 是随机的（某轮 8 次全灭、
+   下一轮第 1 次就过），值得重试 2~3 次；输入侧 `PROHIBITED_CONTENT` / `prompt_blocked`
+   （400、`completion_tokens=0`）重试**完全无效**，同一份输入 **27 次调用 0 次成功**。
+   两者运行时分辨不出来，所以是「先精确重试、再退到切小」。
+   切小才是正解：把过不去的内容按 3 段一块送，块被拦就**递归二分**。
+   ⚠️ **有缺口绝不写** —— 第一版只合并通过的那些块，产出一份看起来正常但有缺口的内容，
+   静默损坏比彻底失败更危险。`chunked_summary()` 救不回任一区间就返回 `None`。
+
+4. **摘要风格统一（`brain/templates/summary_style.jinja`，新）** —— 五条路径共用一份规范：
+   人称（「我」= Nora、「你」= 主人）、如实（禁止「戏谑性描述」「深度解析」这类模糊动词
+   掩盖具体事件）、**严格区分「被平台拦截」与「我主动拒绝」**（生产摘要里把平台拦截写成了
+   Nora 的主动拒绝，还出现过 Nora 被标成 `Visitor`）、中文状态词、六个固定字段
+   （时间线 / 状态 / 隐私边界 …）。
+   接入：`compression.jinja` 的 compress/archive 两个 system block、
+   `scheduler_mixin` 的每日总结内联提示词、`message_history` 与 `context_store` 的注入头部
+   （写死「我／你」对照表）。
+
+> ⚠️ **模板复用只能用 block + `{% include %}`，不能用 `{% import %}` + macro**：
+> `brain/prompts.py` 的 `render_template()` 直接调 `template.blocks[name](context)`，
+> **不执行模板主体**，顶层 `import` 建立的变量在 block 里根本不存在
+> （实测报 `'style' is undefined`）。
+
+**验证**：`tests/test_summary_quality_guard.py`（10：判据、重试、真库写入守卫）、
+`tests/test_summary_chunking.py`（8：切块、二分恢复、有缺口返回 None、截断上限）、
+`tests/test_message_history.py` +2（三个写入点的接线锁）。全量 899 passed / 11 failed，
+失败集与干净树基线**逐条一致**（context_pricing ×4、cost_tracker ×2、
+message_history_retry_queue ×2、timezone ×1、image_memory ×2）。
+
+**上线注意**：这是**新产生的**摘要才受规范约束，库里已有的旧摘要仍是老文风，
+不会自动重写。另外守卫 + 分块只降低丢失概率，**输入侧拦截最狠的那类（单条消息本身就过不去）
+依然无解**——日志里会打 `单条消息仍被拦截…该区间无解，放弃`。
+
+**已知遗留**：本轮只改了压缩/归档/段落摘要/每日总结/上下文槽位这五条路径。
+**还没做**的是：`scheduler_mixin` 之外**其它**把 `chat()` 结果当产物用的调用方，
+应按同一判据（`client.last_error`）自查一遍。
+
 ## 近期关键改动（截至 2026-09-16）
 
 ### 🕒 时间观念修复：历史时间戳不再剥离 + 「当前时间」挪出 system
