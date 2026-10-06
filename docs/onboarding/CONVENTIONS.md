@@ -45,7 +45,10 @@
 
 - 测试放在 `tests/` 目录，命名 `test_*.py`
 - 使用 `pytest` 框架
-- 异步测试需要 `pytest-asyncio` + `@pytest.mark.asyncio`
+- **异步测试用 `anyio`，不是 `pytest-asyncio`**（本仓 venv 未安装后者）：
+  标 `@pytest.mark.anyio`，`tests/conftest.py` 里 `pytest_plugins = ["anyio"]`
+  并固定 `anyio_backend` 为 asyncio（不跑 trio）。写成 `@pytest.mark.asyncio`
+  会被**静默跳过**，看起来像通过
 - 测试数据库使用临时文件或 `:memory:`，**不要**操作生产数据库
 - 运行：`pytest` 或 `pytest tests/test_xxx.py -v`
 

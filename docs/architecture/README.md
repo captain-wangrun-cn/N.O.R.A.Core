@@ -250,6 +250,12 @@ flowchart TB
 - **[工具循环控制 (Tool Loop Detection)](./tool-loop.md)**
   - 防止 AI 陷入死循环的保护机制。
 
+> 📦 **历史复盘归档**：`docs/archive/COMMON_PITFALLS_full.md` 保存了
+> `docs/onboarding/COMMON_PITFALLS.md` 压缩前的完整版本——含各条坑的排查过程、
+> 实测数据表和变量控制重放记录（如归档链三个 bug 的定位、响应体 role 分布验证、
+> 分块降级通过率对比）。现役约束和判据以 onboarding 版为准，需要考古或想看
+> "当时怎么查出来的" 时再翻归档。
+
 ## 核心理念
 
 **像真人一样对话**，意味着：

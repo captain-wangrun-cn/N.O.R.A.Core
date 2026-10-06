@@ -76,14 +76,13 @@ core/controller.py            NoraController.handle_message()
 ### `brain/tools.py`
 - `ToolManager` — 工具注册、schema 生成、执行
   - 内置工具：`create_new_skill`, `execute_skill`, `execute_tool_plan`, `read_file`, `search`, `write_file`, `edit_file`, `list_dir`, `get_available_skills`, `exec_command`, `view_media`, `crop_image_for_llm`, `generate_appearance_reference`(仅配置 `draw` 时注册), `set_alarm`, `list_alarms`, `cancel_alarm`
-  - `view_media`: 默认 `return_image=true`，输出 `[image: abs_path]` 或 `[video: abs_path]` MediaTag，后脑下一轮会读取真实图片/视频并临时使用 image/video 模型；可用 `question` 参数指定对媒体要问的问题，且 `question` 非空时会自动强制 `return_image=true`。可用 `type` 参数筛选（`image`/`video`，不设则全部）。只查元数据/标签/OCR 时可设 `return_image=false`。
-  - `view_media` 的 `keyword`：走**词法检索 + 语义检索 RRF 融合**（`memory/image_store.py`）。词法路 `search_by_lexical()` 分词 + CJK bigram 扩展 + 字段加权打分（tags 3.0 / description 2.0 / ocr_text 1.5），语义路走 Qdrant；两路各取 `limit+offset` 条、都不自己跳 offset，融合排序后统一切片。两路皆空才回退 MongoDB `$text`。
-  - 工具回灌媒体有**单轮数量上限**：图片 4 个（带 `question` 时 3 个）、视频 1 个（`core/back_brain.py` 的 `MAX_TOOL_IMAGES_PER_TURN` 等）。被截断时 `tool_result` 会附带提示，引导收窄查询或用 `page` 翻页。
-  - 回查媒体的**分析轮不用人设**：走 `brain/templates/media_analysis.jinja`，且该轮清空对话历史、不给工具、流式输出不发用户（详见 §6）。
-  - `generate_appearance_reference(requirement, view, usage, replace, source_images)`: 按 `appearance/APPEARANCE.md` 生成形象参考图存进 `appearance/refs/{view}.png` 并更新 `manifest.json`。已有同名 view 必须显式 `replace=true` 才覆盖（覆盖会改变形象，须先问用户）；生成新视角时自动带上已有参考图作锚。不经 `draw_desc`。`appearance/refs/` 被 `_is_path_safe` 目录级拦截，通用文件工具读写会被拒。
-  - `source_images`（逗号分隔本地路径）: 用户发图说"你就长这样"时用，路径从 `view_media` 的 `File:` 行取。来源图**优先占用** 3 张配额、排在附图列表最前，提示词写"与文字描述冲突以图为准"；剩余名额才补已有参考图（写"保持同一个人，只改视角"）。路径过 `_is_path_safe`，读不到直接报错不生图。
-  - IMAGE_TAGS / IMAGE_OCR / IMAGE_DESC 质量兜底：缺失标签或标签未使用英文逗号分隔时，会触发一次仅请求 `IMAGE_TAGS` 的补齐重试。
-  - 详细说明：`docs/architecture/tools.md`
+  - `view_media`: 默认 `return_image=true`，输出 `[image: abs_path]` / `[video: abs_path]`，后脑下一轮读取真实媒体并临时用 image/video 模型。`question` 非空会自动强制 `return_image=true`；只要元数据/标签/OCR 时设 `return_image=false`；`type` 筛选 `image`/`video`。
+  - `keyword` 走**词法 + 语义 RRF 融合**（`memory/image_store.py`）：词法路分词 + CJK bigram 扩展 + 字段加权（tags 3.0 / description 2.0 / ocr_text 1.5），语义路走 Qdrant；两路各取 `limit+offset`、都不自己跳 offset，融合后统一切片。两路皆空才回退 Mongo `$text`。
+  - `generate_appearance_reference(...)`: 生成形象参考图存进 `appearance/refs/{view}.png` 并更新 `manifest.json`。已有同名 view 必须显式 `replace=true` 才覆盖（**须先问用户**）。`appearance/refs/` 被 `_is_path_safe` 目录级拦截，通用文件工具读写会被拒。
+  - `source_images`（逗号分隔本地路径）：用户发图说"你就长这样"时用，**优先占用** 3 张配额、排在附图最前。
+  - 详细参数说明与全部工具：`docs/architecture/tools.md`。
+  - ⚠️ 回灌有**单轮数量上限**、分析轮**不用人设**、IMAGE_TAGS 必须 **tags-first**——
+    这三条的约束和踩坑见 `docs/onboarding/COMMON_PITFALLS.md` §7 媒体回查与表情包。
 
 ### `core/scheduler.py`
 - `ProactiveScheduler` — APScheduler 驱动主动消息调度
@@ -213,12 +212,11 @@ python tui.py
 
 > ⚠️ 修改行为时，优先改 `system.jinja`；修改性格/人设时，改 `SOUL.md`（优先）或 `persona_nora.jinja`（回退）。
 
-**回查媒体分析轮为什么要单独一套 prompt**：分析轮如果沿用 `get_system_prompt()`，
-`system.jinja` 第一行就是人设/SOUL，再叠上对话历史，模型会把 `question` 当成用户在搭话，
-用 Nora 的口吻回一句寒暄而不是做客观分析。`media_analysis.jinja` 明确声明模型没有人设、
-输出是用户看不到的系统内部数据，并禁止寒暄/emoji/向用户提问/输出标签块与消息控制标记。
-**代码侧必须同时满足三条，缺一条人设都会漏回来**（`core/back_brain.py`）：
-覆盖 system + user prompt、`turn_history = []`、该轮不给工具且流式输出不发用户不进 history。
+> 📌 **回查媒体的分析轮为什么必须单独一套 prompt**：分析轮沿用 `get_system_prompt()` 的话，
+> `system.jinja` 第一行的人设/SOUL + 对话历史会让模型把 `question` 当成用户在搭话，
+> 用 Nora 的口吻回一句寒暄而不是做客观分析。代码侧必须同时满足三条（覆盖 system + user prompt、
+> `turn_history = []`、该轮不给工具且流式输出不发用户不进 history），缺一条人设都会漏回来。
+> 详见 `docs/onboarding/COMMON_PITFALLS.md` §7 媒体回查与表情包。
 
 ---
 
