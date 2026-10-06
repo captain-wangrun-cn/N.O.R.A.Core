@@ -839,20 +839,30 @@ class ContextCompressor:
                 "compression.jinja", "compress_user", conversation_text=conversation_text
             )
 
-        # 每段各自首尾截断后再拼。分块层是按"段"劈半的，直接送整段原文会让
-        # 一块里塞进几千字——那正是触发输入侧拦截的形态，劈半也过不去。
-        anchors = [self._build_snippet(t) for t in segs]
+        # 降级阶梯：整段原文 → 首尾锚点 → 分块。
+        #
+        # ⚠️ 顺序不能反。整段原文信息最全，而且**大多数段是过得去的**——
+        # 实测同一批数据里，只有最长的一段（2536 字符）会被拦，其余全过。
+        # 一上来就送锚点等于白丢一半细节（实测同样几段：631→350、397→216）。
+        # 锚点只在整段被拦时才用，那时"少记一点"好过"什么都不记"。
+        full_text = "\n\n".join("\n".join(s.blocks) for s in segs)
+        anchors = [self._build_snippet(s) for s in segs]
+        anchors_text = "\n\n".join(anchors)
 
-        # 先整段试一次（带重试）；过不了再退化成小块。
-        summary = await _one_call(_render("\n\n".join(anchors)))
-        if summary and self._looks_like_summary(summary):
-            return summary
+        trials = [full_text] if full_text != anchors_text else []
+        trials.append(anchors_text)
 
-        if summary:
-            logger.warning("上下文段摘要结构不合规（无【时间线】），转入分块降级")
+        for idx, trial in enumerate(trials):
+            summary = await _one_call(_render(trial))
+            if summary and self._looks_like_summary(summary):
+                if idx:
+                    logger.warning("上下文段摘要整段被拦，已用首尾锚点降级生成")
+                return summary
+            if summary:
+                logger.warning("上下文段摘要结构不合规（无【时间线】），继续降级")
 
         logger.warning(
-            "上下文段摘要整段未通过，转入分块降级（%s 段，每块 %s 段 / 单段上限 %s 字符）",
+            "上下文段摘要锚点仍不可用，转入分块降级（%s 段，每块 %s 段 / 单段上限 %s 字符）",
             len(segs), DEFAULT_CHUNK_SIZE, DEFAULT_CHUNK_CHAR_CAP,
         )
         fallback = await chunked_summary(
