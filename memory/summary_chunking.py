@@ -28,9 +28,26 @@
 """
 
 import logging
+import re
 from typing import Any, Awaitable, Callable, List, Optional, Sequence, Tuple
 
 logger = logging.getLogger(__name__)
+
+# 分块结果的拼装方式。
+#
+# 时间线条目在**行首**，且行内不会出现 `【`（字段名只在行首出现）。
+# 所以按行走一遍，就能在不知道块边界在哪的情况下把「同号槽位的碎片」和
+# 「被块内模型误当成对话续写的散文」区分开——后者既不是时间线条目、
+# 也不属于任何已知字段，直接丢掉。
+_LINE_START = re.compile(r"^[\-\*•]\s*")
+_FIELD_RE = re.compile(r"【([^】]+)】")
+# 允许行首还有 - * • # 等装饰（`## 【时间线】`、`- 【时间线】` 都算）。
+_FIELD_LINE_RE = re.compile(r"^[\s\-\*•#>]*【([^】]+)】")
+
+TIMELINE_NAME = "时间线"
+
+MERGE_MODE_SECTIONS = "sections"
+MERGE_MODE_CONCAT = "concat"
 
 DEFAULT_CHUNK_SIZE = 3
 # 单条上限。实测 200 / 300 都稳过，取中间值留出余量。
@@ -61,6 +78,96 @@ def chunk_messages(messages: Sequence[Any], size: int) -> List[List[Any]]:
     return [list(messages[i:i + step]) for i in range(0, len(messages), step)]
 
 
+def has_timeline(text: str) -> bool:
+    """返回文本是否含【时间线】字段（带装饰也算）。
+
+    为什么结构判据不能只看字符长度：provider 的失败说明与截断原文
+    **都长过任何合理的字数阈值**，长度只能拦住空返回，拦不住"内容不是摘要"。
+    六字段格式里的【时间线】是模型真做了归纳才会出现的标记，拿它当判据才拦得住。
+    """
+    return any(m.group(1).strip() == TIMELINE_NAME for m in _FIELD_LINE_RE.finditer(text or ""))
+
+
+def _merge_concatenated(parts: Sequence[str]) -> str:
+    """把块摘要按行分类拼装，丢掉不属于任何已知字段的行。
+
+    两件事在这里完成：
+
+    1. **同号槽位的碎片合并。** 每个块都会独立输出【时间线】【状态】【隐私边界】，
+       直接拼接会得到三四份重复段落。所以【时间线】的条目要合到一份里，
+       其它字段同名合并、不同名追加——同一个槽位不论切多少块，最终只有一个。
+    2. **丢掉"入戏散文"。** 小块露骨内容会让模型以为自己在对话里，以 Nora 的身份
+       续写场景描述（实测 231 字）。它不是 provider 报错，守卫拦不住；但它既不是
+       时间线条目、也没有字段名，按行分类时自然落进"无归属"里被丢弃。
+
+    ⚠️ 因此**不要切换成人称/口吻聚合**：那会把入戏散文正好归进用户侧聚合里，
+    等于亲手把它救回来。
+    """
+    timeline: List[str] = []
+    sections: List[str] = []
+    seen_sections = set()
+    cur_title: Optional[str] = None
+    cur_lines: List[str] = []
+    dropped = 0
+
+    def _flush() -> None:
+        if cur_title is None:
+            return
+        body = "\n".join(cur_lines).strip()
+        if not body:
+            return
+        if cur_title in seen_sections:
+            return  # 同名非时间线字段以首个为准，不做无标记拼接
+        seen_sections.add(cur_title)
+        sections.append(f"【{cur_title}】\n{body}")
+
+    for text in parts:
+        for raw in text.splitlines():
+            line = raw.rstrip()
+            if not line.strip():
+                continue
+            m = _FIELD_LINE_RE.match(line)
+            if m:
+                _flush()
+                title = m.group(1).strip()
+                cur_title = title
+                rest = line[m.end():].strip()
+                cur_lines = [rest] if rest else []
+                continue
+            if cur_title == TIMELINE_NAME:
+                stripped = _LINE_START.sub("", line.strip())
+                if stripped and not stripped.startswith("（"):  # 吃掉"(无)"这类占位
+                    timeline.append(stripped)
+                continue
+            if cur_title is not None:
+                if _LINE_START.match(line.strip()) or not _FIELD_RE.search(line):
+                    cur_lines.append(line)
+                else:
+                    dropped += 1
+                continue
+            dropped += 1  # 既不属时间线也不属任何字段：入戏散文
+    _flush()
+
+    if dropped:
+        logger.warning("摘要分块：丢弃 %d 行无归属内容（字段外的散文/续写）", dropped)
+
+    blocks: List[str] = []
+    if timeline:
+        blocks.append(f"【{TIMELINE_NAME}】\n" + "\n".join(f"- {t}" for t in timeline))
+    blocks.extend(sections)
+    return "\n\n".join(blocks)
+
+
+def merge_chunk_summaries(parts: Sequence[str], mode: str = MERGE_MODE_SECTIONS) -> str:
+    """按 mode 拼装块摘要：sections 走结构化合并，concat 直接拼接。"""
+    kept = [p for p in parts if p and p.strip()]
+    if not kept:
+        return ""
+    if mode == MERGE_MODE_SECTIONS:
+        return _merge_concatenated(kept)
+    return "\n\n".join(kept)
+
+
 async def _summarize_range(
     messages: Sequence[Any],
     call: SummaryCall,
@@ -68,6 +175,8 @@ async def _summarize_range(
     chunk_size: int,
     char_cap: int,
     depth: int = 0,
+    merge_mode: str = MERGE_MODE_CONCAT,
+    enforce_timeline: bool = False,
 ) -> Optional[str]:
     """总结一段消息；被拦就劈成两半分别总结，都成功才返回。
 
@@ -75,7 +184,7 @@ async def _summarize_range(
     """
     text = "\n".join(_clip(str(m), char_cap) for m in messages)
     summary = await call(render(text))
-    if summary:
+    if summary and (not enforce_timeline or has_timeline(summary)):
         return summary
 
     if len(messages) <= MIN_CHUNK_SIZE:
@@ -87,13 +196,13 @@ async def _summarize_range(
         return None
 
     mid = len(messages) // 2
-    left = await _summarize_range(messages[:mid], call, render, chunk_size, char_cap, depth + 1)
+    left = await _summarize_range(messages[:mid], call, render, chunk_size, char_cap, depth + 1, merge_mode, enforce_timeline)
     if left is None:
         return None
-    right = await _summarize_range(messages[mid:], call, render, chunk_size, char_cap, depth + 1)
+    right = await _summarize_range(messages[mid:], call, render, chunk_size, char_cap, depth + 1, merge_mode, enforce_timeline)
     if right is None:
         return None
-    return f"{left}\n\n{right}"
+    return merge_chunk_summaries([left, right], merge_mode)
 
 
 async def chunked_summary(
@@ -103,6 +212,8 @@ async def chunked_summary(
     *,
     chunk_size: int = DEFAULT_CHUNK_SIZE,
     char_cap: int = DEFAULT_CHUNK_CHAR_CAP,
+    merge_mode: str = MERGE_MODE_CONCAT,
+    enforce_timeline: bool = False,
 ) -> Optional[str]:
     """整段阻塞时退化的分块摘要。全部块都成功才返回，否则 None。
 
@@ -110,16 +221,26 @@ async def chunked_summary(
         messages: 已带历史时间戳前缀的消息文本序列。
         call: 单次摘要调用，返回空串/None 表示这次被拦。
         render: 把对话原文包成 user_prompt 的函数。
+        merge_mode: `MERGE_MODE_SECTIONS` 会把各块的六字段按行分类合并
+            （同号槽位只留一份字段，并丢掉字段外的入戏散文）。
+            只对**同一个槽位**的输入用——跨槽位合并本来就是拼接，别用。
+        enforce_timeline: 要求每块都必须带【时间线】。用于结构已知的
+            六字段摘要路径；不满足就当作这一块没总结成功，交给二分劈半。
     """
     parts: List[Optional[str]] = []
     for piece in chunk_messages(messages, chunk_size):
-        parts.append(await _summarize_range(piece, call, render, chunk_size, char_cap))
+        parts.append(
+            await _summarize_range(
+                piece, call, render, chunk_size, char_cap,
+                merge_mode=merge_mode, enforce_timeline=enforce_timeline,
+            )
+        )
 
     if any(p is None for p in parts):
         logger.error("摘要分块：有区间无法总结，放弃整条摘要（不写有缺口的内容）")
         return None
 
-    joined = "\n\n".join(p for p in parts if p)
+    joined = merge_chunk_summaries([p for p in parts if p], merge_mode)
     if not joined.strip():
         return None
     return joined

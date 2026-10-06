@@ -5,8 +5,10 @@ Copyright © WR（captain-wangrun-cn） All rights reserved
 '''
 import json
 import logging
+import re
 import sqlite3
 import asyncio
+from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import Dict, List, Optional, Callable, Any, Tuple
@@ -16,11 +18,72 @@ from brain.prompts import render_template, append_custom_scope_block
 from brain.prompts import load_identity_context
 from memory.summary_quality import summarize_error_reason
 from memory.summary_retry import call_with_retry
+from memory.summary_chunking import (
+    DEFAULT_CHUNK_SIZE,
+    DEFAULT_CHUNK_CHAR_CAP,
+    MERGE_MODE_SECTIONS,
+    chunked_summary,
+    has_timeline,
+)
 
 logger = logging.getLogger(__name__)
 
 # 与 message_history.DEFAULT_MEMORY_SCOPE_ID / conversation_identity 保持一致。
 DEFAULT_MEMORY_SCOPE_ID = "relationship:owner:default"
+
+# 送给模型的单段锚点长度：开头 + 结尾各这么多字。
+# ⚠️ **不能整段送**。实测 12000 字整段必被输入侧拦截（`empty_choices`，
+# prompt_tokens 13850 / completion_tokens 0），且是确定性的——叠多少重试都没用。
+# 首尾各留一段，既保住"这段在讲什么"的锚点，又把密度压到能过。
+SNIPPET_HEAD = 160
+
+# 槽位标签的模板。按 **slot** 现拼，不落库——历史上是写库的，
+# 命中缓存回填时就变成 `[最近段#1] [最近段#1] …` 层层嵌套。
+_SLOT_LABEL = {
+    "raw_recent_segment": "[最近段#{slot}]",
+    "compressed_recent_segment": "[最近长段摘要#{slot}]",
+    "compressed_single_segment": "[压缩段#{slot}]",
+    "compressed_group_segments": "[合并摘要段7-10]",
+}
+# `[标签] 正文` 与 `[标签]\n正文` 两种写法都要能还原。
+_LABEL_PREFIX = re.compile(r"^\[(?:最近段|最近长段摘要|压缩段|合并摘要段)[^\]]*\][ \t]*\n?")
+
+
+def _load_source_keys(row: Optional[Dict]) -> List[str]:
+    """从库行里取出 message_ids（JSON 数组），解析失败按空处理。"""
+    if not row:
+        return []
+    try:
+        keys = json.loads(row.get("message_ids") or "[]")
+    except Exception:
+        return []
+    return [str(k) for k in keys] if isinstance(keys, list) else []
+
+
+@dataclass
+class _SegmentText:
+    """一段对话展开后的结果。"""
+
+    blocks: List[str]        # 按消息顺序，每条的 `role: 内容`
+    message_count: int       # 消息条数（决定最小字数要求）
+    latest_ts: Optional[float]  # 段内消息的 max(timestamp)，缓存键就靠它
+
+
+def _unwrap_label(content: str) -> str:
+    """去掉槽位标签，还原成纯摘要正文（读/回填都走这里，避免前缀嵌套）。"""
+    text = (content or "").strip()
+    m = _LABEL_PREFIX.match(text)
+    return text[m.end():].strip() if m else text
+
+
+def _decorate(slot: int, segment_type: str, content: str) -> str:
+    """按 slot 拼上标签**不落库**，只在读的时候加。"""
+    template = _SLOT_LABEL.get(segment_type)
+    if not template:
+        return content
+    label = template.format(slot=slot)
+    # 段号是拼出来的（`[压缩段#5]`）用换行接正文；合并段是固定文案，接空格。
+    return f"{label}\n{content}" if "{slot}" in template else f"{label} {content}"
 
 
 # ---------------------------------------------------------------------------
@@ -342,103 +405,143 @@ class ContextCompressor:
 
             existing = self._load_existing(platform, chat_id, memory_scope_id=memory_scope_id)
             slots: List[Dict] = []
+            # _persist_segments 是整表覆盖：这里少一个槽，库里就少一个。
+            # 所以总结不出来的槽必须先把旧内容**原样带过来**，否则等于把之前
+            # 好不容易总结出来的记忆删掉（不总结远好过丢内容）。
+            skipped: List[int] = []
 
             for idx, seg_ref in enumerate(segment_refs):
                 slot = idx + 1
                 if slot > 10:
                     break
 
-                seg_text, message_count = self._build_segment_text(platform, chat_id, seg_ref, memory_scope_id=memory_scope_id)
-                if not seg_text:
+                seg = self._build_segment_text(platform, chat_id, seg_ref, memory_scope_id=memory_scope_id)
+                if not seg.blocks:
                     continue
 
                 seg_role = "system"
-                seg_ts = float(seg_ref.get("source_timestamp", datetime.now().timestamp()))
-                source_keys = [str(seg_ref.get("source_key", ""))]
+                seg_ts = float(seg_ref.get("source_timestamp") or seg.latest_ts or datetime.now().timestamp())
+                source_key = str(seg_ref.get("source_key", ""))
 
                 if slot <= 3:
-                    if len(seg_text) > self.long_message_threshold:
+                    if len("\n".join(seg.blocks)) > self.long_message_threshold:
                         content = await self._summarize_single(
-                            seg_text,
+                            seg,
                             seg_role,
                             existing.get(slot),
-                            source_keys,
-                            min_chars=self._get_required_min_chars(message_count),
+                            source_key,
+                            min_chars=self._get_required_min_chars(seg.message_count),
                         )
+                        if content is None:
+                            self._carry_over(existing, slot, slots, skipped)
+                            continue
                         slots.append(
-                            {
-                                "slot": slot,
-                                "segment_type": "compressed_recent_segment",
-                                "role": "system",
-                                "content": f"[最近长段摘要#{slot}] {content}",
-                                "source_keys": source_keys,
-                                "source_timestamp": seg_ts,
-                            }
+                            self._slot_row(slot, "compressed_recent_segment", content, source_key, seg_ts)
                         )
                     else:
+                        # 最近段没过长就整段保留原文——这是**有意的**，不是降级。
                         slots.append(
-                            {
-                                "slot": slot,
-                                "segment_type": "raw_recent_segment",
-                                "role": "system",
-                                "content": f"[最近段#{slot}]\n{seg_text}",
-                                "source_keys": source_keys,
-                                "source_timestamp": seg_ts,
-                            }
+                            self._slot_row(
+                                slot, "raw_recent_segment", "\n".join(seg.blocks), source_key, seg_ts
+                            )
                         )
                 elif slot <= 6:
                     content = await self._summarize_single(
-                        seg_text,
+                        seg,
                         seg_role,
                         existing.get(slot),
-                        source_keys,
-                        min_chars=self._get_required_min_chars(message_count),
+                        source_key,
+                        min_chars=self._get_required_min_chars(seg.message_count),
                     )
+                    if content is None:
+                        self._carry_over(existing, slot, slots, skipped)
+                        continue
                     slots.append(
-                        {
-                            "slot": slot,
-                            "segment_type": "compressed_single_segment",
-                            "role": "system",
-                            "content": f"[压缩段#{slot}] {content}",
-                            "source_keys": source_keys,
-                            "source_timestamp": seg_ts,
-                        }
+                        self._slot_row(slot, "compressed_single_segment", content, source_key, seg_ts)
                     )
                 elif slot == 7:
-                    group_refs = segment_refs[6:10]
-                    if not group_refs:
+                    # 第 7~10 段合并成一条。源 key 把各段的 key 拼在一起，
+                    # 所以任意一段变了都会让这一槽的缓存失效。
+                    group_segs: List[_SegmentText] = []
+                    group_keys: List[str] = []
+                    for r in segment_refs[6:10]:
+                        g = self._build_segment_text(platform, chat_id, r, memory_scope_id=memory_scope_id)
+                        if not g.blocks:
+                            continue
+                        group_segs.append(g)
+                        group_keys.append(str(r.get("source_key", "")))
+                    if not group_segs:
                         break
-                    group_data = [self._build_segment_text(platform, chat_id, r, memory_scope_id=memory_scope_id) for r in group_refs]
-                    group_texts = [t for t, c in group_data if t]
-                    group_counts = [c for t, c in group_data if t]
-                    if not group_texts:
-                        break
-                    total_group_messages = sum(group_counts)
-                    group_keys = [str(r.get("source_key", "")) for r in group_refs]
-                    last_ts = max(float(r.get("source_timestamp", seg_ts)) for r in group_refs)
+                    total_group_messages = sum(g.message_count for g in group_segs)
+                    last_ts = max(
+                        (float(r.get("source_timestamp") or 0) for r in segment_refs[6:10]),
+                        default=seg_ts,
+                    )
+                    group_key = "|".join(group_keys)
                     content = await self._summarize_group(
-                        group_texts,
+                        group_segs,
                         existing.get(slot),
-                        group_keys,
+                        group_key,
                         min_chars=self._get_required_min_chars(total_group_messages),
                     )
+                    if content is None:
+                        self._carry_over(existing, slot, slots, skipped)
+                        break
                     slots.append(
-                        {
-                            "slot": slot,
-                            "segment_type": "compressed_group_segments",
-                            "role": "system",
-                            "content": f"[合并摘要段7-10] {content}",
-                            "source_keys": group_keys,
-                            "source_timestamp": last_ts,
-                        }
+                        self._slot_row(slot, "compressed_group_segments", content, group_key, last_ts)
                     )
                     break
 
+            if skipped:
+                logger.warning(
+                    "[%s/%s] 槽位 %s 本次总结未通过，保留原有内容（可能是空槽）："
+                    "绝不写截断原文或报错文案当摘要",
+                    platform, chat_id, skipped,
+                )
             self._persist_segments(platform, chat_id, slots, memory_scope_id=memory_scope_id)
             self._mark_refresh_success(platform, chat_id)
         except Exception as e:
             self._enqueue_refresh_retry(platform, chat_id, e)
             raise
+
+    @staticmethod
+    def _slot_row(slot: int, segment_type: str, content: str, source_key: str, ts: float) -> Dict:
+        """构造待写槽位。`content` 存**纯正文**，标签由 `_decorate` 在读时拼。"""
+        return {
+            "slot": slot,
+            "segment_type": segment_type,
+            "role": "system",
+            "content": content,
+            "source_keys": [source_key],
+            "source_timestamp": ts,
+        }
+
+    @staticmethod
+    def _carry_over(
+        existing: Dict[int, Dict],
+        slot: int,
+        slots: List[Dict],
+        skipped: List[int],
+    ) -> None:
+        """本次总结失败时，把该槽位的旧内容原样放回待写列表。
+
+        没有旧内容（新槽）就什么都不加——留空好过写降级内容。
+        """
+        skipped.append(slot)
+        row = existing.get(slot)
+        if not row:
+            return
+        old_keys = _load_source_keys(row)
+        # 旧库里存的是带标签的版本，先剥掉再当正文放回，保持"库里只有正文"。
+        slots.append(
+            ContextCompressor._slot_row(
+                slot,
+                row.get("segment_type") or "compressed_single_segment",
+                _unwrap_label(row.get("content") or ""),
+                old_keys[0] if old_keys else "",
+                float(row.get("source_timestamp") or 0),
+            )
+        )
 
     def _enqueue_refresh_retry(self, platform: str, chat_id: str, error: Exception) -> None:
         if self.retry_callback:
@@ -452,6 +555,10 @@ class ContextCompressor:
         """获取最近对话段（含当前活跃段）引用，按最新在前返回。
 
         传入 memory_scope_id 时按共享作用域聚合所有平台的段落。
+
+        ⚠️ `source_key` 里必须带**段内消息的 max(timestamp)**（`stamp`）。
+        它既是压缩槽位的缓存键，也是排序键——只按 `ended_at` 排的话，
+        活跃段（`ended_at` 为空 / 取首条时间）会被排到最后，槽位顺序就乱了。
         """
         if not self.history_db_path:
             return []
@@ -464,31 +571,24 @@ class ContextCompressor:
 
         refs: List[Dict] = []
 
+        # 活跃段（session_id IS NULL）：id 列表 + 最新时间，一次查询拿全。
         cursor.execute(
             f"""
             SELECT id, timestamp FROM messages
             WHERE {msg_where} AND session_id IS NULL
-            ORDER BY timestamp DESC
-            LIMIT 1
+            ORDER BY timestamp ASC
             """,
             msg_params,
         )
-        active = cursor.fetchone()
-        if active:
-            cursor.execute(
-                f"""
-                SELECT id FROM messages
-                WHERE {msg_where} AND session_id IS NULL
-                ORDER BY timestamp ASC
-                """,
-                msg_params,
-            )
-            active_ids = [int(r[0]) for r in cursor.fetchall()]
+        active_rows = cursor.fetchall()
+        if active_rows:
+            active_ids = [int(r["id"]) for r in active_rows]
             refs.append(
                 {
                     "kind": "active",
                     "source_key": f"active:{','.join(map(str, active_ids))}",
-                    "source_timestamp": float(active["timestamp"]),
+                    "source_timestamp": float(active_rows[-1]["timestamp"]),
+                    "stamp": float(active_rows[-1]["timestamp"]),
                 }
             )
 
@@ -501,24 +601,36 @@ class ContextCompressor:
             """,
             msg_params + (limit,),
         )
-        for row in cursor.fetchall():
+        session_rows = cursor.fetchall()
+        for row in session_rows:
+            session_id = int(row["id"])
+            # 用段内真实的 max(timestamp) 而不是 ended_at：扫描压缩时
+            # ended_at 可能还没回填，而且它和消息时间的口径未必一致。
+            cursor.execute(
+                "SELECT MAX(timestamp) AS stamp FROM messages WHERE session_id = ?",
+                (session_id,),
+            )
+            stamp_row = cursor.fetchone()
+            stamp = float(stamp_row["stamp"]) if stamp_row and stamp_row["stamp"] is not None else float(row["ended_at"] or 0)
             refs.append(
                 {
                     "kind": "closed",
-                    "session_id": int(row["id"]),
-                    "source_key": f"session:{int(row['id'])}:{int(row['message_count'] or 0)}",
-                    "source_timestamp": float(row["ended_at"]),
+                    "session_id": session_id,
+                    "source_key": f"session:{session_id}:{int(row['message_count'] or 0)}:{stamp:.3f}",
+                    "source_timestamp": float(row["ended_at"] or 0),
+                    "stamp": stamp,
                 }
             )
 
         conn.close()
-        refs.sort(key=lambda x: float(x.get("source_timestamp", 0)), reverse=True)
+        refs.sort(key=lambda x: float(x.get("stamp", x.get("source_timestamp", 0))), reverse=True)
         return refs[:limit]
 
-    def _build_segment_text(self, platform: str, chat_id: str, seg_ref: Dict, memory_scope_id: Optional[str] = None) -> tuple[str, int]:
-        """将一个段落引用展开为可供 summary 模型处理的文本，同时返回消息条数。"""
+    def _build_segment_text(self, platform: str, chat_id: str, seg_ref: Dict, memory_scope_id: Optional[str] = None) -> _SegmentText:
+        """将一个段落引用展开为逐条消息（`role: 内容`）与段内最新时间。"""
+        empty = _SegmentText(blocks=[], message_count=0, latest_ts=None)
         if not self.history_db_path:
-            return "", 0
+            return empty
 
         msg_where, msg_params = self._msg_scope_filter(platform, chat_id, memory_scope_id)
 
@@ -530,37 +642,38 @@ class ContextCompressor:
         if kind == "active":
             cursor.execute(
                 f"""
-                SELECT role, content FROM messages
+                SELECT role, content, timestamp FROM messages
                 WHERE {msg_where} AND session_id IS NULL
                 ORDER BY timestamp ASC
                 """,
                 msg_params,
             )
             rows = cursor.fetchall()
-            conn.close()
-            if not rows:
-                return "", 0
-            return "\n".join([f"{r['role']}: {r['content']}" for r in rows]), len(rows)
-
-        session_id = seg_ref.get("session_id")
-        if session_id is None:
-            conn.close()
-            return "", 0
-
-        # 已关闭段落按 session_id（全局唯一主键）取，跨平台合并的段落也能完整取到。
-        cursor.execute(
-            """
-            SELECT role, content FROM messages
-            WHERE session_id = ?
-            ORDER BY timestamp ASC
-            """,
-            (int(session_id),),
-        )
-        rows = cursor.fetchall()
+        else:
+            session_id = seg_ref.get("session_id")
+            if session_id is None:
+                conn.close()
+                return empty
+            # 已关闭段落按 session_id（全局唯一主键）取，跨平台合并的段落也能完整取到。
+            cursor.execute(
+                """
+                SELECT role, content, timestamp FROM messages
+                WHERE session_id = ?
+                ORDER BY timestamp ASC
+                """,
+                (int(session_id),),
+            )
+            rows = cursor.fetchall()
         conn.close()
+
         if not rows:
-            return "", 0
-        return "\n".join([f"{r['role']}: {r['content']}" for r in rows]), len(rows)
+            return empty
+        stamps = [float(r["timestamp"]) for r in rows if r["timestamp"] is not None]
+        return _SegmentText(
+            blocks=[f"{r['role']}: {r['content']}" for r in rows],
+            message_count=len(rows),
+            latest_ts=max(stamps) if stamps else None,
+        )
 
     def _load_existing(self, platform: str, chat_id: str, memory_scope_id: Optional[str] = None) -> Dict[int, Dict]:
         part_platform, part_chat = self._scope_partition(platform, chat_id, memory_scope_id)
@@ -580,65 +693,64 @@ class ContextCompressor:
 
     async def _summarize_single(
         self,
-        raw_text: str,
+        seg: _SegmentText,
         role: str,
         existing_row: Optional[Dict],
-        source_keys: List[str],
+        source_key: str,
         min_chars: Optional[int] = None,
-    ) -> str:
-        if existing_row:
-            try:
-                cached_ids = json.loads(existing_row.get("message_ids", "[]"))
-            except Exception:
-                cached_ids = []
-            if cached_ids == source_keys:
-                return self._strip_label(existing_row.get("content", ""))
-
-        prompt = render_template(
-            "compression.jinja",
-            "compress_user",
-            conversation_text=f"{role}: {raw_text}",
-        )
+    ) -> Optional[str]:
+        """返回 None 表示**这段总结不出来**，调用方必须放弃该槽位。"""
         return await self._call_summary(
-            system_prompt=append_custom_scope_block(
-                render_template("compression.jinja", "compress_system"), "summary"
-            ),
-            user_prompt=prompt,
-            fallback_text=raw_text,
+            segs=[seg],
+            existing_row=existing_row,
+            source_key=source_key,
             min_chars=min_chars,
         )
 
     async def _summarize_group(
         self,
-        messages: List[str],
+        segs: List[_SegmentText],
         existing_row: Optional[Dict],
-        source_keys: List[str],
+        source_key: str,
         min_chars: Optional[int] = None,
-    ) -> str:
-        if existing_row:
-            try:
-                cached_ids = json.loads(existing_row.get("message_ids", "[]"))
-            except Exception:
-                cached_ids = []
-            if cached_ids == source_keys:
-                return self._strip_label(existing_row.get("content", ""))
-
-        conversation_text = "\n\n".join(messages)
-        prompt = render_template("compression.jinja", "compress_user", conversation_text=conversation_text)
+    ) -> Optional[str]:
+        """合并第 7~10 段。返回 None 表示总结不出来，调用方必须放弃该槽位。"""
         return await self._call_summary(
-            system_prompt=append_custom_scope_block(
-                render_template("compression.jinja", "compress_system"), "summary"
-            ),
-            user_prompt=prompt,
-            fallback_text=conversation_text,
+            segs=segs,
+            existing_row=existing_row,
+            source_key=source_key,
             min_chars=min_chars,
         )
 
-    def _strip_label(self, content: str) -> str:
-        """去掉系统前缀标签，避免命中缓存时前缀重复嵌套。"""
-        if "] " in content:
-            return content.split("] ", 1)[1]
-        return content
+    @staticmethod
+    def _build_snippet(seg: _SegmentText) -> str:
+        """把一段展开结果压成首尾各 SNIPPET_HEAD 字的锚点。
+
+        ⚠️ 首尾放在**同一个字符串**里：分块层是按 `texts` 的条数劈半的，
+        拆成两条会让"一次追问被切成两段"而各自都读不全。
+        """
+        joined = "\n".join(seg.blocks)
+        if len(joined) <= SNIPPET_HEAD * 2:
+            return joined
+        return f"{joined[:SNIPPET_HEAD]}\n…（中间省略）…\n{joined[-SNIPPET_HEAD:]}"
+
+    @staticmethod
+    def _matching_existing(
+        existing_row: Optional[Dict],
+        source_key: str,
+    ) -> Optional[str]:
+        """已有行的来源与本次一致则返回复用的摘要正文，否则 None。
+
+        判据只有一个：`message_ids` 是否等于本次的 `source_key`。
+        段内消息的 max(timestamp) 已经编进 source_key，所以"会话内容没动"
+        就是命中，"多了一条 / 改过一条"就是未命中——不依赖任何别处再传一遍。
+        """
+        if not existing_row:
+            return None
+        if _load_source_keys(existing_row) != [source_key]:
+            return None
+        content = (existing_row.get("content") or "").strip()
+        return content or None
 
     def _get_required_min_chars(self, message_count: Optional[int] = None) -> int:
         """根据消息条数动态确定摘要最小字数要求。"""
@@ -646,36 +758,33 @@ class ContextCompressor:
             return 20
         return self.summary_min_chars
 
-    def _is_too_short_summary(self, summary_text: str, min_chars: Optional[int] = None) -> bool:
-        """仅判断摘要是否低于最低字数要求。"""
-        required_min = self.summary_min_chars if min_chars is None else min_chars
-        if not summary_text:
-            return True
-        return len(summary_text.strip()) < required_min
+    def _looks_like_summary(self, text: str) -> bool:
+        """结构判据：六字段摘要必须带【时间线】。
 
-    def _sanitize_summary(self, text: str, fallback_text: str, min_chars: Optional[int] = None) -> str:
-        """清洗摘要；若字数低于最低要求则回退截断摘要，避免污染数据库。"""
-        cleaned = (text or "").strip()
-        required_min = self.summary_min_chars if min_chars is None else min_chars
-        if self._is_too_short_summary(cleaned, required_min):
-            logger.warning(
-                "摘要字数过短（actual=%s, min_required=%s），改用回退摘要",
-                len(cleaned),
-                required_min,
-            )
-            return self._fallback_summary(fallback_text)
-        return cleaned
+        ⚠️ 不能只看字符数。provider 的失败说明、截断原文、模型"入戏"写的散文
+        **都长过任何合理的字数阈值**，长度挡不住"内容不是摘要"。
+        【时间线】是模型真做了归纳才会出现的标记，拿它当判据才拦得住。
+        """
+        return has_timeline(text)
 
     async def _call_summary(
         self,
-        system_prompt: str,
-        user_prompt: str,
-        fallback_text: str,
+        segs: List[_SegmentText],
+        existing_row: Optional[Dict],
+        source_key: str,
         min_chars: Optional[int] = None,
-    ) -> str:
-        identity_context = load_identity_context(include_schedule=True)
-        if identity_context:
-            system_prompt = f"{system_prompt}\n\n{identity_context}"
+    ) -> Optional[str]:
+        """生成一段槽位摘要。返回 None = **这段救不回来**，调用方必须放弃该槽位。
+
+        ⚠️ 这里**没有**"回退摘要"。历史实现会把发不出去的内容截断到 200 字当摘要写库，
+        那不是摘要而是**静默降级**：模型答不上来 / 被安全策略拦下时，槽位里会出现
+        一段半截的原文，读起来像记忆、实际把语义砍掉一半。项目在分块那层已经定过调子
+        ——静默损坏比彻底失败更危险——所以这里改为：整段送 → 被拦就分块 → 还不行就返回
+        None，由调用方保留旧槽位（不写降级内容）。
+        """
+        # 来源没变就直接复用已有摘要，不重复调模型。
+        # 段内消息的 max(timestamp) 已经编进 source_key，所以"内容动过"必然未命中。
+        cached = self._matching_existing(existing_row, source_key)
 
         if self._summarizer is None:
             try:
@@ -683,43 +792,91 @@ class ContextCompressor:
 
                 self._summarizer = get_llm_client(model_alias="summary")
             except Exception as e:
-                logger.warning("summary 模型不可用，使用回退压缩: %s", e)
+                logger.warning("summary 模型不可用，放弃本段压缩: %s", e)
                 self._summarizer = None
 
         if self._summarizer is None:
-            return self._fallback_summary(fallback_text)
+            return None
 
-        # 重试交给 memory/summary_retry.py 统一实现。这里原本自带一套 3 次指数退避，
-        # 叠加上层重试就是 3×3=9 次调用——对生产上已确认是确定性的输入侧拦截纯属浪费。
-        async def _one_call() -> Tuple[Optional[Any], str]:
-            out = await self._summarizer.chat(
-                system_prompt=system_prompt,
-                user_prompt=user_prompt,
-                history=[],
-            )
-            return self._summarizer, out
+        # 缓存命中要放在"模型不可用"之后：模型临时挂掉时也该继续用旧摘要，
+        # 而不是把一个本来好好的槽位判成失败。
+        if cached is not None:
+            return cached
 
-        _, raw = await call_with_retry(
-            _one_call,
-            attempts=self.summary_max_retries,
-            base_delay=self.summary_retry_base_delay,
-            label="上下文段摘要",
+        system_prompt = append_custom_scope_block(
+            render_template("compression.jinja", "compress_system"), "summary"
         )
+        identity_context = load_identity_context(include_schedule=True)
+        if identity_context:
+            system_prompt = f"{system_prompt}\n\n{identity_context}"
 
-        # ⚠️ 判据必须是 last_error，不能只看长度。这里原来只比字符数，阈值 80 ——
-        # provider 的失败说明（"抱歉，处理您的请求时遇到了问题：…"）实测长 96 字，
-        # **正好长过阈值**，于是报错文案被当成上下文摘要存进槽位、注入后续对话。
-        if summarize_error_reason(self._summarizer, raw):
-            logger.error("上下文段摘要被拦截，改用回退摘要")
-            return self._fallback_summary(fallback_text)
+        async def _one_call(prompt: str) -> str:
+            # ⚠️ 精确重试放在**分块之前**：`content_filter` 是随机的，同一段内容
+            # 这次被拦下次能过。只试一次的话，二分树会被随机失败引着把
+            # 本来能过的消息一路劈到单条、最后误判"无解"而整条放弃。
+            async def _one() -> Tuple[Optional[Any], str]:
+                out = await self._summarizer.chat(
+                    system_prompt=system_prompt,
+                    user_prompt=prompt,
+                    history=[],
+                )
+                return self._summarizer, out
 
-        sanitized = self._sanitize_summary(raw, fallback_text, min_chars)
-        return sanitized
+            _, out = await call_with_retry(
+                _one,
+                attempts=self.summary_max_retries,
+                base_delay=self.summary_retry_base_delay,
+                label="上下文段摘要",
+            )
+            reason = summarize_error_reason(self._summarizer, out)
+            if reason:
+                logger.warning("上下文段摘要单次失败（原因=%s）", reason)
+                return ""
+            return str(out or "").strip()
 
-    def _fallback_summary(self, text: str, max_length: int = 200) -> str:
-        if len(text) <= max_length:
-            return text
-        return text[:max_length] + "..."
+        def _render(conversation_text: str) -> str:
+            return render_template(
+                "compression.jinja", "compress_user", conversation_text=conversation_text
+            )
+
+        # 每段各自首尾截断后再拼。分块层是按"段"劈半的，直接送整段原文会让
+        # 一块里塞进几千字——那正是触发输入侧拦截的形态，劈半也过不去。
+        anchors = [self._build_snippet(t) for t in segs]
+
+        # 先整段试一次（带重试）；过不了再退化成小块。
+        summary = await _one_call(_render("\n\n".join(anchors)))
+        if summary and self._looks_like_summary(summary):
+            return summary
+
+        if summary:
+            logger.warning("上下文段摘要结构不合规（无【时间线】），转入分块降级")
+
+        logger.warning(
+            "上下文段摘要整段未通过，转入分块降级（%s 段，每块 %s 段 / 单段上限 %s 字符）",
+            len(segs), DEFAULT_CHUNK_SIZE, DEFAULT_CHUNK_CHAR_CAP,
+        )
+        fallback = await chunked_summary(
+            anchors,
+            _one_call,
+            _render,
+            chunk_size=DEFAULT_CHUNK_SIZE,
+            char_cap=DEFAULT_CHUNK_CHAR_CAP,
+            merge_mode=MERGE_MODE_SECTIONS,
+            enforce_timeline=True,
+        )
+        if not fallback:
+            logger.error("上下文段摘要分块后仍失败，放弃该槽位（保留旧内容，不写降级摘要）")
+            return None
+
+        # 分块层已按行分类合并（同号槽位的字段只留一份、入戏散文被丢弃），
+        # 这里只再兜一道长度：太短说明几乎没归纳出东西。
+        if min_chars is not None and len(fallback.strip()) < min_chars:
+            logger.error(
+                "上下文段摘要分块结果过短（%s < %s），放弃该槽位",
+                len(fallback.strip()), min_chars,
+            )
+            return None
+        return fallback
 
     def _persist_segments(self, platform: str, chat_id: str, slots: List[Dict], memory_scope_id: Optional[str] = None) -> None:
         part_platform, part_chat = self._scope_partition(platform, chat_id, memory_scope_id)
@@ -773,13 +930,16 @@ class ContextCompressor:
         conn.close()
         messages = []
         for row in rows:
+            slot = int(row.get("slot") or 0)
+            segment_type = row.get("segment_type") or ""
             messages.append(
                 {
                     "role": row.get("role", "system"),
-                    "content": row.get("content", ""),
+                    # 库里只存正文，标签在这里按 slot 现拼（见 _decorate）。
+                    "content": _decorate(slot, segment_type, row.get("content", "")),
                     "timestamp": row.get("source_timestamp", 0),
-                    "segment_slot": row.get("slot"),
-                    "segment_type": row.get("segment_type"),
+                    "segment_slot": slot,
+                    "segment_type": segment_type,
                 }
             )
         return messages
