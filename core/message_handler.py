@@ -35,6 +35,7 @@ from core.override_gate import (
     grant_override,
 )
 from core.private_presence_store import PrivatePresenceStore
+from core.non_stream_store import set_non_stream_flag
 from core.routing import has_image_input, sanitize_adapter_output_text, sanitize_user_visible_text
 from core.conversation_identity import (
     conversation_target_dict,
@@ -704,7 +705,6 @@ class MessageHandlerMixin:
             r"(?m)^\s*/status\b",
             r"(?m)^\s*/custom_scope\b",
             r"(?m)^\s*/set_stream\b",
-            r"(?m)^\s*/nonstream\b",
             r"(?m)^\s*/undo\b",
             r"(?m)^\s*/context\b",
             r"(?m)^\s*/end_segment\b",
@@ -823,7 +823,7 @@ class MessageHandlerMixin:
             await self._cmd_override(context, chat_id, chat_type, user_id)
             return
 
-        if re.search(r"(?m)^\s*/set_stream\b", stripped) or re.search(r"(?m)^\s*/nonstream\b", stripped):
+        if re.search(r"(?m)^\s*/set_stream\b", stripped):
             await self._cmd_set_stream(chat_id, chat_type, user_id, stripped)
             return
 
@@ -2139,7 +2139,7 @@ class MessageHandlerMixin:
             await self._cmd_custom_scope(chat_id, stripped)
         elif re.search(r"(?m)^\s*/undo\b", stripped):
             await self._cmd_undo(chat_id, chat_type, user_id)
-        elif re.search(r"(?m)^\s*/set_stream\b", stripped) or re.search(r"(?m)^\s*/nonstream\b", stripped):
+        elif re.search(r"(?m)^\s*/set_stream\b", stripped):
             await self._cmd_set_stream(chat_id, chat_type, user_id, stripped)
         elif re.search(r"(?m)^\s*/context\b", stripped):
             await self._cmd_context(chat_id, chat_type, user_id)
@@ -2497,6 +2497,9 @@ class MessageHandlerMixin:
         if arg in ("on", "off"):
             new_val = arg == "on"
             self.non_stream_flags[chat_id] = new_val
+            # 落盘，否则重启后设置被静默重置回配置默认值。
+            if not set_non_stream_flag(chat_id, new_val):
+                logger.warning(f"[{chat_id}] 输出模式设置未能持久化（本次会话内已生效）")
             msg = "✅ 已启用一次性输出（非流式）" if new_val else "✅ 已恢复流式输出"
         else:
             msg = "ℹ️ 当前输出模式: " + ("一次性输出（非流式）" if current else "流式输出")

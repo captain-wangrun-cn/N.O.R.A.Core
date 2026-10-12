@@ -235,6 +235,26 @@ provider 的失败约定是**返回一段错误文本而不是抛异常**（历�
   log 一次文本内容确认没被剥空。
 - 测试锁：`tests/test_routing.py::test_voice_marker_case_sensitivity_vs_media_protocol`。
 
+### ⚠️ 非流式 `chat()` 必须把工具调用带回来（后脑"空回"的真凶）
+
+现象：开了非流式（`interaction.non_stream` 或 `/set_stream on`）的会话里后脑"什么都没做"，
+日志是 `返回内容为空（finish_reason=tool_calls）`——**模型其实每次都正确发起了工具调用**，
+调用被代码丢了。
+
+- `chat()` 的返回类型是 **`str`**，结构上带不回工具调用。而工具调用与正文在返回体里是
+  **并列字段**，模型只调工具时 `content` 就是 `None`/`""`，所以**判空必须排在摘取
+  `tool_calls` 之后**，否则一次正常调用被当空回（连带误置 `last_error="empty_content"`）。
+- 通道：provider 存进 `last_tool_calls`（`_begin_call` 里清空），`_chat_stream_wrapper`
+  的非流式分支翻译成 `text → tool_call → usage`，**与 `chat_stream` 同款**。
+  后脑工具循环只认 `{"type": "tool_call"}` chunk。
+- ⚠️ **不许用文本编码工具调用**。Gemini 侧曾返回 `"[TOOL_CALL: name(args)]"` 字面串，
+  非流式下会被当正文发给用户。任何"要带结构化数据回上层"的场合都不走字符串。
+- ⚠️ Responses API 分支要单独摘（`type=="function_call"` 的 output 项），
+  与 Chat Completions 的 `message.tool_calls` 是两套结构。
+- 新增 provider 时：只要实现了 `chat()`，就必须同步实现工具回传，否则该 provider 在
+  非流式会话下**静默失去全部工具能力**。
+- 测试锁：`tests/test_non_stream_tools.py`。
+
 ---
 
 ## 5. 平台适配
@@ -694,4 +714,7 @@ Gemini history 格式不正确时也会在后续轮次退化为文本模式。
 - **无内置价格表**，完全依赖 `config.yml → cost_tracking.custom_prices`。
   缺价模型**首次**打 warning，之后不重复；成本记为 $0。CLI 向导中可现场输入价格。
 - **不要读 `config.yml` / `.env`**（系统提示词中明确禁止，含 API Key）。
+- **per-chat 运行期设置必须落盘**（如 `/set_stream` 的输出模式）。只写 controller 内存
+  dict 的设置在重启后会被静默重置回配置默认值，不报任何错，只能靠"怎么又变回去了"察觉。
+  范式：`core/non_stream_store.py`（仿 `private_presence_store.py`，原子写 + JSON）。
   技能使用 `config.json` + 环境变量注入机制。

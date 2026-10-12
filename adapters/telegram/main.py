@@ -170,7 +170,6 @@ class TelegramAdapter(
         self.application.add_handler(CommandHandler('custom_scope', self._custom_scope_command))
         self.application.add_handler(CommandHandler('nora_prefs', self._nora_prefs_command))
         self.application.add_handler(CommandHandler('set_stream', self._set_stream_command))
-        self.application.add_handler(CommandHandler('nonstream', self._set_stream_command))
         self.application.add_handler(CommandHandler('context', self._context_command))
         self.application.add_handler(CommandHandler('end_segment', self._end_segment_command))
         self.application.add_handler(CommandHandler('undo', self._undo_command))
@@ -214,7 +213,6 @@ class TelegramAdapter(
             BotCommand("end_segment", "结束当前消息段"),
             BotCommand("clear", "清空聊天记录"),
             BotCommand("set_stream", "切换输出模式"),
-            BotCommand("nonstream", "一次性输出（同 set_stream on）"),
             BotCommand("model", "查看/切换模型"),
             BotCommand("effort", "设置推理强度"),
             BotCommand("custom_scope", "CUSTOM 注入范围"),

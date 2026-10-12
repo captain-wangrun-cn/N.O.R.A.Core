@@ -270,24 +270,27 @@ class GeminiProvider(BaseLLM):
             else:
                 response = await chat_session.send_message_async(full_prompt)
             
-            # Check for function calls
-            # Gemini SDK (automatic function calling) might execute it automatically if configured?
-            # Or it returns a Part with function_call.
-            
-            # For simplicity in this step, we just return text. 
-            # Real function calling loop needs to happen in Controller.
-            # But wait, we need to return the function call request to the Controller!
-            
-            # If response contains function call, we need to return a special structure or parse it.
-            # This 'chat' method returns 'str'. We might need to change return type or handle it internally?
-            # But the Controller handles the loop.
-            
-            # Let's inspect response.parts[0].function_call
-            if response.parts and response.parts[0].function_call:
-                fc = response.parts[0].function_call
-                # Return a special string or JSON indicating function call?
-                # Or simply return the text representation if any.
-                return f"[TOOL_CALL: {fc.name}({fc.args})]"
+            # 工具调用必须走 last_tool_calls 带回去：chat() 返回 str，这里过去把调用
+            # 编码成 "[TOOL_CALL: name(args)]" 字面串，非流式下会被当成正文直接发给
+            # 用户（流式路径是 yield {"type": "tool_call"}，两边语义要一致）。
+            # 工具的**执行**仍由 controller 的工具循环负责，这里只负责如实上报请求。
+            _calls: List[Dict[str, Any]] = []
+            for _part in (response.parts or []):
+                _fc = getattr(_part, "function_call", None)
+                if _fc and getattr(_fc, "name", None):
+                    _calls.append({
+                        "name": _fc.name,
+                        "args": dict(getattr(_fc, "args", None) or {}),
+                        "id": None,
+                    })
+            if _calls:
+                self.last_tool_calls = _calls
+                # 纯工具调用时响应里没有 text part，直接取 response.text 会抛异常
+                # （这正是原代码在此处提前 return 的原因），所以这里要兜住。
+                try:
+                    return self.strip_think_content(response.text)
+                except Exception:
+                    return ""
 
             # SDK 的 response.text 在被安全策略拦截时会抛异常或返回空，
             # 而 finishReason 才说得清是 SAFETY / RECITATION 还是别的。先查它。

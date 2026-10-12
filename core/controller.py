@@ -58,6 +58,7 @@ from core.conversation_identity import (
 from core.group_listener import GroupListenerManager
 from core.group_presence_store import GroupPresenceStore
 from core.private_presence_store import PrivatePresence, PrivatePresenceStore
+from core.non_stream_store import load_non_stream_flags, set_non_stream_flag
 from core.routing import sanitize_adapter_output_text, sanitize_user_visible_text, parse_route_markers
 from adapters.message_controls import parse_message_controls, strip_message_control_markers
 from triggers import TriggerManager
@@ -184,10 +185,11 @@ class NoraController(
         # 用于"被新图片打断时把旧图与新图合并重启"
         self.back_brain_input_context: Dict[str, Dict[str, Any]] = {}
 
-        # 是否启用非流式输出（per-chat，可被命令切换）
+        # 是否启用非流式输出（per-chat，可被命令切换）。持久化的设置覆盖默认值，
+        # 否则 /set_stream 重启后会被静默重置回配置默认。
         interaction_cfg = (config.get_config() or {}).get("interaction", {})
         self.default_non_stream = interaction_cfg.get("non_stream", False)
-        self.non_stream_flags: Dict[str, bool] = {}
+        self.non_stream_flags: Dict[str, bool] = load_non_stream_flags()
         
         # 对话延续配置
         self.FOLLOWUP_INITIAL_DELAY = 120    # 2 分钟
@@ -939,7 +941,26 @@ class NoraController(
             async def _gen():
                 safe_kwargs = _filter_kwargs(model_client.chat, kwargs)
                 text = await model_client.chat(**safe_kwargs)
-                yield {"type": "text", "content": text}
+                # chat() 的返回类型是 str，带不回工具调用，provider 会把它们另存在
+                # last_tool_calls 里。这里翻译成与 chat_stream 同款的 chunk 序列——
+                # 少了这步，非流式下后脑的工具循环永远收不到 tool_call，模型真正发起的
+                # 调用会被静默丢掉，表现为"后脑空回"。
+                tool_calls = list(getattr(model_client, "last_tool_calls", None) or [])
+                usage = getattr(model_client, "last_usage", None)
+                if text:
+                    yield {"type": "text", "content": text}
+                for tool_call in tool_calls:
+                    yield {
+                        "type": "tool_call",
+                        "name": tool_call.get("name"),
+                        "args": tool_call.get("args") or {},
+                    }
+                if usage:
+                    yield {
+                        "type": "usage",
+                        "input_tokens": usage.get("input_tokens", 0),
+                        "output_tokens": usage.get("output_tokens", 0),
+                    }
             return _gen()
 
         safe_kwargs = _filter_kwargs(model_client.chat_stream, kwargs)

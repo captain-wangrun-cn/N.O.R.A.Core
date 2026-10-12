@@ -1,3 +1,61 @@
+## 近期关键改动（截至 2026-10-12）
+
+### 🔧 非流式 `chat()` 吞掉工具调用（治"后脑空回"）+ `/set_stream` 落盘
+
+生产日志反复出现 `[OpenAI chat/coder] 返回内容为空（finish_reason=tool_calls, ...）`，
+后脑在开了非流式的会话里"什么都不做"。**模型每次都正确发起了工具调用**
+（日志原文里 `exec_command` / `execute_tool_plan` / `get_available_skills` 都在
+`tool_calls` 里），是代码把它丢了。
+
+**根因（两层，缺一不可）**：
+
+1. **`chat()` 只取 `message.content`，完全无视 `message.tool_calls`。** 它的返回类型是
+   `str`，结构上带不回工具调用。模型只调工具时 `content` 恰好是 `None`/`""`，
+   于是走到 `if not cleaned.strip()` 分支打"返回内容为空"、置
+   `last_error="empty_content"`、返回空串（`brain/providers/openai.py`）。
+2. **`_chat_stream_wrapper` 的非流式分支只把结果包成 `{"type": "text"}`**
+   （`core/controller.py`）。后脑工具循环只认 `{"type": "tool_call"}` chunk，
+   所以即便 `chat()` 能拿到调用也没有通道送上去。
+
+只有非流式会话犯病——流式路径 `chat_stream()` 一直完整累积并 yield `tool_call`。
+**注意判空必须排在摘取 `tool_calls` 之后**：两者在返回体里是并列字段。
+
+**修复**：
+
+- `brain/interface.py`：新增 `last_tool_calls`，`_begin_call()` 里清空。
+- `brain/providers/openai.py`：`chat()` 两个分支各自摘取（Chat Completions 走
+  `message.tool_calls`，Responses API 走 `type=="function_call"` 的 output 项——
+  **两套结构不能混**）；有工具调用时不再误报空回。arguments 解析失败保留原文
+  `{"raw": ...}`，不丢掉这次调用。
+- `brain/providers/gemini.py`：`chat()` 过去把调用编码成 `"[TOOL_CALL: name(args)]"`
+  **字面串**返回，非流式下会被当正文发给用户；改为存 `last_tool_calls` 并返回正文
+  （纯工具调用时响应里没有 text part，取 `response.text` 会抛异常，已兜住）。
+- `core/controller.py`：非流式分支翻译成 `text → tool_call → usage`，与 `chat_stream` 同款。
+
+**顺带的两件事**：
+
+- **删掉 `/nonstream` 指令**（它是 `/set_stream on` 的别名）：Telegram handler +
+  命令菜单 + `core/message_handler.py` 三处分发正则。
+- **`/set_stream` 状态落盘**（`core/non_stream_store.py`，新）：过去只写 controller 内存
+  的 `non_stream_flags`，重启即丢且不报错。键用 runtime_key（不是 memory_scope_id）——
+  输出模式描述的是"这段回复怎么送到这个端点"，同一人不同平台的投递约束本来就不同。
+  controller `__init__` 用 `load_non_stream_flags()` 读回。
+
+**排查结论（其它非流式链路无此病）**：逐个查了全部 `.chat(` 调用点
+（`appearance_gen` / `scheduler_mixin` / `context_store` / `triggers.manager` / `rtc.*`），
+它们都不带真工具（`triggers/manager.py` 是显式空 `tools=[]`）且都正确检查了
+`last_error`/错误文案前缀。**受害面只有后脑这一条。**
+
+**验证**：`tests/test_non_stream_tools.py`（16：tool-call-only 不再误报空回、
+真空回仍报 `empty_content`、正文与工具并存、arguments 坏掉保留原文、Responses 分支、
+非流式 wrapper 产出 `tool_call`/`usage` chunk 且关掉非流式仍走 `chat_stream`、
+持久化往返 / 未设置返回 None / per-runtime_key 隔离、`/nonstream` 已无残留）。
+全量 **914 passed / 13 failed**，失败集与干净树基线**逐条一致**
+（adapter_selection ×2、context_pricing ×4、cost_tracker ×2、image_memory ×2、
+message_history_retry_queue ×2、timezone ×1）。
+
+---
+
 ## 近期关键改动（截至 2026-10-05）
 
 ### 🛡️ 摘要链路：报错文案被当记忆写库 + 统一摘要风格

@@ -21,10 +21,15 @@ class BaseLLM(ABC):
         # 安全策略拒绝生成…" 就被当成生图提示词喂进了文生图模型。这个字段是它们唯一
         # 可靠的判别信号，别改成靠匹配返回文本。
         self.last_error: Optional[str] = None
+        # 最近一次**非流式** chat() 请求的工具调用列表，每项 {"name", "args", "id"}。
+        # 非流式返回类型是 str，工具调用没有别的通道能带回来，只能挂在这里由调用方取。
+        # 流式路径不需要它——chat_stream 直接 yield {"type": "tool_call"}。
+        self.last_tool_calls: List[Dict[str, Any]] = []
 
     def _begin_call(self) -> None:
         """每次对外调用入口处清理上一轮的错误状态。"""
         self.last_error = None
+        self.last_tool_calls = []
 
     def _fail(self, message: str, reason: str = "") -> str:
         """记录失败并返回给上层的错误文本（保持既有「返回文本而非抛异常」的行为）。"""

@@ -186,6 +186,54 @@ class OpenAIProvider(BaseLLM):
         allowed = set(sig.parameters.keys())
         return {key: value for key, value in payload.items() if key in allowed}
 
+    @staticmethod
+    def _parse_tool_args(name: str, raw_args: Any) -> Dict[str, Any]:
+        """把工具的 arguments 解析成 dict。解析不了时保留原文，别吞掉这次调用。"""
+        if not raw_args:
+            return {}
+        try:
+            args = json.loads(raw_args)
+        except (json.JSONDecodeError, TypeError):
+            logger.warning(f"Failed to parse tool_call arguments for '{name}': {str(raw_args)[:200]}")
+            return {"raw": raw_args}
+        return args if isinstance(args, dict) else {"raw": args}
+
+    def _extract_message_tool_calls(self, message: Any) -> List[Dict[str, Any]]:
+        """归一化 Chat Completions 非流式返回的 message.tool_calls。
+
+        非流式返回体里 tool_calls 与 content 是并列字段，模型只调工具时 content
+        就是 None/""。chat() 的返回类型是 str 带不回工具调用，所以在这里摘出来存进
+        last_tool_calls，由调用方（controller 的非流式包装）取走。
+        """
+        calls: List[Dict[str, Any]] = []
+        for tc in getattr(message, "tool_calls", None) or []:
+            fn = getattr(tc, "function", None)
+            name = getattr(fn, "name", None) if fn else None
+            if not name:
+                continue
+            calls.append({
+                "name": name,
+                "args": self._parse_tool_args(name, getattr(fn, "arguments", None)),
+                "id": getattr(tc, "id", None),
+            })
+        return calls
+
+    def _extract_response_tool_calls(self, response: Any) -> List[Dict[str, Any]]:
+        """归一化 Responses API 非流式返回里 type=="function_call" 的 output 项。"""
+        calls: List[Dict[str, Any]] = []
+        for item in getattr(response, "output", []) or []:
+            if getattr(item, "type", None) != "function_call":
+                continue
+            name = getattr(item, "name", None)
+            if not name:
+                continue
+            calls.append({
+                "name": name,
+                "args": self._parse_tool_args(name, getattr(item, "arguments", None)),
+                "id": getattr(item, "call_id", None) or getattr(item, "id", None),
+            })
+        return calls
+
     def _extract_response_text(self, response: Any) -> str:
         output_text = getattr(response, "output_text", None)
         if output_text:
@@ -808,7 +856,15 @@ class OpenAIProvider(BaseLLM):
                         "input_tokens": getattr(usage, "input_tokens", 0) or 0,
                         "output_tokens": getattr(usage, "output_tokens", 0) or 0,
                     }
-                return self._extract_response_text(response)
+                self.last_tool_calls = self._extract_response_tool_calls(response)
+                text = self._extract_response_text(response)
+                if not text.strip() and not self.last_tool_calls:
+                    logger.error(
+                        f"[OpenAI chat/{self.model_alias}] Responses API 返回内容为空"
+                        f"（usage={self.last_usage}），原始响应: {repr(response)[:800]}"
+                    )
+                    self.last_error = "empty_content"
+                return text
             except Exception as e:
                 logger.error(f"OpenAI Responses API Error: {e}", exc_info=True)
                 return self._fail(
@@ -897,7 +953,14 @@ class OpenAIProvider(BaseLLM):
                 return err
 
             cleaned = self.strip_think_content(content or "")
-            if not cleaned.strip():
+
+            # 工具调用与正文在返回体里是并列字段，模型只调工具时 content 就是
+            # None/""。必须先摘出 tool_calls 再判空，否则一次正常的工具调用会被
+            # 当成"空回"丢掉（现象：finish_reason=tool_calls 却报"返回内容为空"，
+            # 后脑工具循环拿到空字符串直接结束）。
+            self.last_tool_calls = self._extract_message_tool_calls(message)
+
+            if not cleaned.strip() and not self.last_tool_calls:
                 # 没有异常 finish_reason 却拿不到内容：推理模型把额度耗在 reasoning 上、
                 # 或兼容端点把正文塞进了非标字段，都会走到这里。原始响应是唯一线索。
                 logger.error(
