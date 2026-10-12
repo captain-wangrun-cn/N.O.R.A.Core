@@ -114,7 +114,20 @@ provider 的失败约定是**返回一段错误文本而不是抛异常**（历�
 排序也用这个 `stamp`——只按 `ended_at` 排的话活跃段会被排到最后，与"最新在前"矛盾。
 
 ⚠️ **槽位标签不落库，读时按 slot 现拼**（`_decorate(slot, segment_type, content)`）。
-拼进 `content` 存库会在缓存回填时层层嵌套。存量库要先 `_unwrap_label()` 洗一遍。
+拼进 `content` 存库会在缓存回填时层层嵌套。
+
+⚠️ **读路径必须自己先剥一层**：`get_context_messages` 里是
+`_decorate(slot, segment_type, _unwrap_label(row["content"]))`。存量库、以及**回滚回来的
+旧备份**里，标签是**落了库**的——只 `_decorate` 不 `_unwrap_label`，会渲染成
+`[压缩段#6]\n[压缩段#6] 正文`（2026-10-12 恢复 10-05 备份后复现）。`_unwrap_label`
+幂等且便宜，等于把"存量库洗一遍"这步做在读路径上，**不必依赖一次性迁移脚本**。
+
+- ⚠️ **测试陷阱（通用）**：只断言 `_decorate(.., _unwrap_label(..))` 的**helper 组合**
+  是绿的——helper 确实对，但读路径压根没这么串，于是线上一直渲染两层而没有测试报警。
+  **必须有一条测试真的走 `get_context_messages`**：
+  `test_context_store_failure_semantics.py::test_read_path_unwraps_legacy_label_before_decorating`
+  （撤掉修复即变红，实测复现 `[压缩段#6]\n[压缩段#6]`）。
+  **lock 接线，不要只 lock helper** —— 这个套路适用于所有"解析层产出/读取层拼装"的链路。
 
 ⚠️ **分块结果的拼装方式取决于用途**：
 

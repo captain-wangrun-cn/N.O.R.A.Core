@@ -946,7 +946,12 @@ class ContextCompressor:
                 {
                     "role": row.get("role", "system"),
                     # 库里只存正文，标签在这里按 slot 现拼（见 _decorate）。
-                    "content": _decorate(slot, segment_type, row.get("content", "")),
+                    # 但**存量库/回滚回来的库里标签是落了库的**——先在读侧剥一层再拼，
+                    # 否则会渲染成 `[压缩段#6]\n[压缩段#6] 正文`。
+                    # 幂等且便宜，等于把"存量库洗一遍"这步做在了读路径上，不必依赖迁移。
+                    "content": _decorate(
+                        slot, segment_type, _unwrap_label(row.get("content", ""))
+                    ),
                     "timestamp": row.get("source_timestamp", 0),
                     "segment_slot": slot,
                     "segment_type": segment_type,

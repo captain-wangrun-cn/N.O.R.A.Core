@@ -120,6 +120,51 @@ def test_label_never_persisted_and_roundtrips():
     assert _unwrap_label("[某张图] 细节说明") == "[某张图] 细节说明"
 
 
+def test_read_path_unwraps_legacy_label_before_decorating(tmp_path):
+    """存量库/回滚回来的库里，标签是**落了库**的：读路径必须先剥再拼。
+
+    这条锁的是**接线** —— `get_context_messages` 真的调了 `_unwrap_label`。
+    上面那条只把两个 helper 手动串起来测（`_decorate(.., _unwrap_label(..))`），
+    helper 组合确实是对的，所以**读路径漏了这一步也照样全绿**：
+    生产上一直渲染成 `[压缩段#6]\\n[压缩段#6] 正文`，却没有任何测试报警。
+    """
+    cc, _ = _make(tmp_path, _GoodSummarizer())
+    body_legacy = "【时间线】\n- 10:00 旧库里的正文。"
+    body_new = "【时间线】\n- 11:00 新写入的正文。"
+
+    conn = sqlite3.connect(str(tmp_path / "context.db"))
+    conn.executescript(
+        """
+        CREATE TABLE IF NOT EXISTS context_segments (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            platform TEXT NOT NULL, chat_id TEXT NOT NULL, slot INTEGER NOT NULL,
+            segment_type TEXT NOT NULL, role TEXT NOT NULL, content TEXT NOT NULL,
+            message_ids TEXT NOT NULL, source_timestamp REAL NOT NULL,
+            updated_at REAL NOT NULL, memory_scope_id TEXT,
+            UNIQUE(platform, chat_id, slot)
+        );
+        """
+    )
+    for slot, body in ((6, f"[压缩段#6]\n{body_legacy}"), (5, body_new)):
+        conn.execute(
+            "INSERT INTO context_segments (platform, chat_id, slot, segment_type, role,"
+            " content, message_ids, source_timestamp, updated_at, memory_scope_id)"
+            " VALUES ('__scope__', ?, ?, 'compressed_single_segment', 'system', ?,"
+            " '[\"k1\"]', 1.0, 1.0, ?)",
+            (SCOPE, slot, body, SCOPE),
+        )
+    conn.commit()
+    conn.close()
+
+    got = {
+        m["segment_slot"]: m["content"]
+        for m in cc.get_context_messages("telegram", "6112866979", memory_scope_id=SCOPE)
+    }
+    assert got[6].count("[压缩段#6]") == 1, f"存量行的标签被重复渲染: {got[6]!r}"
+    assert got[6] == f"[压缩段#6]\n{body_legacy}"
+    assert got[5] == f"[压缩段#5]\n{body_new}", "无标签的行仍要正常拼一次"
+
+
 # --------------------------------------------------------------------------
 # 失败语义
 # --------------------------------------------------------------------------
