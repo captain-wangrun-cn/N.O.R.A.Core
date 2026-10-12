@@ -777,10 +777,6 @@ class MessageHandlerMixin:
         # ── 命令分发 ──
         stripped = text.strip()
 
-        if re.search(r"(?m)^\s*/start\b", stripped):
-            await self._cmd_start(chat_id, chat_type, user_id)
-            return
-
         if re.search(r"(?m)^\s*/reload_models\b", stripped):
             await self._cmd_reload_models(chat_id)
             return
@@ -1971,27 +1967,6 @@ class MessageHandlerMixin:
     # ------------------------------------------------------------------
     # 斜杠命令处理子方法
     # ------------------------------------------------------------------
-
-    async def _cmd_start(self, chat_id: str, chat_type: str, user_id: str):
-        identity = self._identity_for_runtime_key(chat_id)
-        platform = identity.platform
-        storage_id = identity.storage_id
-        memory_scope_id = identity.memory_scope_id
-        for runtime_key in self._runtime_keys_for_scope(memory_scope_id):
-            if runtime_key in self.generation_tasks:
-                self.generation_tasks[runtime_key].cancel()
-        await asyncio.sleep(0.1)
-        self.sessions[chat_id] = {"history": [], "interrupted_thought": ""}
-        self.message_history.clear_chat_history(platform, storage_id, keep_pinned=True, memory_scope_id=memory_scope_id)
-        for runtime_key in self._runtime_keys_for_scope(memory_scope_id):
-            status = self.worker_status.get(runtime_key)
-            if status:
-                status.finish()
-        queue = self._get_scope_queue_for_runtime(chat_id)
-        if queue:
-            await queue.clear()
-        await self._send_platform_message(chat_id, "N.O.R.A. Core 已启动。")
-        logger.info(f"[{chat_id}] Session已重置 by /start command.")
 
     async def _cmd_reload_models(self, chat_id: str):
         try:

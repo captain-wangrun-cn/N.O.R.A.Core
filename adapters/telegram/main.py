@@ -160,7 +160,6 @@ class TelegramAdapter(
             on_complete=self.on_aggregator_complete,
         )
 
-        self.application.add_handler(CommandHandler('start', self._start_command))
         self.application.add_handler(CommandHandler('stop', self._stop_command))
         self.application.add_handler(CommandHandler('clear', self._clear_command))
         self.application.add_handler(CommandHandler('status', self._status_command))
@@ -204,7 +203,6 @@ class TelegramAdapter(
     async def _register_bot_commands(self, application: Application) -> None:
         """启动时把已注册的命令登记到 Telegram 命令菜单（输入框 '/' 自动补全）。失败只记日志。"""
         commands = [
-            BotCommand("start", "开始对话"),
             BotCommand("status", "查看状态报告"),
             BotCommand("context", "查看当前上下文"),
             BotCommand("undo", "撤销上一条回复"),

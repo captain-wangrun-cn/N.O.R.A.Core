@@ -717,4 +717,33 @@ Gemini history 格式不正确时也会在后续轮次退化为文本模式。
 - **per-chat 运行期设置必须落盘**（如 `/set_stream` 的输出模式）。只写 controller 内存
   dict 的设置在重启后会被静默重置回配置默认值，不报任何错，只能靠"怎么又变回去了"察觉。
   范式：`core/non_stream_store.py`（仿 `private_presence_store.py`，原子写 + JSON）。
+
+---
+
+## 14. 破坏性操作与数据可恢复性
+
+⚠️ **命令的菜单标签必须等于它的实际后果。** 生产事故（2026-10-12）：`/start` 在菜单里
+写着「开始对话」，实际是 `clear_chat_history(keep_pinned=True)` —— 删掉全部非 pinned
+消息 + **整个 `summaries`（含 level-3 长期归档）** + `conversation_sessions` + 压缩重试
+队列，并连带清空消息镜像库与压缩上下文库。用户顺手一按，几个月记忆归零。
+**它已删除**（`tests/test_start_command_removed.py` 锁住不许回来）。
+
+- 「看起来最无害」的入口不该是破坏性最强的操作。清空历史走 `/clear`（标签即后果）。
+- 新增破坏性命令时对照 `/debug_cleanup`：**按钮选择 + 二次确认**。
+
+⚠️ **本仓的删除是不可恢复的。** 实测 `PRAGMA secure_delete = 1`（Python sqlite3 默认即开），
+被删的页会被**清零**：1474 页里 1460 页近乎全零，`.recover` 和空闲页捞数据全部无效
+（官方 sqlite-tools 3.46.1 跑 `.recover` 只捞回 schema、0 行）。
+**别把"删了还能捞"当兜底，备份是唯一退路。**
+
+⚠️ **备份要在部署/重启前做，而且要覆盖全部三个库**：
+`message_history.db`（消息+摘要+段落）、`message_log.db`（镜像）、
+`context_compression.db`（压缩槽位）。缺一个，恢复出来的上下文就是残的。
+`/root/restart_nora_instances.sh` **只重启、不备份**，别指望它。
+
+- 恢复后上下文能重建到什么程度，用 `MessageHistory(db_path=<副本>).get_context_messages(...)`
+  实测一遍即可（实测备份可重建 58 条 / 18K 字符，结构完整）。
+- 排查"能不能恢复"的顺序：① 找最近备份；② 看 freelist_page 是否被清零；
+  ③ 镜像库/压缩库是否也被清；④ 每日记忆 `.md` 是否覆盖缺口；
+  ⑤ 身份文件（SOUL/USER/MEMORY/APPEARANCE）**不受命令影响，通常完好**。
   技能使用 `config.json` + 环境变量注入机制。

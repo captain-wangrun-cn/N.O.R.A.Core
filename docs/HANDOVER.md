@@ -1,3 +1,46 @@
+## 近期关键改动（截至 2026-10-12 事故复盘）
+
+### 💥 `/start` 是伪装成打招呼的硬重置 → 已删除 + 生产记忆事故复盘
+
+**事故**：生产 nora 实例（@Nora5465_Bot）的 Telegram 菜单里 `/start` 标签是「开始对话」，
+用户顺手一按，几个月对话记忆清零。
+
+**根因**：`_cmd_start` 实际调的是 `clear_chat_history(keep_pinned=True)`，删掉
+`messages`（非 pinned）、**整个 `summaries`（含 level-3 长期归档）**、
+`conversation_sessions`、压缩重试队列，并连带清空 `message_log.db` 与
+`context_compression.db`。**菜单标签与实际后果完全不符**——这是设计问题，不是用户误操作。
+
+**处置**：删除 `/start` 全链路（`core/message_handler.py` 的分发分支与 `_cmd_start` 方法、
+`adapters/telegram/commands.py` 的 `_start_command`、`main.py` 的 handler 注册与
+`BotCommand` 菜单项、`PROMPT.md` 里把它当命令范例的那句）。
+`tests/test_start_command_removed.py` 锁住不许回来。清空历史仍走 `/clear`（标签即后果）。
+
+**数据可恢复性（重要，影响今后所有破坏性改动）**：
+
+- **不可恢复。** 实测 `PRAGMA secure_delete = 1`（Python sqlite3 默认即开），删除的页被
+  **清零**——1474 页里 1460 页近乎全零。官方 sqlite-tools 3.46.1 跑 `.recover` 只捞回
+  schema、**0 行**（`.recover` 也不扫 freelist）。空闲页/镜像库/压缩库全部无效。
+- 镜像库 `message_log.db` **不是救兵**：只剩 60 行且时间停在 2026-09-16，说明这个
+  "原文双写备追溯" 的机制实际早已不在写近期数据。
+- RAG（Qdrant）**不含对话**：`add_memory()` 全仓只有 `cli.py` 的配置自检在调，
+  运行时不写。查"RAG 里有没有"是白费力气。
+- 每日记忆 `.md`（151 个文件）与身份文件（SOUL/USER/MEMORY/APPEARANCE）**都不受影响**，
+  缺口那一周的 `.md` 内容很薄（10-11 那份写着"今日无新增对话记录"）。
+- **唯一有效来源是备份**：`/root/nora_deploy_backup_20261005_234955/nora/`（三个库齐全，
+  1181 条消息，2026-08-17 → 10-05 23:20）。实测拿它跑
+  `MessageHistory(db_path=副本).get_context_messages(...)` → **58 条 / 18111 字符**，
+  结构完整（归档总结 → 合并段 → 压缩段 → 段落分隔 → 最近段 → 原始窗口）。
+  **恢复备份 = 工作上下文本身被重建**，不只是塞回裸记录。
+- 教训已写进 `docs/onboarding/COMMON_PITFALLS.md` §14：菜单标签必须等于实际后果；
+  破坏性命令要有二次确认（对照 `/debug_cleanup`）；删除不可恢复，**备份要在部署/重启前
+  做且必须覆盖三个库**；`/root/restart_nora_instances.sh` **只重启不备份**。
+
+**残留观察（未修）**：从备份重建出的上下文里，注入块存在**标签重复**
+（`[压缩段#6]\n[压缩段#6] 【时间线】`），即 pitfalls §2 记的"槽位标签落库层层嵌套"
+在存量数据上没被 `_unwrap_label()` 洗全。不影响可用性。
+
+---
+
 ## 近期关键改动（截至 2026-10-12）
 
 ### 🔧 非流式 `chat()` 吞掉工具调用（治"后脑空回"）+ `/set_stream` 落盘

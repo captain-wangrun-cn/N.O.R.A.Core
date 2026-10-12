@@ -52,13 +52,6 @@ class TelegramCommandsMixin:
         )
         return await self._enrich_group_context(context, update.effective_chat, update=update)
 
-    async def _start_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        if not self._command_should_process(update):
-            return
-        if self._message_handler:
-            event_context = await self._command_context(update, self._command_text(update, "/start"))
-            await self._message_handler(event_context)
-
     async def _clear_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not self._command_should_process(update):
             return
