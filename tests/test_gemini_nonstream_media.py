@@ -20,8 +20,8 @@ def _provider() -> GeminiProvider:
     """绕过 __init__（会真的去 configure SDK 客户端），只造一个够用的实例。"""
     p = object.__new__(GeminiProvider)
     p.model_alias = "video"
-    p.model_name = "[满血E]gemini-3.1-pro-preview"
-    p.base_url = "https://api4.gemini.invalid"
+    p.model_name = "video-model-under-test"
+    p.base_url = "https://gemini.invalid"
     p.api_key = "sk-test"
     p.effort = None
     p.temperature = None
@@ -73,3 +73,28 @@ def test_media_parts_skips_payloads_without_bytes():
     p = _provider()
     parts = p._media_parts("hi", multimodal_videos=[{}, {"mime_type": "video/mp4"}])
     assert parts == [{"text": "hi"}]
+
+
+def test_safety_settings_are_not_defined_inside_conditionals():
+    """`chat()` 的 `if tools:` 分支曾引用方法内**从未定义**的 safety_settings。
+
+    一旦带工具走非流式就是 NameError，被方法尾部的宽 except 吞掉，对外只表现
+    为一句"处理请求时遇到了问题"。长期没炸只是因为视频轮固定 no_tools=True。
+    收成模块级 helper 后，方法内不许再出现局部定义的 safety_settings。
+    """
+    src = inspect.getsource(GeminiProvider.chat_stream)
+    assert "safety_settings = {" not in src, "safety_settings 又变回局部变量了"
+    assert "_gemini_safety_settings()" in src or "self.model" in src
+
+
+def test_rest_safety_settings_shape():
+    from brain.providers.gemini import _gemini_rest_safety_settings
+
+    settings = _gemini_rest_safety_settings()
+    assert all(s["threshold"] == "BLOCK_NONE" for s in settings)
+    assert {s["category"] for s in settings} == {
+        "HARM_CATEGORY_HARASSMENT",
+        "HARM_CATEGORY_HATE_SPEECH",
+        "HARM_CATEGORY_SEXUALLY_EXPLICIT",
+        "HARM_CATEGORY_DANGEROUS_CONTENT",
+    }

@@ -288,14 +288,36 @@ provider 的失败约定是**返回一段错误文本而不是抛异常**（历�
 - **群管/撤回/禁言/改群名片等真实 QQ 操作必须先向主人确认**，实际成功与否取决于
   登录号权限和 OneBot 实现。
 
-### Gemini REST 路径必须整段编码模型名
+### ⚠️ 带媒体的回合，流式与非流式**都必须**绕开 SDK
+
+`_video_stream_via_rest` 的注释早就点明了病根：**SDK + 自定义 endpoint + 视频 inline_data 会卡死**。
+但那只修了流式一侧。`chat()`（非流式）收下 `multimodal_videos` 后**从未使用**，无条件走
+`send_message_async` → 带视频时一路卡到 SDK 重试超时（**整 600 秒**），而且 `chat()` 不吐
+chunk，日志从 `Turn 1 模型: video` 起**完全静默**，看上去像"后脑没反应"。
+
+⚠️ **只修一边等于没修**：`/set_stream` 是 per-chat 开关（`core/non_stream_store.py`
+持久化），同一个实例上两条路都会有人走。生产事故 2026-10-13 就是主人那个 chat 开着非流式。
+现在 `chat()` 命中 `multimodal_videos or multimodal_images` 时直接前置 return 到
+`_media_chat_via_rest()`（REST `:generateContent`），两边共用 `_media_parts()` 拼装。
+测试锁 `tests/test_gemini_nonstream_media.py`（源码级断言：前置分支必须排在 `start_chat(` 之前）。
+
+- **复现手法**：`GeminiProvider(model_alias="video").chat(..., multimodal_videos=[...])`
+  配一份真实 mp4。修复前 180s 不返回，修复后 ~15s。
+- **排障信号**：`chat()` 路径不吐 chunk，所以"日志停在 Turn 1、连报错都没有"本身就指向
+  非流式分支。
+
+### REST 路径必须整段编码模型名（次生问题，不是上面那次的根因）
 
 ⚠️ **`urllib.parse.quote(model)` 默认 `safe="/"`，模型别名里的斜杠会漏进 URL 路径。**
-自建 Gemini 网关（gemai.huchan.cn / newapi 系）按**路径段**解析模型名，`antigravity/gemini-3.1-pro-low`
-被截成两段后路由到别的供应商，报 `unknown provider for model gemini-pro-agent` ——
-**看着像模型名配错，其实是编码漏了**。统一用 `_encode_model_for_url()`（`safe=""`），
-`generate_image` 与 `_video_stream_via_rest` 两处都要。测试锁
-`tests/test_gemini_model_url_encoding.py`。
+自建 Gemini 网关按**路径段**解析模型名，带命名空间前缀的别名被截成两段后路由到别的
+供应商，报 `unknown provider for ...` —— **看着像模型名配错，其实是编码漏了**。
+统一用 `_encode_model_for_url()`（`safe=""`），两条 REST 路径都要。
+测试锁 `tests/test_gemini_model_url_encoding.py`。
+
+> 注意：别名里的非 ASCII 字符（中文、方括号）**编码与否都能过**（实测两种都 200），
+> 出问题的只有斜杠。别把这条当成"视频卡死"的根因——排查时一度这么误判过。
+
+
 
 ### ⚠️ 聊天记录（合并转发）里的图片不要去解析
 

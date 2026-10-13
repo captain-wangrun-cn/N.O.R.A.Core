@@ -27,16 +27,42 @@ def _encode_model_for_url(model_name: str) -> str:
     """把模型名整段百分号编码，供 REST 路径占位使用。
 
     `urllib.parse.quote` 默认 `safe="/"`，会把模型名里的斜杠留在 URL 路径上。自建
-    Gemini 网关（如 gemai.huchan.cn / newapi 系）按**路径段**解析模型名，于是
-    `antigravity/gemini-3.1-pro-low` 这类带命名空间前缀的别名会被截成
-    `antigravity` + `/gemini-3.1-pro-low`，后端解析出完全不同的供应商，报
-    `unknown provider for model gemini-pro-agent` ——**看起来像模型名配错，其实是编码漏了**。
-    编码掉斜杠后，网关拿到的是还原后的原始别名，能正常路由。
+    Gemini 网关按**路径段**解析模型名，于是 `vendor/model-variant` 这类带命名空间
+    前缀的别名会被截成两段，后端解析出完全不同的供应商，报 `unknown provider for ...`
+    ——**看起来像模型名配错，其实是编码漏了**。编码掉斜杠后，网关拿到的是还原后的
+    原始别名，能正常路由。
 
-    只抹掉 URL 里有特殊含义的字符，冒号/方括号等 Gemini 别名常见字符本身不是问题；
-    中国区模型别名带 `[满血E]` 这类方括号，实测编码与不编码都能路由，统一编码更稳。
+    别名里的非 ASCII 字符（中文、方括号之类）编码与否都能过，统一编码更稳。
     """
     return urllib.parse.quote(str(model_name or ""), safe="")
+
+
+def _gemini_safety_settings() -> Dict[str, Any]:
+    """放宽内容过滤的四个阈值（BLOCK_NONE），构造 SDK/HarmCategory 形式的设置。
+
+    历史坑：`chat()` 的 `if tools:` 分支引用过 `safety_settings`，但该方法内**从未
+    定义过**这个名字——一旦带工具调 `chat()` 就是 NameError，被方法尾部那个宽
+    `except` 吞掉，对外只表现为一句"处理请求时遇到了问题"。之所以一直没炸，只是
+    因为 video 客户端的轮子固定 `no_tools=True`，这条分支从未被走到。
+    **别再在方法里手拼这个 dict**，统一走这里；REST 那侧用 `_gemini_rest_safety_settings()`。
+    """
+    from google.generativeai.types import HarmCategory, HarmBlockThreshold
+    return {
+        HarmCategory.HARM_CATEGORY_HARASSMENT: HarmBlockThreshold.BLOCK_NONE,
+        HarmCategory.HARM_CATEGORY_HATE_SPEECH: HarmBlockThreshold.BLOCK_NONE,
+        HarmCategory.HARM_CATEGORY_SEXUALLY_EXPLICIT: HarmBlockThreshold.BLOCK_NONE,
+        HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT: HarmBlockThreshold.BLOCK_NONE,
+    }
+
+
+def _gemini_rest_safety_settings() -> List[Dict[str, str]]:
+    """同上，但 REST body 要的是 camelCase 字面量列表。"""
+    return [
+        {"category": "HARM_CATEGORY_HARASSMENT", "threshold": "BLOCK_NONE"},
+        {"category": "HARM_CATEGORY_HATE_SPEECH", "threshold": "BLOCK_NONE"},
+        {"category": "HARM_CATEGORY_SEXUALLY_EXPLICIT", "threshold": "BLOCK_NONE"},
+        {"category": "HARM_CATEGORY_DANGEROUS_CONTENT", "threshold": "BLOCK_NONE"},
+    ]
 
 
 def _sanitize_links_for_safety(text: str) -> str:
@@ -102,15 +128,9 @@ class GeminiProvider(BaseLLM):
         self.model_name = model_name
 
         # 配置安全设置 - 放宽内容过滤以允许链接等内容
-        from google.generativeai.types import HarmCategory, HarmBlockThreshold
-        safety_settings = {
-            HarmCategory.HARM_CATEGORY_HARASSMENT: HarmBlockThreshold.BLOCK_NONE,
-            HarmCategory.HARM_CATEGORY_HATE_SPEECH: HarmBlockThreshold.BLOCK_NONE,
-            HarmCategory.HARM_CATEGORY_SEXUALLY_EXPLICIT: HarmBlockThreshold.BLOCK_NONE,
-            HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT: HarmBlockThreshold.BLOCK_NONE,
-        }
-
-        self.model = genai.GenerativeModel(model_name, safety_settings=safety_settings)
+        self.model = genai.GenerativeModel(
+            model_name, safety_settings=_gemini_safety_settings()
+        )
 
     def _uses_thinking_level(self) -> bool:
         """该模型是否走 thinkingLevel 枚举（3.x）而不是 thinkingBudget（2.5）。
@@ -279,7 +299,7 @@ class GeminiProvider(BaseLLM):
                     self.model_name,
                     tools=tools, # Pass tools here
                     system_instruction=system_prompt,
-                    safety_settings=safety_settings,
+                    safety_settings=_gemini_safety_settings(),
                 )
             
             # Note: start_chat doesn't take system_prompt again if model has it.
@@ -494,12 +514,7 @@ class GeminiProvider(BaseLLM):
         if system_prompt and system_prompt.strip():
             body["systemInstruction"] = {"parts": [{"text": system_prompt}]}
 
-        body["safetySettings"] = [
-            {"category": "HARM_CATEGORY_HARASSMENT", "threshold": "BLOCK_NONE"},
-            {"category": "HARM_CATEGORY_HATE_SPEECH", "threshold": "BLOCK_NONE"},
-            {"category": "HARM_CATEGORY_SEXUALLY_EXPLICIT", "threshold": "BLOCK_NONE"},
-            {"category": "HARM_CATEGORY_DANGEROUS_CONTENT", "threshold": "BLOCK_NONE"},
-        ]
+        body["safetySettings"] = _gemini_rest_safety_settings()
 
         generation_config = self._effort_generation_config(camel_case=True)
         if generation_config:
@@ -597,12 +612,7 @@ class GeminiProvider(BaseLLM):
 
         body: Dict[str, Any] = {
             "contents": [{"role": "user", "parts": parts}],
-            "safetySettings": [
-                {"category": "HARM_CATEGORY_HARASSMENT", "threshold": "BLOCK_NONE"},
-                {"category": "HARM_CATEGORY_HATE_SPEECH", "threshold": "BLOCK_NONE"},
-                {"category": "HARM_CATEGORY_SEXUALLY_EXPLICIT", "threshold": "BLOCK_NONE"},
-                {"category": "HARM_CATEGORY_DANGEROUS_CONTENT", "threshold": "BLOCK_NONE"},
-            ],
+            "safetySettings": _gemini_rest_safety_settings(),
             "generationConfig": {"responseModalities": ["TEXT", "IMAGE"]},
         }
 
@@ -722,12 +732,7 @@ class GeminiProvider(BaseLLM):
         if system_prompt and system_prompt.strip():
             body["systemInstruction"] = {"parts": [{"text": system_prompt}]}
 
-        body["safetySettings"] = [
-            {"category": "HARM_CATEGORY_HARASSMENT", "threshold": "BLOCK_NONE"},
-            {"category": "HARM_CATEGORY_HATE_SPEECH", "threshold": "BLOCK_NONE"},
-            {"category": "HARM_CATEGORY_SEXUALLY_EXPLICIT", "threshold": "BLOCK_NONE"},
-            {"category": "HARM_CATEGORY_DANGEROUS_CONTENT", "threshold": "BLOCK_NONE"},
-        ]
+        body["safetySettings"] = _gemini_rest_safety_settings()
 
         if generation_config:
             body["generationConfig"] = generation_config
@@ -852,15 +857,6 @@ class GeminiProvider(BaseLLM):
 
         gemini_history = self._convert_history(history)
 
-        # 配置安全设置
-        from google.generativeai.types import HarmCategory, HarmBlockThreshold
-        safety_settings = {
-            HarmCategory.HARM_CATEGORY_HARASSMENT: HarmBlockThreshold.BLOCK_NONE,
-            HarmCategory.HARM_CATEGORY_HATE_SPEECH: HarmBlockThreshold.BLOCK_NONE,
-            HarmCategory.HARM_CATEGORY_SEXUALLY_EXPLICIT: HarmBlockThreshold.BLOCK_NONE,
-            HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT: HarmBlockThreshold.BLOCK_NONE,
-        }
-
         # Configure model with tools if present
         current_model = self.model
         if tools:
@@ -870,7 +866,7 @@ class GeminiProvider(BaseLLM):
                 self.model_name,
                 tools=tools,
                 system_instruction=system_prompt,
-                safety_settings=safety_settings
+                safety_settings=_gemini_safety_settings(),
             )
             full_prompt = user_prompt # System prompt is in instruction
         else:
