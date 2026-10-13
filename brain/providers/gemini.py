@@ -233,8 +233,21 @@ class GeminiProvider(BaseLLM):
     ) -> str:
         # Convert history to Gemini's format, handling tool_call/tool_response
         self._begin_call()
+
+        # 多模态（尤其是视频）必须走 REST：SDK + 自定义 endpoint + inline_data 是
+        # _video_stream_via_rest 当初要绕开的组合，非流式路径漏掉了这一条——带视频时
+        # 会一路卡到 SDK 重试超时（600s），而且 chat() 不吐 chunk，日志从 Turn 1 起全静默。
+        if multimodal_videos or multimodal_images:
+            return await self._media_chat_via_rest(
+                system_prompt=system_prompt,
+                user_prompt=user_prompt,
+                history=history,
+                multimodal_images=multimodal_images,
+                multimodal_videos=multimodal_videos,
+            )
+
         gemini_history = self._convert_history(history)
-        
+
         try:
             # Re-initialize model with tools if provided (Gemini defines tools at model level or chat level)
             # Efficient way: instantiate a lightweight tool-aware chat session just for this turn?
@@ -389,6 +402,164 @@ class GeminiProvider(BaseLLM):
             parts.append({"text": user_prompt})
         return parts
 
+    def _media_parts(
+        self,
+        prompt: str,
+        multimodal_images: Optional[List[Dict]] = None,
+        multimodal_videos: Optional[List[Dict]] = None,
+    ) -> List[Dict[str, Any]]:
+        """拼多模态 user parts（text + 图片/视频 inlineData）。
+
+        mime 一律取 payload 里的 `mime_type`（调用方 `brain/multimodal.py` 给的就是
+        按魔数判出来的真实类型），兜底值只在 payload 缺字段时用。
+        """
+        parts: List[Dict[str, Any]] = []
+        if prompt and prompt.strip():
+            parts.append({"text": prompt})
+
+        def _add(items: Optional[List[Dict]], default_mime: str) -> None:
+            for item in (items or []):
+                b64 = item.get("base64")
+                if not b64:
+                    raw = item.get("bytes")
+                    if not raw:
+                        continue
+                    b64 = base64.b64encode(raw).decode("utf-8") if isinstance(raw, bytes) else raw
+                parts.append({
+                    "inlineData": {
+                        "mimeType": item.get("mime_type") or default_mime,
+                        "data": b64,
+                    }
+                })
+
+        _add(multimodal_images, "image/jpeg")
+        _add(multimodal_videos, "video/mp4")
+        return parts
+
+    async def _rest_generate_content(self, body: Dict[str, Any], label: str) -> Dict[str, Any]:
+        """POST 一次 REST `:generateContent`，返回解析后的 payload。
+
+        与 `generate_image` 同样的理由走 REST 而不是 SDK。不做重试：调用方（后脑
+        工具循环 / 对话轮）自己有重试与降级，这里重试只会把一次慢失败放大成几次。
+        """
+        url = f"{self.base_url}/v1beta/models/{_encode_model_for_url(self.model_name)}:generateContent"
+        headers = {
+            "Content-Type": "application/json",
+            "x-goog-api-key": self.api_key,
+        }
+        timeout = aiohttp.ClientTimeout(total=180)
+        async with aiohttp.ClientSession(timeout=timeout) as session:
+            async with session.post(url, headers=headers, json=body) as resp:
+                text = await resp.text()
+                if resp.status != 200:
+                    raise RuntimeError(f"{label} HTTP {resp.status}: {text[:500]}")
+                try:
+                    return json.loads(text)
+                except json.JSONDecodeError as e:
+                    raise RuntimeError(f"{label} 响应不是合法 JSON: {text[:300]}") from e
+
+    def _record_rest_usage(self, payload: Dict[str, Any]) -> None:
+        usage_meta = payload.get("usageMetadata") or {}
+        if usage_meta:
+            self.last_usage = {
+                "input_tokens": usage_meta.get("promptTokenCount", 0) or 0,
+                "output_tokens": (
+                    usage_meta.get("candidatesTokenCount", 0)
+                    or usage_meta.get("totalTokenCount", 0)
+                    or 0
+                ),
+            }
+
+    async def _media_chat_via_rest(
+        self,
+        system_prompt: str,
+        user_prompt: str,
+        history: List[Dict[str, str]],
+        multimodal_images: Optional[List[Dict]] = None,
+        multimodal_videos: Optional[List[Dict]] = None,
+    ) -> str:
+        """带媒体的非流式回合：走 REST `:generateContent`。
+
+        body 的拼装顺序与 `_video_stream_via_rest` 保持一致（history → 本轮 user parts，
+        systemInstruction / safetySettings / generationConfig 与流式路径同款），
+        这样同一个会话在流式与非流式之间切换时，模型看到的东西是一致的。
+        """
+        contents = self._convert_history_to_rest(history)
+        contents.append({
+            "role": "user",
+            "parts": self._media_parts(user_prompt, multimodal_images, multimodal_videos),
+        })
+        body: Dict[str, Any] = {"contents": contents}
+
+        if system_prompt and system_prompt.strip():
+            body["systemInstruction"] = {"parts": [{"text": system_prompt}]}
+
+        body["safetySettings"] = [
+            {"category": "HARM_CATEGORY_HARASSMENT", "threshold": "BLOCK_NONE"},
+            {"category": "HARM_CATEGORY_HATE_SPEECH", "threshold": "BLOCK_NONE"},
+            {"category": "HARM_CATEGORY_SEXUALLY_EXPLICIT", "threshold": "BLOCK_NONE"},
+            {"category": "HARM_CATEGORY_DANGEROUS_CONTENT", "threshold": "BLOCK_NONE"},
+        ]
+
+        generation_config = self._effort_generation_config(camel_case=True)
+        if generation_config:
+            body["generationConfig"] = generation_config
+
+        try:
+            payload = await self._rest_generate_content(body, "Gemini 多模态非流式请求失败")
+        except Exception as e:
+            error_msg = str(e)
+            logger.error(f"Gemini 多模态 REST 错误: {error_msg}", exc_info=True)
+            if "PROHIBITED_CONTENT" in error_msg or "block_reason" in error_msg or "SAFETY" in error_msg:
+                return self._fail(
+                    "抱歉，由于内容安全限制，我无法直接回复该消息。",
+                    reason=f"blocked_exception:{error_msg}",
+                )
+            return self._fail(
+                f"抱歉，处理您的请求时遇到了问题：{error_msg[:300]}",
+                reason=f"exception:{error_msg}",
+            )
+
+        self._record_rest_usage(payload)
+
+        # 视频轮的 finishReason 要显式过一遍：SAFETY / RECITATION 在 REST payload 里
+        # 只体现为 candidates[0].finishReason，直接取 text 会得到一段空串而不报错。
+        candidates = payload.get("candidates") or []
+        candidate = candidates[0] if candidates else None
+        err = self.check_finish_reason_and_log(
+            (candidate or {}).get("finishReason"),
+            payload,
+            None,
+            context=f"Gemini media chat/{self.model_alias}",
+        )
+        if err:
+            return err
+
+        parts = ((candidate or {}).get("content") or {}).get("parts") or []
+        text_parts: List[str] = []
+        calls: List[Dict[str, Any]] = []
+        for part in parts:
+            if part.get("thought"):
+                continue
+            fc = part.get("functionCall")
+            if fc and fc.get("name"):
+                calls.append({"name": fc["name"], "args": fc.get("args") or {}, "id": None})
+            elif part.get("text"):
+                text_parts.append(part["text"])
+
+        if calls:
+            self.last_tool_calls = calls
+
+        cleaned = self.strip_think_content("".join(text_parts))
+        if not cleaned.strip() and not calls:
+            logger.error(
+                f"[Gemini media chat/{self.model_alias}] 返回内容为空"
+                f"（finishReason={(candidate or {}).get('finishReason')}），"
+                f"candidates={repr(candidates)[:600]}"
+            )
+            self.last_error = "empty_content"
+        return cleaned
+
     async def generate_image(
         self,
         prompt: str,
@@ -525,7 +696,11 @@ class GeminiProvider(BaseLLM):
         multimodal_videos: Optional[List[Dict]] = None,
         generation_config: Optional[Dict] = None,
     ):
-        """绕过 SDK，直接用 REST API 流式请求（解决 SDK + 自定义 endpoint + 视频 inline_data 卡死问题）。"""
+        """绕过 SDK，直接用 REST API 流式请求（解决 SDK + 自定义 endpoint + 视频 inline_data 卡死问题）。
+
+        非流式那一侧对应 `_media_chat_via_rest`——两边都必须绕开 SDK，只修一边等于
+        没修：`/set_stream` 是 per-chat 的，同一个实例上两条路都会有人走。
+        """
         model_encoded = _encode_model_for_url(self.model_name)
         url = f"{self.base_url}/v1beta/models/{model_encoded}:streamGenerateContent?alt=sse"
 
@@ -537,24 +712,8 @@ class GeminiProvider(BaseLLM):
         # 构建 contents: history + 当前用户消息
         contents = self._convert_history_to_rest(history)
 
-        # 当前用户消息 parts
-        user_parts = []
-        if user_prompt and user_prompt.strip():
-            user_parts.append({"text": user_prompt})
-        for image in (multimodal_images or []):
-            mime_type = image.get("mime_type") or "image/jpeg"
-            raw_bytes = image.get("bytes")
-            if not raw_bytes:
-                continue
-            b64 = base64.b64encode(raw_bytes).decode("utf-8") if isinstance(raw_bytes, bytes) else raw_bytes
-            user_parts.append({"inlineData": {"mimeType": mime_type, "data": b64}})
-        for video in (multimodal_videos or []):
-            mime_type = video.get("mime_type") or "video/mp4"
-            raw_bytes = video.get("bytes")
-            if not raw_bytes:
-                continue
-            b64 = base64.b64encode(raw_bytes).decode("utf-8") if isinstance(raw_bytes, bytes) else raw_bytes
-            user_parts.append({"inlineData": {"mimeType": mime_type, "data": b64}})
+        # 当前用户消息 parts（图片与视频共用同一套拼装，见 _media_parts）
+        user_parts = self._media_parts(user_prompt, multimodal_images, multimodal_videos)
 
         contents.append({"role": "user", "parts": user_parts})
 
