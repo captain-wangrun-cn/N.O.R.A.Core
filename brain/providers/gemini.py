@@ -22,6 +22,23 @@ import config
 
 logger = logging.getLogger(__name__)
 
+
+def _encode_model_for_url(model_name: str) -> str:
+    """把模型名整段百分号编码，供 REST 路径占位使用。
+
+    `urllib.parse.quote` 默认 `safe="/"`，会把模型名里的斜杠留在 URL 路径上。自建
+    Gemini 网关（如 gemai.huchan.cn / newapi 系）按**路径段**解析模型名，于是
+    `antigravity/gemini-3.1-pro-low` 这类带命名空间前缀的别名会被截成
+    `antigravity` + `/gemini-3.1-pro-low`，后端解析出完全不同的供应商，报
+    `unknown provider for model gemini-pro-agent` ——**看起来像模型名配错，其实是编码漏了**。
+    编码掉斜杠后，网关拿到的是还原后的原始别名，能正常路由。
+
+    只抹掉 URL 里有特殊含义的字符，冒号/方括号等 Gemini 别名常见字符本身不是问题；
+    中国区模型别名带 `[满血E]` 这类方括号，实测编码与不编码都能路由，统一编码更稳。
+    """
+    return urllib.parse.quote(str(model_name or ""), safe="")
+
+
 def _sanitize_links_for_safety(text: str) -> str:
     """
     在链接中插入随机空格以绕过内容安全过滤。
@@ -389,7 +406,7 @@ class GeminiProvider(BaseLLM):
         if not prompt or not prompt.strip():
             raise ValueError("generate_image 需要非空 prompt")
 
-        model_encoded = urllib.parse.quote(self.model_name)
+        model_encoded = _encode_model_for_url(self.model_name)
         url = f"{self.base_url}/v1beta/models/{model_encoded}:generateContent"
         headers = {
             "Content-Type": "application/json",
@@ -509,7 +526,7 @@ class GeminiProvider(BaseLLM):
         generation_config: Optional[Dict] = None,
     ):
         """绕过 SDK，直接用 REST API 流式请求（解决 SDK + 自定义 endpoint + 视频 inline_data 卡死问题）。"""
-        model_encoded = urllib.parse.quote(self.model_name)
+        model_encoded = _encode_model_for_url(self.model_name)
         url = f"{self.base_url}/v1beta/models/{model_encoded}:streamGenerateContent?alt=sse"
 
         headers = {

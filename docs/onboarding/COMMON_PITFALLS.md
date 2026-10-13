@@ -288,6 +288,15 @@ provider 的失败约定是**返回一段错误文本而不是抛异常**（历�
 - **群管/撤回/禁言/改群名片等真实 QQ 操作必须先向主人确认**，实际成功与否取决于
   登录号权限和 OneBot 实现。
 
+### Gemini REST 路径必须整段编码模型名
+
+⚠️ **`urllib.parse.quote(model)` 默认 `safe="/"`，模型别名里的斜杠会漏进 URL 路径。**
+自建 Gemini 网关（gemai.huchan.cn / newapi 系）按**路径段**解析模型名，`antigravity/gemini-3.1-pro-low`
+被截成两段后路由到别的供应商，报 `unknown provider for model gemini-pro-agent` ——
+**看着像模型名配错，其实是编码漏了**。统一用 `_encode_model_for_url()`（`safe=""`），
+`generate_image` 与 `_video_stream_via_rest` 两处都要。测试锁
+`tests/test_gemini_model_url_encoding.py`。
+
 ### ⚠️ 聊天记录（合并转发）里的图片不要去解析
 
 `adapters/onebotv11/forward.py` 展开时内部媒体**只留 `[图片]` 占位**，不下载、
