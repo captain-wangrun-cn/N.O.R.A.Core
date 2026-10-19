@@ -107,6 +107,10 @@ class TestWriteCallToHistory:
         assert args[0] == "telegram" and args[1] == "6112866979"
         assert "[RTC通话" in args[3]
         assert "通话摘要内容。" in args[3]
+        # 时间戳只能由 add_message 按配置时区插入一次。这里手动拼过
+        # datetime.now()（服务器本地时区），一条消息出现两个相差 12 小时的前缀，
+        # 模型第二天把 06:56 当成了"今天早晨"。
+        assert args[3].startswith("[RTC通话"), "RTC 摘要不许自带时间戳前缀"
         # 原始转写入镜像库（ContextStore 列名）
         conn = sqlite3.connect(str(mirror_db))
         rows = conn.execute(

@@ -9,6 +9,7 @@ from typing import Any, Dict, Optional
 from telegram import Message
 
 from .constants import COMPRESS_TARGET_SIZE, HISTORICAL_REPLY_IMAGE_DIRECT_MARKER
+from .sticker_utils import sticker_download_spec, sticker_download_source
 from adapters.media_path import build_media_subdir, infer_scene
 
 logger = logging.getLogger(__name__)
@@ -330,11 +331,11 @@ class TelegramReplyMixin:
                 chat_id=chat_id,
                 media_type="sticker",
             )
-            ext = "webm" if getattr(sticker, "is_video", False) else "webp"
+            ext, _ = sticker_download_spec(sticker)
             abs_file_path = os.path.join(target_dir, f"sticker_{sticker.file_id}.{ext}")
             # 已存在就直接复用，不重复下载
             if not os.path.isfile(abs_file_path):
-                file = await sticker.get_file()
+                file = await sticker_download_source(sticker).get_file()
                 await file.download_to_drive(abs_file_path)
             return os.path.relpath(abs_file_path, self.workspace_root).replace('\\', '/')
         except Exception as e:

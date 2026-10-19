@@ -62,6 +62,38 @@ def _convert_gif_to_png(raw_bytes: bytes) -> Optional[bytes]:
         return None
 
 
+def _extract_video_first_frame_png(video_path: str) -> Optional[bytes]:
+    """抽取视频第一帧转 PNG（视频表情包给视觉模型看）。
+
+    Telegram 的视频表情包（is_video）落盘是 `.webm`，本身不是图片，
+    视觉模型读不了。抽首帧后与静态表情包走同一条 fast-image 描述链路。
+    返回 PNG bytes，失败返回 None（调用方按"读不出来"跳过）。
+    """
+    with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tmp:
+        out_path = tmp.name
+    try:
+        subprocess.run(
+            [
+                "ffmpeg", "-y", "-i", video_path,
+                "-frames:v", "1", "-update", "1", "-f", "image2", out_path,
+            ],
+            capture_output=True,
+            check=True,
+            timeout=30,
+        )
+        with open(out_path, "rb") as f:
+            data = f.read()
+        return data or None
+    except Exception as e:
+        logger.warning(f"视频表情包抽取首帧失败: {video_path} ({e})")
+        return None
+    finally:
+        try:
+            os.unlink(out_path)
+        except OSError:
+            pass
+
+
 def _resolve_local_image_path(raw_path: str) -> str:
     """
     解析本地媒体文件路径。
@@ -218,7 +250,23 @@ def _load_single_image(raw_path: str, seen_paths: set, is_sticker: bool = False)
 
     mime_type, _ = mimetypes.guess_type(resolved)
     if not mime_type or not mime_type.startswith("image/"):
-        # 视频贴纸（.webm 等）无法作为图片解析，静默跳过
+        if is_sticker and _sniff_video_mime(resolved):
+            # 视频表情包（Telegram is_video → .webm）：抽首帧当静态图喂视觉模型。
+            frame_bytes = _extract_video_first_frame_png(resolved)
+            if not frame_bytes:
+                return None
+            seen_paths.add(resolved)
+            logger.info(f"视频表情包已抽取首帧: {resolved}")
+            return {
+                "image_id": _generate_image_id(),
+                "path": resolved,
+                "mime_type": "image/png",
+                "bytes": frame_bytes,
+                "base64": base64.b64encode(frame_bytes).decode("utf-8"),
+                "is_sticker": True,
+                "first_frame": True,
+            }
+        # 动画贴纸（.tgs）等其它非图片格式仍读不了，静默跳过。
         if not is_sticker:
             logger.warning(f"标记为 image 但文件并非图片，已跳过: {resolved}")
         return None

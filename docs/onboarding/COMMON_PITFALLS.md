@@ -188,6 +188,13 @@ provider 的失败约定是**返回一段错误文本而不是抛异常**（历�
 - 历史上曾有三份只认分钟精度的窄正则副本，而实际格式默认带秒和星期
   （`%Y-%m-%d %H:%M:%S %A`）——**剥时间戳只用 `strip_timestamp_markers`**。
 
+⚠️ **时间戳只能由 `add_message` 插入一次。** 任何"先自己拼 `datetime.now()` 再交给
+`add_message`"的写入点都会得到**两个前缀**，而且手动那个用的是**服务器本地时区**
+（香港机器是 EDT），与配置时区差 12 小时。RTC 通话摘要就这样踩过：库里存成
+`[2026-10-13 18:56:32 Tuesday] [2026-10-13 06:56:32 Tuesday]`，模型次日把 `06:56`
+当成"今天早晨"，把两天前的通话说成刚发生（`rtc/history_writer.py`，测试
+`tests/test_rtc_history_writer.py` 锁 `content` 不得自带前缀）。
+
 ⚠️ **`[系统备注]` / `[内部备注]` 块后面必须留空行。**
 `_INTERNAL_NOTE_BLOCK_PATTERN` / `_SYSTEM_NOTE_BLOCK_PATTERN` 的终止符是 `\n\s*\n`
 **或字符串结尾**。块在**最末尾**（靠 `$` 终止）或块后**跟一个空行**都是对的。
@@ -490,6 +497,22 @@ chunk，日志从 `Turn 1 模型: video` 起**完全静默**，看上去像"后�
 - OneBot v11 走的是**另一条路但不用修**：`_enrich_reply_text` 调的是和直发消息同一个
   `segments_to_nora_text`。`message.py:176` 那个 `[表情包:{file}]` 只是给人看的摘要函数，
   不在入站链路上——别被它误导。
+
+### ⚠️ 动图表情包必须先变成静态图
+
+Telegram 的 `is_video` 表情包落盘是 `.webm`，**不是图片**。`_load_single_image` 曾对
+非 `image/*` 的 sticker 直接静默跳过 → fast-image 永远拿不到图，Nora 只能凭
+emoji / 贴纸包名猜内容。
+
+- 视频表情包：`brain/multimodal.py` 的 `_extract_video_first_frame_png()` 用 ffmpeg
+  抽首帧转 PNG（必须带 `-update 1`，否则 image2 会报 pattern 警告），payload 标
+  `first_frame=True` 且仍带 `is_sticker=True`，照常进 `_describe_stickers`。
+- 动画表情包（`.tgs` Lottie）抽不出帧：下载时优先取 Telegram 给的静态 `thumbnail`
+  存成 `.webp`；没有缩略图才退回 `.tgs`（视觉侧仍会跳过）。
+- 落盘规则集中在 `adapters/telegram/sticker_utils.py`。**直接发（incoming）和引用重下
+  （reply）两条路径必须共用**，否则行为会分叉（仓库里有源码级一致性测试）。
+- 测试锁：`tests/test_multimodal_input.py`（webm 抽帧成功/失败跳过）、
+  `tests/test_telegram_reply_sticker.py`（动画用缩略图、无缩略图退回 tgs）。
 
 ### 图片和紧随其后的文本各回一次
 

@@ -39,15 +39,28 @@ class _FakeFile:
 
 
 class _FakeSticker:
-    def __init__(self, file_id="ABC", emoji="🐱", set_name="CatPack", is_video=False):
+    def __init__(self, file_id="ABC", emoji="🐱", set_name="CatPack", is_video=False,
+                 is_animated=False, thumbnail=None):
         self.file_id = file_id
         self.emoji = emoji
         self.set_name = set_name
         self.is_video = is_video
+        self.is_animated = is_animated
+        self.thumbnail = thumbnail
         self.downloads = []
 
     async def get_file(self):
         return _FakeFile(self.downloads)
+
+
+class _FakeThumbnail:
+    """Telegram 给动画表情包的静态缩略图（通常就是首帧）。"""
+
+    def __init__(self, downloads):
+        self._downloads = downloads
+
+    async def get_file(self):
+        return _FakeFile(self._downloads)
 
 
 class _FakeChat:
@@ -146,6 +159,31 @@ def test_video_sticker_uses_webm_extension(adapter):
     msg = _FakeMessage(sticker=_FakeSticker(is_video=True))
     result = asyncio.run(adapter._redownload_replied_sticker_as_input(msg))
     assert result.endswith(".webm]")
+
+
+def test_animated_sticker_saves_static_thumbnail_as_webp(adapter):
+    """动画表情包（.tgs）视觉模型读不了：落盘用 Telegram 给的静态缩略图。"""
+    thumbnail_downloads = []
+    sticker = _FakeSticker(
+        is_animated=True,
+        thumbnail=_FakeThumbnail(thumbnail_downloads),
+    )
+    msg = _FakeMessage(sticker=sticker)
+
+    result = asyncio.run(adapter._redownload_replied_sticker_as_input(msg))
+
+    assert result.endswith(".webp]")
+    assert len(thumbnail_downloads) == 1, "应该下载缩略图而不是 .tgs"
+    assert sticker.downloads == []
+
+
+def test_animated_sticker_without_thumbnail_falls_back_to_tgs(adapter):
+    sticker = _FakeSticker(is_animated=True)
+    msg = _FakeMessage(sticker=sticker)
+
+    result = asyncio.run(adapter._redownload_replied_sticker_as_input(msg))
+
+    assert result.endswith(".tgs]")
 
 
 def test_missing_sticker_returns_none(adapter):

@@ -15,7 +15,6 @@
 from __future__ import annotations
 
 import logging
-from datetime import datetime
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
@@ -100,14 +99,15 @@ async def write_call_to_history(
     summary = await summarize_call(transcript, duration_seconds,
                                    video_summary=video_summary)
 
-    now = datetime.now().strftime("%Y-%m-%d %H:%M:%S %A")
     minutes = max(1, round(duration_seconds / 60)) if duration_seconds else 1
 
     # ---- 2. 摘要入 message_history（下次对话 Nora 就"记得"这通电话）
     if summary:
-        content = (
-            f"[{now}]\n[RTC通话 {minutes}分钟] {summary}"
-        )
+        # 不要在这里自己拼时间戳：add_message 会按配置时区统一插入。
+        # 曾手动拼过 datetime.now()（服务器本地时区），一条消息因此出现两个
+        # 相差 12 小时的前缀（如 18:56 与 06:56），第二天模型把 06:56 当成
+        # "今天早晨"，对通话时间产生错乱。
+        content = f"[RTC通话 {minutes}分钟] {summary}"
         try:
             from memory.message_history import MessageHistory
 

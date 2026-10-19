@@ -14,6 +14,7 @@ from .message import (
     strip_bot_mention,
     telegram_reliable_users,
 )
+from .sticker_utils import sticker_download_spec, sticker_download_source
 from adapters.media_path import (
     build_media_relpath,
     build_media_subdir,
@@ -475,9 +476,9 @@ class TelegramIncomingMixin:
         emoji = sticker.emoji or "🎨"
         set_name = sticker.set_name or "未知贴纸包"
         
-        # 下载贴纸
-        file = await sticker.get_file()
-        ext = "webm" if sticker.is_video else "webp"
+        # 下载贴纸（视频/动画表情包的落盘形态见 sticker_utils）
+        ext, _ = sticker_download_spec(sticker)
+        file = await sticker_download_source(sticker).get_file()
         abs_file_path = os.path.join(self._media_target_dir(update, "sticker"), f"sticker_{sticker.file_id}.{ext}")
         await file.download_to_drive(abs_file_path)
         rel_file_path = os.path.relpath(abs_file_path, self.workspace_root).replace('\\', '/')

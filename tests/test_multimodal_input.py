@@ -42,9 +42,33 @@ def test_extract_sticker_payloads_marks_webp_as_sticker(tmp_path):
     assert images[0]["base64"] == base64.b64encode(images[0]["bytes"]).decode("utf-8")
 
 
-def test_extract_sticker_payloads_skips_webm(tmp_path):
+def test_extract_sticker_payloads_extracts_first_frame_from_webm(tmp_path, monkeypatch):
+    """视频表情包（.webm）不能整条丢掉：抽首帧后按 PNG 喂视觉模型。"""
     sticker_path = tmp_path / "animated.webm"
     sticker_path.write_bytes(b"\x1aE\xdf\xa3webm")
+
+    buf = io.BytesIO()
+    Image.new("RGB", (8, 8), color="green").save(buf, format="PNG")
+    monkeypatch.setattr(
+        "brain.multimodal._extract_video_first_frame_png",
+        lambda path: buf.getvalue(),
+    )
+
+    clean_text, images = extract_image_payloads(f"[sticker: {sticker_path}]")
+
+    assert clean_text == ""
+    assert len(images) == 1
+    assert images[0]["mime_type"] == "image/png"
+    assert images[0]["is_sticker"] is True
+    assert images[0]["first_frame"] is True
+    assert images[0]["base64"] == base64.b64encode(images[0]["bytes"]).decode("utf-8")
+
+
+def test_extract_sticker_payloads_skips_webm_when_frame_extraction_fails(tmp_path, monkeypatch):
+    """抽帧失败（ffmpeg 缺失/坏文件）时仍安静跳过，不把入站链路带崩。"""
+    sticker_path = tmp_path / "broken.webm"
+    sticker_path.write_bytes(b"\x1aE\xdf\xa3webm")
+    monkeypatch.setattr("brain.multimodal._extract_video_first_frame_png", lambda path: None)
 
     clean_text, images = extract_image_payloads(f"[sticker: {sticker_path}]")
 
