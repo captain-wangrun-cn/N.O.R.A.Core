@@ -302,7 +302,23 @@ class PollingMixin:
         finally:
             if polling_finished:
                 self._clear_polling_backend_context(chat_id)
-            if not self._was_interrupted(chat_id):
+            # 注意 _was_interrupted 会 pop 标记，这里只取一次，别让后面的分支读到 False。
+            interrupted = self._was_interrupted(chat_id)
+            # 前脑主对话轮给了 [NEED_BACKEND] + [SEMI_ONLINE]：半在线要等后脑和审查
+            # 全部收尾后再落（见 message_handler.should_defer_semi_online_until_backend）。
+            # 队列里还有待处理任务时先不落，交给下一个任务的上下文决定。
+            queue = self._get_scope_queue_for_runtime(chat_id)
+            if (
+                context.get("_force_semi_online_after_backend")
+                and not interrupted
+                and not (queue and queue.size() > 0)
+            ):
+                apply_presence = getattr(self, "_apply_presence_markers", None)
+                if callable(apply_presence):
+                    await apply_presence(chat_id, identity.chat_type, force_semi_online=True)
+                else:
+                    self._transition_to_semi_online(chat_id)
+            if not interrupted:
                 await self._process_pending_messages(chat_id)
 
     async def _process_pending_messages(self, chat_id: str):

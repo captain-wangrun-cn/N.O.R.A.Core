@@ -146,6 +146,16 @@ def media_placeholder_text(context: Dict[str, Any], text: str) -> str:
     return text
 
 
+def should_defer_semi_online_until_backend(front_result: Dict[str, Any]) -> bool:
+    """`[NEED_BACKEND]` + `[SEMI_ONLINE]` 时，半在线必须等后脑（含审查轮）收尾再落。
+
+    `front_brain.jinja` 明确要求「把活交给后脑、用户不需要立刻看到结果」时同时输出
+    这两个标记。半在线一旦在主对话轮提前生效就会 close_session 并 return，
+    后脑整轮任务被静默丢弃——现象是 debug 里能看到任务指示，但后脑一条日志都没有。
+    """
+    return bool(front_result.get("needs_backend")) and bool(front_result.get("force_semi_online"))
+
+
 def group_message_content(context: Dict[str, Any], user_name: str, text: str, chat_type: str) -> str:
     """Return persisted user content, avoiding duplicate names for aggregated group text."""
     text = media_placeholder_text(context, text)
@@ -1381,14 +1391,21 @@ class MessageHandlerMixin:
                 voice_key = voice_key or chat_id
                 self.start_voice_task(voice_key, voice_text)
 
-        presence_ended = await self._apply_presence_markers(
-            chat_id,
-            chat_type,
-            force_online=bool(front_result.get("force_online")),
-            force_semi_online=bool(front_result.get("force_semi_online")),
-        )
-        if presence_ended:
-            return
+        # 3.8) 在线状态标记。`[NEED_BACKEND]` + `[SEMI_ONLINE]` 是 prompt 推荐的组合
+        #      （把活交给后脑就直接让位），但半在线不能在这里就生效：_transition_to_semi_online
+        #      会闭段并让下面 return，后脑整轮任务被丢掉。标记转交给轮询循环收尾时消费。
+        defer_semi_online = should_defer_semi_online_until_backend(front_result)
+        if defer_semi_online:
+            presence_ended = False
+        else:
+            presence_ended = await self._apply_presence_markers(
+                chat_id,
+                chat_type,
+                force_online=bool(front_result.get("force_online")),
+                force_semi_online=bool(front_result.get("force_semi_online")),
+            )
+            if presence_ended:
+                return
 
         followup_delay = self.FOLLOWUP_NEED_FOLLOW_DELAY if front_result.get("need_follow") else None
         if front_result.get("keep_segment_open"):
@@ -1409,6 +1426,9 @@ class MessageHandlerMixin:
             backend_context["_front_brain_reply"] = user_reply if should_reply else ""
             backend_context["_message_saved"] = True
             backend_context["task_instruction"] = front_result.get("task_instruction", "")
+            if defer_semi_online:
+                # 由 _run_polling_loop 在本轮后脑 + 审查全部收尾后再切半在线。
+                backend_context["_force_semi_online_after_backend"] = True
             backend_context["use_image_model"] = front_result.get("use_image_model", context.get("use_image_model", False))
             if followup_delay is not None:
                 backend_context["_followup_initial_delay"] = followup_delay
@@ -1466,6 +1486,11 @@ class MessageHandlerMixin:
 
                 if not should_enqueue:
                     logger.info(f"[{chat_id}] 前脑内部判定本轮暂不入队，跳过排队")
+                    # 后脑不会启动，延迟的半在线没人消费了，就地落掉。
+                    if defer_semi_online:
+                        await self._apply_presence_markers(
+                            chat_id, chat_type, force_semi_online=True
+                        )
                     return
 
                 logger.info(f"[{chat_id}] 前脑判定需要后脑，且内部确认通过，自动加入队列")

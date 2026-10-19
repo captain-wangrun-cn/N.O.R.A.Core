@@ -231,6 +231,23 @@ provider 的失败约定是**返回一段错误文本而不是抛异常**（历�
 - 通用化：**任何"解析层产出新字段 → 上层 dict 转发"的链路**（adapter context、
   工具结果、provider 返回）都有同一个坑。
 
+### ⚠️ `[NEED_BACKEND]` + `[SEMI_ONLINE]` 是 prompt 推荐的合法组合，半在线必须延后生效
+
+`front_brain.jinja` 明确要求「把活交给后脑、用户不需要立刻看到结果」时**同时**输出
+`[NEED_BACKEND]` 和 `[SEMI_ONLINE]`。主对话轮如果先应用在线标记再判断后脑，
+`presence_ended` 会闭段并 `return`，**后脑整轮被静默丢弃**——现象是 debug 里能看到
+`任务指示`，日志里连「前脑判定需要后脑」都没有，会话直接在 20 秒内闭段。
+
+- 判定用 `core/message_handler.py` 的 `should_defer_semi_online_until_backend()`；
+  延迟标记进 `backend_context["_force_semi_online_after_backend"]`，
+  由 `_run_polling_loop` 的 `finally` 在后脑 + 审查全部收尾、且队列为空时消费。
+- 后脑未被启动的两条路（前脑判定暂不入队、主动放弃）必须在原地把半在线落掉，
+  否则标记永远没人消费。**新增"后脑不启动"的早退分支时都要检查这一项。**
+- **不要照抄审查轮的互斥处理**：`parse_front_brain_review` 里 `[SEMI_ONLINE]` 会直接
+  丢弃 `continue`（审查轮确实应该收手），但在主对话轮这样丢等于丢任务。
+- 测试锁：`tests/test_presence_backend_markers.py`（含源码级接线断言：
+  `presence_ended` 的 return 必须排在 `if front_result["needs_backend"]:` 之后）。
+
 ### ⚠️ 前脑标记与平台媒体协议撞名：剥离正则绝不能 IGNORECASE
 
 | 方向 | 格式 | 消费方 |
