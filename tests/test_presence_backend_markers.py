@@ -72,5 +72,7 @@ def test_polling_loop_applies_deferred_semi_online_at_teardown():
 
     assert '_force_semi_online_after_backend' in src
     assert "force_semi_online=True" in src
+    # 被打断（用户又发了新消息）时不能落半在线，否则会把新一轮的会话段关掉。
+    assert "interrupted_early" in src
     # 必须落在 finally 的收尾段：后脑 + 审查都跑完才落半在线。
     assert src.index("finally:") < src.index("_force_semi_online_after_backend")
