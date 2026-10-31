@@ -18,10 +18,7 @@ logger = logging.getLogger(__name__)
 
 # 所有可配置的模型别名。/model 与 /effort 共用，新增别名只改这一处，
 # 否则两个菜单会长期不一致。
-MODEL_ALIASES = [
-    "smart", "fast", "coder", "image", "video", "security",
-    "fast-image", "draw", "draw_desc", "summary",
-]
+MODEL_ALIASES = list(config.LLM_MODEL_ALIASES)
 
 
 class TelegramCommandsMixin:

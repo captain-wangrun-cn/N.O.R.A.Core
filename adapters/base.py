@@ -427,6 +427,10 @@ class BaseAdapter(ABC):
         """钩子：消息分发给控制器前触发，可改写 context。"""
         return context
 
+    async def before_command(self, context: Dict[str, Any], identity: Any) -> bool:
+        """最终命令入口闸门；True 表示适配器已处理/拒绝，不再执行 Core 命令。"""
+        return False
+
     async def after_message(self, context: Dict[str, Any], result: Any = None) -> None:
         """钩子：消息处理后触发。"""
         return None
@@ -435,7 +439,8 @@ class BaseAdapter(ABC):
         """标准消息分发：normalize -> before hook -> handler -> after hook。"""
         if not self._message_handler:
             return None
-        context = self.normalize_event(event_or_context).to_context()
+        context = dict(event_or_context) if isinstance(event_or_context, Mapping) else {}
+        context.update(self.normalize_event(event_or_context).to_context())
         processed_context = await self.before_message(context)
         maybe_result = self._message_handler(processed_context)
         result = await maybe_result if inspect.isawaitable(maybe_result) else maybe_result

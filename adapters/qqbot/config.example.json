@@ -1,0 +1,12 @@
+{
+  "app_id": "YOUR_QQ_BOT_APP_ID",
+  "app_secret": "YOUR_QQ_BOT_APP_SECRET",
+  "self_id": "",
+  "download_media": true,
+  "text_chunk_size": 2000,
+  "passive_ttl_seconds": 300,
+  "request_timeout_seconds": 30,
+  "max_media_bytes": 104857600,
+  "cache_size": 4096,
+  "event_queue_size": 1024
+}

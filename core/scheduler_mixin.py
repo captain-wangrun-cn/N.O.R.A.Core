@@ -797,13 +797,20 @@ class SchedulerMixin:
                     },
                 )
             if response:
-                await self._send_split_response(chat_id, response)
+                from adapters.delivery import DeliveryContext
+                sent_ids, response = await self._send_visible_reply(
+                    chat_id, response, chat_type=identity.chat_type,
+                    delivery_context=DeliveryContext.proactive(identity.platform, identity.platform_chat_id, identity.chat_type),
+                )
+                if not response:
+                    return
                 self.message_history.add_message(
                     platform=identity.platform,
                     chat_id=storage_id,
                     role="assistant",
                     content=response,
                     user_id="assistant",
+                    metadata={"platform_message_ids": sent_ids},
                     memory_scope_id=identity.memory_scope_id,
                     place_scope_id=identity.place_scope_id,
                 )
@@ -821,13 +828,14 @@ class SchedulerMixin:
             logger.error(f"[{chat_id}] 发送追话消息失败: {e}", exc_info=True)
 
     async def _send_split_response(self, chat_id: str, response: str) -> bool:
-        """按 [SPLIT] / [SPLIT:秒数] 分段发送。"""
-        if self._SPLIT_MARKER_PATTERN.search(response):
-            await self._send_split_message(chat_id, response)
-            return True
-
-        await self._send_platform_message(chat_id, response)
-        return False
+        """兼容入口：返回是否采用了语义分段，不用于判断送达。"""
+        from adapters.delivery import DeliveryContext
+        identity = self._identity_for_runtime_key(chat_id)
+        await self._send_split_message(
+            chat_id, response, chat_type=identity.chat_type,
+            delivery_context=DeliveryContext.proactive(identity.platform, identity.platform_chat_id, identity.chat_type),
+        )
+        return bool(self._SPLIT_MARKER_PATTERN.search(response))
 
     async def _send_wrapup_message(self, chat_id: str):
         """生成并发送结束对话的消息，同时写入聊天记录。"""
@@ -882,13 +890,20 @@ class SchedulerMixin:
                     },
                 )
             if response:
-                await self._send_split_response(chat_id, response)
+                from adapters.delivery import DeliveryContext
+                sent_ids, response = await self._send_visible_reply(
+                    chat_id, response, chat_type=identity.chat_type,
+                    delivery_context=DeliveryContext.proactive(identity.platform, identity.platform_chat_id, identity.chat_type),
+                )
+                if not response:
+                    return
                 self.message_history.add_message(
                     platform=identity.platform,
                     chat_id=storage_id,
                     role="assistant",
                     content=response,
                     user_id="assistant",
+                    metadata={"platform_message_ids": sent_ids},
                     memory_scope_id=identity.memory_scope_id,
                     place_scope_id=identity.place_scope_id,
                 )
@@ -1280,23 +1295,32 @@ class SchedulerMixin:
                     )
                     send_key = ""
 
-        sent_reply = bool(user_reply and send_key)
-        if sent_reply:
-            await self._send_split_message(send_key, user_reply, chat_type=send_chat_type)
+        from adapters.delivery import DeliveryContext
+        sent_ids: list[str] = []
+        visible_reply = ""
+        sent_reply = False
+        if user_reply and send_key:
+            sent_ids, visible_reply = await self._send_visible_reply(
+                send_key, user_reply, chat_type=send_chat_type,
+                delivery_context=DeliveryContext.proactive(dest_identity.platform, dest_identity.platform_chat_id, send_chat_type),
+            )
+            sent_reply = bool(sent_ids)
 
             log_platform = dest_identity.platform if redirected else platform
             log_storage_id = dest_identity.storage_id if redirected else storage_id
             log_memory_scope_id = dest_identity.memory_scope_id if redirected else identity.memory_scope_id
             log_place_scope_id = dest_identity.place_scope_id if redirected else identity.place_scope_id
-            self.message_history.add_message(
-                platform=log_platform,
-                chat_id=log_storage_id,
-                role="assistant",
-                content=user_reply,
-                user_id="assistant",
-                memory_scope_id=log_memory_scope_id,
-                place_scope_id=log_place_scope_id,
-            )
+            if visible_reply:
+                self.message_history.add_message(
+                    platform=log_platform,
+                    chat_id=log_storage_id,
+                    role="assistant",
+                    content=visible_reply,
+                    user_id="assistant",
+                    metadata={"platform_message_ids": sent_ids},
+                    memory_scope_id=log_memory_scope_id,
+                    place_scope_id=log_place_scope_id,
+                )
         else:
             if user_reply and not send_key:
                 logger.info(f"[{chat_id}] 主动消息投递目标被拒绝，跳过发送")
@@ -1310,7 +1334,7 @@ class SchedulerMixin:
         trigger_note = f"[proactive:{event_type}:{message_kind}] {reason}" if reason else f"[proactive:{event_type}:{message_kind}]"
         session_history.append({"role": "system", "content": trigger_note})
         if sent_reply:
-            session_history.append({"role": "assistant", "content": user_reply})
+            session_history.append({"role": "assistant", "content": visible_reply})
         if len(session_history) > 20:
             session["history"] = session_history[-20:]
 
@@ -1320,8 +1344,8 @@ class SchedulerMixin:
                 f"主动消息触发（类型: {event_type}, 分类: {message_kind}, 时间: {current_time}, 缘由: {reason_display}）。"
                 "请完成前脑提到的需要后台处理的任务，生成最终要发送给用户的结果。"
             )
-            if user_reply:
-                backend_instruction += f"\n\n前脑已对用户说: {user_reply}"
+            if visible_reply:
+                backend_instruction += f"\n\n前脑已对用户说: {visible_reply}"
             elif raw_front_reply:
                 backend_instruction += f"\n\n前脑原始回复: {raw_front_reply}"
 
@@ -1337,7 +1361,8 @@ class SchedulerMixin:
                 "user_name": "User",
                 "text": backend_instruction,
                 "_front_brain_handled": True,
-                "_front_brain_reply": user_reply,
+                "_front_brain_reply": visible_reply,
+                "delivery_context": DeliveryContext.proactive(dest_identity.platform, dest_identity.platform_chat_id, dest_identity.chat_type),
                 "task_instruction": task_instruction,
                 "use_image_model": front_result.get("use_image_model", False),
             }

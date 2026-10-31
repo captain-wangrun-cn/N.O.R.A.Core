@@ -98,6 +98,11 @@ adapters/<platform>/
 - `parse_media: bool = True`：是否解析 NORA 通用媒体标记，如 `[image: path]` / `[file: path]`。`False` 时按纯文本发送。
 - `chat_type: str = ""`：调用方知道目标是 `private` / `group` 时可传入；adapter 可用它选择平台发送 API。不能识别时应回退到自身缓存或平台默认行为。
 - `reply_to_message_id: str = ""`：Nora 本条出站消息应该回复/引用的平台消息 ID。支持 reply 的平台必须优先使用该显式值，不要再回退到“最近一条入站消息”；不支持 reply 的平台应安全忽略。
+- `delivery_context: DeliveryContext | None`：逻辑轮不可变来源快照（`adapters/delivery.py`）；QQ 用来源 ID 解析本轮被动凭据，**不等同于引用目标**。跨场景清来源；主动通知无来源。其它平台安全忽略。
+
+QQ 接入和配置见 [QQ 官方机器人架构](../docs/architecture/qqbot.md)。可选 `before_command(context, identity)` 闸门返回 True 时 Core 不再执行命令；目前仅 QQ 调用，保持其它平台行为。dict `dispatch_message` 保留标准字段之外的群门控/聚合/投递字段。
+
+发送成功仍返回 `list[str]`；可用 `DeliveryReceipt` 附确认可见文本，部分失败用 `DeliveryError`，取消用 `DeliveryCancelled` 携部分回执，不把未发原文持久化成用户已见历史。
 
 实现要求：
 

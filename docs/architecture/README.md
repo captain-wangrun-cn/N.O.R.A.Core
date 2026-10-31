@@ -229,6 +229,8 @@ flowchart TB
 
 ### 🌉 平台适配 (Adapters)
 
+- **[QQ 官方机器人](./qqbot.md)**
+  - 独立 qqbot adapter：全群/主动、WS 恢复、请求绑定预算、分片媒体、安全按钮与真实回执；真机验收待授权。
 - **[Adapter 系统](./adapter-system.md)**
   - 轻量 Adapter/Event/Message 分层、metadata 清单、通用/平台 prompt 分层与 Telegram 拆分示例。
 - **[实时通话 (RTC)](./rtc.md)** — P2 已实现，真机验收进行中

@@ -66,6 +66,12 @@ def _onebotv11_configured() -> bool:
     return not is_placeholder_value(cfg.get("websocket_url"))
 
 
+def _qqbot_configured() -> bool:
+    cfg = read_adapter_config("qqbot")
+    return bool(cfg and not is_placeholder_value(cfg.get("app_id"))
+                and not is_placeholder_value(cfg.get("app_secret")))
+
+
 def resolve_adapter_names(adapter_name: str = "auto") -> list[str]:
     """解析 --adapter 参数为一个或多个适配器名。
 
@@ -85,11 +91,13 @@ def resolve_adapter_names(adapter_name: str = "auto") -> list[str]:
             configured.append("onebotv11")
         if _telegram_configured():
             configured.append("telegram")
+        if _qqbot_configured():
+            configured.append("qqbot")
         if configured:
             return configured
         raise ValueError(
             "No configured adapter found. Please edit one adapter config.json, "
-            "or start with --adapter telegram / --adapter onebotv11 to configure explicitly."
+            "or start with --adapter telegram / --adapter onebotv11 / --adapter qqbot to configure explicitly."
         )
 
     names = [_canonical(part) for part in normalized.split(",") if part.strip()]
@@ -119,6 +127,10 @@ def _instantiate_adapter(normalized: str):
         from adapters.onebotv11 import OneBotV11Adapter
 
         return OneBotV11Adapter()
+    if normalized == "qqbot":
+        from adapters.qqbot import QQBotAdapter
+
+        return QQBotAdapter()
     raise ValueError(f"Unsupported adapter: {normalized}")
 
 

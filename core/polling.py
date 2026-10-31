@@ -197,11 +197,12 @@ class PollingMixin:
                     redirected = bool(send_target.get("redirected"))
                     dest_identity = send_target.get("identity") or identity
                     reply_id = "" if redirected else reply_target_message_id(context)
-                    sent_ids = await self._send_split_message(
+                    sent_ids, visible_review_reply = await self._send_visible_reply(
                         send_key,
                         review_reply,
                         reply_to_message_id=reply_id,
                         chat_type=send_chat_type,
+                        delivery_context=context.get("delivery_context"),
                     )
 
                     # 保存到数据库（重定向后按目标场景身份归属）
@@ -209,20 +210,21 @@ class PollingMixin:
                     log_storage_id = dest_identity.storage_id if redirected else storage_id
                     log_memory_scope_id = dest_identity.memory_scope_id if redirected else memory_scope_id
                     log_place_scope_id = dest_identity.place_scope_id if redirected else place_scope_id
-                    self.message_history.add_message(
-                        platform=log_platform,
-                        chat_id=log_storage_id,
-                        role="assistant",
-                        content=review_reply,
-                        user_id="assistant",
-                        metadata={"source": "polling_review", "platform_message_ids": sent_ids},
-                        memory_scope_id=log_memory_scope_id,
-                        place_scope_id=log_place_scope_id,
-                    )
+                    if visible_review_reply:
+                        self.message_history.add_message(
+                            platform=log_platform,
+                            chat_id=log_storage_id,
+                            role="assistant",
+                            content=visible_review_reply,
+                            user_id="assistant",
+                            metadata={"source": "polling_review", "platform_message_ids": sent_ids},
+                            memory_scope_id=log_memory_scope_id,
+                            place_scope_id=log_place_scope_id,
+                        )
                     # 同步到 session history
-                    if not action == "continue":
+                    if not action == "continue" and visible_review_reply:
                         session_history = session.setdefault("history", [])
-                        session_history.append({"role": "assistant", "content": review_reply})
+                        session_history.append({"role": "assistant", "content": visible_review_reply})
                         if len(session_history) > 20:
                             session["history"] = session_history[-20:]
                 

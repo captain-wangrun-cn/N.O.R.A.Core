@@ -14,6 +14,7 @@ import time
 import traceback
 from typing import Dict, Any, List, Optional, cast
 
+from adapters.delivery import DeliveryCancelled, DeliveryContext, backend_archive_text
 from brain.prompts import (
     get_system_prompt,
     render_template,
@@ -486,6 +487,12 @@ class BackBrainMixin:
             "resolved": False,
         }
 
+        delivered_parts: list[str] = []
+        visible_history_saved = False
+        delivery_context = context.get("delivery_context")
+        if platform == "qqbot" and not isinstance(delivery_context, DeliveryContext):
+            delivery_context = DeliveryContext.from_context(context)
+
         async def _send_reply(text_to_send: str) -> list[str]:
             """按路由标记把后脑回复发到目标场景（缺省=当前会话）。"""
             self.resolve_route_state(text_to_send, _route_state, identity)
@@ -497,13 +504,22 @@ class BackBrainMixin:
             reply_id = "" if _route_state.get("redirected") else reply_to_message_id
             # 一旦对用户可见地说过话，本轮就不能再被上层"折进同一轮"的合并逻辑 cancel 重启，
             # 否则用户会先看到半截回复、再看到重写后的完整回复。
-            self._mark_back_brain_sent_user_message(chat_id)
-            return await self._send_split_message(
-                send_key,
-                send_text,
-                reply_to_message_id=reply_id,
-                chat_type=send_ct,
-            )
+            try:
+                sent_ids, visible_text = await self._send_visible_reply(
+                    send_key,
+                    send_text,
+                    reply_to_message_id=reply_id,
+                    chat_type=send_ct,
+                    delivery_context=delivery_context,
+                )
+            except DeliveryCancelled as exc:
+                if exc.sent_ids:
+                    self._mark_back_brain_sent_user_message(chat_id)
+                raise
+            if sent_ids:
+                self._mark_back_brain_sent_user_message(chat_id)
+                delivered_parts.append(visible_text)
+            return sent_ids
 
         # 记录本次后脑任务的输入快照：被"新消息到达"打断重启时需要把旧输入+新输入合并
         self.back_brain_input_context[chat_id] = {
@@ -516,6 +532,7 @@ class BackBrainMixin:
             # 旧那一轮的平台消息 ID 同理：合并后它的正文成了本轮输入的一部分，
             # 不带过去的话模型就只看得到后到的那条文本的 ID，想引用那张图会引到别处。
             "platform_message_ids": list(platform_msg_ids),
+            "delivery_context": delivery_context,
             # 轮询模式由前脑审查驱动自己的重启节奏，上层不能拿"折进同一轮"去 cancel 它
             "in_polling": bool(context.get("_in_polling_loop", False)),
             # 折进同一轮的判定依据：谁发的、什么时候开始的、有没有已经对用户说过话
@@ -895,6 +912,7 @@ class BackBrainMixin:
                     for msg in db_context
                     if msg["role"] in ("user", "assistant", "system")
                 ]
+            confirmed_base_history = list(temp_history)
             polling_history_insert_at = len(temp_history)
 
             # Typing 状态跟踪（在所有 turns 中保持）
@@ -1329,25 +1347,29 @@ class BackBrainMixin:
                         progress_msg = str(tool_args.get("message", "")).strip()
                         in_polling = context.get("_in_polling_loop", False)
                         if progress_msg and not in_polling and not no_reply:
+                            progress_ids: list[str] = []
                             try:
-                                await self._send_platform_message(
+                                progress_ids, progress_visible = await self._send_visible_reply(
                                     chat_id,
                                     f"⏳ {progress_msg}",
-                                    parse_media=False,
                                     reply_to_message_id=reply_to_message_id,
+                                    delivery_context=delivery_context,
                                 )
-                                self.message_history.add_message(
-                                    platform=platform,
-                                    chat_id=storage_id,
-                                    role="assistant",
-                                    content=f"⏳ {progress_msg}",
-                                    user_id="assistant",
-                                    memory_scope_id=memory_scope_id,
-                                    place_scope_id=place_scope_id,
-                                )
+                                if progress_ids:
+                                    self._mark_back_brain_sent_user_message(chat_id)
+                                    self.message_history.add_message(
+                                        platform=platform,
+                                        chat_id=storage_id,
+                                        role="assistant",
+                                        content=progress_visible,
+                                        user_id="assistant",
+                                        metadata={"platform_message_ids": progress_ids},
+                                        memory_scope_id=memory_scope_id,
+                                        place_scope_id=place_scope_id,
+                                    )
                             except Exception as e:
                                 logger.debug(f"[{chat_id}] 发送进度消息失败: {e}")
-                            tool_result = "Progress message sent to user."
+                            tool_result = "Progress message sent to user." if progress_ids else "Progress delivery was not confirmed; do not claim the user received it."
                         elif progress_msg and in_polling:
                             logger.info(f"[{chat_id}] [轮询模式] 后脑进度: {progress_msg}")
                             tool_result = "Progress noted. (Polling mode: message will be reviewed by front-brain, not sent directly.)"
@@ -1851,15 +1873,10 @@ class BackBrainMixin:
 
             if image_tags_failed:
                 if not in_polling and not no_reply:
-                    await self._send_platform_message(
-                        chat_id,
-                        "图片输出异常，已自动重试失败，请稍后重试。",
-                        reply_to_message_id=reply_to_message_id,
-                    )
-                    # 这一轮 final_response_buffer 已被清空，4.5 段的入库分支不会执行。
-                    # 不补这一条，历史里就只剩用户那条图片消息、AI 一片空白：
-                    # followup 的 _detect_followup_intent 会据此判 END 静默收尾。
-                    final_response_buffer = "图片输出异常，已自动重试失败，请稍后重试。"
+                    error_text = "图片输出异常，已自动重试失败，请稍后重试。"
+                    sent_ids = await _send_reply(error_text)
+                    response_platform_ids.extend(sent_ids)
+                    final_response_buffer = error_text
                 else:
                     logger.info(f"[{chat_id}] [轮询模式] 图片输出异常，已自动重试失败，前脑稍后重试。")
             elif final_response_buffer:
@@ -1960,7 +1977,9 @@ class BackBrainMixin:
                             response_platform_ids.extend(sent_ids)
             
             # --- 4.5 保存助手回复到数据库 ---
-            if final_response_buffer:
+            internal_result = bool(context.get("_in_polling_loop") or context.get("no_reply"))
+            archive_response = backend_archive_text(final_response_buffer, delivered_parts, internal=internal_result)
+            if archive_response:
                 metadata = {"image_ids": [img.get("image_id") for img in multimodal_images] if multimodal_images else None}
                 media_id_map = _image_ids_by_platform_message_id(multimodal_images, multimodal_videos)
                 if media_id_map:
@@ -1974,13 +1993,14 @@ class BackBrainMixin:
                     platform=_dest.platform if _dest else platform,
                     chat_id=_dest.storage_id if _dest else storage_id,
                     role="assistant",
-                    content=final_response_buffer,
+                    content=archive_response,
                     user_id="assistant",
                     metadata=metadata,
                     memory_scope_id=_dest.memory_scope_id if _dest else memory_scope_id,
                     place_scope_id=_dest.place_scope_id if _dest else place_scope_id,
                 )
-            
+                visible_history_saved = True
+
             # --- 4.6 图片记忆存储 (Image Memory Storage) ---
             if multimodal_images and self.image_store.enabled:
                 for img in multimodal_images:
@@ -2172,12 +2192,31 @@ class BackBrainMixin:
                 # 等前脑确认结束后由 polling loop 统一清理。
                 self._sync_backend_work_history(session, backend_work_history, in_polling_mode=True)
             else:
+                if platform == "qqbot" and not internal_result:
+                    # QQ 的工作草稿不能冒充用户已见内容；polling/no_reply 仍保留内部产物。
+                    # 保留历史里的已发助手消息；只丢弃本轮新增的未确认工作草稿。
+                    compact_history = list(confirmed_base_history)
+                    compact_history.extend(h for h in temp_history[len(confirmed_base_history):]
+                                           if h.get("role") != "assistant"
+                                           and not str(h.get("content", "")).startswith("【Tool Output for "))
+                    if archive_response:
+                        compact_history.append({"role": "assistant", "content": archive_response})
                 session["history"] = self._trim_history(compact_history, max_items=20)
             logger.debug(f"[{chat_id}] History updated. New length: {len(session.get('history', []))}")
 
         except asyncio.CancelledError:
             status.finish()
-            
+            if delivered_parts and not visible_history_saved:
+                destination = _route_state.get("identity") or identity
+                visible = "\n".join(delivered_parts)
+                self.message_history.add_message(
+                    platform=destination.platform, chat_id=destination.storage_id,
+                    role="assistant", content=visible, user_id="assistant",
+                    metadata={"source": "partial_delivery", "platform_message_ids": response_platform_ids},
+                    memory_scope_id=destination.memory_scope_id, place_scope_id=destination.place_scope_id,
+                )
+                session.setdefault("history", []).append({"role": "assistant", "content": visible})
+
             session["pending_text"] = text
             
             if 'final_response_buffer' in locals() and final_response_buffer:

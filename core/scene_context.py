@@ -30,6 +30,8 @@ def _platform_label(platform: str) -> str:
         return "QQ / OneBot v11"
     if value == "telegram":
         return "Telegram"
+    if value == "qqbot":
+        return "QQ 官方机器人"
     return value or "unknown"
 
 

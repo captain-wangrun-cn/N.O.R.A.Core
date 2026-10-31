@@ -49,6 +49,8 @@ class AppearanceGenMixin:
         draw_key: str,
         draw_request: str,
         identity: Any = None,
+        *,
+        delivery_context: Any = None,
     ) -> None:
         """
         启动生图后台任务。per-runtime_key 只保留最新一张：
@@ -76,7 +78,7 @@ class AppearanceGenMixin:
             old.cancel()
 
         self.image_gen_tasks[draw_key] = asyncio.create_task(
-            self._generate_and_send_appearance_image(draw_key, draw_request, identity)
+            self._generate_and_send_appearance_image(draw_key, draw_request, identity, delivery_context=delivery_context)
         )
 
     def cancel_appearance_image_task(self, draw_key: str) -> bool:
@@ -203,6 +205,8 @@ class AppearanceGenMixin:
         runtime_key: str,
         user_request: str,
         identity: Any = None,
+        *,
+        delivery_context: Any = None,
     ) -> None:
         """
         读 APPEARANCE.md + manifest → draw_desc 出提示词并挑参考图 → 加载参考图
@@ -254,8 +258,12 @@ class AppearanceGenMixin:
                     draw_prompt=prompt,
                 )
 
-            await self._send_platform_message(runtime_key, f"[image: {abs_path}]")
-            logger.info("[%s] 生图已追发给用户。", runtime_key)
+            send_kwargs = {"delivery_context": delivery_context} if delivery_context is not None else {}
+            sent_ids = await self._send_platform_message(runtime_key, f"[image: {abs_path}]", **send_kwargs)
+            if sent_ids:
+                logger.info("[%s] 生图已追发给用户。", runtime_key)
+            else:
+                logger.warning("[%s] 生图未取得发送回执。", runtime_key)
 
         except asyncio.CancelledError:
             # 被新的生图请求取消是正常路径，不当成失败。

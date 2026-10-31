@@ -50,6 +50,8 @@ class SpeechGenMixin:
         voice_key: str,
         voice_text: str,
         identity: Any = None,
+        *,
+        delivery_context: Any = None,
     ) -> None:
         """
         启动语音合成后台任务。per-runtime_key 只保留最新一条：
@@ -79,7 +81,7 @@ class SpeechGenMixin:
             old.cancel()
 
         self.voice_gen_tasks[voice_key] = asyncio.create_task(
-            self._generate_and_send_voice(voice_key, voice_text)
+            self._generate_and_send_voice(voice_key, voice_text, delivery_context=delivery_context)
         )
 
     def cancel_voice_task(self, voice_key: str) -> bool:
@@ -92,7 +94,7 @@ class SpeechGenMixin:
         self.voice_gen_tasks.pop(voice_key, None)
         return False
 
-    async def _generate_and_send_voice(self, runtime_key: str, voice_text: str) -> None:
+    async def _generate_and_send_voice(self, runtime_key: str, voice_text: str, *, delivery_context: Any = None) -> None:
         """
         tts provider 合成 → 落盘 workspace/data/voice/YYYY-MM-DD/ → [voice: path] 追发。
 
@@ -127,8 +129,12 @@ class SpeechGenMixin:
                 f.write(audio_bytes)
             logger.info("[%s] 语音合成完成，已落盘: %s", runtime_key, abs_path)
 
-            await self._send_platform_message(runtime_key, f"[voice: {abs_path}]")
-            logger.info("[%s] 语音已追发给用户。", runtime_key)
+            send_kwargs = {"delivery_context": delivery_context} if delivery_context is not None else {}
+            sent_ids = await self._send_platform_message(runtime_key, f"[voice: {abs_path}]", **send_kwargs)
+            if sent_ids:
+                logger.info("[%s] 语音已追发给用户。", runtime_key)
+            else:
+                logger.warning("[%s] 语音未取得发送回执。", runtime_key)
 
         except asyncio.CancelledError:
             # 被新的语音请求取消是正常路径，不当成失败。

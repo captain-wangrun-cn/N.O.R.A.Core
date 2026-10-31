@@ -408,6 +408,26 @@ def get_llm_effort_budget_tokens(model_alias: str = "smart"):
     return EFFORT_BUDGET_TOKENS.get(effort)
 
 
+LLM_MODEL_ALIASES = (
+    "smart", "fast", "coder", "image", "video", "security",
+    "fast-image", "draw", "draw_desc", "summary",
+)
+
+
+def set_llm_model_by_alias(model_alias: str, model_name: str) -> None:
+    """校验并保存单个模型别名，不依赖平台 UI 或 provider 枚举。"""
+    name = str(model_name or "").strip()
+    if model_alias not in LLM_MODEL_ALIASES or not name or len(name) > 256 or any(ord(c) < 32 for c in name):
+        raise ValueError("Invalid model alias or name")
+    cfg = dict(_safe_config())
+    llm_cfg = dict(cfg.get("llm", {}) or {})
+    models = dict(llm_cfg.get("models", {}) or {})
+    models[model_alias] = name
+    llm_cfg["models"] = models
+    cfg["llm"] = llm_cfg
+    save_config(cfg)
+
+
 def set_llm_effort_by_alias(model_alias: str, effort) -> dict:
     """
     持久化单个别名的推理强度。传 None / 空值表示清除该别名的设置（回落全局）。

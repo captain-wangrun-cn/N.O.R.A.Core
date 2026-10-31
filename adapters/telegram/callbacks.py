@@ -614,11 +614,7 @@ class TelegramCallbacksMixin:
             return
 
         try:
-            cfg = config.get_config() or {}
-            llm_cfg = cfg.setdefault("llm", {})
-            models_cfg = llm_cfg.setdefault("models", {})
-            models_cfg[alias] = model_name
-            config.save_config(cfg)
+            config.set_llm_model_by_alias(alias, model_name)
             await update.message.reply_text(f"✅ 已更新 {alias} 模型为: {model_name}")
         except Exception as e:
             await update.message.reply_text(f"❌ 更新失败: {e}")

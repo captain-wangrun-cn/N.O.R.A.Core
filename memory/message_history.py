@@ -783,10 +783,7 @@ class MessageHistory:
         跨平台共享作用域下同一 memory_scope 会有多个 (platform, chat_id) 分区、各有
         各的归档，`LIMIT 1` 会让其余的归档永远读不到、也删不掉，内容静默丢失。
 
-        ⚠️ **潜在风险（目前不触发）**：多个 (platform, chat_id) 分区合并成一条时，
-        各平台的「我／你」会被无声地混在一起（摘要正文用第一/二人称）。
-        只有同一 memory_scope 下真的出现**第二个分区**才会踩到——届时必须改成按分区分别标注，
-        不能继续这样直接拼。当前生产只有一个分区（telegram/6112866979），安全。
+        多分区归档仍合成一条，但逐项标明平台/场景来源，避免摘要人称无声混用。
         """
         rows = self._dedupe_summaries([r for r in rows if r])
         if not rows:
@@ -795,6 +792,8 @@ class MessageHistory:
             "以下是更早对话的归档总结。"
             "（摘要正文中「我」指你 Nora，「你」指主人）\n\n"
             + "\n\n".join(
+                f"[来源: platform={r.get('platform') or 'unknown'}, "
+                f"scene={r.get('place_scope_id') or r.get('chat_id') or 'unknown'}] "
                 f"[📚 早期对话总结，共{r.get('message_count') or 0}条] "
                 f"{str(r.get('summary_text') or '').strip()}"
                 for r in rows

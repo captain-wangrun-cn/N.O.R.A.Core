@@ -32,6 +32,7 @@ network:
 # 例如：
 #   - adapters/telegram/config.json -> bot_token
 #   - adapters/onebotv11/config.json -> websocket_url / access_token / enable_napcat_api
+#   - adapters/qqbot/config.json -> app_id / app_secret（QQ 官方机器人）
 
 # 主人识别（跨平台接力）
 # Nora 是同一个连续的人；owner 用来认出"哪个账号是主人"。
@@ -42,6 +43,9 @@ owner:
     # - platform: telegram
     #   user_id: "123456789"
     #   display_name: "主人"   # 可选，仅备注用
+    # QQ 官方接入前请预绑定；开放 ID 不是真实 QQ 号，也不预设群/私聊相同。
+    # - platform: qqbot
+    #   user_id: "YOUR_OWNER_USER_OPENID"
 
 llm:
   # 默认提供商（当某个 alias 未显式绑定 provider 时使用）

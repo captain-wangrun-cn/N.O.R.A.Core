@@ -18,7 +18,7 @@ def test_auto_selects_onebot_when_telegram_is_placeholder(tmp_path, monkeypatch)
         encoding="utf-8",
     )
 
-    monkeypatch.setattr(main, "read_adapter_config", lambda name: json.loads((adapters_dir / name / "config.json").read_text(encoding="utf-8")))
+    monkeypatch.setattr(main, "read_adapter_config", lambda name: json.loads((adapters_dir / name / "config.json").read_text(encoding="utf-8")) if (adapters_dir / name / "config.json").exists() else None)
     monkeypatch.setattr(
         main,
         "load_adapter_config",
@@ -46,7 +46,7 @@ def test_auto_selects_telegram_when_only_telegram_is_configured(tmp_path, monkey
         encoding="utf-8",
     )
 
-    monkeypatch.setattr(main, "read_adapter_config", lambda name: json.loads((adapters_dir / name / "config.json").read_text(encoding="utf-8")))
+    monkeypatch.setattr(main, "read_adapter_config", lambda name: json.loads((adapters_dir / name / "config.json").read_text(encoding="utf-8")) if (adapters_dir / name / "config.json").exists() else None)
     monkeypatch.setattr(
         main,
         "load_adapter_config",

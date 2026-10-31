@@ -14,6 +14,7 @@ import re
 import time
 from typing import Dict, Any, List, Optional
 
+from adapters.delivery import DeliveryCancelled, DeliveryContext, DeliveryError, DeliveryReceipt, delivered_text
 from brain.multimodal import extract_image_payloads, extract_video_payloads
 from brain.prompts import (
     render_template,
@@ -523,6 +524,9 @@ class MessageHandlerMixin:
         batch_platform_ids = list(dict.fromkeys(mid for mid in batch_platform_ids if mid))
         if batch_platform_ids:
             context["platform_message_ids"] = batch_platform_ids
+        if latest.platform == "qqbot":
+            context["qqbot_has_nested_elements"] = any(event.context.get("qqbot_has_nested_elements") for event in events)
+            context["delivery_context"] = DeliveryContext.from_context(context)
         return context
 
     async def _promote_group_message_batch(
@@ -623,6 +627,11 @@ class MessageHandlerMixin:
         memory_scope_id = identity.memory_scope_id
         place_scope_id = identity.place_scope_id
         actor_display_name = identity.actor_display_name
+        if platform == "qqbot":
+            context["delivery_context"] = DeliveryContext.from_context(context)
+            adapter = self._adapter_for_key(chat_id)
+            if await adapter.before_command(context, identity):
+                return
 
         # 解析多模态输入：从 [image: ...] 中提取真实图片内容
         clean_text, multimodal_images = extract_image_payloads(text)
@@ -975,6 +984,8 @@ class MessageHandlerMixin:
                 )
                 if merged_platform_ids:
                     merged_context["platform_message_ids"] = merged_platform_ids
+                if platform == "qqbot":
+                    merged_context["delivery_context"] = DeliveryContext.from_context(merged_context)
                 # 清理上一轮残留：旧 input_context 和 partial 我们已经吃掉了
                 self.back_brain_partial.pop(backend_runtime, None)
                 self.back_brain_input_context.pop(backend_runtime, None)
@@ -1020,25 +1031,27 @@ class MessageHandlerMixin:
             if action in {"stop", "change"}:
                 session_history.append({"role": "user", "content": message_content})
                 if reply:
-                    msg_ids = await self._send_platform_message(
+                    msg_ids, reply = await self._send_visible_reply(
                         chat_id,
                         reply,
                         reply_to_message_id=reply_to_message_id,
+                        delivery_context=context.get("delivery_context"),
                     )
                     md = {"source": "interrupt"}
                     if msg_ids:
                         md["platform_message_ids"] = [str(mid) for mid in msg_ids]
-                    self.message_history.add_message(
-                        platform=platform,
-                        chat_id=storage_id,
-                        role="assistant",
-                        content=reply,
-                        user_id="assistant",
-                        metadata=md,
-                        memory_scope_id=memory_scope_id,
-                        place_scope_id=place_scope_id,
-                    )
-                    session_history.append({"role": "assistant", "content": reply})
+                    if reply:
+                        self.message_history.add_message(
+                            platform=platform,
+                            chat_id=storage_id,
+                            role="assistant",
+                            content=reply,
+                            user_id="assistant",
+                            metadata=md,
+                            memory_scope_id=memory_scope_id,
+                            place_scope_id=place_scope_id,
+                        )
+                        session_history.append({"role": "assistant", "content": reply})
                 await self._interrupt_backend(
                     chat_id,
                     reason=action,
@@ -1052,25 +1065,27 @@ class MessageHandlerMixin:
                 session_history.append({"role": "user", "content": message_content})
                 if reply:
                     reply = self._append_busy_queue_summary(chat_id, reply)
-                    msg_ids = await self._send_platform_message(
+                    msg_ids, reply = await self._send_visible_reply(
                         chat_id,
                         reply,
                         reply_to_message_id=reply_to_message_id,
+                        delivery_context=context.get("delivery_context"),
                     )
                     md = {"source": "queue_status"}
                     if msg_ids:
                         md["platform_message_ids"] = [str(mid) for mid in msg_ids]
-                    self.message_history.add_message(
-                        platform=platform,
-                        chat_id=storage_id,
-                        role="assistant",
-                        content=reply,
-                        user_id="assistant",
-                        metadata=md,
-                        memory_scope_id=memory_scope_id,
-                        place_scope_id=place_scope_id,
-                    )
-                    session_history.append({"role": "assistant", "content": reply})
+                    if reply:
+                        self.message_history.add_message(
+                            platform=platform,
+                            chat_id=storage_id,
+                            role="assistant",
+                            content=reply,
+                            user_id="assistant",
+                            metadata=md,
+                            memory_scope_id=memory_scope_id,
+                            place_scope_id=place_scope_id,
+                        )
+                        session_history.append({"role": "assistant", "content": reply})
                 return
             elif action == "cancel_queue":
                 session_history.append({"role": "user", "content": message_content})
@@ -1083,25 +1098,27 @@ class MessageHandlerMixin:
                     else:
                         logger.warning(f"[{chat_id}] 取消排队任务 #{param} 失败（序号无效或队列已空）")
                 if reply:
-                    msg_ids = await self._send_platform_message(
+                    msg_ids, reply = await self._send_visible_reply(
                         chat_id,
                         reply,
                         reply_to_message_id=reply_to_message_id,
+                        delivery_context=context.get("delivery_context"),
                     )
                     md = {"source": "queue_cancel"}
                     if msg_ids:
                         md["platform_message_ids"] = [str(mid) for mid in msg_ids]
-                    self.message_history.add_message(
-                        platform=platform,
-                        chat_id=storage_id,
-                        role="assistant",
-                        content=reply,
-                        user_id="assistant",
-                        metadata=md,
-                        memory_scope_id=memory_scope_id,
-                        place_scope_id=place_scope_id,
-                    )
-                    session_history.append({"role": "assistant", "content": reply})
+                    if reply:
+                        self.message_history.add_message(
+                            platform=platform,
+                            chat_id=storage_id,
+                            role="assistant",
+                            content=reply,
+                            user_id="assistant",
+                            metadata=md,
+                            memory_scope_id=memory_scope_id,
+                            place_scope_id=place_scope_id,
+                        )
+                        session_history.append({"role": "assistant", "content": reply})
                 return
             elif action == "clear_queue":
                 session_history.append({"role": "user", "content": message_content})
@@ -1110,25 +1127,27 @@ class MessageHandlerMixin:
                     await queue.clear()
                     logger.info(f"[{chat_id}] 已清空所有排队任务")
                 if reply:
-                    msg_ids = await self._send_platform_message(
+                    msg_ids, reply = await self._send_visible_reply(
                         chat_id,
                         reply,
                         reply_to_message_id=reply_to_message_id,
+                        delivery_context=context.get("delivery_context"),
                     )
                     md = {"source": "queue_clear"}
                     if msg_ids:
                         md["platform_message_ids"] = [str(mid) for mid in msg_ids]
-                    self.message_history.add_message(
-                        platform=platform,
-                        chat_id=storage_id,
-                        role="assistant",
-                        content=reply,
-                        user_id="assistant",
-                        metadata=md,
-                        memory_scope_id=memory_scope_id,
-                        place_scope_id=place_scope_id,
-                    )
-                    session_history.append({"role": "assistant", "content": reply})
+                    if reply:
+                        self.message_history.add_message(
+                            platform=platform,
+                            chat_id=storage_id,
+                            role="assistant",
+                            content=reply,
+                            user_id="assistant",
+                            metadata=md,
+                            memory_scope_id=memory_scope_id,
+                            place_scope_id=place_scope_id,
+                        )
+                        session_history.append({"role": "assistant", "content": reply})
                 return
             else:
                 # action == "queue"：不发忙碌提示，让前脑继续。
@@ -1320,11 +1339,12 @@ class MessageHandlerMixin:
             # 重定向到别的场景时，被引用的消息 id 在目标场景不存在，不能带引用。
             reply_id = "" if redirected else reply_to_message_id
             # 使用 [SPLIT] 分段发送
-            sent_message_ids = await self._send_split_message(
+            sent_message_ids, user_reply = await self._send_visible_reply(
                 send_key,
                 user_reply,
                 reply_to_message_id=reply_id,
                 chat_type=send_chat_type,
+                delivery_context=context.get("delivery_context"),
             )
 
             # 保存前脑回复到数据库，记录来源与平台 message_id。
@@ -1345,23 +1365,25 @@ class MessageHandlerMixin:
                     "needs_backend": bool(front_result.get("needs_backend")),
                     "task_instruction": front_task_instruction,
                 }
-            self.message_history.add_message(
-                platform=log_platform,
-                chat_id=log_storage_id,
-                role="assistant",
-                content=user_reply,
-                user_id="assistant",
-                metadata=metadata,
-                memory_scope_id=log_memory_scope_id,
-                place_scope_id=log_place_scope_id,
-            )
+            if user_reply:
+                self.message_history.add_message(
+                    platform=log_platform,
+                    chat_id=log_storage_id,
+                    role="assistant",
+                    content=user_reply,
+                    user_id="assistant",
+                    metadata=metadata,
+                    memory_scope_id=log_memory_scope_id,
+                    place_scope_id=log_place_scope_id,
+                )
 
             # 同步到 session history
             session = self.sessions.setdefault(chat_id, {"history": [], "interrupted_thought": "", "pending_text": ""})
             session_history = session.setdefault("history", [])
             if not session_history or session_history[-1] != {"role": "user", "content": message_content}:
                 session_history.append({"role": "user", "content": message_content})
-            session_history.append({"role": "assistant", "content": user_reply})
+            if user_reply:
+                session_history.append({"role": "assistant", "content": user_reply})
             if len(session_history) > 20:
                 session["history"] = session_history[-20:]
 
@@ -1378,7 +1400,10 @@ class MessageHandlerMixin:
             else:
                 draw_key = draw_key or chat_id
                 draw_identity = (send_target or {}).get("identity") or identity
-                self.start_appearance_image_task(draw_key, draw_request, draw_identity)
+                self.start_appearance_image_task(
+                    draw_key, draw_request, draw_identity,
+                    delivery_context=context.get("delivery_context"),
+                )
 
         # 3.10) 旁路语音：前脑 [VOICE]...[/VOICE]，与 [DRAW:] / [NEED_BACKEND] 都独立。
         #       位置约束同上（用 send_target 的 runtime_key，且在 presence_markers 之前）。
@@ -1389,7 +1414,9 @@ class MessageHandlerMixin:
                 logger.info(f"[{chat_id}] 投递目标被拒绝，跳过语音合成。")
             else:
                 voice_key = voice_key or chat_id
-                self.start_voice_task(voice_key, voice_text)
+                self.start_voice_task(
+                    voice_key, voice_text, delivery_context=context.get("delivery_context"),
+                )
 
         # 3.8) 在线状态标记。`[NEED_BACKEND]` + `[SEMI_ONLINE]` 是 prompt 推荐的组合
         #      （把活交给后脑就直接让位），但半在线不能在这里就生效：_transition_to_semi_online
@@ -1663,48 +1690,52 @@ class MessageHandlerMixin:
 
         if front_reply:
             reply_to_message_id = reply_target_message_id(backend_context)
-            front_sent_ids = await self._send_split_message(
+            front_sent_ids, front_reply = await self._send_visible_reply(
                 chat_id,
                 front_reply,
                 reply_to_message_id=reply_to_message_id,
+                delivery_context=backend_context.get("delivery_context"),
             )
             front_metadata = {"source": "front", "stage": "busy_chat"}
             if front_sent_ids:
                 front_metadata["platform_message_ids"] = front_sent_ids
-            self.message_history.add_message(
-                platform=platform,
-                chat_id=storage_id,
-                role="assistant",
-                content=front_reply,
-                user_id="assistant",
-                metadata=front_metadata,
-                memory_scope_id=memory_scope_id,
-                place_scope_id=place_scope_id,
-            )
-            session_history.append({"role": "assistant", "content": front_reply})
+            if front_reply:
+                self.message_history.add_message(
+                    platform=platform,
+                    chat_id=storage_id,
+                    role="assistant",
+                    content=front_reply,
+                    user_id="assistant",
+                    metadata=front_metadata,
+                    memory_scope_id=memory_scope_id,
+                    place_scope_id=place_scope_id,
+                )
+                session_history.append({"role": "assistant", "content": front_reply})
 
         if confirm_reply:
             reply_to_message_id = reply_target_message_id(backend_context)
-            sent_ids = await self._send_split_message(
+            sent_ids, confirm_reply = await self._send_visible_reply(
                 chat_id,
                 confirm_reply,
                 reply_to_message_id=reply_to_message_id,
+                delivery_context=backend_context.get("delivery_context"),
             )
             metadata = {"source": "front", "stage": "queue_confirm"}
             if sent_ids:
                 metadata["platform_message_ids"] = sent_ids
 
-            self.message_history.add_message(
-                platform=platform,
-                chat_id=storage_id,
-                role="assistant",
-                content=confirm_reply,
-                user_id="assistant",
-                metadata=metadata,
-                memory_scope_id=memory_scope_id,
-                place_scope_id=place_scope_id,
-            )
-            session_history.append({"role": "assistant", "content": confirm_reply})
+            if confirm_reply:
+                self.message_history.add_message(
+                    platform=platform,
+                    chat_id=storage_id,
+                    role="assistant",
+                    content=confirm_reply,
+                    user_id="assistant",
+                    metadata=metadata,
+                    memory_scope_id=memory_scope_id,
+                    place_scope_id=place_scope_id,
+                )
+                session_history.append({"role": "assistant", "content": confirm_reply})
 
         if len(session_history) > 20:
             session["history"] = session_history[-20:]
@@ -1805,26 +1836,28 @@ class MessageHandlerMixin:
             logger.info(f"[{chat_id}] 待确认入队：用户回复不明确，继续等待确认")
 
         if reply:
-            sent_ids = await self._send_split_message(
+            sent_ids, reply = await self._send_visible_reply(
                 chat_id,
                 reply,
                 reply_to_message_id=reply_target_message_id(context),
+                delivery_context=context.get("delivery_context"),
             )
             metadata = {"source": "front", "stage": "queue_confirm"}
             if sent_ids:
                 metadata["platform_message_ids"] = sent_ids
 
-            self.message_history.add_message(
-                platform=platform,
-                chat_id=storage_id,
-                role="assistant",
-                content=reply,
-                user_id="assistant",
-                metadata=metadata,
-                memory_scope_id=memory_scope_id,
-                place_scope_id=place_scope_id,
-            )
-            session_history.append({"role": "assistant", "content": reply})
+            if reply:
+                self.message_history.add_message(
+                    platform=platform,
+                    chat_id=storage_id,
+                    role="assistant",
+                    content=reply,
+                    user_id="assistant",
+                    metadata=metadata,
+                    memory_scope_id=memory_scope_id,
+                    place_scope_id=place_scope_id,
+                )
+                session_history.append({"role": "assistant", "content": reply})
 
         if len(session_history) > 20:
             session["history"] = session_history[-20:]
@@ -1949,6 +1982,7 @@ class MessageHandlerMixin:
         *,
         reply_to_message_id: str = "",
         chat_type: str = "",
+        delivery_context: DeliveryContext | None = None,
     ) -> list[str]:
         """按 [SPLIT] 或 [SPLIT:delay] 规则发送消息，返回平台消息 ID 列表。
 
@@ -1961,6 +1995,9 @@ class MessageHandlerMixin:
         send_kwargs: Dict[str, Any] = {"reply_to_message_id": reply_to_message_id}
         if chat_type:
             send_kwargs["chat_type"] = chat_type
+        if delivery_context is not None:
+            send_kwargs["delivery_context"] = delivery_context
+        sent_texts: list[str] = []
         # fallback reply 只属于首个实际发出的语义分段；显式 [reply:ID] 仍由各分段自行解释。
         pending_reply_to_message_id = reply_to_message_id
         # _SPLIT_MARKER_PATTERN 现在返回 [text_part, delay_str, text_part, ...]
@@ -1970,13 +2007,27 @@ class MessageHandlerMixin:
             part = parts[i].strip()
             if part:
                 send_kwargs["reply_to_message_id"] = pending_reply_to_message_id
-                msg_ids = await self._send_platform_message(
-                    chat_id,
-                    part,
-                    **send_kwargs,
-                )
+                try:
+                    msg_ids = await self._send_platform_message(
+                        chat_id,
+                        part,
+                        **send_kwargs,
+                    )
+                except DeliveryCancelled as exc:
+                    raise DeliveryCancelled(
+                        sent_ids=sent_message_ids + exc.sent_ids,
+                        sent_texts=sent_texts + exc.sent_texts,
+                    ) from None
+                except asyncio.CancelledError:
+                    raise DeliveryCancelled(sent_ids=sent_message_ids, sent_texts=sent_texts) from None
+                except DeliveryError as exc:
+                    raise DeliveryError(
+                        str(exc), sent_ids=sent_message_ids + exc.sent_ids,
+                        sent_texts=sent_texts + exc.sent_texts, uncertain=exc.uncertain,
+                    ) from None
                 if msg_ids:
                     sent_message_ids.extend(str(mid) for mid in msg_ids)
+                    sent_texts.append(delivered_text(msg_ids, part))
                     pending_reply_to_message_id = ""
 
             # 如果后面还有 delay，则执行停顿（最后一个 part 后面没有 delay 所以用 i+1 检查）
@@ -1984,10 +2035,34 @@ class MessageHandlerMixin:
                 try:
                     delay_val = float(parts[i+1])
                     if delay_val > 0:
-                        await asyncio.sleep(delay_val)
+                        try:
+                            await asyncio.sleep(delay_val)
+                        except asyncio.CancelledError:
+                            raise DeliveryCancelled(sent_ids=sent_message_ids, sent_texts=sent_texts) from None
                 except ValueError:
                     pass
-        return sent_message_ids
+        return DeliveryReceipt(sent_message_ids, "\n".join(sent_texts))
+
+    async def _send_visible_reply(self, chat_id: str, text: str, **kwargs) -> tuple[list[str], str]:
+        """可见回复只持久化确认送达部分；失败不阻止本轮后脑任务接线。"""
+        try:
+            ids = await self._send_split_message(chat_id, text, **kwargs)
+            return ids, delivered_text(ids, text)
+        except DeliveryCancelled as exc:
+            if exc.sent_ids:
+                identity = self._identity_for_runtime_key(chat_id)
+                self.message_history.add_message(
+                    platform=identity.platform, chat_id=identity.storage_id,
+                    role="assistant", content=exc.visible_text, user_id="assistant",
+                    metadata={"source": "partial_delivery", "platform_message_ids": exc.sent_ids},
+                    memory_scope_id=identity.memory_scope_id, place_scope_id=identity.place_scope_id,
+                )
+                session = self.sessions.setdefault(chat_id, {"history": []})
+                session.setdefault("history", []).append({"role": "assistant", "content": exc.visible_text})
+            raise
+        except DeliveryError as exc:
+            logger.warning("[%s] 回复投递失败: sent=%d uncertain=%s", chat_id, len(exc.sent_ids), exc.uncertain)
+            return exc.sent_ids, exc.visible_text
 
     # ------------------------------------------------------------------
     # 斜杠命令处理子方法
@@ -2402,15 +2477,18 @@ class MessageHandlerMixin:
         platform_ids = md.get("platform_message_ids") or []
         delete_ok = False
         delete_attempted = False
-        if platform_ids and getattr(self.adapter, "platform_features", None):
-            feats = self.adapter.platform_features
+        target_adapter = self._adapter_for_key(chat_id)
+        if platform_ids and getattr(target_adapter, "platform_features", None):
+            feats = target_adapter.platform_features
             if getattr(feats, "supports_delete_message", False):
                 delete_attempted = True
+                delete_ok = True
                 for pid in platform_ids:
                     try:
                         ok = await self._delete_platform_message(chat_id, pid)
-                        delete_ok = delete_ok or ok
+                        delete_ok = delete_ok and ok
                     except Exception:
+                        delete_ok = False
                         logger.warning(f"[{chat_id}] 平台删除消息 {pid} 失败", exc_info=True)
 
         return {"delete_attempted": delete_attempted, "delete_ok": delete_ok}

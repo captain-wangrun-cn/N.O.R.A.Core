@@ -107,7 +107,10 @@ class MessageAggregator:
             self._contexts[key] = dict(context)
         else:
             existing = self._contexts[key]
+            has_nested_elements = bool(existing.get("qqbot_has_nested_elements") or context.get("qqbot_has_nested_elements"))
             existing.update(context)
+            if has_nested_elements:
+                existing["qqbot_has_nested_elements"] = True
             existing.setdefault("first_user_id", parts[0].get("user_id"))
             existing.setdefault("first_user_name", parts[0].get("user_name"))
         self._contexts[key]["text"] = self._buffers[key]

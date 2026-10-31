@@ -1,0 +1,25 @@
+{
+  "adapter_id": "qqbot",
+  "name": "QQ 官方机器人",
+  "version": "0.1.0",
+  "author": "N.O.R.A. Core",
+  "entrypoint": "adapters.qqbot:QQBotAdapter",
+  "description": "QQ 官方 API v2：私聊、全群接收、主动消息、Markdown、按钮和富媒体。",
+  "platform": {
+    "name": "QQ 官方机器人",
+    "type": "chat",
+    "protocol": "QQ Bot API v2 / WebSocket",
+    "official_website": "https://bot.q.qq.com/",
+    "privacy_notes": ["开放 ID 不是真实 QQ 号，也不能自动映射至 OneBot。"]
+  },
+  "features": {
+    "supports_edit_message": false,
+    "supports_delete_message": true,
+    "supports_typing_indicator": false,
+    "supports_rich_media": true,
+    "supports_reply": true,
+    "supports_buttons": true,
+    "supports_message_controls": true
+  },
+  "tags": ["qq", "official", "websocket", "markdown"]
+}

@@ -772,8 +772,19 @@ class NoraController(
             text = strip_message_control_markers(text)
         if not text:
             return []
+        platform_chat_id = self._platform_chat_id(chat_or_runtime_key)
+        if adapter.platform_name == "qqbot":
+            identity = self._identity_for_runtime_key(chat_or_runtime_key)
+            kwargs.setdefault("chat_type", identity.chat_type)
+            from adapters.delivery import DeliveryContext
+            snapshot = kwargs.get("delivery_context")
+            if isinstance(snapshot, DeliveryContext):
+                snapshot = snapshot.for_target(adapter.platform_name, platform_chat_id, kwargs["chat_type"])
+            else:
+                snapshot = DeliveryContext.proactive(adapter.platform_name, platform_chat_id, kwargs["chat_type"])
+            kwargs["delivery_context"] = snapshot
         return await adapter.send_message(
-            self._platform_chat_id(chat_or_runtime_key),
+            platform_chat_id,
             text,
             **kwargs,
         )
@@ -789,7 +800,10 @@ class NoraController(
         )
 
     async def _delete_platform_message(self, chat_or_runtime_key: str, message_id: str, **kwargs) -> bool:
-        return await self._adapter_for_key(chat_or_runtime_key).delete_message(
+        adapter = self._adapter_for_key(chat_or_runtime_key)
+        if adapter.platform_name == "qqbot":
+            kwargs.setdefault("chat_type", self._identity_for_runtime_key(chat_or_runtime_key).chat_type)
+        return await adapter.delete_message(
             self._platform_chat_id(chat_or_runtime_key),
             message_id,
             **kwargs,

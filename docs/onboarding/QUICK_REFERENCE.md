@@ -34,6 +34,7 @@ core/controller.py            NoraController.handle_message()
 | 配置项 | 位置 | 说明 |
 |--------|------|------|
 | Telegram Token | `adapters/telegram/config.json` → `bot_token` | 不写入全局 `config.yml` |
+| QQ 官方机器人 | `adapters/qqbot/config.json` | `app_id` / `app_secret`；`--adapter qqbot`，旧 `qq` 仍为 OneBot；公开前预绑 owner 开放 ID |
 | OneBot v11 连接 | `adapters/onebotv11/config.json` | `websocket_url` / `access_token` / `enable_napcat_api` |
 | LLM Provider | `config.yml` → `llm.provider` | `gemini` 或 `openai` |
 | API Keys | `config.yml` → `llm.api_keys.*` | |
