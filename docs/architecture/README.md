@@ -52,6 +52,8 @@ flowchart TB
   subgraph Entry[入口与接入层]
     U[用户消息]
     TG[Telegram Adapter\nadapters/telegram/main.py]
+    QQ[QQBot Adapter\nadapters/qqbot/main.py]
+    OB[OneBot v11 Adapter\nadapters/onebotv11/main.py]
     AGG[MessageAggregator\nadapters/aggregator.py]
     EXT[外部事件源\nEmail/Webhook/Calendar]
     TRM[TriggerManager\ntriggers/manager.py]
@@ -61,7 +63,7 @@ flowchart TB
   %% ========== 控制与编排层 ==========
   subgraph Orchestrator[控制与编排层]
     CTRL[NoraController\ncore/controller.py]
-    MH[MessageHandlerMixin\n消息入口/命令路由]
+    MH[MessageHandlerMixin\n消息入口/命令路由/投递回执]
     POLL[PollingMixin\n前后脑轮询协同]
     INT[InterruptHandlerMixin\n忙碌中意图检测]
     WS[WorkerStatus\n状态追踪]
@@ -84,13 +86,22 @@ flowchart TB
     REPORT[后脑工作报告汇总\nfinal_response_buffer + tool_history]
   end
 
+  %% ========== 实时音视频与语音 ==========
+  subgraph MediaAudio[实时音视频与语音]
+    RTC_BRIDGE[RTC Bridge Server\nrtc/server.py]
+    RTC_LIVE[Gemini Live Client\nrtc/live_client.py]
+    TTS_SYS[TTS Provider Registry\ntts/registry.py]
+  end
+
   %% ========== 模型与提示词层 ==========
   subgraph LLM[模型与提示词层]
-    PROMPT[Prompt 组装\nbrain/prompts.py + templates/*.jinja]
+    PROMPT[Prompt 组装与时区注入\nbrain/prompts.py + templates/*.jinja]
     FACTORY[get_llm_client\nbrain/llm.py]
-    ALIAS[模型别名\nsmart / coder / image / fast]
+    ALIAS[模型别名\nsmart/coder/image/video/summary/draw...]
     OPENAI[OpenAI Provider]
-    GEMINI[Gemini Provider]
+    GEMINI[Gemini Provider\nSDK & REST]
+    ANTHROPIC[Anthropic Provider]
+    OPENROUTER[OpenRouter Provider]
   end
 
   %% ========== 工具与技能层 ==========
@@ -103,12 +114,12 @@ flowchart TB
 
   %% ========== 记忆与数据层 ==========
   subgraph Data[记忆与数据层]
-    MHIST[MessageHistory]
-    CSTORE[ContextStore]
+    MHIST[MessageHistory\nbuild_history_messages]
+    CSTORE[ContextStore\n分块二分降级与质量守卫]
     RAG[memory/rag.py]
     VDB[Qdrant/Vector]
     IMGS[ImageStore]
-    SQL[(SQLite\nmessage_history.db\nmessage_log.db\ncontext_compression.db)]
+    SQL[(SQLite\nmessage_history.db\ncontext_compression.db\nmessage_log.db)]
     MONGO[(MongoDB\n图片元数据/OCR)]
   end
 
@@ -128,8 +139,12 @@ flowchart TB
 
   %% 入口主链路
   U --> TG --> AGG --> CTRL --> MH
+  U --> QQ --> AGG
+  U --> OB --> AGG
   MH --> FG
   FG -->|无需后脑| TG
+  FG -->|无需后脑| QQ
+  FG -->|无需后脑| OB
   FG -->|NEED_BACKEND| BG
 
   %% 忙碌中插话链路
@@ -145,6 +160,10 @@ flowchart TB
   BG --> REPORT --> FR --> TG
   BG --> WS
 
+  %% 实时通话与语音
+  TG -.->|/rtc 指令| RTC_BRIDGE <--> RTC_LIVE
+  FG -.->|[VOICE] 标记| TTS_SYS
+
   %% 模型路由
   FG --> PROMPT
   FR --> PROMPT
@@ -153,6 +172,8 @@ flowchart TB
   PROMPT --> FACTORY --> ALIAS
   ALIAS --> OPENAI
   ALIAS --> GEMINI
+  ALIAS --> ANTHROPIC
+  ALIAS --> OPENROUTER
 
   %% 数据落盘
   BG --> MHIST --> SQL
@@ -164,6 +185,7 @@ flowchart TB
   %% Trigger/主动消息链路
   EXT --> TRG --> TRM --> CTRL
   CTRL --> SMX --> SCH --> TG
+  CTRL --> SMX --> SCH --> QQ
   SCH --> PRES
 
   %% 运维链路
@@ -207,10 +229,11 @@ flowchart TB
   - 每群 ONLINE/SEMI_ONLINE 运行状态、跨说话者窗口、fast 决策与 smart 生成中断；认知历史继续跨场景共享。
 - **[消息历史管理 (Message History)](./message_history.md)**
   - 四层存储策略 (Raw, Compressed, Vector, Archive) + 对话分段 (Conversation Session Segmentation)。
+  - 引入 `build_history_messages` 规范模型输入入口，时间戳注入时区校准。
 - **[对话分段系统 (Conversation Segmentation)](./conversation-segmentation.md)**
   - ONLINE → SEMI_ONLINE 时封闭对话段落，生成段落摘要，分段插入上下文，配合前后脑轮询闭环。
 - **[消息压缩 (Message Compression)](./message-compression.md)**
-  - 针对长对话的 Token 优化策略。
+  - 针对长对话的 Token 优化策略与分块二分降级重试机制。
 - **[图片记忆系统 (Image Memory)](./image-memory.md)**
   - 图片/视频 ID 分配、LLM 标签提取、MongoDB + Qdrant 双写、语义检索与 `view_media` 工具。
 - **[身份与记忆文件一览](./identity_files.md)**
@@ -230,10 +253,10 @@ flowchart TB
 ### 🌉 平台适配 (Adapters)
 
 - **[QQ 官方机器人](./qqbot.md)**
-  - 独立 qqbot adapter：全群/主动、WS 恢复、请求绑定预算、分片媒体、安全按钮与真实回执；真机验收待授权。
+  - 独立 qqbot adapter：全群/主动、WS 恢复、请求绑定预算、分片媒体、安全按钮与真实回执。
 - **[Adapter 系统](./adapter-system.md)**
   - 轻量 Adapter/Event/Message 分层、metadata 清单、通用/平台 prompt 分层与 Telegram 拆分示例。
-- **[实时通话 (RTC)](./rtc.md)** — P2 已实现，真机验收进行中
+- **[实时通话 (RTC)](./rtc.md)**
   - Gemini Live API 服务端桥接（浏览器 → rtc bridge → Google WS）、TG Mini App 无状态前端、
     连接轮换/resumption、双轨认证（initData + token）、双端发起（/rtc 命令 + [RTC] 前脑标记邀请）、
     短时视频输入、转写回写、TTS provider 流式音色（voice_source=tts）与分期计划。
@@ -242,7 +265,7 @@ flowchart TB
 
 - **[主动消息调度 (Proactive Scheduler)](./schedule-system.md)**
   - 每日主动消息计划生成、动态闹钟、在线状态管理。
-  - 现已包含 `nora_preferences`、follow-up / autonomous proactive 概率控制、`explicit/autonomous` 计划分类、`/nora_prefs` Telegram 配置入口。
+  - 包含 `nora_preferences`、follow-up / autonomous proactive 概率控制、`explicit/autonomous` 计划分类、`/nora_prefs` Telegram 配置入口。
 - **[外部触发系统 (Trigger System)](./trigger-system.md)**
   - 非 IM 渠道事件（如 Email）接入、模型过滤判定、通知链路复用。
 - **[Trigger 开发指南 (Trigger Development Guide)](./trigger-development.md)**

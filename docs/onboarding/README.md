@@ -10,7 +10,7 @@
 |---|---|
 | 仓库 | `N.O.R.A.Core`（branch: main） |
 | 语言 | Python 3.12+，asyncio 驱动 |
-| 类型 | 多平台 AI 智能体内核（Telegram 为主适配） |
+| 类型 | 多平台 AI 智能体内核（支持 Telegram / QQ 官方机器人 / OneBot v11） |
 | 核心目标 | 像真人一样陪伴对话 + 可自主执行工具/技能 |
 | 维护者 | CaptainCN (WR) + Nora (AI) |
 
@@ -46,7 +46,7 @@
 ```
 
 - **脑口分离**：后端深度思考 + fast_llm 前端即时回复（打断/排队/切换）
-- **消息历史**：SQLite 持久化，三层压缩（原始 → 摘要 → 归档），Pinned 永久保留
+- **消息历史**：SQLite 持久化，四层压缩与归档（原始 → 摘要 → 槽位压缩 → 长期滚动归档），质量守卫与分块二分降级重试
 - **技能系统**：`skills/` 下每个技能有 `main.py` + `SKILL.md`，通过 `execute_skill` 调用
 
 ---
@@ -58,13 +58,16 @@
 | 入口 | `main.py` |
 | CLI / 配置向导 | `cli.py` |
 | 核心控制器 | `core/controller.py` |
-| LLM 调用 | `brain/llm.py`, `brain/providers/gemini.py`, `brain/providers/openai.py` |
+| LLM 调用工厂与提供商 | `brain/llm.py`, `brain/providers/` (`gemini.py`, `openai.py`, `anthropic.py`, `openrouter.py`) |
 | 工具注册 | `brain/tools.py` |
 | 系统提示词 | `brain/templates/system.jinja` |
-| 消息历史/压缩 | `memory/message_history.py` |
+| 消息历史/压缩 | `memory/message_history.py`, `memory/context_store.py` |
 | RAG | `memory/rag.py`, `memory/vector.py`, `memory/embed.py` |
 | Telegram 适配 | `adapters/telegram/main.py` |
+| QQ 官方机器人适配 | `adapters/qqbot/main.py` |
 | OneBot v11 适配 | `adapters/onebotv11/main.py` |
+| 实时音视频通话 (RTC) | `rtc/server.py`, `rtc/live_client.py` |
+| 语音合成 (TTS) | `tts/base.py`, `tts/registry.py` |
 | 外部触发器系统 | `triggers/` |
 | 技能加载 | `skills/loader.py` |
 | 成本跟踪 | `core/cost_tracker.py`, `view_costs.py` |
@@ -99,26 +102,7 @@ python view_costs.py --today
 
 ## 5. 接手检查清单
 
-新会话接手时，快速过一遍：
-
-- [ ] 读完本文件 + `HANDOVER.md`
-- [ ] 了解 `core/controller.py` 的消息处理流程
-- [ ] 了解 `brain/templates/system.jinja` 中的行为约定
-- [ ] 了解 `lexicon/manager.py` 的词库注入策略（always->system, lazy->user）
-- [ ] 确认 `config.yml` 存在且配置正确
-- [ ] 确认 `data/memory/message_history.db` 是否存在（有则说明有历史数据）
-- [ ] 运行 `pytest` 确认测试状态
-- [ ] 查看 `git log --oneline -10` 了解最近改动
-
----
-
-## 6. 下一步
-
-- 如果要**修改行为/提示词** → 编辑 `brain/templates/system.jinja`
-- 如果要**添加新工具** → 编辑 `brain/tools.py`
-- 如果要**添加新技能** → 使用 `skill_creator` 或手动创建 `skills/技能名/`
-- 如果要**修改消息处理逻辑** → 编辑 `core/controller.py`
-- 如果要**适配新平台** → 继承 `adapters/base.py` 创建新适配器
-- 如果要**新增外部触发源（邮件/日历/Webhook）** → 继承 `triggers/base.py` 并在 `triggers/factory.py` 注册
-
-> 💡 **提示：** 修改完成后，请更新 `docs/HANDOVER.md` 记录你的改动，方便下一个会话接手。
+- [ ] 阅读 `docs/HANDOVER.md` 最新改动
+- [ ] 阅读 `docs/onboarding/COMMON_PITFALLS.md` 避免重复踩坑
+- [ ] 检查 `git status` 与最近 commit log
+- [ ] 运行测试确认基线状态
