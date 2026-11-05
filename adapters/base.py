@@ -329,6 +329,10 @@ class AdapterEvent:
 class BaseAdapter(ABC):
     """平台适配器基础抽象层。"""
 
+    # 回复投递彻底失败（结果确定且无任何已送达内容）时，Core 是否向场景补发一条安全提示。
+    # 默认关闭；官方 QQ 的内容审核拒收（40034006）对用户完全静默，需要显式提示。
+    notify_delivery_failure: bool = False
+
     def __init__(self):
         self.current_chat_id: str | None = None
         self._message_handler: MessageHandler | None = None

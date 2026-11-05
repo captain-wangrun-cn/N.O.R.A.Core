@@ -56,6 +56,9 @@ import config
 
 logger = logging.getLogger(__name__)
 
+# 回复投递彻底失败且平台要求提示时，补发的安全文案；内容必须本身可通过平台审核。
+DELIVERY_FAILURE_NOTICE = "（系统提示：Nora 刚才的回复没有送达，可能被平台内容审核拦截了。）"
+
 
 def _update_message_entry_presence(
     runtime_key: str,
@@ -2062,7 +2065,28 @@ class MessageHandlerMixin:
             raise
         except DeliveryError as exc:
             logger.warning("[%s] 回复投递失败: sent=%d uncertain=%s", chat_id, len(exc.sent_ids), exc.uncertain)
+            await self._notify_delivery_failure(chat_id, exc)
             return exc.sent_ids, exc.visible_text
+
+    async def _notify_delivery_failure(self, chat_id: str, exc: DeliveryError) -> None:
+        """彻底失败（结果确定、无任何已送达内容）时按平台开关补一条安全提示。
+
+        只提示不重发原内容；提示自身的发送失败只记日志，绝不递归再补。
+        """
+        if exc.sent_ids or exc.uncertain:
+            return
+        try:
+            adapter = self._adapter_for_key(chat_id)
+        except Exception:
+            return
+        if not getattr(adapter, "notify_delivery_failure", False):
+            return
+        try:
+            await self._send_platform_message(chat_id, DELIVERY_FAILURE_NOTICE, parse_media=False)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.debug("[%s] 投递失败提示未送出（忽略）", chat_id, exc_info=True)
 
     # ------------------------------------------------------------------
     # 斜杠命令处理子方法

@@ -23,6 +23,17 @@ async def test_token_refresh_mutex_and_expiry():
 
 
 @pytest.mark.anyio
+async def test_api_error_carries_tps_trace_id():
+    session = Session([Response({'access_token': 'a'}), Response({'code': 40034006}, 400, headers={'X-Tps-Trace-Id': 'trace-1'})])
+    client = QQBotClient('app', 'secret', session=session)
+    with pytest.raises(QQBotAPIError) as caught:
+        await client.request('POST', '/v2/groups/g/messages', json={'content': 'x'})
+    assert caught.value.trace_id == 'trace-1'
+    assert 'trace-1' not in str(caught.value)  # 消息体保持脱敏，trace 走独立字段
+    await client.close()
+
+
+@pytest.mark.anyio
 async def test_rest_401_refresh_once_and_sanitized_error():
     session = Session([Response({'access_token': 'a'}), Response({}, 401), Response({'access_token': 'b'}), Response({'code': 40034024, 'message': 'secret URL'}, 403)])
     client = QQBotClient('app', 'secret', session=session)

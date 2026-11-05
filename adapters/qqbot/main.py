@@ -29,7 +29,13 @@ def _scene_log_id(chat_id: str) -> str:
 
 
 class QQBotAdapter(BaseAdapter):
-    """QQ 官方 API v2 adapter；全群接收仍遵守 Core 的在线状态。"""
+    """QQ 官方 API v2 adapter；全群接收仍遵守 Core 的在线状态。
+
+    事件按场景分链处理：同群/同私聊内保持到达顺序，跨场景并发，
+    生成轮与媒体下载不再阻塞其它聊天的入站管线（对齐 ob11 模型）。
+    """
+
+    notify_delivery_failure = True
 
     def __init__(self, adapter_config: dict[str, Any] | None = None, *, workspace_root: Path | None = None) -> None:
         super().__init__()
@@ -44,6 +50,8 @@ class QQBotAdapter(BaseAdapter):
         self._aggregator: MessageAggregator | None = None
         self._event_queue: asyncio.Queue = asyncio.Queue(maxsize=max(1, int(self.config["event_queue_size"])))
         self._worker: asyncio.Task | None = None
+        self._event_tasks: set[asyncio.Task] = set()
+        self._event_chains: dict[str, asyncio.Task] = {}
         self._interaction_tasks: set[asyncio.Task] = set()
         self._chat_types: dict[str, str] = {}
         self._blocked_scenes: OrderedDict[tuple[str, str], None] = OrderedDict()
@@ -124,14 +132,49 @@ class QQBotAdapter(BaseAdapter):
     async def _consume_events(self) -> None:
         while True:
             packet = await self._event_queue.get()
+            self._event_queue.task_done()
+            self._dispatch_event(packet)
+
+    @staticmethod
+    def _chain_key_for(packet: dict[str, Any]) -> str:
+        if str(packet.get("t") or "") not in MESSAGE_EVENTS:
+            # 关系变更等控制事件轻量，共用一条链保持相互之间的顺序。
+            return "control"
+        data = packet.get("d") or {}
+        if data.get("group_openid"):
+            return f"group:{data['group_openid']}"
+        openid = str(data.get("user_openid") or (data.get("author") or {}).get("user_openid") or "")
+        return f"c2c:{openid}" if openid else ""
+
+    def _dispatch_event(self, packet: dict[str, Any]) -> None:
+        key = self._chain_key_for(packet)
+        previous = self._event_chains.get(key) if key else None
+        if previous is not None and previous.done():
+            previous = None
+        task = asyncio.create_task(self._run_event_in_order(packet, previous))
+        if key:
+            self._event_chains[key] = task
+        self._event_tasks.add(task)
+        task.add_done_callback(self._on_event_task_done)
+
+    async def _run_event_in_order(self, packet: dict[str, Any], previous: asyncio.Task | None) -> None:
+        if previous is not None and not previous.done():
             try:
-                await self.handle_event(packet)
-            except asyncio.CancelledError:
-                raise
-            except Exception as exc:
-                logger.warning("[qqbot] event processing failed (%s)", type(exc).__name__)
-            finally:
-                self._event_queue.task_done()
+                await previous
+            except Exception:
+                pass
+        await self.handle_event(packet)
+
+    def _on_event_task_done(self, task: asyncio.Task) -> None:
+        self._event_tasks.discard(task)
+        for key, chained in list(self._event_chains.items()):
+            if chained is task:
+                self._event_chains.pop(key, None)
+        if task.cancelled():
+            return
+        exc = task.exception()
+        if exc:
+            logger.warning("[qqbot] event processing failed (%s)", type(exc).__name__)
 
     async def handle_event(self, packet: dict[str, Any]) -> None:
         event_type = str(packet.get("t") or "")
@@ -261,6 +304,7 @@ class QQBotAdapter(BaseAdapter):
         tasks = list(self._interaction_tasks)
         if self._worker:
             tasks.append(self._worker)
+        tasks.extend(self._event_tasks)
         if self._aggregator:
             tasks.extend(self._aggregator._timers.values())
         for task in tasks:
@@ -269,6 +313,8 @@ class QQBotAdapter(BaseAdapter):
             with contextlib.suppress(asyncio.CancelledError, Exception):
                 await task
         self._interaction_tasks.clear()
+        self._event_tasks.clear()
+        self._event_chains.clear()
         await self.client.close()
         if self.media:
             await self.media.close()

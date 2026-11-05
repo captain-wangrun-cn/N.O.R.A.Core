@@ -15,7 +15,7 @@
 
 | 文件 | 职责 |
 |---|---|
-| `main.py` | 生命周期、队列、群门控、聚合、标准事件分发 |
+| `main.py` | 生命周期、场景分链事件分发、群门控、聚合、标准事件分发 |
 | `client.py` | token 提前刷新/401 竞争、REST、WS Identify/Resume/心跳 ACK |
 | `message.py` | opaque ID、mentions、引用关系、有界嵌套记录 |
 | `state.py` | 场景隔离的有界去重、被动凭据、引用索引缓存 |
@@ -28,7 +28,7 @@
 ## 连接与事件
 
 - token 请求 `POST https://api.bot.qq.com/app/getAppAccessToken`；REST 和 WS 使用 `QQBot {AccessToken}`。
-- 使用 `/gateway/bot` 返回的 WSS；Hello 后 Identify 或 Resume，心跳带最新已入队序号，漏 ACK 关闭并重连。消息消费与网络心跳分离，队列有上限；互动 ACK 不排在下载/普通消息后面。关闭取消 worker、互动任务、聚合 timer 和心跳，关闭自有会话。
+- 使用 `/gateway/bot` 返回的 WSS；Hello 后 Identify 或 Resume，心跳带最新已入队序号，漏 ACK 关闭并重连。消息消费与网络心跳分离，队列只做背压（满则不推进 seq、重连后重放）；出队后按场景分链——同群/同私聊串行、跨场景并发、控制事件独立链，生成轮与媒体下载不再阻塞其它聊天的入站管线。互动 ACK 不排在下载/普通消息后面。关闭取消 worker、全部场景链、互动任务、聚合 timer 和心跳，关闭自有会话。
 - 订阅 `(1<<25) | (1<<26)`：C2C、全群、群 @、互动及关系变更。拒收/机器人移除事件阻止对应场景发送，恢复事件解锁；未知事件忽略。
 - 全群与 AT 双事件、Resume 重放按场景 + `msg_idx` 去重，缺失回退 `d.id`，不是正文去重。SEMI 忽略的非定向全量版本不吞掉后到的 AT 版本。
 - ONLINE 消息进入已有 group listener，SEMI 仅 @自己/引用已知自己的消息进入聚合；**不新增 SEMI 非@消息入库**。@其它 bot 不是 @自己。全量模式 @ 也可能只推 `GROUP_MESSAGE_CREATE`：认平台 `mentions[].is_you` 严格布尔 `true` 及可靠 User ID 别名，不能只依赖 AT 事件或 READY ID，不能把任意 `bot=true` 当自己。
@@ -46,6 +46,8 @@
 私聊每凭据 4 次、群 5 次，锁和 `msg_seq` 跨多次 send 共用，覆盖长文本/SPLIT/媒体。凭据用尽或明确过期转主动；429 有限等待并复用同一序号；权限失败不重试，超时结果不确定**不转主动重复发**。200 响应缺少消息 ID 也视为结果不确定，不冒充成功。
 
 `text_chunk_size=2000` 是可调的软切块值，**不是官方长度上限**。被动时效暂用保守 `passive_ttl_seconds=300`，私聊文档概述 60 分钟与字段表 5 分钟冲突，等待真机契约验证。若平台拒绝软长度，保持部分回执并报告失败，不无限重试。
+
+出站文本被 40034006（消息内容违规）或 40034127（无 markdown 模板权限）拒绝时，自动换 `msg_type=0` 纯文本重试一次（凭据 msg_seq 继续递增）；40034127 之后本进程直接改发纯文本，不再每条白耗一次 400。同一内容纯文本仍被拒则干净失败——不重试、不转主动重复发。响应头 `X-Tps-Trace-Id` 随 `QQBotAPIError.trace_id` 进发送失败日志（`trace=` 字段），供联系开放平台排查。投递彻底失败（结果确定且无任何已送达内容）时，Core 按平台开关 `notify_delivery_failure`（当前仅 qqbot 为 True）向场景补发一条固定系统提示（`core.message_handler.DELIVERY_FAILURE_NOTICE`）；提示自身的发送失败只记日志，绝不递归补发。
 
 ## 富媒体与控制
 

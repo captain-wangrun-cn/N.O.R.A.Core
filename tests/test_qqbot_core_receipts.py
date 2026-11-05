@@ -75,6 +75,53 @@ async def test_undo_uses_target_features_and_does_not_claim_partial_success():
     assert await probe._undo_last_assistant('qqbot:user') == {'delete_attempted': True, 'delete_ok': False}
 
 
+class NoticeProbe(MessageHandlerMixin):
+    def __init__(self, fail):
+        self.fail = fail
+        self.notices = []
+
+    async def _send_split_message(self, chat_id, text, **kwargs):
+        raise self.fail
+
+    async def _send_platform_message(self, chat_id, text, **kwargs):
+        self.notices.append((chat_id, text, kwargs))
+        return ['notice-id']
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize('fail,flagged,expect_notice', [
+    (DeliveryError('reject'), True, True),
+    (DeliveryError('partial', sent_ids=['1'], sent_texts=['part']), True, False),
+    (DeliveryError('uncertain', uncertain=True), True, False),
+    (DeliveryError('reject'), False, False),
+])
+async def test_delivery_failure_notice_gated_by_flag_and_total_failure(fail, flagged, expect_notice):
+    from core.message_handler import DELIVERY_FAILURE_NOTICE
+    probe = NoticeProbe(fail)
+    probe._adapter_for_key = lambda key: (
+        SimpleNamespace(notify_delivery_failure=flagged) if flagged else SimpleNamespace()
+    )
+    ids, visible = await probe._send_visible_reply('qqbot:g', 'hello')
+    assert ids == fail.sent_ids and visible == fail.visible_text
+    if expect_notice:
+        assert probe.notices == [('qqbot:g', DELIVERY_FAILURE_NOTICE, {'parse_media': False})]
+    else:
+        assert probe.notices == []
+
+
+@pytest.mark.anyio
+async def test_delivery_failure_notice_send_error_never_raises():
+    probe = NoticeProbe(DeliveryError('reject'))
+    probe._adapter_for_key = lambda key: SimpleNamespace(notify_delivery_failure=True)
+
+    async def broken_notice(*args, **kwargs):
+        raise DeliveryError('notice also rejected')
+
+    probe._send_platform_message = broken_notice
+    ids, visible = await probe._send_visible_reply('qqbot:g', 'hello')
+    assert ids == [] and visible == ''
+
+
 def test_model_helper_persists_only_valid_alias_to_mock_config(monkeypatch):
     import config
     saved = []

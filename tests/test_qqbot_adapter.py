@@ -104,6 +104,37 @@ async def test_group_presence_gate_before_download_and_aggregation(tmp_path, onl
     assert bool(adapter._event_queue.maxsize)
 
 
+def test_chain_keys_split_scenes_and_control_events():
+    assert QQBotAdapter._chain_key_for(packet(chat='g1')) == 'group:g1'
+    assert QQBotAdapter._chain_key_for(packet(event='C2C_MESSAGE_CREATE', user='u1', chat='')) == 'c2c:u1'
+    assert QQBotAdapter._chain_key_for({'t': 'FRIEND_ADD', 'd': {'openid': 'u'}}) == 'control'
+    assert QQBotAdapter._chain_key_for({'t': 'C2C_MESSAGE_CREATE', 'd': {}}) == ''
+
+
+@pytest.mark.anyio
+async def test_same_scene_events_serialize_and_other_scenes_proceed(tmp_path):
+    adapter = QQBotAdapter({}, workspace_root=tmp_path)
+    order = []
+    release = asyncio.Event()
+
+    async def fake_handle(item):
+        order.append(item['d']['id'])
+        if item['d']['id'] == 'block':
+            await release.wait()
+
+    adapter.handle_event = fake_handle
+    adapter._dispatch_event(packet(mid='block', chat='g1'))
+    adapter._dispatch_event(packet(mid='after', chat='g1'))
+    adapter._dispatch_event(packet(mid='other', chat='g2'))
+    await asyncio.sleep(0.05)
+    # g1 链被 block 挡住：after 仍在排队，g2 不受影响。
+    assert order == ['block', 'other']
+    release.set()
+    await asyncio.gather(*list(adapter._event_tasks))
+    assert order == ['block', 'other', 'after']
+    assert not adapter._event_chains
+
+
 @pytest.mark.anyio
 async def test_full_at_overlap_and_resume_replay_deduplicated(tmp_path):
     adapter = QQBotAdapter({}, workspace_root=tmp_path)
@@ -153,12 +184,16 @@ async def test_group_senders_are_not_aggregated_together(tmp_path):
 
 
 def test_metadata_and_capabilities_without_loading_private_config(tmp_path):
+    from adapters.base import BaseAdapter
     adapter = QQBotAdapter({}, workspace_root=tmp_path)
     assert adapter.metadata.adapter_id == 'qqbot'
     assert adapter.platform_features.supports_delete_message
     assert not adapter.platform_features.supports_typing_indicator
     assert not adapter.platform_features.supports_edit_message
     assert adapter.get_adapter_tools() == []
+    # QQ 内容审核拒收（40034006）对用户静默，只有官方适配器要求补提示。
+    assert adapter.notify_delivery_failure
+    assert BaseAdapter.notify_delivery_failure is False
 
 
 def test_actual_qqbot_prompt_is_loaded_by_platform_name():
@@ -217,9 +252,13 @@ async def test_shutdown_cancels_workers_aggregator_and_interactions(tmp_path):
     adapter._worker = tasks[0]
     adapter._interaction_tasks.add(tasks[1])
     adapter._aggregator = type('Aggregator', (), {'_timers': {'x': tasks[2]}})()
+    chain = asyncio.create_task(asyncio.Event().wait())
+    adapter._event_tasks.add(chain)
+    adapter._event_chains['group:g'] = chain
     await adapter.shutdown()
-    assert all(task.cancelled() for task in tasks)
+    assert all(task.cancelled() for task in tasks + [chain])
     assert not adapter.is_running
+    assert not adapter._event_chains and not adapter._event_tasks
 
 
 @pytest.mark.anyio

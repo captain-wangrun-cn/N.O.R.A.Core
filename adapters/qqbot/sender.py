@@ -11,7 +11,7 @@ from adapters.delivery import DeliveryCancelled, DeliveryContext, DeliveryError,
 from adapters.message_controls import parse_message_controls
 
 from .client import QQBotAPIError
-from .constants import PASSIVE_EXPIRED_CODES
+from .constants import MARKDOWN_FALLBACK_CODES, PASSIVE_EXPIRED_CODES
 from .media import scene_endpoint
 
 logger = logging.getLogger(__name__)
@@ -38,6 +38,8 @@ class QQBotSender:
         self.state = state
         self.media = media
         self.chunk_size = max(64, chunk_size)
+        # 40034127（无 markdown 模板权限）后本进程内直接改发纯文本，不再每条白费一次 400。
+        self._markdown_enabled = True
 
     async def _post(self, endpoint: str, payload: dict[str, Any], credential: Any = None) -> dict[str, Any]:
         async def perform() -> dict[str, Any]:
@@ -99,8 +101,13 @@ class QQBotSender:
             for kind, content in items:
                 stage = "prepare"
                 payload: dict[str, Any]
+                text_payload: dict[str, Any] | None = None
                 if kind == "text":
-                    payload = {"msg_type": 2, "markdown": {"content": content}} if markdown else {"msg_type": 0, "content": content}
+                    use_markdown = bool(markdown) and self._markdown_enabled
+                    text_payload = payload = (
+                        {"msg_type": 2, "markdown": {"content": content}}
+                        if use_markdown else {"msg_type": 0, "content": content}
+                    )
                     if keyboard and not sent_ids:
                         payload["keyboard"] = keyboard
                 else:
@@ -111,7 +118,21 @@ class QQBotSender:
                     payload["message_reference"] = {"message_id": reference.index}
                 credential = self.state.credential_for(chat_type, chat_id, snapshot.source_message_ids) if snapshot.mode == "response" else None
                 stage = "message"
-                result = await self._post(endpoint, payload, credential)
+                try:
+                    result = await self._post(endpoint, payload, credential)
+                except QQBotAPIError as exc:
+                    if text_payload is None or payload.get("msg_type") != 2 or exc.code not in MARKDOWN_FALLBACK_CODES:
+                        raise
+                    # 内容违规(40034006)/无 markdown 权限(40034127)：换纯文本重试一次，
+                    # 区分 markdown 载荷被拒与内容本身违规；纯文本仍被拒则干净失败。
+                    if exc.code == 40034127:
+                        self._markdown_enabled = False
+                    payload = {"msg_type": 0, "content": content}
+                    if keyboard and not sent_ids:
+                        payload["keyboard"] = keyboard
+                    if reference and reference.index and not sent_ids:
+                        payload["message_reference"] = {"message_id": reference.index}
+                    result = await self._post(endpoint, payload, credential)
                 message_id = str(result.get("id") or "")
                 if not message_id:
                     raise DeliveryError("QQ send returned no message ID", uncertain=True)
@@ -126,7 +147,7 @@ class QQBotSender:
             uncertain = (isinstance(exc, (aiohttp.ClientError, asyncio.TimeoutError))
                          or (isinstance(exc, QQBotAPIError) and (exc.status >= 500 or 200 <= exc.status < 300))
                          or (isinstance(exc, DeliveryError) and exc.uncertain))
-            logger.warning("[qqbot] send failed: stage=%s kind=%s sent=%d uncertain=%s error=%s http=%s code=%s", stage, kind, len(sent_ids), uncertain, type(exc).__name__, exc.status if isinstance(exc, QQBotAPIError) else "-", exc.code if isinstance(exc, QQBotAPIError) else "-")
+            logger.warning("[qqbot] send failed: stage=%s kind=%s sent=%d uncertain=%s error=%s http=%s code=%s trace=%s", stage, kind, len(sent_ids), uncertain, type(exc).__name__, exc.status if isinstance(exc, QQBotAPIError) else "-", exc.code if isinstance(exc, QQBotAPIError) else "-", exc.trace_id if isinstance(exc, QQBotAPIError) else "-")
             raise DeliveryError(
                 str(exc) if isinstance(exc, (QQBotAPIError, DeliveryError, ValueError)) else "QQ send failed",
                 sent_ids=sent_ids, sent_texts=sent_texts, uncertain=uncertain,

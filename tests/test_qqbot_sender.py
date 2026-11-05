@@ -188,3 +188,48 @@ async def test_missing_id_is_uncertain_not_fake_success():
     with pytest.raises(DeliveryError) as caught:
         await sender.send('u', 'x', chat_type='private')
     assert caught.value.uncertain
+
+
+@pytest.mark.anyio
+async def test_content_reject_downgrades_markdown_to_plain_text_once():
+    api = API([QQBotAPIError(400, 40034006), {'id': 'sent'}])
+    sender = QQBotSender(api, QQBotState(), Media())
+    receipt = await sender.send('g', 'hello', chat_type='group')
+    assert list(receipt) == ['sent']
+    bodies = [c[2]['json'] for c in api.calls]
+    assert bodies[0]['msg_type'] == 2 and bodies[0]['markdown']['content'] == 'hello'
+    assert bodies[1] == {'msg_type': 0, 'content': 'hello'}
+    # 内容违规可能是载荷格式触发，不永久关闭 markdown。
+    assert sender._markdown_enabled
+
+
+@pytest.mark.anyio
+async def test_missing_markdown_permission_disables_markdown_for_process():
+    api = API([QQBotAPIError(400, 40034127), {'id': 'sent'}, {'id': 'sent2'}])
+    sender = QQBotSender(api, QQBotState(), Media())
+    await sender.send('g', 'hello', chat_type='group')
+    await sender.send('g', 'again', chat_type='group')
+    bodies = [c[2]['json'] for c in api.calls]
+    assert bodies[0]['msg_type'] == 2
+    assert bodies[1] == {'msg_type': 0, 'content': 'hello'}
+    assert bodies[2] == {'msg_type': 0, 'content': 'again'}
+    assert not sender._markdown_enabled
+
+
+@pytest.mark.anyio
+async def test_markdown_downgrade_keeps_reference_and_retries_clean_error():
+    state = QQBotState()
+    state.remember_reference('group', 'g', 'incoming', 'msg-idx')
+    # 引用保留在纯文本重试里；非 markdown 家族错误不降级、干净失败。
+    api = API([QQBotAPIError(400, 40034006), {'id': 'sent'}])
+    sender = QQBotSender(api, state, Media())
+    receipt = await sender.send('g', '[reply:incoming]hello', chat_type='group')
+    assert list(receipt) == ['sent']
+    bodies = [c[2]['json'] for c in api.calls]
+    assert bodies[0]['message_reference'] == {'message_id': 'msg-idx'}
+    assert bodies[1]['msg_type'] == 0
+    assert bodies[1]['message_reference'] == {'message_id': 'msg-idx'}
+    api.results = [QQBotAPIError(403, 40034024)]
+    with pytest.raises(DeliveryError):
+        await sender.send('g', 'hello', chat_type='group')
+    assert len(api.calls) == 3

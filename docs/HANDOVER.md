@@ -1,3 +1,15 @@
+## QQ 群聊事件并发与投递失败可见性（2026-11-05）
+
+线上反馈官方 QQ 群聊「没有合并、监听异常」，且群回复出现 `QQBotAPIError http=400 code=40034006`（官方错误码表语义：**消息内容违规**，见发送群聊消息页）。三项修复，均不改 Core 群监听状态机与 SEMI 门控设计：
+
+1. **事件消费按场景分链**（`adapters/qqbot/main.py`）。原先单一 worker 串行消费全部事件，ONLINE 定向消息的 promote（`handle_new_message` 整轮前脑生成）、每附件媒体下载、表情包描述全部内联在 worker 里，一个慢事件卡住所有平台所有聊天，把 3 秒聚合窗口拉散——这是「群聊没有合并」体感的主要来源。现在 `_dispatch_event` 按场景 key（`group:{group_openid}` / `c2c:{user_openid}`，控制事件共用 `control` 链）分链：**链内保序、跨链并发**，对齐 ob11 client `_run_event_in_order` 模型；`_event_queue` 保留为背压（满则不推进 seq、重连重放），shutdown 取消全部场景链。
+2. **40034006/40034127 纯文本降级**（`sender.py` + `constants.MARKDOWN_FALLBACK_CODES`）。默认 `markdown=True` 使全部文本走 `msg_type=2`；这两码换 `msg_type=0` 纯文本重试一次（凭据 msg_seq 顺延复用），40034127（无 markdown 模板权限）之后本进程 `_markdown_enabled=False` 直接发纯文本。同一内容纯文本仍被拒则干净失败，不重试、不转主动。
+3. **失败可见性**。`QQBotAPIError` 新增 `trace_id`（响应头 `X-Tps-Trace-Id`，联系开放平台排查用），发送失败日志追加 `trace=`；`BaseAdapter.notify_delivery_failure`（默认 False，仅 qqbot 置 True），`_send_visible_reply` 遇彻底失败（结果确定、无已送达内容）时向场景补发固定系统提示 `DELIVERY_FAILURE_NOTICE`，提示自身失败只记日志不递归。
+
+验证：全量 **1044 passed / 11 failed**，失败集与基线逐条一致（context_pricing×4、cost_tracker×2、image_memory×2、retry_queue×2、timezone×1）；QQ 适配器 + adapter selection **111 passed**。**明确未改**（属设计决策）：全局单 ONLINE 群不变式——ob11 与 qqbot 同时在线时互相顶掉监听；SEMI 非@消息不入库；qqbot 引用上下文仅靠本地 references 缓存解析（弱于 ob11 `get_msg`）。
+
+---
+
 ## QQ adapter 提交前验收与撤回限制（2026-10-31）
 
 全部 QQ adapter 测试与 adapter selection 回归 **100 passed**；历史全量中的 13 项基线失败未顺带修复，最新未重跑全量。已部署代码与真实联调进展见下方记录；初次实施段落中的未部署/未联调说明仅指当时状态。

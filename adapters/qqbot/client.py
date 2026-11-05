@@ -14,12 +14,14 @@ logger = logging.getLogger(__name__)
 
 
 class QQBotAPIError(RuntimeError):
-    def __init__(self, status: int, code: int = 0, retry_after: float = 0) -> None:
+    def __init__(self, status: int, code: int = 0, retry_after: float = 0, trace_id: str = "") -> None:
         # 平台 message/请求 URL 可能含 token、rkey，异常只暴露状态和错误码。
+        # trace_id 是官方响应头 X-Tps-Trace-Id，供联系开放平台排查，不含敏感信息。
         super().__init__(f"QQ API failed: HTTP {status}, code {code}")
         self.status = status
         self.code = code
         self.retry_after = retry_after
+        self.trace_id = trace_id
 
 
 class QQBotClient:
@@ -86,6 +88,7 @@ class QQBotClient:
                 method, API_BASE + path, json=json,
                 headers={"Authorization": f"QQBot {token}"}, allow_redirects=False,
             ) as response:
+                trace_id = str(response.headers.get("X-Tps-Trace-Id") or "")
                 if response.status == 401 and attempt == 0:
                     token = await self.access_token(rejected_token=token)
                     continue
@@ -94,16 +97,16 @@ class QQBotClient:
                 try:
                     data = await response.json()
                 except (ValueError, aiohttp.ContentTypeError):
-                    raise QQBotAPIError(response.status) from None
+                    raise QQBotAPIError(response.status, trace_id=trace_id) from None
                 code = int(data.get("code") or 0) if isinstance(data, dict) else 0
                 if not 200 <= response.status < 300 or code:
                     try:
                         retry_after = float(response.headers.get("Retry-After", 0))
                     except (ValueError, TypeError):
                         retry_after = 0
-                    raise QQBotAPIError(response.status, code, retry_after)
+                    raise QQBotAPIError(response.status, code, retry_after, trace_id=trace_id)
                 if not isinstance(data, dict):
-                    raise QQBotAPIError(response.status)
+                    raise QQBotAPIError(response.status, trace_id=trace_id)
                 return data
         raise QQBotAPIError(401)
 
