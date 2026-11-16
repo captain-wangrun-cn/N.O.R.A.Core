@@ -15,6 +15,7 @@ from adapters.delivery import DeliveryContext
 
 from .client import QQBotClient
 from .constants import DEFAULT_CONFIG, MESSAGE_EVENTS
+from .commands import CatalogStore
 from .interactions import InteractionStore
 from .media import QQBotMedia
 from .message import attachment_type, event_to_context, scene_ext
@@ -44,6 +45,7 @@ class QQBotAdapter(BaseAdapter):
         self.self_id = str(self.config.get("self_id") or "")
         self.state = QQBotState(int(self.config["cache_size"]))
         self.interactions = InteractionStore()
+        self.model_catalogs = CatalogStore()
         self.client = QQBotClient(str(self.config["app_id"]), str(self.config["app_secret"]), request_timeout=float(self.config["request_timeout_seconds"]))
         self.media: QQBotMedia | None = None
         self.sender: QQBotSender | None = None

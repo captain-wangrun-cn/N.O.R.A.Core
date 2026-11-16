@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import importlib
 import logging
 import platform
 import sys
@@ -11,6 +10,9 @@ from telegram.constants import ParseMode
 from telegram.ext import ContextTypes
 
 import config
+from adapters.model_catalog import fetch_provider_models as _fetch_provider_models_shared
+from adapters.model_catalog import provider_config as _get_provider_config_shared
+from adapters.model_catalog import provider_for_alias as _get_provider_for_alias_shared
 from brain.llm import get_llm_client
 from .message import context_from_update, has_bot_mention, strip_bot_mention
 
@@ -303,56 +305,13 @@ class TelegramCommandsMixin:
             await update.message.reply_text("❌ 无法加载推理强度设置。")
 
     def _get_provider_for_alias(self, cfg: Dict[str, Any], alias: str) -> str:
-        llm_cfg = cfg.get("llm", {}) or {}
-        model_providers = llm_cfg.get("model_providers", {}) or {}
-        return model_providers.get(alias) or llm_cfg.get("provider", "gemini")
+        return _get_provider_for_alias_shared(cfg, alias)
 
     def _get_provider_config(self, cfg: Dict[str, Any], provider_name: str) -> Dict[str, Any]:
-        llm_cfg = cfg.get("llm", {}) or {}
-        providers_cfg = llm_cfg.get("providers", {}) or {}
-        if provider_name in providers_cfg:
-            return providers_cfg.get(provider_name) or {}
-
-        api_keys = llm_cfg.get("api_keys", {}) or {}
-        legacy = {
-            "type": provider_name,
-            "api_key": api_keys.get(provider_name, ""),
-        }
-        if provider_name == "openai":
-            if llm_cfg.get("base_url"):
-                legacy["base_url"] = llm_cfg.get("base_url")
-            if llm_cfg.get("user_agent"):
-                legacy["user_agent"] = llm_cfg.get("user_agent")
-        return legacy
+        return _get_provider_config_shared(cfg, provider_name)
 
     def _fetch_provider_models(self, provider_name: str, provider_cfg: Dict[str, Any]) -> List[str]:
-        provider_type = provider_cfg.get("type", provider_name)
-        api_key = provider_cfg.get("api_key", "")
-        if not api_key:
-            return []
-
-        try:
-            if provider_type == "gemini":
-                genai = importlib.import_module("google.generativeai")
-                if hasattr(genai, "configure"):
-                    genai.configure(api_key=api_key)
-                if hasattr(genai, "list_models"):
-                    models = [
-                        m.name.replace("models/", "")
-                        for m in genai.list_models()
-                        if "generateContent" in getattr(m, "supported_generation_methods", [])
-                    ]
-                    return sorted(models)
-                return []
-            if provider_type == "openai":
-                openai_module = importlib.import_module("openai")
-                base_url = provider_cfg.get("base_url") or None
-                client = openai_module.OpenAI(api_key=api_key, base_url=base_url)
-                return sorted([model.id for model in client.models.list()])
-        except Exception:
-            return []
-
-        return []
+        return _fetch_provider_models_shared(provider_name, provider_cfg)
 
     async def _regenerate_proactive_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """

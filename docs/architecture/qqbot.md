@@ -64,12 +64,14 @@ Core 命令复用现有 dispatcher；QQ 前置闸门在 `handle_new_message` 最
 
 - `/clear`：明确警告永久清空跨平台共享历史，按钮二次确认后才准许清库。
 - `/set_stream`：二选一按钮，或 `/set_stream on|off`。
-- `/model <alias> <name>`：共用 `config.set_llm_model_by_alias()`，立即保存并刷新；不做 TG 完整 provider 分页枚举。
-- `/effort <alias> <level>`：复用 effort helper，`default` 清除单别名设置。
+- `/model`：全按钮流（对齐 Telegram）。无参弹 markdown 别名菜单（3 列，标签带当前模型）→ `/model_pick <alias>` 选 Provider → `/model_list <alias> <provider>` 经共享 `adapters/model_catalog.py` 拉模型列表（同步 SDK 调用丢 `asyncio.to_thread`，失败回落手输提示）→ 每页 6 个、2 列分页按钮 `/model_set <alias> <token>` 点击即切换并 reload。可选别名（video/security/fast-image/draw/draw_desc）在 Provider 菜单提供"清除"→ `/model_clear <alias>`。保留 `/model <alias> <name>` 手输路径；`/model <alias>` 等价点击别名。
+- `/effort`：两级按钮。无参弹别名菜单（3 列）→ `/effort_pick <alias>` 弹档位菜单（含 `default（跟随全局）`），按钮直接发出既有 `/effort <alias> <level>` 文本命令。
 - `/nora_prefs`：显示偏好及简短菜单，`/nora_prefs <key> <value>` 校验后持久化。
 - `/status`、`/context` 等由 Core 处理；没有危险 `/start` 或全库 `/debug_cleanup` 菜单。
 
-keyboard 按腾讯官方 botgo `dto/keyboard/keyboard.go` 的 callback type=1 构造。token 为随机、不含裸命令，绑定用户/场景/动作/参数、180 秒过期、单次消费、旧菜单和同菜单其它按钮失效。客户端 permission 之外仍服务端验权。ACK 与业务分离，同 interaction ID 仅尝试一次 ACK，耗时业务通过新消息反馈，不编辑旧消息。
+keyboard 按腾讯官方 botgo `dto/keyboard/keyboard.go` 的 callback type=1 构造。token 为随机、不含裸命令，绑定用户/场景/动作/参数、180 秒过期、单次消费、旧菜单和同菜单其它按钮失效。`InteractionStore.menu()` 支持 `columns` 多列排布（QQ 官方 keyboard 上限约 5 行×5 按钮，多别名菜单按 ≤5 行设计）。客户端 permission 之外仍服务端验权。ACK 与业务分离，同 interaction ID 仅尝试一次 ACK，耗时业务通过新消息反馈，不编辑旧消息。
+
+`/model` 的模型列表目录由 `adapters/qqbot/commands.py` 的 `CatalogStore` 服务端持有（token 索引、归属绑定、180 秒过期、可重复读供翻页连点，选项 token 单项对应一个待选模型）；同一链路统一 menu 名 `model`/`effort`， drilling 层级推进即令旧层级按钮失效。菜单文本用 markdown 排版，`40034127`/`40034006` 降级纯文本时 keyboard 保留。
 
 ## 送达与历史
 
@@ -79,7 +81,7 @@ keyboard 按腾讯官方 botgo `dto/keyboard/keyboard.go` 的 callback type=1 �
 
 ## 验证与尚未完成的端到端项
 
-新增 `tests/test_qqbot_{client,adapter,sender,media,interactions,delivery}.py`，mock HTTP/WS 和临时工作区；现有重点回归另跑。全量测试必须用仓库 `.venv`，异步 `anyio`。
+新增 `tests/test_qqbot_{client,adapter,sender,media,interactions,delivery,model_menu}.py`，mock HTTP/WS 和临时工作区；现有重点回归另跑。全量测试必须用仓库 `.venv`，异步 `anyio`。
 
 2026-10-30 临时 HEAD 快照 + 合成内存配置基线：938 passed / 13 failed / 1 skipped；同配置当前全量：1020 passed / 同 13 failed / 1 skipped。全部新增 QQ 测试 82 passed；重点回归另跑 293 passed。13 个既有失败涉及 main 模块导入污染 2、旧价格数据 4、cost tracker 2、图片语义 fixture 2、旧 asyncio mark 2、timezone 上下文数量 1；不在本次改造中顺带修复。
 

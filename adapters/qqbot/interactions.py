@@ -34,22 +34,27 @@ class InteractionStore:
         while len(cache) > self.max_size:
             cache.popitem(last=False)
 
-    def menu(self, user_id: str, chat_id: str, chat_type: str, menu: str, choices: list[tuple[str, str]]) -> dict:
+    def menu(self, user_id: str, chat_id: str, chat_type: str, menu: str,
+             choices: list[tuple[str, str]], *, columns: int = 1) -> dict:
+        columns = max(1, columns)
         key = (user_id, chat_id, chat_type, menu)
         generation = secrets.token_urlsafe(12)
         self.generations[key] = generation
         self.generations.move_to_end(key)
         self._trim(self.generations)
         rows = []
-        for label, command in choices:
-            token = secrets.token_urlsafe(24)
-            self.actions[token] = ButtonAction(user_id, chat_id, chat_type, command, menu, generation, self.clock() + 180)
-            rows.append({"buttons": [{
-                "id": token,
-                "render_data": {"label": label, "visited_label": "已选择", "style": 1},
-                "action": {"type": 1, "permission": {"type": 0, "specify_user_ids": [user_id]},
-                           "data": token, "click_limit": 1},
-            }]})
+        for index in range(0, len(choices), columns):
+            buttons = []
+            for label, command in choices[index:index + columns]:
+                token = secrets.token_urlsafe(24)
+                self.actions[token] = ButtonAction(user_id, chat_id, chat_type, command, menu, generation, self.clock() + 180)
+                buttons.append({
+                    "id": token,
+                    "render_data": {"label": label, "visited_label": "已选择", "style": 1},
+                    "action": {"type": 1, "permission": {"type": 0, "specify_user_ids": [user_id]},
+                               "data": token, "click_limit": 1},
+                })
+            rows.append({"buttons": buttons})
         self._trim(self.actions)
         return {"content": {"rows": rows}}
 
