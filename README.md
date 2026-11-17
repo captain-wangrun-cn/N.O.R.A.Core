@@ -280,7 +280,7 @@ N.O.R.A.Core/
   * 可先复制 `config.example.yml` 为 `config.yml`，然后运行 `python cli.py wizard` 或 `python cli.py configure` 进行配置。
 * **关于 `/start` 指令**
 
-  * 为避免误操作将几个月的长远记忆全部清空，旧版伪装成打招呼的 `/start` 指令已被彻底删除。如需彻底清空记忆请使用有明确警告的 `/clear`，撤销上一轮请使用 `/undo`，重试上一轮请使用 `/override`。
+  * 为避免误操作将几个月的长远记忆全部清空，旧版伪装成打招呼的 `/start` 指令已被彻底删除。如需彻底清空记忆请使用有明确警告的 `/clear`，撤销上一轮请使用 `/undo`，重试上一轮请使用 `/retry`（带特批放行声明请使用 `/override`）。
 * **多平台如何同时运行？**
 
   * 在各 adapter 的 `config.json` 中配置好凭据后，直接运行 `python main.py --adapter auto`，系统会自动发现所有就绪的平台并并发监听。

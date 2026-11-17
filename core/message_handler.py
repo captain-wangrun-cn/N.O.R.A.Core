@@ -59,6 +59,30 @@ logger = logging.getLogger(__name__)
 # 回复投递彻底失败且平台要求提示时，补发的安全文案；内容必须本身可通过平台审核。
 DELIVERY_FAILURE_NOTICE = "（系统提示：Nora 刚才的回复没有送达，可能被平台内容审核拦截了。）"
 
+# /retry 命令入库的正文占位符。
+RETRY_PLACEHOLDER_TEXT = "[系统：重新生成上一条回复]"
+
+
+def _clean_command_text(text: str) -> str:
+    """提取指令文本，剥离适配器（如 OneBot v11）在入站时附加的引用标记、回复区块与提及标记。"""
+    s = str(text or "").strip()
+    cand = re.sub(
+        r"^(?:\[\s*(?:回复消息ID|reply|at|poke)\s*:[^\]]*\]\s*)+",
+        "",
+        s,
+        flags=re.IGNORECASE,
+    )
+    cand = re.sub(r"^\[回复内容\].*?\[/回复内容\]\s*", "", cand, flags=re.DOTALL)
+    cand = re.sub(
+        r"^(?:\[\s*(?:回复消息ID|reply|at|poke)\s*:[^\]]*\]\s*)+",
+        "",
+        cand,
+        flags=re.IGNORECASE,
+    )
+    if cand.startswith("/"):
+        return cand.strip()
+    return s
+
 
 def _update_message_entry_presence(
     runtime_key: str,
@@ -721,7 +745,7 @@ class MessageHandlerMixin:
 
         # ── 非中断型命令快速路径：不打断前脑生成 ──
         # 这些命令不需要取消正在进行的生成任务，直接执行后返回。
-        stripped_early = text.strip()
+        stripped_early = _clean_command_text(text)
         _NON_INTERRUPTING_CMDS = (
             r"(?m)^\s*/debug\b",
             r"(?m)^\s*/status\b",
@@ -797,7 +821,7 @@ class MessageHandlerMixin:
             logger.debug(f"[{chat_id}] 记录活跃平台/场景失败: {e}")
 
         # ── 命令分发 ──
-        stripped = text.strip()
+        stripped = _clean_command_text(text)
 
         if re.search(r"(?m)^\s*/reload_models\b", stripped):
             await self._cmd_reload_models(chat_id)
@@ -839,6 +863,10 @@ class MessageHandlerMixin:
         # 必须先让正在跑的前脑任务停下（上面已统一 cancel），且需要 context 合成新一轮。
         if re.search(r"(?m)^\s*/override\b", stripped):
             await self._cmd_override(context, chat_id, chat_type, user_id)
+            return
+
+        if re.search(r"(?m)^\s*/retry\b", stripped):
+            await self._cmd_retry(context, chat_id, chat_type, user_id)
             return
 
         if re.search(r"(?m)^\s*/set_stream\b", stripped):
@@ -2474,7 +2502,7 @@ class MessageHandlerMixin:
     async def _undo_last_assistant(self, chat_id: str) -> Optional[Dict[str, Any]]:
         """删除上一条 assistant 消息：DB + 内存 history + 平台消息。
 
-        `/undo` 与 `/override` 共用。返回 None 表示没有可删的消息；否则返回
+        `/undo`、`/override` 与 `/retry` 共用。返回 None 表示没有可删的消息；否则返回
         `{"delete_attempted": bool, "delete_ok": bool}`——平台删除是 best-effort，
         不支持或权限不足时只删存档，聊天界面会留着旧消息。
         """
@@ -2583,6 +2611,50 @@ class MessageHandlerMixin:
         except Exception as e:
             clear_override(session, chat_id)
             logger.error(f"[{chat_id}] /override 重新生成失败: {e}", exc_info=True)
+            await self._send_platform_message(chat_id, f"❌ 重新生成失败: {e}")
+
+    async def _cmd_retry(
+        self, context: Dict[str, Any], chat_id: str, chat_type: str, user_id: str
+    ) -> None:
+        """重试上一轮：撤销上一条 AI 回复并重新生成一次。
+
+        与 /override 的区别：/retry 是正常的重试生成，不带放行声明，不绕过人格边界与授权检查。
+        支持附带补充说明，如 `/retry 换个语气`。
+        """
+        # 先把上一条 AI 回复删干净再重新生成：平台删除是逐个 await 的，
+        # 顺序反过来用户会看到新回复先出现、旧的后消失，或者两条并存。
+        undone = await self._undo_last_assistant(chat_id)
+        if undone is None:
+            await self._send_platform_message(chat_id, "❌ 没有可重新生成的回复。")
+            return
+        if undone["delete_attempted"] and not undone["delete_ok"]:
+            await self._send_platform_message(
+                chat_id, "⚠️ 平台消息删除失败或权限不足，旧回复会留在聊天界面。"
+            )
+
+        raw_text = _clean_command_text(str(context.get("text") or ""))
+        match = re.search(r"(?m)^\s*/retry(?:\s+(.*))?$", raw_text)
+        extra_prompt = match.group(1).strip() if match and match.group(1) else ""
+        if extra_prompt:
+            placeholder_text = f"[系统：重新生成上一条回复。补充要求：{extra_prompt}]"
+        else:
+            placeholder_text = RETRY_PLACEHOLDER_TEXT
+
+        # 合成新一轮：正文用占位（入库，留下"重新生成"的归因），媒体/平台 ID 一概不带——
+        # 上一条用户请求本来就还在历史里，重新生成时它就是上文，不需要重放输入。
+        replay = dict(context)
+        replay["text"] = placeholder_text
+        replay.pop("multimodal_images", None)
+        replay.pop("multimodal_videos", None)
+        replay.pop("image_load_failed", None)
+        clear_persisted_user_messages(replay)
+        replay["_retry_replay"] = True
+
+        logger.info(f"[{chat_id}] /retry: 已撤销上一条回复，重新生成")
+        try:
+            await self.handle_new_message(replay)
+        except Exception as e:
+            logger.error(f"[{chat_id}] /retry 重新生成失败: {e}", exc_info=True)
             await self._send_platform_message(chat_id, f"❌ 重新生成失败: {e}")
 
     async def _cmd_set_stream(self, chat_id: str, chat_type: str, user_id: str, text: str):
