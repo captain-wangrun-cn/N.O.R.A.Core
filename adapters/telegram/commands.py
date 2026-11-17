@@ -216,6 +216,17 @@ class TelegramCommandsMixin:
             ),
         )
 
+    async def _preset_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """全局预设管理透传，主人权限由 Core 本次入站身份验证。"""
+        if not self._command_should_process(update):
+            return
+        if not self._message_handler:
+            if update.message:
+                await update.message.reply_text("❌ 指令处理器未就绪。")
+            return
+        event_context = await self._command_context(update, self._command_text(update, "/preset"))
+        await self._message_handler(event_context)
+
     async def _retry_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """重试上一轮回复，透传给 controller。"""
         if not self._command_should_process(update):

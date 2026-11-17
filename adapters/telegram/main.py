@@ -172,6 +172,7 @@ class TelegramAdapter(
         self.application.add_handler(CommandHandler('context', self._context_command))
         self.application.add_handler(CommandHandler('end_segment', self._end_segment_command))
         self.application.add_handler(CommandHandler('undo', self._undo_command))
+        self.application.add_handler(CommandHandler('preset', self._preset_command))
         self.application.add_handler(CommandHandler('retry', self._retry_command))
         self.application.add_handler(CommandHandler('override', self._override_command))
         self.application.add_handler(CommandHandler('debug_cleanup', self._debug_cleanup_command))
@@ -207,6 +208,7 @@ class TelegramAdapter(
             BotCommand("status", "查看状态报告"),
             BotCommand("context", "查看当前上下文"),
             BotCommand("undo", "撤销上一条回复"),
+            BotCommand("preset", "管理全局提示词预设"),
             BotCommand("retry", "重新生成上一条回复"),
             BotCommand("override", "撤回并重新回复"),
             BotCommand("stop", "停止当前任务"),

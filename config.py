@@ -530,6 +530,15 @@ def get_tts_provider_name() -> str:
     return str(get_tts_config().get("provider", "") or "").strip()
 
 
+def get_active_preset_name() -> str:
+    """默认全局预设名；工作区 presets/.active 存在时由管理器优先使用。"""
+    data = _safe_config().get("preset", {}) or {}
+    if not isinstance(data, dict):
+        return "none"
+    value = data.get("active", "none")
+    return value.strip() if isinstance(value, str) and value.strip() else "none"
+
+
 def get_custom_injection_scopes():
     """Gets the CUSTOM.md injection scopes configuration."""
     cfg = _safe_config()

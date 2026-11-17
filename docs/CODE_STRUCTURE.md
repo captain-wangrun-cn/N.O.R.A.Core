@@ -46,6 +46,7 @@ N.O.R.A.Core/
 - `interrupt_handler.py`：忙碌状态下的意图检测（`stop` / `change` / `queue`）。
 - `polling.py`：前后脑轮询协同机制与延迟状态消费。
 - `scheduler.py` / `scheduler_mixin.py`：主动消息调度、每日日程生成与动态闹钟。
+- `preset_manager.py` / `preset_injection.py` / `preset_commands.py`：工作区全局预设资产、Head/Depth 请求内注入、CLI/聊天命令与跨进程重载。
 - `routing.py`：前脑标记解析（`[NEED_BACKEND]`、`[DRAW:]`、`[VOICE]`、`[SEMI_ONLINE]` 等）。
 - `appearance_gen.py`：形象生图与异步追发流水线。
 - `worker_status.py`：后脑工作状态与任务队列模型。

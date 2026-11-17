@@ -23,6 +23,7 @@ WORKSPACE_STRUCTURE = {
     "data": "数据存储目录",
     "logs": "日志文件目录",
     "cache": "缓存目录",
+    "presets": "用户自定义全局提示词预设目录",
 }
 
 class WorkspaceManager:

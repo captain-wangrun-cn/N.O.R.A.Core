@@ -84,6 +84,9 @@ class CivitaiProvider(BaseLLM):
         history: List[Dict[str, str]],
         tools: Optional[List[Dict]] = None,
         multimodal_images: Optional[List[Dict[str, Any]]] = None,
+        temperature: Optional[float] = None,
+        top_p: Optional[float] = None,
+        request_tail: Optional[List[Dict[str, str]]] = None,
     ) -> str:
         raise NotImplementedError(
             "Civitai provider 只支持生图，不能绑给对话类模型别名（smart/fast/...）"
@@ -96,6 +99,9 @@ class CivitaiProvider(BaseLLM):
         history: List[Dict[str, str]],
         tools: Optional[List[Dict]] = None,
         multimodal_images: Optional[List[Dict[str, Any]]] = None,
+        temperature: Optional[float] = None,
+        top_p: Optional[float] = None,
+        request_tail: Optional[List[Dict[str, str]]] = None,
     ) -> AsyncGenerator[Dict, None]:
         raise NotImplementedError(
             "Civitai provider 只支持生图，不能绑给对话类模型别名（smart/fast/...）"

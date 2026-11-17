@@ -660,6 +660,11 @@ class MessageHandlerMixin:
             if await adapter.before_command(context, identity):
                 return
 
+        # 全局预设命令不改变 presence、followup 或当前生成，权限用本次入站身份。
+        preset_command = re.match(r"^\s*/preset(?:@\w+)?(?:\s+(.*))?$", _clean_command_text(text), re.DOTALL)
+        if preset_command:
+            return await self._cmd_preset(chat_id, identity, preset_command.group(1) or "")
+
         # 解析多模态输入：从 [image: ...] 中提取真实图片内容
         clean_text, multimodal_images = extract_image_payloads(text)
         # has_image_input 用来探测"用户文本里疑似带图片标记/链接"，
@@ -2253,6 +2258,20 @@ class MessageHandlerMixin:
         except Exception as e:
             logger.error(f"[{chat_id}] /schedule_today 执行失败: {e}", exc_info=True)
             await self._send_platform_message(chat_id, f"❌ 获取今日计划失败: {e}")
+
+    async def _cmd_preset(self, chat_id: str, identity, arguments: str = "") -> None:
+        if owner_resolution_available() and not identity.is_owner:
+            await self._send_platform_message(chat_id, "❌ 全局预设仅限已绑定的主人操作。")
+            return
+        from core.preset_commands import run_preset_command
+        from core.preset_manager import get_preset_manager
+
+        try:
+            result = run_preset_command(get_preset_manager(), arguments)
+        except OSError:
+            logger.exception("全局预设操作失败")
+            result = "❌ 预设目录读取或状态保存失败。"
+        await self._send_platform_message(chat_id, result)
 
     async def _dispatch_non_interrupting_cmd(
         self, chat_id: str, chat_type: str, user_id: str, stripped: str

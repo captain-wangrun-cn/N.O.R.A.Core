@@ -237,6 +237,11 @@ memory:
     model: "BAAI/bge-m3" # Recommended for RAG
     dimensions: 1024 # BGE-M3 output dimensions
 
+# 全局预设：workspace/presets/*.yml 或 *.yaml；框架不内置预设。
+# .active 标记优先于此默认值；/preset use、off、reload 不需要重启。
+preset:
+  active: "none"  # 文件名（不含扩展名）；none 或留空表示不注入
+
 # CUSTOM.md 注入范围（可选）
 # scopes 为空或缺失时表示全量注入。
 # 可选值: fast, smart, image, coder, video, summary, draw_desc

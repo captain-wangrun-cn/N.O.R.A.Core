@@ -1037,6 +1037,7 @@ class BackBrainMixin:
                 stream = self._chat_stream_wrapper(
                     turn_llm,
                     chat_id,
+                    preset_scope=None if tool_media_analysis_round else "hindbrain",
                     system_prompt=turn_system_prompt,
                     user_prompt=turn_user_prompt,
                     history=turn_history,
@@ -1554,6 +1555,7 @@ class BackBrainMixin:
 
                         stream = self._chat_stream_wrapper(
                             turn_llm, chat_id,
+                            preset_scope="hindbrain",
                             system_prompt=system_prompt,
                             user_prompt=None,
                             history=temp_history,
@@ -1594,6 +1596,7 @@ class BackBrainMixin:
                 stream = self._chat_stream_wrapper(
                     last_turn_llm,
                     chat_id,
+                    preset_scope="hindbrain",
                     system_prompt=system_prompt,
                     user_prompt=render_template('loop_interventions.jinja', 'summarize_turns_exhausted'),
                     history=temp_history,
@@ -1792,6 +1795,7 @@ class BackBrainMixin:
                     retry_stream = self._chat_stream_wrapper(
                         self.image_llm if multimodal_images else self.coder_llm,
                         chat_id,
+                        preset_scope="hindbrain",
                         system_prompt=system_prompt,
                         user_prompt=retry_prompt,
                         history=retry_history,
@@ -1908,6 +1912,7 @@ class BackBrainMixin:
                 stream = self._chat_stream_wrapper(
                     last_turn_llm,
                     chat_id,
+                    preset_scope="hindbrain",
                     system_prompt=system_prompt,
                     user_prompt=render_template('loop_interventions.jinja', 'summarize_meaningful'),
                     history=temp_history,
@@ -1946,6 +1951,7 @@ class BackBrainMixin:
                 stream = self._chat_stream_wrapper(
                     last_turn_llm,
                     chat_id,
+                    preset_scope="hindbrain",
                     system_prompt=system_prompt,
                     user_prompt=render_template('loop_interventions.jinja', 'summarize_fallback'),
                     history=temp_history,

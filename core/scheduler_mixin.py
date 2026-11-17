@@ -771,6 +771,7 @@ class SchedulerMixin:
             stream = self._chat_stream_wrapper(
                 self.llm,
                 chat_id,
+                preset_scope="forebrain",
                 system_prompt=system_prompt,
                 user_prompt=user_prompt,
                 history=[],
@@ -864,6 +865,7 @@ class SchedulerMixin:
             stream = self._chat_stream_wrapper(
                 self.llm,
                 chat_id,
+                preset_scope="forebrain",
                 system_prompt=system_prompt,
                 user_prompt=user_prompt,
                 history=[],

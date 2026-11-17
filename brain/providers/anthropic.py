@@ -105,7 +105,7 @@ class AnthropicProvider(BaseLLM):
         payload["output_config"] = {"effort": native}
         return payload
 
-    def _apply_temperature(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+    def _apply_temperature(self, payload: Dict[str, Any], temperature: Optional[float] = None, top_p: Optional[float] = None) -> Dict[str, Any]:
         """把采样温度写进请求体。
 
         ⚠️ Anthropic 的硬约束：开启思考（thinking=enabled，或新模型的 output_config.effort）
@@ -115,15 +115,20 @@ class AnthropicProvider(BaseLLM):
 
         用 getattr 取值：绕过 __init__ 的实例少这属性也不该崩。
         """
-        temperature = getattr(self, "temperature", None)
-        if temperature is None:
-            return payload
+        temperature = temperature if temperature is not None else getattr(self, "temperature", None)
         thinking = payload.get("thinking")
         reasoning_active = ("output_config" in payload) or (
-            isinstance(thinking, dict) and thinking.get("type") == "enabled"
+            isinstance(thinking, dict) and thinking.get("type") in ("enabled", "adaptive")
         )
         if not reasoning_active:
-            payload["temperature"] = float(temperature)
+            if temperature is not None:
+                if temperature > 1:
+                    logger.warning("Anthropic temperature 上限为 1，已裁剪本次请求")
+                payload["temperature"] = min(1.0, float(temperature))
+                if top_p is not None:
+                    logger.warning("Anthropic 采样参数二选一，本次保留 temperature，忽略 top_p")
+            elif top_p is not None:
+                payload["top_p"] = float(top_p)
         return payload
 
     def _apply_budget_effort(self, payload: Dict[str, Any], effort: str) -> Dict[str, Any]:
@@ -264,11 +269,14 @@ class AnthropicProvider(BaseLLM):
         tools: Optional[List[Dict]] = None,
         multimodal_images: Optional[List[Dict[str, Any]]] = None,
         multimodal_videos: Optional[List[Dict[str, Any]]] = None,
+        temperature: Optional[float] = None,
+        top_p: Optional[float] = None,
+        request_tail: Optional[List[Dict[str, str]]] = None,
     ) -> str:
         self._begin_call()
         messages = [
             *self._convert_history(history),
-            {"role": "user", "content": user_prompt},
+            *([{"role": "user", "content": user_prompt}] if user_prompt is not None else []),
         ]
         payload: Dict[str, Any] = {
             "model": self.model,
@@ -277,7 +285,9 @@ class AnthropicProvider(BaseLLM):
             "max_tokens": int(self.max_output_tokens),
         }
         self._apply_effort(payload)
-        self._apply_temperature(payload)
+        self._apply_temperature(payload, temperature, top_p)
+        if request_tail:
+            messages.extend(self._convert_history(request_tail))
         if tools:
             payload["tools"] = self._convert_tools_schema(tools)
         try:
@@ -334,11 +344,14 @@ class AnthropicProvider(BaseLLM):
         tools: Optional[List[Dict]] = None,
         multimodal_images: Optional[List[Dict[str, Any]]] = None,
         multimodal_videos: Optional[List[Dict[str, Any]]] = None,
+        temperature: Optional[float] = None,
+        top_p: Optional[float] = None,
+        request_tail: Optional[List[Dict[str, str]]] = None,
     ):
         self._begin_call()
         messages = [
             *self._convert_history(history),
-            {"role": "user", "content": user_prompt},
+            *([{"role": "user", "content": user_prompt}] if user_prompt is not None else []),
         ]
         payload: Dict[str, Any] = {
             "model": self.model,
@@ -347,7 +360,9 @@ class AnthropicProvider(BaseLLM):
             "max_tokens": int(self.max_output_tokens),
         }
         self._apply_effort(payload)
-        self._apply_temperature(payload)
+        self._apply_temperature(payload, temperature, top_p)
+        if request_tail:
+            messages.extend(self._convert_history(request_tail))
         if tools:
             payload["tools"] = self._convert_tools_schema(tools)
 

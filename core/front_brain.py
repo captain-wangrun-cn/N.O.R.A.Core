@@ -572,6 +572,7 @@ class FrontBrainMixin:
                     stream = self._chat_stream_wrapper(
                         self.llm,
                         chat_id,
+                        preset_scope="forebrain",
                         system_prompt=system_prompt_candidate,
                         user_prompt=user_prompt,
                         history=history,
@@ -896,6 +897,7 @@ class FrontBrainMixin:
                 stream = self._chat_stream_wrapper(
                     self.llm,
                     chat_id,
+                    preset_scope="forebrain",
                     system_prompt=system_prompt_candidate,
                     user_prompt=user_prompt,
                     history=history,

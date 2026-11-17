@@ -1,4 +1,7 @@
-{{ persona_prompt }}
+{% if head_prompt %}{{ head_prompt }}
+
+---
+{% endif %}{{ persona_prompt }}
 
 {% if instructions %}
 ---

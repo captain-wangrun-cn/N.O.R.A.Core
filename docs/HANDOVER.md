@@ -1,3 +1,17 @@
+## 全局预设系统（2026-11-17）
+
+按外部预设方案完成四阶段：工作区空 `presets/`、不可变预设数据与严格 YAML 校验、`.active` 全局持久化（优先于 `preset.active`）、`.reload` 跨进程显式重载、Head 置顶、Depth user 轮计数与 `request_tail` 真末尾注入、逐请求 temperature/top_p、Core/Telegram/QQ/CLI 命令。框架**不内置预设、不新增拒绝自动重发、不写入历史**。
+
+相对方案示例的必要修正：前脑不调用 `get_system_prompt`，所以最终 wrapper 必须覆盖前脑；depth 按倒数 user 而非 list 长度，0 落实际当前 user 后；provider 签名与 SDK/REST payload 同步支持采样，否则会被 kwargs 过滤器静默丢弃。使用 `preset_scope` 显式 opt-in，无人设媒体分析、JSON 日程、群监听与快速判断不受影响；前脑对话/审查/主动消息/追话/收尾以及后脑常规任务生效。命令使用本次入站身份验主人，早于 presence/followup/生成抢占返回。
+
+提供方限制：Gemini/Anthropic 深度 system 转 user（不能变 assistant/model）；Anthropic 思考态省略 temperature/top_p，普通态温度上限 1 且二选一保留 temperature；OpenAI/Responses 和 Gemini SDK/REST 均逐请求传采样，不改共享实例。无当前 user 时 OpenAI/Anthropic 不插 null 正文，尾部直接位于历史之后。
+
+验证：**新增预设专项 72 项通过**（真实临时数据库无污染、CLI 路由、跨进程状态、假 SDK/REST payload、前后脑 scope 与分析/JSON 排除，Gemini 未启用预设保持原非流式采样行为）。最终离线隔离全量 **1139 passed / 11 failed / 1 skipped**；临时目录提取干净 HEAD 用相同 runner 对照 **1067 passed / 同 11 failed / 1 skipped**，失败 nodeid 逐条一致（context_pricing×4、cost_tracker×2、image_memory×2、retry_queue×2、timezone×1），无新增失败。`git diff --check` 通过。测试使用合成 config.example 内存配置、临时 HOME/workspace、禁止外网；既有测试改写的 tracked `memory/test_history.db` 已还原。
+
+**未进行**：真实模型对话效果、Telegram/QQ 外发联调、部署、提交、推送。使用与兼容边界见 [预设系统](architecture/preset-system.md)。
+
+---
+
 ## QQ 群聊事件并发与投递失败可见性（2026-11-05）
 
 线上反馈官方 QQ 群聊「没有合并、监听异常」，且群回复出现 `QQBotAPIError http=400 code=40034006`（官方错误码表语义：**消息内容违规**，见发送群聊消息页）。三项修复，均不改 Core 群监听状态机与 SEMI 门控设计：

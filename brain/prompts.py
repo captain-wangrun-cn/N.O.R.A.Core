@@ -577,6 +577,7 @@ def get_system_prompt(
     group_member_count_status: str = "",
     group_online_count: Optional[int] = None,
     group_online_count_status: str = "",
+    preset_scope: Optional[str] = None,
 ) -> str:
     """
     使用 Jinja2 模板渲染最终的 System Prompt。
@@ -626,8 +627,16 @@ def get_system_prompt(
     if user_preferences_block:
         all_instructions.insert(0, user_preferences_block)
 
+    head_prompt = ""
+    if preset_scope is not None:
+        from core.preset_manager import get_preset_manager
+
+        preset = get_preset_manager().get_active_preset()
+        if preset is not None and preset_scope in preset.scopes:
+            head_prompt = preset.head_prompt
     system_template = env.get_template('system.jinja')
     return system_template.render(
+        head_prompt=head_prompt,
         persona_prompt=persona_prompt,
         instructions=all_instructions,
         platform_specific_prompt=platform_prompt

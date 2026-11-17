@@ -43,6 +43,12 @@ python cli.py status
 python cli.py test-qdrant
 python cli.py test-rag
 
+# 全局预设管理（文件在 workspace/presets/，与聊天命令共享状态）
+python cli.py preset list
+python cli.py preset use <文件名>
+python cli.py preset off
+python cli.py preset reload
+
 # 聊天记录管理
 python cli.py history stats                                            # 查看对话消息统计
 python cli.py history clear --all                                     # 清理所有聊天历史（保留已标记项）

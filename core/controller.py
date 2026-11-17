@@ -913,7 +913,14 @@ class NoraController(
             return bool(self.default_non_stream)
         return bool(flag)
 
-    def _chat_stream_wrapper(self, model_client, chat_id: str, **kwargs):
+    def _chat_stream_wrapper(self, model_client, chat_id: str, *, preset_scope: str | None = None, **kwargs):
+        if preset_scope is not None:
+            from core.preset_injection import apply_preset_to_request
+            from core.preset_manager import get_preset_manager
+
+            preset = get_preset_manager().get_active_preset()
+            if preset is not None and preset_scope in preset.scopes:
+                kwargs = apply_preset_to_request(kwargs, preset)
         # 自动注入词库全局说明 + 系统环境信息到 system_prompt（全链路生效）
         system_prompt = kwargs.get("system_prompt") or ""
         if self._LEXICON_GLOBAL_MARKER not in system_prompt:

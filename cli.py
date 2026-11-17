@@ -2527,6 +2527,10 @@ def main():
     data_parser = history_subparsers.add_parser("clear-data", help="清空本地 SQLite 数据文件")
     data_parser.add_argument("--keep-costs", action="store_true", help="保留成本记录数据库")
 
+    preset_parser = subparsers.add_parser("preset", help="管理工作区全局预设")
+    preset_parser.add_argument("preset_action", nargs="?", default="list", choices=("list", "use", "off", "clear", "reload"))
+    preset_parser.add_argument("preset_name", nargs="?", default="", help="预设文件名")
+
     args = parser.parse_args()
 
     # 无配置文件时自动进入首次配置流程
@@ -2548,6 +2552,15 @@ def main():
         test_rag()
     elif args.command == "test-qdrant":
         test_qdrant()
+    elif args.command == "preset":
+        from core.preset_commands import run_preset_command
+        from core.preset_manager import get_preset_manager
+
+        try:
+            print(run_preset_command(get_preset_manager(), f"{args.preset_action} {args.preset_name}"))
+        except OSError:
+            logger.exception("全局预设操作失败")
+            print("❌ 预设目录读取或状态保存失败。")
     elif args.command == "history":
         if args.history_command == "stats":
             show_history_stats()

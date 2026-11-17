@@ -21,6 +21,7 @@ clear - 清空聊天记录
 set_stream - 切换输出模式
 model - 查看/切换模型
 effort - 设置推理强度
+preset - 管理全局提示词预设
 custom_scope - CUSTOM 注入范围
 nora_prefs - Nora 偏好设置
 schedule_today - 查看今日主动消息计划
@@ -127,6 +128,7 @@ Nora 的记忆压缩基于“消息段（Conversation Segment）”：
 - `/override`：撤销上一条回复并带主人特批放行声明重新生成。
 - `/effort`：为当前或指定模型别名配置推理强度（`low` / `medium` / `high`），适合在深度思考与响应速度之间平衡。
 - `/set_stream`：切换回复是否使用流式输出（持久化配置）。
+- `/preset`：列出工作区预设；`/preset use <文件名>` 全局切换，`/preset off` 停用，改文件后 `/preset reload`。仅主人管理，当前生成不中断，后续匹配的前/后脑请求生效。框架不内置预设，详见 [预设系统](architecture/preset-system.md)。
 - `/nora_prefs`：交互式调整 Nora 的偏好设置（如主动消息概率、追问敏感度等）。
 
 ---

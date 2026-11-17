@@ -804,6 +804,14 @@ Gemini history 格式不正确时也会在后续轮次退化为文本模式。
 
 ---
 
+## 15. 全局预设注入
+
+- **作用域按请求用途显式标记，不按模型别名推断。** `_chat_stream_wrapper(..., preset_scope=...)` 只有人设对话/常规任务轮 opt-in；JSON 日程、群监听、快速意图判断和无人设分析不注入。批量替换同形调用时必须逐处核对用途，否则日程 JSON 会被角色指令污染。
+- **Depth 按 user 对话消息计数，工具输出不算轮。** `depth=0` 通过 provider `request_tail` 落在当前 user 后，不是追加 system 尾；不得拆开 tool_call/tool_response。Gemini 的 system 深度指令转 user，不能转 model。
+- **参数必须逐请求到 API，不改共享实例。** wrapper 接受 kwargs 不等于 provider 已实现；签名过滤会静默丢参。SDK snake_case 与 Gemini REST camelCase 都要覆盖，0.0 不能按假值吞掉。
+- **CLI 是另一个进程。** 激活状态需读 `.active`；reload 通知走 `.reload`。只更新单例内存会导致 CLI 明明显示成功、在线机器人仍用旧预设。
+- 详见 `docs/architecture/preset-system.md`，测试 `test_presets.py` / `test_preset_integration.py` / `test_preset_provider_parameters.py`。
+
 ## 14. 破坏性操作与数据可恢复性
 
 ⚠️ **命令的菜单标签必须等于它的实际后果。** 生产事故（2026-10-12）：`/start` 在菜单里

@@ -73,7 +73,7 @@ class OpenAIProvider(BaseLLM):
             payload["reasoning_effort"] = effort
         return payload
 
-    def _apply_temperature(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+    def _apply_temperature(self, payload: Dict[str, Any], temperature: Optional[float] = None, top_p: Optional[float] = None) -> Dict[str, Any]:
         """把采样温度写进请求体（Chat Completions 与 Responses 都是顶层 `temperature`）。
 
         None 表示不配置（用端点默认，不发字段）。不支持自定义温度的推理模型
@@ -82,9 +82,11 @@ class OpenAIProvider(BaseLLM):
 
         用 getattr 取值：绕过 __init__ 的实例（测试里的 object.__new__）少这属性也不该崩。
         """
-        temperature = getattr(self, "temperature", None)
+        temperature = temperature if temperature is not None else getattr(self, "temperature", None)
         if temperature is not None:
             payload["temperature"] = float(temperature)
+        if top_p is not None:
+            payload["top_p"] = float(top_p)
         return payload
 
     @staticmethod
@@ -825,6 +827,9 @@ class OpenAIProvider(BaseLLM):
         tools: Optional[List[Dict]] = None,
         multimodal_images: Optional[List[Dict[str, Any]]] = None,
         multimodal_videos: Optional[List[Dict[str, Any]]] = None,
+        temperature: Optional[float] = None,
+        top_p: Optional[float] = None,
+        request_tail: Optional[List[Dict[str, str]]] = None,
     ) -> str:
         """
         非流式调用 OpenAI API（含 function calling 支持）。
@@ -839,13 +844,15 @@ class OpenAIProvider(BaseLLM):
                 "instructions": system_prompt,
                 "input": [
                     *self._convert_history_for_responses(history),
-                    {"role": "user", "content": [{"type": "input_text", "text": user_prompt}]},
+                    *([{"role": "user", "content": [{"type": "input_text", "text": user_prompt}]}] if user_prompt is not None else []),
                 ],
             }
             if self.max_output_tokens:
                 payload["max_output_tokens"] = int(self.max_output_tokens)
             self._apply_effort(payload, responses_api=True)
-            self._apply_temperature(payload)
+            self._apply_temperature(payload, temperature, top_p)
+            if request_tail:
+                payload["input"].extend(self._convert_history_for_responses(request_tail))
             if tools:
                 payload["tools"] = self._convert_tools_schema_for_responses(tools)
             try:
@@ -877,7 +884,7 @@ class OpenAIProvider(BaseLLM):
         messages = [
             {"role": "system", "content": system_prompt},
             *filtered_history,
-            {"role": "user", "content": user_content}
+            *([{"role": "user", "content": user_content}] if user_content is not None else [])
         ]
         
         # 构建 API 请求参数
@@ -888,7 +895,9 @@ class OpenAIProvider(BaseLLM):
         if self.max_output_tokens:
             kwargs["max_tokens"] = int(self.max_output_tokens)
         self._apply_effort(kwargs)
-        self._apply_temperature(kwargs)
+        self._apply_temperature(kwargs, temperature, top_p)
+        if request_tail:
+            messages.extend(self._convert_history(request_tail))
 
         # 如果有 tools，转换格式并传入
         if tools:
@@ -909,6 +918,9 @@ class OpenAIProvider(BaseLLM):
                 if "temperature" in kwargs and self._is_temperature_rejection(first_error):
                     kwargs.pop("temperature", None)
                     stripped.append("temperature")
+                if "top_p" in kwargs and "top_p" in str(first_error).lower():
+                    kwargs.pop("top_p", None)
+                    stripped.append("top_p")
                 if not stripped:
                     raise
                 logger.warning(
@@ -985,6 +997,9 @@ class OpenAIProvider(BaseLLM):
         tools: Optional[List[Dict]] = None,
         multimodal_images: Optional[List[Dict[str, Any]]] = None,
         multimodal_videos: Optional[List[Dict[str, Any]]] = None,
+        temperature: Optional[float] = None,
+        top_p: Optional[float] = None,
+        request_tail: Optional[List[Dict[str, str]]] = None,
     ):
         """
         流式调用 OpenAI API，完整支持 function calling。
@@ -1006,14 +1021,16 @@ class OpenAIProvider(BaseLLM):
                 "instructions": system_prompt,
                 "input": [
                     *self._convert_history_for_responses(history),
-                    {"role": "user", "content": [{"type": "input_text", "text": user_prompt}]},
+                    *([{"role": "user", "content": [{"type": "input_text", "text": user_prompt}]}] if user_prompt is not None else []),
                 ],
                 "stream": True,
             }
             if self.max_output_tokens:
                 payload["max_output_tokens"] = int(self.max_output_tokens)
             self._apply_effort(payload, responses_api=True)
-            self._apply_temperature(payload)
+            self._apply_temperature(payload, temperature, top_p)
+            if request_tail:
+                payload["input"].extend(self._convert_history_for_responses(request_tail))
             if tools:
                 payload["tools"] = self._convert_tools_schema_for_responses(tools)
             try:
@@ -1069,7 +1086,7 @@ class OpenAIProvider(BaseLLM):
         messages = [
             {"role": "system", "content": system_prompt},
             *filtered_history,
-            {"role": "user", "content": user_content}
+            *([{"role": "user", "content": user_content}] if user_content is not None else [])
         ]
         
         # 构建 API 请求参数
@@ -1081,7 +1098,9 @@ class OpenAIProvider(BaseLLM):
         if self.max_output_tokens:
             kwargs["max_tokens"] = int(self.max_output_tokens)
         self._apply_effort(kwargs)
-        self._apply_temperature(kwargs)
+        self._apply_temperature(kwargs, temperature, top_p)
+        if request_tail:
+            messages.extend(self._convert_history(request_tail))
 
         # 如果有 tools，转换格式并传入
         if tools:
@@ -1107,6 +1126,7 @@ class OpenAIProvider(BaseLLM):
             ("去掉 stream_options", "stream_options"),
             ("去掉 reasoning_effort", "reasoning_effort"),
             ("去掉 temperature", "temperature"),
+            ("去掉 top_p", "top_p"),
         ):
             if strip_key is not None:
                 if strip_key not in kwargs:

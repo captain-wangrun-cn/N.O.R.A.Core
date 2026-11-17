@@ -13,7 +13,7 @@ import config
 from adapters.model_catalog import fetch_provider_models, provider_config, provider_names
 
 _COMMAND = re.compile(r"(?m)^\s*/([a-z_]+)\b([^\n]*)")
-_OWNER_COMMANDS = {"clear", "stop", "undo", "retry", "override", "reload_models", "debug", "custom_scope",
+_OWNER_COMMANDS = {"preset", "clear", "stop", "undo", "retry", "override", "reload_models", "debug", "custom_scope",
                    "set_stream", "regenerate_proactive", "end_segment", "model", "effort", "nora_prefs",
                    "model_pick", "model_list", "model_page", "model_set", "model_clear", "effort_pick"}
 

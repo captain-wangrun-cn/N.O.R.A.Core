@@ -125,6 +125,9 @@ class BaseLLM(ABC):
         history: List[Dict[str, str]],
         tools: Optional[List[Dict]] = None,
         multimodal_images: Optional[List[Dict[str, Any]]] = None,
+        temperature: Optional[float] = None,
+        top_p: Optional[float] = None,
+        request_tail: Optional[List[Dict[str, str]]] = None,
     ) -> str:
         """
         Generates a chat response.
@@ -149,6 +152,9 @@ class BaseLLM(ABC):
         history: List[Dict[str, str]],
         tools: Optional[List[Dict]] = None,
         multimodal_images: Optional[List[Dict[str, Any]]] = None,
+        temperature: Optional[float] = None,
+        top_p: Optional[float] = None,
+        request_tail: Optional[List[Dict[str, str]]] = None,
     ) -> AsyncGenerator[Dict, None]:
         """
         Generates a chat response as an asynchronous stream.

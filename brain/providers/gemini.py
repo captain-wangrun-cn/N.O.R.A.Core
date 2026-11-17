@@ -237,10 +237,20 @@ class GeminiProvider(BaseLLM):
                 continue
 
             # 普通文本消息
-            role = "user" if role_raw == "user" else "model"
+            role = "user" if role_raw in ("user", "system") else "model"
             gemini_history.append({"role": role, "parts": [{"text": content}]})
         
         return gemini_history
+
+    def _apply_sampling(
+        self, payload: Dict[str, Any], temperature: Optional[float], top_p: Optional[float],
+        *, camel_case: bool = False, use_config: bool = True,
+    ) -> None:
+        value = temperature if temperature is not None else (getattr(self, "temperature", None) if use_config else None)
+        if value is not None:
+            payload["temperature"] = float(value)
+        if top_p is not None:
+            payload["topP" if camel_case else "top_p"] = float(top_p)
 
     async def chat(
         self,
@@ -250,6 +260,9 @@ class GeminiProvider(BaseLLM):
         tools: Optional[List[Dict]] = None,
         multimodal_images: Optional[List[Dict]] = None,
         multimodal_videos: Optional[List[Dict]] = None,
+        temperature: Optional[float] = None,
+        top_p: Optional[float] = None,
+        request_tail: Optional[List[Dict[str, str]]] = None,
     ) -> str:
         # Convert history to Gemini's format, handling tool_call/tool_response
         self._begin_call()
@@ -264,6 +277,9 @@ class GeminiProvider(BaseLLM):
                 history=history,
                 multimodal_images=multimodal_images,
                 multimodal_videos=multimodal_videos,
+                temperature=temperature,
+                top_p=top_p,
+                request_tail=request_tail,
             )
 
         gemini_history = self._convert_history(history)
@@ -313,6 +329,9 @@ class GeminiProvider(BaseLLM):
             # chat() 没有 max_output_tokens 逻辑（历史如此），但 effort 要生效
             # 就必须走 generation_config；为空时不传，保持原行为。
             effort_config = self._effort_generation_config()
+            self._apply_sampling(effort_config, temperature, top_p, use_config=False)
+            if request_tail:
+                full_prompt = [{"text": full_prompt}, *[{"text": item["content"]} for item in request_tail]]
             if effort_config:
                 response = await chat_session.send_message_async(
                     full_prompt, generation_config=effort_config
@@ -497,6 +516,9 @@ class GeminiProvider(BaseLLM):
         history: List[Dict[str, str]],
         multimodal_images: Optional[List[Dict]] = None,
         multimodal_videos: Optional[List[Dict]] = None,
+        temperature: Optional[float] = None,
+        top_p: Optional[float] = None,
+        request_tail: Optional[List[Dict[str, str]]] = None,
     ) -> str:
         """带媒体的非流式回合：走 REST `:generateContent`。
 
@@ -509,6 +531,8 @@ class GeminiProvider(BaseLLM):
             "role": "user",
             "parts": self._media_parts(user_prompt, multimodal_images, multimodal_videos),
         })
+        if request_tail:
+            contents.extend(self._convert_history_to_rest(request_tail))
         body: Dict[str, Any] = {"contents": contents}
 
         if system_prompt and system_prompt.strip():
@@ -517,6 +541,7 @@ class GeminiProvider(BaseLLM):
         body["safetySettings"] = _gemini_rest_safety_settings()
 
         generation_config = self._effort_generation_config(camel_case=True)
+        self._apply_sampling(generation_config, temperature, top_p, camel_case=True, use_config=False)
         if generation_config:
             body["generationConfig"] = generation_config
 
@@ -693,7 +718,7 @@ class GeminiProvider(BaseLLM):
                     "parts": [{"functionResponse": {"name": tool_name, "response": {"result": content}}}]
                 })
             else:
-                role = "user" if role_raw == "user" else "model"
+                role = "user" if role_raw in ("user", "system") else "model"
                 contents.append({"role": role, "parts": [{"text": content}]})
         return contents
 
@@ -705,6 +730,7 @@ class GeminiProvider(BaseLLM):
         multimodal_images: Optional[List[Dict]] = None,
         multimodal_videos: Optional[List[Dict]] = None,
         generation_config: Optional[Dict] = None,
+        request_tail: Optional[List[Dict[str, str]]] = None,
     ):
         """绕过 SDK，直接用 REST API 流式请求（解决 SDK + 自定义 endpoint + 视频 inline_data 卡死问题）。
 
@@ -727,6 +753,8 @@ class GeminiProvider(BaseLLM):
 
         contents.append({"role": "user", "parts": user_parts})
 
+        if request_tail:
+            contents.extend(self._convert_history_to_rest(request_tail))
         body: Dict[str, Any] = {"contents": contents}
 
         if system_prompt and system_prompt.strip():
@@ -832,6 +860,9 @@ class GeminiProvider(BaseLLM):
         tools: Optional[List[Dict]] = None,
         multimodal_images: Optional[List[Dict]] = None,
         multimodal_videos: Optional[List[Dict]] = None,
+        temperature: Optional[float] = None,
+        top_p: Optional[float] = None,
+        request_tail: Optional[List[Dict[str, str]]] = None,
     ):
         # 视频请求绕过 SDK，直接走 REST API（SDK + 自定义 endpoint + 视频 inline_data 会卡死）
         self._begin_call()
@@ -841,8 +872,7 @@ class GeminiProvider(BaseLLM):
             gen_config: Dict[str, Any] = {}
             if self.max_output_tokens:
                 gen_config["maxOutputTokens"] = int(self.max_output_tokens)
-            if self.temperature is not None:
-                gen_config["temperature"] = float(self.temperature)
+            self._apply_sampling(gen_config, temperature, top_p, camel_case=True)
             gen_config.update(self._effort_generation_config(camel_case=True))
             async for chunk in self._video_stream_via_rest(
                 system_prompt=system_prompt if tools else "",
@@ -851,6 +881,7 @@ class GeminiProvider(BaseLLM):
                 multimodal_images=multimodal_images,
                 multimodal_videos=multimodal_videos,
                 generation_config=gen_config or None,
+                request_tail=request_tail,
             ):
                 yield chunk
             return
@@ -875,12 +906,13 @@ class GeminiProvider(BaseLLM):
         generation_config: Dict[str, Any] = {}
         if self.max_output_tokens:
             generation_config["max_output_tokens"] = int(self.max_output_tokens)
-        if self.temperature is not None:
-            generation_config["temperature"] = float(self.temperature)
+        self._apply_sampling(generation_config, temperature, top_p)
         # SDK 分支用 snake_case；REST 视频分支在上面用 camelCase。
         generation_config.update(self._effort_generation_config())
 
         user_parts = self._build_user_parts(full_prompt, multimodal_images, multimodal_videos)
+        if request_tail:
+            user_parts.extend({"text": item["content"]} for item in request_tail)
         chat_session = current_model.start_chat(history=gemini_history)
         
         try:
